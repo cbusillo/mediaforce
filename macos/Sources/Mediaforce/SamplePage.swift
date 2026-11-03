@@ -1,24 +1,29 @@
-import AVKit
-import Combine
 import SwiftUI
 
 struct SamplePage: View {
     let prefix: String
     let model: MainWindowModel
     let openItem: (String) -> Void
+    var namePage: (String) -> Void = { _ in }
     @State private var facts: SampleFacts?
 
     var body: some View {
-        PageFrame(title: title) {
+        let names = self.names
+        let title = Words.sampleTitle(names.season)
+        PageFrame(title: title, subtitle: names.show) {
             SampleWork(prefix: prefix, model: model, facts: $facts, openItem: openItem)
         }
+        .onChange(of: title, initial: true) { _, title in namePage(title) }
     }
 
-    private var title: String {
-        if let facts { return Words.season(facts.show, facts.season) }
+    /// The season names the page and its show is the subtitle, as on the season's own page.
+    private var names: (season: String, show: String) {
+        if let facts { return Words.seasonTitle(facts.show, facts.season) }
         let samples = (model.facts?.samples.waitingOnYou ?? []) + (model.facts?.samples.approvedNotStarted ?? [])
-        if let sample = samples.first(where: { $0.prefix == prefix }) { return Words.season(sample.show, sample.season) }
-        return prefix.split(separator: "/").dropFirst().joined(separator: ", ")
+        if let sample = samples.first(where: { $0.prefix == prefix }) { return Words.seasonTitle(sample.show, sample.season) }
+        // Until its facts arrive, the page is named by its folders.
+        let folders = prefix.split(separator: "/").map(String.init)
+        return (Words.folderName(prefix), folders.count > 2 ? folders[folders.count - 2] : "")
     }
 }
 
@@ -39,25 +44,42 @@ struct SampleWork: View {
     @State private var refreshes = 0
     @State private var approval: SampleApproval?
     @State private var confirming: String?
-    // The sample can't be made until a size is chosen, so the page offers the sizes right there.
-    @State private var askingSize = false
-    @State private var selectedBalance: String?
+    @State private var choices = SampleChoices()
+    @State private var players = ComparePlayers()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             if let facts {
-                Text(Words.sampleHeadline(facts, namesSeason: namesSeason, now: .now))
-                    .font(.title3.weight(.semibold))
+                if !facts.moments.isEmpty {
+                    ComparePlayer(players: players, model: model, moments: .clips(facts.moments),
+                                  names: PictureNames(compressed: Words.sample),
+                                  gettingReady: Words.gettingSampleReady, couldNotPlay: Words.couldNotPlaySample)
+                }
+                // The decision, under the player.
+                DecisionLine {
+                    // On a kind's page the headline names the season, so it opens the season's page.
+                    if namesSeason {
+                        Button(Words.sampleHeadline(facts, namesSeason: true, now: .now)) { openItem(prefix) }
+                            .buttonStyle(QuietLinkStyle(primary: true))
+                    } else {
+                        Text(Words.sampleHeadline(facts, namesSeason: false, now: .now))
+                    }
+                } buttons: {
+                    if facts.isInProgress {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    SampleActions(
+                        facts: facts, working: working, approve: { startApproval(scope: $0) }, make: { make(size: $0) },
+                        compress: compress, openItem: { openItem(prefix) }
+                    )
+                }
                 if let failure = Words.sampleFailure(facts.failure), facts.state == "needs_help" {
                     Text(failure)
                         .foregroundStyle(.secondary)
                 }
-                if facts.isInProgress {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-                if !facts.moments.isEmpty {
-                    SampleComparison(moments: facts.moments, client: model.client)
+                if facts.actions.contains(.chooseSize) || (choices.askingSize && !facts.sizeChoices.isEmpty) {
+                    SizeChoices(facts: facts, working: working) { make(size: $0) }
                 }
                 SampleFactsGrid(facts: facts)
                 if let coverage = Words.sampleCoverage(facts) {
@@ -65,12 +87,12 @@ struct SampleWork: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if (facts.canChooseBalance || askingSize) && !facts.balanceChoices.isEmpty {
+                if (facts.canChooseBalance || choices.askingSize) && !facts.balanceChoices.isEmpty {
                     Picker(Words.sampleBalance, selection: Binding(
                         get: {
-                            selectedBalance ?? facts.balanceChoices.first(where: \.selected)?.key
+                            choices.selectedBalance ?? facts.balanceChoices.first(where: \.selected)?.key
                         },
-                        set: { selectedBalance = $0 }
+                        set: { choices.selectedBalance = $0 }
                     )) {
                         ForEach(facts.balanceChoices) { choice in
                             Text(choice.label)
@@ -80,12 +102,9 @@ struct SampleWork: View {
                         }
                     }
                     .pickerStyle(.radioGroup)
+                    .disabled(working)
                     .fixedSize(horizontal: false, vertical: true)
                 }
-                SampleActions(
-                    facts: facts, working: working, askingSize: askingSize, approve: startApproval, make: { make(size: $0) },
-                    compress: compress, openItem: { openItem(prefix) }
-                )
             } else if unreadable {
                 Text(Words.staleNotice(.failing, lastHeard: nil))
                     .foregroundStyle(.secondary)
@@ -94,12 +113,13 @@ struct SampleWork: View {
             }
         }
         .task(id: refreshes) { await watch() }
+        .onDisappear { players.pause() }
         .confirmationDialog(
             confirming.flatMap(Words.sampleConfirmation)?.title ?? "",
             isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
             presenting: confirming
         ) { code in
-            Button(Words.approveSample) {
+            Button(Words.sampleApproval(scope: approval?.scope ?? "season")) {
                 approval?.confirmed.append(String(code.dropFirst("confirm_".count)))
                 approve()
             }
@@ -123,8 +143,8 @@ struct SampleWork: View {
         } while !Task.isCancelled
     }
 
-    private func startApproval() {
-        approval = SampleApproval(reviewedDraftHash: facts?.draftHash ?? "")
+    private func startApproval(scope: String) {
+        approval = SampleApproval(reviewedDraftHash: facts?.draftHash ?? "", scope: scope)
         approve()
     }
 
@@ -133,54 +153,46 @@ struct SampleWork: View {
         self.approval = nil
         if confirming != nil {
             confirming = nil
-            model.notice = .sampleChanged
+            model.notice = approval.changeNotice(facts)
         }
     }
 
     private func approve() {
+        let changedNotice = approval?.changeNotice(facts) ?? .sampleChanged
         dropApprovalIfChanged()
         guard let approval else {
-            model.notice = .sampleChanged
+            model.notice = changedNotice
             return
         }
         act {
-            let result = try await $0.approveSample(prefix, confirm: approval.confirmed, draftHash: approval.reviewedDraftHash)
+            let result = try await $0.approveSample(prefix, confirm: approval.confirmed, draftHash: approval.reviewedDraftHash, scope: approval.scope)
             if let code = result.code, Words.sampleConfirmation(code) != nil {
                 confirming = code
                 return nil
+            }
+            if result.code == "approval_scope_changed" {
+                self.approval = nil
+                return .approvalScopeChanged
             }
             if result.code == "sample_changed" {
                 self.approval = nil
                 return .sampleChanged
             }
-            return result.ok ? compressingNotice(result) : .sampleRefused
+            return choices.compressed(result, facts: facts)
         }
     }
 
     private func compress() {
         act {
             let result = try await $0.compressSeason(prefix)
-            return result.ok ? compressingNotice(result) : .sampleRefused
+            return choices.compressed(result, facts: facts)
         }
-    }
-
-    private func compressingNotice(_ result: SampleActionResult) -> ActionNotice? {
-        if result.compressing == true { return nil }
-        if result.needsChoice && facts?.sizeChoices.isEmpty == false {
-            askingSize = true
-        }
-        return result.needsChoice ? .compressNeedsChoice : .approvedNotCompressing
     }
 
     private func make(size: String?) {
         act {
-            let current = facts?.balanceChoices.first(where: \.selected)?.key
-            let changedBalance = selectedBalance == current ? nil : selectedBalance
-            let result = try await $0.makeSample(prefix, size: size, balance: changedBalance)
-            if result.ok { selectedBalance = nil }
-            askingSize = result.code == "choose_size" && facts?.sizeChoices.isEmpty == false
-            if result.ok || askingSize { return nil }
-            return .sampleRefused
+            let result = try await $0.makeSample(prefix, size: size, balance: choices.balance(in: facts))
+            return choices.made(result, facts: facts)
         }
     }
 
@@ -195,6 +207,7 @@ struct SampleWork: View {
             working = false
             refreshes += 1
             await model.refresh()
+            await model.refreshKinds()
             await acted()
         }
     }
@@ -217,55 +230,19 @@ struct SampleFactsGrid: View {
     }
 }
 
-struct SampleActions: View {
+/// The sizes to choose from when the sample can't be made until one is chosen.
+struct SizeChoices: View {
     let facts: SampleFacts
     let working: Bool
-    let askingSize: Bool
-    let approve: () -> Void
     let make: (String?) -> Void
-    let compress: () -> Void
-    let openItem: () -> Void
 
     var body: some View {
-        let actions = facts.actions
-        VStack(alignment: .leading, spacing: 10) {
-            if actions.contains(.chooseSize) || (askingSize && !facts.sizeChoices.isEmpty) {
-                Text(Words.chooseSizeHeadline)
-                    .font(.headline)
-                HStack(spacing: 10) {
-                    ForEach(facts.sizeChoices) { choice in
-                        Button(Words.sizeChoice(choice)) { make(choice.key) }
-                    }
-                }
-            }
+        VStack(alignment: .leading, spacing: 8) {
+            Text(Words.chooseSizeHeadline)
+                .font(.headline)
             HStack(spacing: 10) {
-                if actions.contains(.approve) {
-                    Button(Words.approveSample, action: approve)
-                        .buttonStyle(.borderedProminent)
-                }
-                if actions.contains(.startCompressing) {
-                    Button(Words.startCompressing, action: compress)
-                        .buttonStyle(.borderedProminent)
-                }
-                // Checking, replacing, retrying and motion choices live on the season's page.
-                if let next = actions.first(where: SampleFacts.seasonPageActions.contains) {
-                    Button(Words.workAction(next), action: openItem)
-                        .buttonStyle(.borderedProminent)
-                }
-                if actions.contains(.makeSample) {
-                    Button(Words.makeSample) { make(nil) }
-                        .buttonStyle(.borderedProminent)
-                }
-                if actions.contains(.makeAgain) {
-                    Button(Words.makeSampleAgain) { make(nil) }
-                }
-                if actions.contains(.tryAnotherSize) {
-                    Menu(Words.tryAnotherSize) {
-                        ForEach(facts.sizeChoices) { choice in
-                            Button(Words.sizeChoice(choice)) { make(choice.key) }
-                        }
-                    }
-                    .fixedSize()
+                ForEach(facts.sizeChoices) { choice in
+                    Button(Words.sizeChoice(choice)) { make(choice.key) }
                 }
             }
         }
@@ -273,143 +250,49 @@ struct SampleActions: View {
     }
 }
 
-enum HearSide: Hashable {
-    case original, sample
-}
-
-@MainActor
-@Observable
-final class ComparisonPlayers {
-    let original = AVPlayer()
-    let sample = AVPlayer()
-    private(set) var playing = false
-    var hear: HearSide = .original {
-        didSet { applySound() }
-    }
-
-    init() {
-        applySound()
-    }
-
-    func load(_ moment: SampleFacts.Moment, client: MediaforceClient) {
-        pause()
-        original.replaceCurrentItem(with: AVPlayerItem(url: client.reviewMedia(moment.original.url)))
-        sample.replaceCurrentItem(with: AVPlayerItem(url: client.reviewMedia(moment.sample.url)))
-    }
-
-    func toggle() {
-        if playing {
-            pause()
-            return
-        }
-        if original.currentItem.map({ $0.currentTime() >= $0.duration }) == true {
-            original.seek(to: .zero)
-        }
-        sample.seek(to: original.currentTime(), toleranceBefore: .zero, toleranceAfter: .zero)
-        original.play()
-        sample.play()
-        playing = true
-    }
-
-    func startOver() {
-        pause()
-        original.seek(to: .zero)
-        sample.seek(to: .zero)
-    }
-
-    func pause() {
-        original.pause()
-        sample.pause()
-        playing = false
-    }
-
-    private func applySound() {
-        original.isMuted = hear != .original
-        sample.isMuted = hear != .sample
-    }
-}
-
-struct SampleComparison: View {
-    let moments: [SampleFacts.Moment]
-    let client: MediaforceClient
-    @State private var players = ComparisonPlayers()
-    @State private var moment = 0
+/// The sample's buttons, in its decision line.
+struct SampleActions: View {
+    let facts: SampleFacts
+    let working: Bool
+    let approve: (String) -> Void
+    let make: (String?) -> Void
+    let compress: () -> Void
+    let openItem: () -> Void
 
     var body: some View {
-        let current = moments[min(moment, moments.count - 1)]
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 12) {
-                ClipView(label: Words.original, detail: Words.clipSize(current.original), player: players.original)
-                ClipView(label: Words.sample, detail: Words.clipSize(current.sample), player: players.sample)
+        let actions = facts.actions
+        HStack(spacing: 10) {
+            if actions.contains(.approve) {
+                Button(Words.sampleApproval(scope: facts.approvalKind ?? "season")) { approve(facts.approvalKind ?? "season") }
+                    .buttonStyle(.borderedProminent)
+                if facts.approvalKind != nil {
+                    Button(Words.approveOnlySeason) { approve("season") }
+                }
             }
-            HStack(spacing: 14) {
-                Button {
-                    players.toggle()
-                } label: {
-                    Label(players.playing ? Words.pause : Words.play, systemImage: players.playing ? "pause.fill" : "play.fill")
-                }
-                .keyboardShortcut(.space, modifiers: [])
-                Button(Words.startOver, systemImage: "backward.end.fill") { players.startOver() }
-                Picker(Words.hear, selection: Bindable(players).hear) {
-                    Text(Words.original).tag(HearSide.original)
-                    Text(Words.sample).tag(HearSide.sample)
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                if moments.count > 1 {
-                    Picker(Words.momentChoice, selection: $moment) {
-                        ForEach(moments.indices, id: \.self) { index in
-                            Text(Words.momentTime(moments[index].atSeconds)).tag(index)
-                        }
+            if actions.contains(.startCompressing) {
+                Button(Words.startCompressing, action: compress)
+                    .buttonStyle(.borderedProminent)
+            }
+            // Checking, replacing, retrying and motion choices live on the season's page.
+            if let next = actions.first(where: SampleFacts.seasonPageActions.contains) {
+                Button(Words.workAction(next), action: openItem)
+                    .buttonStyle(.borderedProminent)
+            }
+            if actions.contains(.makeSample) {
+                Button(Words.makeSample) { make(nil) }
+                    .buttonStyle(.borderedProminent)
+            }
+            if actions.contains(.makeAgain) {
+                Button(Words.makeSampleAgain) { make(nil) }
+            }
+            if actions.contains(.tryAnotherSize) {
+                Menu(Words.tryAnotherSize) {
+                    ForEach(facts.sizeChoices) { choice in
+                        Button(Words.sizeChoice(choice)) { make(choice.key) }
                     }
-                    .fixedSize()
                 }
             }
         }
-        .task(id: current) { players.load(current, client: client) }
-        .onReceive(NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification).receive(on: RunLoop.main)) { note in
-            if (note.object as? AVPlayerItem) === players.original.currentItem { players.pause() }
-        }
-        .onDisappear { players.pause() }
-    }
-}
-
-struct ClipView: View {
-    let label: String
-    let detail: String
-    let player: AVPlayer
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(label)
-                    .font(.headline)
-                Spacer()
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            PlayerSurface(player: player)
-                .aspectRatio(16 / 9, contentMode: .fit)
-                .background(Color.black)
-                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-        }
-        .frame(maxWidth: .infinity)
-    }
-}
-
-struct PlayerSurface: NSViewRepresentable {
-    let player: AVPlayer
-
-    func makeNSView(context: Context) -> AVPlayerView {
-        let view = AVPlayerView()
-        view.controlsStyle = .none
-        view.player = player
-        return view
-    }
-
-    func updateNSView(_ view: AVPlayerView, context: Context) {
-        view.player = player
+        .disabled(working)
     }
 }

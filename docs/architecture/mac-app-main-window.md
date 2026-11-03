@@ -10,6 +10,11 @@ controller storage record and the saved sample state the library cards already
 read from the local review cache. It reads no shared media storage, so it
 still answers when that storage is gone, and it starts no work.
 
+Within one read, season approval checks reuse the kinds already measured for
+the window. Seasons outside that report use the normal evidence lookup. The
+next request builds a fresh report, so changed measurements and genres apply
+without waiting for a cache to expire.
+
 ## Sections
 
 - `work`: `state` is `running`, `idle`, `paused` (the owner paused the queue)
@@ -18,6 +23,12 @@ still answers when that storage is gone, and it starts no work.
   `no_computer_ready` (work is waiting and no computer can take it).
   `running_count` and `waiting_count` count encode jobs. `storage` lists each
   required mount with its recovery `status` and last `failure` code.
+  `checks_paused` is true when the active evidence batch is paused, has not
+  been asked to cancel, and still has work that can be claimed. It is separate
+  from encode `state`, `paused_by_owner`, and `stop_reasons`.
+  `seasons_needing_you` carries non-sample season decisions for the badge and
+  notifications, using the TV season facts below; sample decisions remain under
+  `samples.waiting_on_you` so they count once.
 - `library`: per kind (`tv`, `movies`, `other`), counts of present files and
   `total_bytes`, plus `original_bytes`, the size still in original form.
 - `space_saved`: bytes saved by replaced files, the replaced file and episode
@@ -33,14 +44,19 @@ still answers when that storage is gone, and it starts no work.
 - `samples`: `waiting_on_you` (page state `ready_to_compare`, or `needs_help`
   for a sample) and `approved_not_started` (`ready_to_make`). `state`,
   `action` and `failure` are the folder page's own codes, from
-  `mediaforce/web/runtime/page_state.py`.
+  `mediaforce/web/runtime/page_state.py`. Their
+  waiting-list membership is selected from the season's canonical `needs_you`
+  fact.
 - `computers`: each computer's `state`, from the same rows as the computers
-  page: `ready`, `busy`, `outside_schedule` (with `schedule_opens_at`),
+  page: `ready`, `busy`, `finishing_file` (a running file without a close deadline
+  or an explicit bypass), `schedule_disabled`, `outside_schedule` (with `schedule_opens_at`),
   `cooling_down` (with `cooldown_until`), `not_encoding`, `checking`,
   `storage_unreachable`, `not_ready`, or the kind of failed check
   (`password_needed`, `unreachable`, `remote_login_off`, `identity_changed`,
   `new_name`, `not_found`, `no_address`, `python_missing`,
-  `unreadable_reply`, `check_failed`).
+  `unreadable_reply`, `check_failed`). Its `needs_you` fact is shared by the
+  Library, Settings, notifications and badge. Automatic cooldown and retries
+  do not require the Director.
 - `events` and `last_change`: recent encode, check and replace events, newest
   first, using their event types as codes.
 - `original_backups`: originals moved aside on replacement and not yet
@@ -52,6 +68,8 @@ still answers when that storage is gone, and it starts no work.
   decision (`motion_pattern`).
 
 ## Show posters
+
+Needs you uses the same cached posters as Media.
 
 `GET /api/app/posters/{show_prefix}`, for example `/api/app/posters/tv/Futurama`,
 returns the show's poster image, or `404` with `{"poster": "none"}` when
@@ -78,8 +96,13 @@ with each choice's key, label, detail and selected state. Balance controls apply
 to making a sample and appear beside those actions.
 
 `POST .../approve` with `confirm` (`high_impact`, `size_tradeoff`) and
-`reviewed_draft_hash` approves the sample and starts compressing the season,
-like the web page's approval. It answers `{"ok": true, "compressing": bool}`,
+`reviewed_draft_hash` approves the sample and starts compressing the season.
+`approval_kind` in ready sample facts names a representative kind only when
+the draft meets its scalable-size and measured-kind guards. The shared controls
+name that kind before the click, with an explicit season-only alternative.
+`approval_scope` takes that kind or `season` (also the default for older
+callers). A kind request checks those guards and the representative again
+before saving, then reuses the existing kind approval path. It answers `{"ok": true, "compressing": bool}`,
 or `409` with `code` `confirm_high_impact` or `confirm_size_tradeoff` when the
 approval check wants the Director to confirm again, `sample_changed` when the
 sample is no longer the draft the Director watched (nothing is approved), or
@@ -114,10 +137,10 @@ samples and only while the page is open: `shows`, biggest first, each with
 season's details are still loading) and `seasons` in season order. Each season
 has its `prefix`, `season` number (null for a folder without one), the page
 state codes `state`, `action`, `failure` and `tone`, its `episode_count`
-and `bytes`, `files_need_you` (compressing while some files already need the
-Director) and `checks_only` (approved, but starting it only runs motion-pattern
-checks first). The app groups a show by its seasons the way the web library
-does (needs you, in progress, ready for you, no active work), opens the sample
+and `bytes`, `needs_you` (a sample judgment or file problem needs the Director,
+including while other files compress) and `checks_only` (approved, but starting
+it only runs motion-pattern checks first). The app's Needs you filter and waiting
+marks use `needs_you`; the other groups describe progress and readiness. It opens the sample
 page for a season whose sample waits on the Director, and opens the season's
 item page for anything else.
 
@@ -175,7 +198,12 @@ file itself when it was never replaced), or `404` when that side is gone. The
 Mac player cannot open MKV, so the first request remuxes the file to MP4,
 copying the picture and making the sound stereo AAC, into the `player`
 folder of the web state folder (`paths.web_state_dir`); the newest six stay cached. It answers byte
-ranges, so the player can seek.
+ranges, so the player can seek. Each side of the comparison checks that its
+seek still belongs to the latest request before moving, including while paused.
+
+Scrolling over either comparison picture scrolls the page, or pans both pictures
+at actual size; it never scrubs a video. Seeking and frame stepping use the
+shared controls and move both pictures together.
 
 ## Settings
 
@@ -285,3 +313,26 @@ storage being gone or a computer being off schedule, never notify. The first
 check after the app starts with no memory only records what it sees, so a new
 install does not announce the whole library. Opened from /Applications, the
 app registers itself to open at login.
+
+Older controllers omit the attention facts. The app still loads them and keeps
+sample notifications working, but season marks and non-sample notices return
+when the current controller is restored. A running show summary records all
+child job IDs for waiting reasons, beyond the short file preview, so a season
+only inherits reasons for its own files. Older summaries gain those IDs on the
+next progress refresh. Until then their existing unscoped warning remains.
+
+Kind facts retain the approved sample's season and `sample_moments` from the
+saved kind approval even after the season is resampled or leaves the waiting
+list. The kind page plays those saved clips directly, without opening the
+season's current draft. A replacement draft is not the approved kind's
+representative. Post-save extension also checks the reviewed draft against the
+approval being copied. If it refuses after the season was saved, the successful
+season result includes `kind_code`; the app says the season was approved but
+the kind was not, with the refusal reason.
+
+Review cleanup retains the clips referenced by saved kind approvals and skips only
+review-clip cleanup if their records cannot be read. Stopping a kind releases those clips
+to the normal age-based cleanup. Missing legacy clips remain unavailable rather
+than being replaced by a different sample; a show can still be selected for a
+published-episode comparison. A changed approval scope is reported separately
+from a changed draft, and partial-approval notices include any queue hold.

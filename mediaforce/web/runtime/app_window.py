@@ -13,6 +13,8 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, motion_keep_decisions, staged_artifacts
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, count_pending_encode_work, load_queue_state
 from mediaforce.library.candidate_selection import SEASON_PATTERN
+from mediaforce.library.background_work import background_work_is_paused
+from mediaforce.library.evidence_queue import EVIDENCE_WORK_CLAIMABLE_STATUSES, evidence_queue_summary, original_check_wait_reasons
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_source_sql
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
@@ -79,20 +81,44 @@ def app_window_payload(
         controller_storage: Mapping[str, Any],
         storage_admits_work: bool,
         observed_at: datetime,
+        kinds: Iterable[Mapping[str, Any]] = (),
+        remaking_samples: Collection[str] = (),
 ) -> dict[str, Any]:
     items = _present_items(connection, library_types)
     promotions = _promotions(connection)
     kept = _kept_original_rows(connection)
     seasons = _seasons(items)
     cards = [card for card in season_cards if card.get("prefix")]
+    kinds = list(kinds)
+    pending_kinds = [{key: kind[key] for key in ("kind", "sample_season", "sample_status", "sample_ready", "one_time", "sample_start_prefix") if key in kind}
+                     for kind in kinds if kind.get("needs_you")]
+    settings_by_kind = {kind["kind"]: bool(kind["settings"]) and not kind.get("one_time") for kind in kinds if "settings" in kind}
+    for kind in pending_kinds:
+        if kind["kind"] in settings_by_kind:
+            kind["settings_available"] = settings_by_kind[kind["kind"]]
+        if kind["sample_season"] in remaking_samples:
+            kind["sample_status"] = "retry_backoff"
+    kind_samples = {kind["sample_season"] for kind in pending_kinds
+                    if kind.get("sample_ready", True) or kind.get("sample_status") in {"failed", "stopped", "needs_attention"}}
     samples = _samples(cards)
+    waiting_samples = {sample["prefix"] for sample in samples["waiting_on_you"]}
+    samples["waiting_on_you"] = [sample for sample in samples["waiting_on_you"]
+                                 if sample["prefix"] not in kind_samples and sample["prefix"] not in remaking_samples]
     finished = _finished_seasons(items, promotions, seasons, kept)
     events = _events(connection)
     computer_states = [_computer(row) for row in computers]
     return {
         "schema_version": SCHEMA_VERSION,
         "observed_at": observed_at.isoformat(timespec="seconds"),
-        "work": _work(connection, controller_storage, storage_admits_work, computer_states),
+        "work": {
+            **_work(connection, controller_storage, storage_admits_work, computer_states),
+            "kinds_needing_you": pending_kinds,
+            "seasons_needing_you": [
+                _tv_season(season_identity(str(card["prefix"])), card) for card in cards
+                if (card.get("page_state") or {}).get("needs_you")
+                and card["prefix"] not in waiting_samples
+            ],
+        },
         "library": _library_totals(items),
         "space_saved": _space_saved(items, promotions, finished),
         "recently_finished_seasons": finished[:RECENT_SEASON_LIMIT],
@@ -257,16 +283,15 @@ def _tv_season(identity: Mapping[str, Any], card: Mapping[str, Any]) -> dict[str
         "prefix": identity["prefix"],
         "season": identity["season"],
         "state": state.get("key"),
+        "wait_detail": state.get("wait_detail"),
         "action": state.get("primary_action"),
         "failure": state.get("failure"),
         "tone": state.get("tone"),
         "approval_source": state.get("approval_source"),
         "approval_kind": state.get("approval_kind"),
+        "needs_you": bool(state.get("needs_you")),
         "episode_count": int(card.get("item_count") or 0),
         "bytes": int(card.get("total_size_bytes") or 0),
-        # A compressing season still says so when some of its files already need the owner.
-        "files_need_you": state.get("key") == "making_season"
-        and "attention" in str(card.get("review_badge_label") or "").lower(),
         # An approved season whose action only starts motion-pattern checks says so, not that it compresses now.
         "checks_only": state.get("key") == "ready_to_make"
         and lifecycle.get("eligible_candidate_count") == 0
@@ -475,7 +500,10 @@ def _samples(cards: list[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
             "action": state.get("primary_action"),
             "failure": state.get("failure"),
         }
-        if key == "ready_to_compare" or (key == "needs_help" and state.get("recovery_kind") == "test"):
+        sample_judgment = key == "ready_to_compare" or (
+            key == "needs_help" and state.get("recovery_kind") == "test"
+        )
+        if state.get("needs_you") and sample_judgment:
             waiting.append(entry)
         elif key == "ready_to_make":
             approved.append(entry)
@@ -489,7 +517,15 @@ def _work(
         storage_admits_work: bool,
         computers: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    paused = bool(load_queue_state(connection).get("is_paused"))
+    paused = bool(load_queue_state(connection).get("is_paused")) or background_work_is_paused(connection)
+    evidence_summary = evidence_queue_summary(connection)
+    checks_paused = bool(
+        evidence_summary.get("batch_id")
+        and evidence_summary.get("status") == "paused"
+        and evidence_summary.get("is_paused")
+        and not evidence_summary.get("cancel_requested")
+        and any(evidence_summary["counts"].get(status, 0) for status in EVIDENCE_WORK_CLAIMABLE_STATUSES)
+    )
     waiting_count = count_pending_encode_work(connection)
     running_count = sum(running_encode_counts_by_host(connection).values())
     stop_reasons = []
@@ -508,10 +544,12 @@ def _work(
     return {
         "state": state,
         "paused_by_owner": paused,
+        "checks_paused": checks_paused,
         "stop_reasons": stop_reasons,
         "running_count": running_count,
         "running_seasons": _running_seasons(connection),
         "waiting_count": waiting_count,
+        "original_check_wait_reasons": original_check_wait_reasons(connection),
         "storage": [
             {"mount_point": mount.get("mount_point"), "status": mount.get("status"), "failure": mount.get("last_failure_kind")}
             for mount in controller_storage.get("mounts") or []
@@ -531,15 +569,22 @@ def _running_seasons(connection: DBClient) -> list[dict[str, Any]]:
 
 
 def _computer(row: Mapping[str, Any]) -> dict[str, Any]:
+    state = _computer_state(row)
+    attention_reason = (
+        (row.get("recovery") or {}).get("reason")
+        if not row.get("available") and (row.get("recovery") or {}).get("status") == "action_required" else None
+    )
     return {
         "key": row.get("key"),
         "name": row.get("label"),
         "platform": row.get("platform"),
-        "state": _computer_state(row),
-        "attention_reason": (
-            (row.get("recovery") or {}).get("reason")
-            if not row.get("available") and (row.get("recovery") or {}).get("status") == "action_required" else None
+        "state": state,
+        "needs_you": (
+            state in {"password_needed", "identity_changed", "new_name", "remote_login_off", "unreachable_long",
+                      "recovery_required", "python_missing", "no_address"}
+            or attention_reason is not None
         ),
+        "attention_reason": attention_reason,
         "attention_since": (row.get("recovery") or {}).get("first_failure_at"),
         "running_count": int(row.get("active_encode_count") or 0),
         "schedule_opens_at": row.get("schedule_next_opens_at"),
@@ -553,6 +598,11 @@ def _computer_state(row: Mapping[str, Any]) -> str:
     if not row.get("available"):
         return _unavailable_computer_state(row)
     if int(row.get("active_encode_count") or 0):
+        if not row.get("schedule_open") and any(
+            not job.get("bypass_schedule") and not job.get("schedule_close_deadline_at")
+            for job in row.get("running_jobs") or []
+        ):
+            return "finishing_file"
         return "busy"
     if "encode_queue" not in {str(capability).lower() for capability in row.get("capabilities") or []}:
         return "not_encoding"
@@ -560,6 +610,8 @@ def _computer_state(row: Mapping[str, Any]) -> str:
         return "storage_unreachable"
     if row.get("active_flag") == "cooldown":
         return "cooling_down"
+    if row.get("schedule_profile") == "never":
+        return "schedule_disabled"
     if not row.get("schedule_open"):
         return "outside_schedule"
     return "ready" if row.get("queue_active") else "not_ready"

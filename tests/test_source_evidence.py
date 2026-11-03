@@ -28,11 +28,10 @@ from mediaforce.encoding.staging import promote_one_item
 from mediaforce.encoding.put_back import PUT_BACK_EVENT, PutBackRefused, PutBackRestoreError, put_original_back, \
     reconcile_unfinished_put_backs
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
-from mediaforce.web.runtime.episode_progress import put_back_rel_paths
 from mediaforce.library.evidence_acquisition import load_fingerprint_acquisition_items, plan_fingerprint_acquisition
 from mediaforce.library.evidence_state import EvidenceKind
 from mediaforce.library.source_evidence import append_measurement, ensure_active_source_version, json_text, load_source_evidence, \
-    known_output_check, observe_file, record_current_measurement, record_generated_output, source_trait_coverage, version_location
+    SourceEvidenceContext, known_output_check, observe_file, record_current_measurement, record_generated_output, source_trait_coverage, version_location
 from mediaforce.library.source_evidence_backfill import restore_published_source_evidence
 from mediaforce.library.evidence_queue import load_evidence_work_claim
 from mediaforce.library.evidence_worker import _commit_evidence_summary
@@ -233,7 +232,11 @@ def test_publication_is_not_unavailability_and_legacy_candidates_are_unknown(con
                                             ({"sha256": "different"}, "clear"),
                                             ({"sha256": "source", "size_bytes": 2, "video_codec": "av1"}, "match")])
 def test_known_output_digest_gaps_respect_size_or_codec_exclusion(output: dict[str, Any], expected: str) -> None:
-    assert known_output_check({"sha256": "source", "size_bytes": 10, "video_codec": "h264"}, [output]) == expected
+    candidate = {"sha256": "source", "size_bytes": 10, "video_codec": "h264"}
+    assert known_output_check(candidate, [output]) == expected
+    context = SourceEvidenceContext(frozenset(), (output,), {}, False, "")
+    assert context.output_check(candidate) == expected
+    assert context.output_check({"sha256": "source"}) == known_output_check({"sha256": "source"}, [output])
 
 
 def _probe() -> SimpleNamespace:
@@ -739,6 +742,7 @@ def test_worker_commit_checks_identity_instead_of_revision(connection: DBClient,
 def test_publish_missing_source_keeps_previous_success_behavior(connection: DBClient, tmp_path: Path,
                                                                occupied_archive: bool, missing_at: str) -> None:
     history = _history(connection, tmp_path)
+    connection.execute(update(library_items).where(library_items.c.id == history["id"]).values(missing_since=timestamp()))
     if missing_at == "before":
         history["path"].unlink()
     if occupied_archive:
@@ -767,6 +771,7 @@ def test_publish_missing_source_keeps_previous_success_behavior(connection: DBCl
                                      allowed=True, waiting_reason=None, required_by_volume={}))
     assert published.read_bytes() == b"ready output"
     assert connection.execute(select(library_items.c.status)).scalar_one() == "promoted"
+    assert connection.execute(select(library_items.c.missing_since)).scalar_one() is None
     assert history["archive"].exists() == occupied_archive
     if occupied_archive:
         assert history["archive"].read_bytes() == b"older rollback"
@@ -1138,8 +1143,6 @@ def test_put_back_returns_the_original_and_keeps_it(connection: DBClient, tmp_pa
     assert (keep["reason_code"], keep["source_fingerprint"]) == ("put_back", item["content_version_fingerprint"])
     assert library_item_ids_kept_original(connection, [published["id"]]) == {published["id"]}
     assert [kind for kind, _details in events] == [PUT_BACK_EVENT]
-    # The episode list words it as the owner's put-back, not a motion-pattern choice.
-    assert put_back_rel_paths(connection, [item["rel_path"], "tv/Show/Season 1/other.mkv"]) == {item["rel_path"]}
 
 
 def test_put_back_refuses_when_the_backup_is_gone(connection: DBClient, tmp_path: Path) -> None:

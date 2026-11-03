@@ -2,7 +2,7 @@ import unittest
 from typing import Any
 
 from mediaforce.library.workflow_state import ItemWorkflowState
-from mediaforce.web.runtime.encode_runtime import CONTROLLER_RESTART_STOP_REASON, SIZE_QUESTION_QUALITY_NEEDS_MORE
+from mediaforce.web.runtime.encode_runtime import CONTROLLER_RESTART_STOP_REASON, KEPT_ORIGINAL_TERMINAL_REASON, SIZE_QUESTION_QUALITY_NEEDS_MORE
 from mediaforce.web.runtime.episode_progress import season_episode_progress
 
 SEASON = "tv/Show/Season 1"
@@ -29,6 +29,15 @@ def _stages(episodes: list[dict[str, Any]]) -> dict[str, str]:
 
 
 class SeasonEpisodeProgressTests(unittest.TestCase):
+    def test_undoing_keep_original_does_not_leave_a_new_question_from_its_backstop_stop(self) -> None:
+        item = _item(1)
+        run = _run("stopped", terminal_reason=KEPT_ORIGINAL_TERMINAL_REASON)
+
+        [episode] = season_episode_progress([item], {item.rel_path: run}, {})
+
+        self.assertEqual(episode["stage"], "not_started")
+        self.assertIsNone(episode["wait_reason"])
+
     def test_each_episode_reads_where_it_has_got(self) -> None:
         items = [
             _item(1, "complete"),

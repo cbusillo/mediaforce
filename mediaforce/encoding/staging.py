@@ -792,6 +792,7 @@ def promote_one_item(
             .where(library_items.c.id == item["library_item_id"])
             .values(
                 source_path=str(destination_path),
+                missing_since=None,
                 rel_path=rel_path,
                 parent_dir=parent_dir,
                 file_name=destination_path.name,

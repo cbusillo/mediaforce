@@ -81,19 +81,11 @@ check or connection for that computer is running. Each pass saves only its own
 computer's record, so a background pass and Retry connection never overwrite
 each other.
 
-`GET /api/recovery-alerts` reads current warnings without probing or mounting.
-The application shell polls it every 30 seconds and shows one warning per
-incident beneath navigation, linking to Activity's computers. Missing controller
-storage warns immediately, even with an empty queue. Remote computers warn after
-five minutes, or immediately when an ambiguous mount needs attention. A
-computer's warning also says how many other computers are still working, from
-the last checks the computer cards show; it says none only once every other
-computer has been checked. New
-incidents and recovery are logged once, with the active notification IDs in
+New incidents and recovery are logged once, with the active notification IDs in
 `recovery-alerts.json`; a restart does not emit the same outage again. Recovered
-warnings disappear. These are in-app/log notifications; no email, chat or system
-notification destination is assumed. Checks do not unpause work, retry stopped
-jobs, unmount storage or change service/runtime locations.
+incidents disappear. No email, chat or system notification destination is
+assumed. Checks do not unpause work, retry stopped jobs, unmount storage or
+change service/runtime locations.
 
 ### Installed acceptance
 

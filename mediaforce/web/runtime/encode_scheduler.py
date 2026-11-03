@@ -8,6 +8,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.timezones import system_timezone, valid_timezone_name
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.plain_failure import plain_failure_summary
+from mediaforce.encoding.encode_queue import unfinished_items_summary
 
 SCHEDULE_DAY_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 SCHEDULE_CLOSE_WAITING_REASON = "Waiting for the next work window."
@@ -17,12 +18,16 @@ COMPUTER_WORK_WINDOW_WAITING_REASON = "waiting for a computer's work window"
 
 
 @dataclass(slots=True)
-class EncodeSchedulerDeps:
+class SchedulePolicyDeps:
     normalize_encode_queue_scheduler: Any
     canonical_schedule_profile_key: Any
     default_host_schedule_profile: str
     always_schedule_profile: str
     default_scheduler_policy: dict[str, Any]
+
+
+@dataclass(slots=True)
+class EncodeSchedulerDeps(SchedulePolicyDeps):
     encode_job_manifest_totals: Any
     encode_job_max_attempts: int
 
@@ -41,13 +46,26 @@ class EncodeScheduleTransition:
         }
 
 
+def schedule_policy_deps() -> SchedulePolicyDeps:
+    from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY
+    from mediaforce.web.settings_runtime import (
+        ALWAYS_SCHEDULE_PROFILE, DEFAULT_HOST_SCHEDULE_PROFILE, canonical_schedule_profile_key,
+        normalize_encode_queue_scheduler,
+    )
+
+    return SchedulePolicyDeps(
+        normalize_encode_queue_scheduler, canonical_schedule_profile_key,
+        DEFAULT_HOST_SCHEDULE_PROFILE, ALWAYS_SCHEDULE_PROFILE, DEFAULT_SCHEDULER_POLICY,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _ScheduleInterval:
     starts_at: datetime
     ends_at: datetime
 
 
-def encode_queue_scheduler_policy(config: MediaforceConfig, deps: EncodeSchedulerDeps) -> dict[str, Any]:
+def encode_queue_scheduler_policy(config: MediaforceConfig, deps: SchedulePolicyDeps) -> dict[str, Any]:
     config_raw = object_dict(config.raw)
     encode_queue = object_dict(config_raw.get("encode_queue"))
     raw = encode_queue.get("scheduler")
@@ -57,7 +75,7 @@ def encode_queue_scheduler_policy(config: MediaforceConfig, deps: EncodeSchedule
     return deps.normalize_encode_queue_scheduler(raw if isinstance(raw, dict) else None)
 
 
-def encode_queue_schedule_profiles(config: MediaforceConfig, deps: EncodeSchedulerDeps) -> dict[str, dict[str, Any]]:
+def encode_queue_schedule_profiles(config: MediaforceConfig, deps: SchedulePolicyDeps) -> dict[str, dict[str, Any]]:
     always = deps.normalize_encode_queue_scheduler({"mode": "anytime", "timezone": "host_local"})
     always["key"] = deps.always_schedule_profile
     always["label"] = "Always"
@@ -85,7 +103,7 @@ def encode_queue_schedule_profiles(config: MediaforceConfig, deps: EncodeSchedul
 def schedule_profile_policy_for_host(
         config: MediaforceConfig,
         host_payload: dict[str, Any] | None,
-        deps: EncodeSchedulerDeps,
+        deps: SchedulePolicyDeps,
         *,
         profiles: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -123,7 +141,7 @@ def _host_schedule_timezone(host_payload: dict[str, Any] | None) -> tzinfo:
 
 def evaluate_encode_schedule_transition(
         policy: dict[str, Any],
-        deps: EncodeSchedulerDeps,
+        deps: SchedulePolicyDeps,
         *,
         bypass_schedule: bool = False,
         now: datetime | None = None,
@@ -181,7 +199,7 @@ def evaluate_encode_schedule_transition(
 
 def scheduler_allows_encode_run(
         policy: dict[str, Any],
-        deps: EncodeSchedulerDeps,
+        deps: SchedulePolicyDeps,
         *,
         bypass_schedule: bool = False,
         now: datetime | None = None,
@@ -198,7 +216,7 @@ def scheduler_allows_encode_run(
 
 def max_encode_schedule_window_seconds(
         policy: dict[str, Any],
-        deps: EncodeSchedulerDeps,
+        deps: SchedulePolicyDeps,
         *,
         now: datetime | None = None,
         host_payload: dict[str, Any] | None = None,
@@ -262,7 +280,7 @@ def _schedule_days(policy: dict[str, Any], key: str) -> frozenset[str]:
     })
 
 
-def _schedule_hour(policy: dict[str, Any], key: str, deps: EncodeSchedulerDeps) -> int:
+def _schedule_hour(policy: dict[str, Any], key: str, deps: SchedulePolicyDeps) -> int:
     value = policy.get(key)
     if value is None:
         value = deps.default_scheduler_policy[key]
@@ -515,12 +533,13 @@ def _queue_left_out_item_counts(
         int_value(object_dict(job.get("progress")).get("left_out_failed_item_count"))
         for job in summed_jobs
     )
-    # A single job that reads needs_attention waits for the Director as a whole.
-    needs_attention += sum(
-        max(int_value(job.get("item_count")), 1)
-        for job in attention_jobs
-        if not _reports_left_out_items(job)
-    )
+    for job in attention_jobs:
+        if _reports_left_out_items(job):
+            continue
+        current = object_dict(job.get("attention_counts"))
+        needs_attention += (int_value(current.get("left_out_needs_attention_item_count")) if current
+                            else max(int_value(job.get("item_count")), 1))
+        failed += int_value(current.get("left_out_failed_item_count"))
     return {
         "left_out_needs_attention_item_count": needs_attention,
         "left_out_failed_item_count": failed,
@@ -528,17 +547,8 @@ def _queue_left_out_item_counts(
 
 
 def left_out_items_copy(counts: dict[str, Any]) -> str | None:
-    """Says how many items an estimate leaves out, or nothing when it covers everything."""
-    needs_attention = int_value(counts.get("left_out_needs_attention_item_count"))
-    failed = int_value(counts.get("left_out_failed_item_count"))
-    parts: list[str] = []
-    if needs_attention:
-        parts.append(f"{needs_attention} {'item' if needs_attention == 1 else 'items'} waiting for you")
-    if failed:
-        parts.append(f"{failed} that didn't finish")
-    if not parts:
-        return None
-    return f"leaves out {' and '.join(parts)}"
+    summary = unfinished_items_summary(counts)
+    return f"leaves out {summary}" if summary else None
 
 
 def decorate_encode_job_for_scheduler(
@@ -598,7 +608,7 @@ def decorate_encode_job_for_scheduler(
     elif status == "running":
         decorated["scheduler_status_copy"] = "running now"
     elif status == "needs_attention":
-        decorated["scheduler_status_copy"] = waiting_reason or "needs attention before retrying"
+        decorated["scheduler_status_copy"] = decorated.get("attention_summary") or waiting_reason or "needs attention before retrying"
     elif status == "retry_backoff":
         decorated["scheduler_status_copy"] = waiting_reason or "waiting for retry backoff"
     elif waiting_reason:

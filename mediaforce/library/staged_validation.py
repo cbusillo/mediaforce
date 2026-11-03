@@ -7,6 +7,8 @@ from typing import Any, Literal
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK, FINAL_SIZE_GOAL_CHECK, encoder_final_size_miss
 
+AUTOMATIC_PUBLISH_ORIGINS = frozenset({"queue", "cli-production"})
+
 # The automatic publisher's state for a failed copy it is making again; a new check replaces it.
 REMAKING_AFTER_FAILED_CHECK = "remaking"
 # The automatic publisher's state for a failed copy it could not make again, which waits on the owner.

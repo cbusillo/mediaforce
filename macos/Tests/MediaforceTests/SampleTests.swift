@@ -43,18 +43,18 @@ final class SampleTests: XCTestCase {
         XCTAssertFalse(try decode(Self.facts(state: "finished", action: nil)).isInProgress)
         XCTAssertEqual(try decode(Self.facts(state: "ready_to_make", action: "queue_encode")).actions, [.startCompressing])
         let laterStages: [(String, String?, SampleFacts.Action)] = [
-            ("needs_help", "retry_encode", .retryUnfinished), ("ready_to_check", "validate_outputs", .checkFiles),
+            ("needs_help", "review_files", .reviewFiles), ("needs_help", "retry_encode", .retryUnfinished), ("ready_to_check", "validate_outputs", .checkFiles),
             ("ready_to_finish", "promote_outputs", .replaceOriginals), ("motion_held", "decide_motion", .decideMotion),
         ]
-        // A blocked file and a state with no native step still say where the season is, with no button.
         let noNativeStep: [(String, String?)] = [
-            ("needs_help", "review_files"), ("finish_blocked", nil), ("ready_to_check", nil), ("ready_to_finish", nil),
+            ("finish_blocked", nil), ("ready_to_check", nil), ("ready_to_finish", nil),
         ]
         let makeSampleHeadline = Words.sampleHeadline(try decode(Self.facts(state: "needs_help", action: "make_sample")))
         for (state, action, expected) in laterStages.map({ ($0.0, $0.1, [$0.2]) }) + noNativeStep.map({ ($0.0, $0.1, []) }) {
             let facts = try decode(Self.facts(state: state, action: action))
             XCTAssertEqual(facts.actions, expected, state)
             XCTAssertNotEqual(Words.sampleHeadline(facts), makeSampleHeadline, state)
+            if let first = expected.first { XCTAssertTrue(SampleFacts.seasonPageActions.contains(first)) }
         }
     }
 
@@ -80,6 +80,14 @@ final class SampleTests: XCTestCase {
         XCTAssertNil(Words.sampleCoverage(notMade))
     }
 
+    func testBlockedMeasuringShowsItsSavedReasonWithoutApprovalActions() throws {
+        var payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(Self.facts(state: "waiting_for_measurement", action: nil).utf8)) as? [String: Any])
+        payload["wait_detail"] = "Measuring is blocked. The original measurements disagree."
+        let facts = try JSONDecoder.mediaforce.decode(SampleFacts.self, from: JSONSerialization.data(withJSONObject: payload))
+        XCTAssertEqual(Words.sampleHeadline(facts), facts.waitDetail)
+        XCTAssertTrue(facts.actions.isEmpty)
+    }
+
     func testAnApprovalHoldsOnlyForTheSampleTheOwnerWatched() throws {
         let watched = try decode(Self.facts())
         let approval = SampleApproval(reviewedDraftHash: try XCTUnwrap(watched.draftHash))
@@ -89,8 +97,23 @@ final class SampleTests: XCTestCase {
         XCTAssertFalse(approval.stillReviewed(nil))
     }
 
+    func testKindApprovalNamesItsScopeAndExpiresWhenRepresentationChanges() throws {
+        let scopedJSON = Self.facts().replacingOccurrences(of: #""draft_hash""#, with: #""approval_kind": "darker_live_action", "draft_hash""#)
+        let scoped = try decode(scopedJSON)
+        let kind = try XCTUnwrap(scoped.approvalKind)
+        let approval = SampleApproval(reviewedDraftHash: "draft-1", scope: kind)
+        XCTAssertTrue(approval.stillReviewed(scoped))
+        let noLongerRepresentative = try decode(Self.facts())
+        XCTAssertFalse(approval.stillReviewed(noLongerRepresentative))
+        XCTAssertEqual(approval.changeNotice(noLongerRepresentative), .approvalScopeChanged)
+        XCTAssertNotEqual(Words.sampleApproval(scope: kind), Words.sampleApproval(scope: "season"))
+        XCTAssertTrue(Words.sampleApproval(scope: kind).contains(Words.kindName(kind)))
+        XCTAssertNotEqual(Words.sampleHeadline(scoped), Words.sampleHeadline(try decode(Self.facts())))
+        XCTAssertTrue(SampleApproval(reviewedDraftHash: "draft-1").stillReviewed(scoped))
+    }
+
     func testEveryStateHasItsOwnHeadlineAndOnlyKnownGuardsAsk() throws {
-        let states = ["making_test", "sample_waiting", "ready_to_compare", "needs_test", "ready_to_make", "making_season", "finished"]
+        let states = ["waiting_for_measurement", "making_test", "sample_waiting", "ready_to_compare", "needs_test", "ready_to_make", "making_season", "finished"]
         let headlines = try states.map { Words.sampleHeadline(try decode(Self.facts(state: $0))) }
         XCTAssertEqual(Set(headlines).count, states.count)
         XCTAssertFalse(headlines.contains(Words.sampleHeadline(try decode(Self.facts(state: "a state the app does not know")))))
@@ -149,7 +172,7 @@ final class SampleClientTests: XCTestCase {
 
     func testARefusedApprovalIsAnAnswerNotAFailure() async throws {
         let result = try await client(status: 409, body: #"{"ok": false, "code": "confirm_size_tradeoff"}"#)
-            .approveSample("tv/Lucifer/Season 2", confirm: ["high_impact"], draftHash: "draft-1")
+            .approveSample("tv/Lucifer/Season 2", confirm: ["high_impact"], draftHash: "draft-1", scope: "darker_live_action")
         XCTAssertEqual(result.code, "confirm_size_tradeoff")
         let request = try XCTUnwrap(Self.requests.first)
         XCTAssertEqual(request.httpMethod, "POST")
@@ -157,6 +180,23 @@ final class SampleClientTests: XCTestCase {
         let sent = try XCTUnwrap(StubServerBody.json(request))
         XCTAssertEqual(sent["confirm"] as? [String], ["high_impact"])
         XCTAssertEqual(sent["reviewed_draft_hash"] as? String, "draft-1")
+        XCTAssertEqual(sent["approval_scope"] as? String, "darker_live_action")
+    }
+
+    func testAChangedKindAfterSavingNamesThePartialApprovalEvenIfCompressionStarted() throws {
+        for (compressing, reason) in [(true, "free_space_reserve"), (false, "free_space_reserve"), (false, "confirm_compression_goal")] {
+            let body = """
+                {"ok": true, "compressing": \(compressing), "reason": "\(reason)", "kind_code": "sample_changed"}
+                """
+            let result = try JSONDecoder.mediaforce.decode(SampleActionResult.self, from: Data(body.utf8))
+            let notice = try XCTUnwrap(Words.sampleResult(result))
+            XCTAssertTrue(notice.message.hasPrefix(Words.kindRefusal("sample_changed")))
+            XCTAssertNotEqual(notice.title, ActionNotice.sampleRefused.title)
+            if !compressing {
+                let queueNotice = result.needsChoice ? ActionNotice.compressNeedsChoice : .approvedNotCompressing
+                XCTAssertTrue(notice.message.contains(queueNotice.message))
+            }
+        }
     }
 
     func testOnlyAReasonThatNeedsAChoiceIsSaidAsOne() async throws {
@@ -181,6 +221,38 @@ final class SampleClientTests: XCTestCase {
         let sent = try XCTUnwrap(StubServerBody.json(try XCTUnwrap(Self.requests.first)))
         XCTAssertEqual(sent["size"] as? String, "smaller")
         XCTAssertEqual(sent["balance"] as? String, "reference")
+    }
+
+    func testSizeConfirmationsMakeFreshSamplesAndUnchangedFailedRetriesKeepTheirRequest() async throws {
+        let facts = try JSONDecoder.mediaforce.decode(SampleFacts.self, from: Data(SampleTests.facts().utf8))
+        for reason in SampleActionResult.choiceReasons {
+            let response = "{\"ok\": true, \"compressing\": false, \"reason\": \"\(reason)\"}"
+            let client = client(status: 200, body: response)
+            let result = try await client.compressSeason(facts.prefix)
+            var choices = SampleChoices()
+            XCTAssertEqual(choices.compressed(result, facts: facts), .compressNeedsChoice)
+            XCTAssertTrue(choices.askingSize)
+            choices.selectedBalance = "reference"
+            let size = try XCTUnwrap(facts.sizeChoices.first).key
+            let made = try await self.client(status: 200, body: #"{"ok": true}"#)
+                .makeSample(facts.prefix, size: size, balance: choices.balance(in: facts))
+            let request = try XCTUnwrap(StubServerBody.json(try XCTUnwrap(Self.requests.last)))
+            XCTAssertEqual(request["size"] as? String, size)
+            XCTAssertEqual(request["balance"] as? String, choices.selectedBalance)
+            XCTAssertNil(choices.made(made, facts: facts))
+            XCTAssertFalse(choices.askingSize)
+            XCTAssertNil(choices.selectedBalance)
+        }
+        var choices = SampleChoices(selectedBalance: facts.balanceChoices.first(where: \.selected)?.key)
+        _ = try await client(status: 200, body: #"{"ok": true}"#)
+            .makeSample(facts.prefix, size: nil, balance: choices.balance(in: facts))
+        let retry = try XCTUnwrap(StubServerBody.json(try XCTUnwrap(Self.requests.last)))
+        XCTAssertTrue(retry["size"] is NSNull)
+        XCTAssertTrue(retry["balance"] is NSNull)
+        let refused = try JSONDecoder.mediaforce.decode(SampleActionResult.self, from: Data(#"{"ok": false, "code": "choose_size"}"#.utf8))
+        XCTAssertNil(choices.made(refused, facts: facts))
+        XCTAssertTrue(choices.askingSize)
+        XCTAssertNotNil(choices.selectedBalance)
     }
 
     func testReviewClipsLoadFromTheServer() {

@@ -127,11 +127,9 @@ def cadence_evidence_blocker(
             "code": "cadence_unresolved",
             "message": (
                 f"{unresolved_count} selected {file_label} a measured motion pattern that Mediaforce cannot "
-                f"convert safely on its own. Review that item in Activity before {decision_label}."
+                f"convert safely on its own. Review that file's motion options before {decision_label}."
             ),
             "affected_item_count": unresolved_count,
-            "next_route": "/ops",
-            "next_action_label": "Open Activity",
         }
     try:
         preparations = _queue_cadence_evidence_work(
@@ -147,11 +145,9 @@ def cadence_evidence_blocker(
             "ok": False,
             "code": "cadence_analysis_unavailable",
             "message": (
-                f"Cadence safety evidence is required before {decision_label}, but {str(exc).rstrip('.').lower()}."
+                f"A motion-pattern check is required before {decision_label}, but {str(exc).rstrip('.').lower()}."
             ),
             "affected_item_count": len(normalized_ids),
-            "next_route": "/ops",
-            "next_action_label": "Open Activity",
         }
     required_count = sum(int(preparation.get("required_count") or 0) for preparation in preparations)
     if required_count == 0:
@@ -169,27 +165,24 @@ def cadence_evidence_blocker(
         {},
     )
     if terminal_failure_count:
-        file_label, folder_label = ("file", "its") if terminal_failure_count == 1 else ("files", "their")
+        file_label = "file" if terminal_failure_count == 1 else "files"
         return {
             "ok": False,
             "code": "cadence_analysis_failed",
             "message": (
                 f"Motion-pattern analysis failed earlier for {terminal_failure_count} selected {file_label}. "
-                f"Open Activity, use Prepare analysis for {folder_label} folder, then select Start analysis. "
-                f"Once it finishes, try {decision_label} again."
+                "Those files stay out until a motion-pattern check succeeds."
             ),
             "affected_item_count": terminal_failure_count,
             "evidence_work": work,
-            "next_route": "/ops",
-            "next_action_label": "Open Activity",
         }
     work_status = str(work.get("status") or "")
     if bool(work.get("is_paused")):
-        work_instruction = "The work is prepared in Activity. Select Start analysis, then try again."
+        work_instruction = "The motion-pattern check is paused."
     elif work_status == "running":
-        work_instruction = "The analysis is already running in Activity. Try again after it finishes."
+        work_instruction = "The motion-pattern check is running. Try again after it finishes."
     else:
-        work_instruction = "The work is queued in Activity. Try again after it finishes."
+        work_instruction = "The motion-pattern check is queued. Try again after it finishes."
     file_label = "file" if required_count == 1 else "files"
     return {
         "ok": False,
@@ -200,8 +193,6 @@ def cadence_evidence_blocker(
         ),
         "affected_item_count": required_count,
         "evidence_work": work,
-        "next_route": "/ops",
-        "next_action_label": "Open Activity",
     }
 
 

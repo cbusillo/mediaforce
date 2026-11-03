@@ -3,7 +3,8 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from mediaforce.web.settings_runtime import SettingsValidationError, build_runtime_settings_payload
+from mediaforce.web.settings_runtime import SettingsValidationError, build_runtime_computer_settings, \
+    build_runtime_media_settings, merge_runtime_settings_payload
 
 
 class SettingsRuntimeTests(unittest.TestCase):
@@ -15,24 +16,47 @@ class SettingsRuntimeTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def _payload(self, catalog_refresh_hours: object) -> dict[str, Any]:
-        return build_runtime_settings_payload(
+        return build_runtime_media_settings(
             libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-            remote_hosts=[],
             transcode_root=str(self.root / "staging"),
             catalog_refresh_hours=catalog_refresh_hours,
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
+        )[0]
 
     def test_catalog_refresh_interval_is_persisted(self) -> None:
         payload = self._payload("2.5")
 
-        self.assertEqual(payload["media"]["catalog_refresh_hours"], 2.5)
+        self.assertEqual(payload["catalog_refresh_hours"], 2.5)
 
     def test_catalog_refresh_interval_rejects_out_of_range_and_nonfinite_values(self) -> None:
         for value in ("-1", "8761", "nan", "inf"):
             with self.subTest(value=value), self.assertRaises(SettingsValidationError):
                 self._payload(value)
+
+
+    def test_schedule_close_option_merge_uses_the_current_saved_value_when_omitted(self) -> None:
+        cases = [
+            (True, False, None, True),
+            (False, True, None, False),
+            (None, True, None, True),
+            (True, False, False, False),
+            (False, False, True, True),
+        ]
+        for saved, default, submitted, expected in cases:
+            with self.subTest(saved=saved, default=default, submitted=submitted):
+                profile: dict[str, Any] = {"key": "night", "start_hour": 0, "end_hour": 5}
+                if submitted is not None:
+                    profile["finish_current_file"] = submitted
+                updates = build_runtime_computer_settings(
+                    remote_hosts=[], encode_queue_scheduler={"mode": "anytime"},
+                    schedule_profiles=[profile], known_library_keys=set(),
+                )
+                existing = {} if saved is None else {
+                    "encode_queue": {"schedule_profiles": [{"key": "night", "finish_current_file": saved}]},
+                }
+                merged = merge_runtime_settings_payload(
+                    existing, updates, schedule_defaults=[{"name": "night", "finish_current_file": default}],
+                )
+                self.assertIs(merged["encode_queue"]["schedule_profiles"][0]["finish_current_file"], expected)
 
 
 if __name__ == "__main__":

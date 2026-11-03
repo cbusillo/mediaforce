@@ -29,6 +29,35 @@ final class KindsTests: XCTestCase {
         XCTAssertEqual(decided.approval?.showPrefix, "tv/Raising Hope")
     }
 
+    func testTheNewestSamplesSettingComesBeforeAnOlderWatchableShow() throws {
+        let older = try facts().kinds[0].settings[0]
+        let latest = KindsFacts.Setting(show: "tv/The Blacklist", fromPrefix: "tv/The Blacklist/Season 10",
+                                       sizeGoalMode: "normalized", sizeGoalMb: 300, libraryItemId: nil)
+        let pending = KindsFacts.Kind(kind: "darker_live_action", oneTime: false, seasons: 1, waitingBytes: 1000,
+                                     shows: [], settings: [older, latest], approval: nil, sampleSeason: latest.fromPrefix)
+        XCTAssertEqual(pending.sampleSetting, latest)
+        XCTAssertEqual(pending.firstSetting, latest)
+        XCTAssertTrue(pending.showsSampleFirst)
+        var unrelated = KindsFacts.Kind(kind: "darker_live_action", oneTime: false, seasons: 1, waitingBytes: 1000,
+                                       shows: [], settings: [older], approval: nil, sampleSeason: latest.fromPrefix)
+        XCTAssertFalse(unrelated.showsSampleFirst)
+        unrelated.sampleReady = false
+        unrelated.sampleStatus = "pending_review"
+        XCTAssertTrue(unrelated.offersSample)
+        unrelated.sampleReady = true
+        XCTAssertFalse(unrelated.offersSample)
+    }
+
+    func testTheApprovedKindCarriesItsOwnSavedSampleClips() throws {
+        let decided = try facts(approval: """
+        {"from_prefix": "tv/Raising Hope/Season 2", "approved_at": "now", "library_item_id": null,
+         "sample_moments": [{"at_seconds": 600, "original": {"url": "/watched/source.mp4", "size_bytes": 1000},
+                             "sample": {"url": "/watched/sample.mp4", "size_bytes": 100}}]}
+        """).kinds[0]
+        XCTAssertEqual(decided.approval?.sampleMoments?.first?.sample.url, "/watched/sample.mp4")
+        XCTAssertNil(try facts().kinds[0].approval)
+    }
+
     func testAKindNamesTheShowWhoseSampleIsBeingMadeAndWhereEachShowsSampleWouldBe() throws {
         let kind = try facts().kinds[0]
         XCTAssertEqual(kind.sampleShow, "tv/Psych")

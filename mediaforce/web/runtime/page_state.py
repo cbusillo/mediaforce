@@ -1,39 +1,3 @@
-"""The one state a folder page or library card leads with, and the action it offers.
-
-The server decides it from database rows and saved samples, never from the hour-long job notice the
-page payload carries, so a page and its library card agree and nothing changes when a notice expires.
-The Mac app maps the key to wording.
-
-Order, first match wins:
-
-1. ``making_season``: an encode run is working on the scope (the workflow state's wider-run rules).
-2. ``needs_help`` / ``season``: an encode run stopped on one of the scope's files, unless the page's
-   own sample is newer than the stop. The newer sample is how the owner answers a stopped run, so
-   its state leads instead.
-3. ``needs_help`` / ``files``: a finished file is blocked, unless a fresh sample awaits review; a
-   blocked file is made again only after a fresh sample is approved.
-4. The page's own sample, in its order: ``making_test``, ``sample_waiting``, ``needs_help`` /
-   ``test`` for a sample that stopped, ``ready_to_compare`` for a sample awaiting review. A sample
-   outranks validating, finishing and finished because it is the owner's newest request for the
-   scope, and approving it changes which settings its files are published under.
-5. ``ready_to_check``, ``finish_blocked`` / ``ready_to_finish``, ``finished``: the workflow lanes. A
-   file the owner kept original for its motion pattern is settled, so a scope whose remaining files
-   are all published or kept original is ``finished``.
-6. ``ready_to_make``: the approval governing the scope (the nearest folder holding one, see
-   ``production_approval``) is current, records its contract, and the review evidence still allows
-   production. Under such an approval a scope where neither queueing nor an override the page
-   offers would take or start a check for any file, and some file is held for its measured motion
-   pattern, is ``motion_held`` instead, so nothing offers to compress files queueing would refuse.
-   The counts come from the scope's lifecycle payload, which reads the queue's own motion-pattern
-   gate. It is quiet when no one can change the outcome, and asks for attention when the show's
-   encode-as-is decision could accept some of the files.
-7. ``needs_help`` / ``test``: the page's saved sample cannot be reviewed.
-8. ``needs_test``.
-
-The page's own sample is the newest sample job and the saved sample at exactly its folder. A sample
-of one episode inside a season, or of the show around it, never sets the season's sample state.
-"""
-
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -43,16 +7,19 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.encoding.encode_queue import load_encode_job
+from mediaforce.encoding.plain_failure import plain_failure_summary
 from mediaforce.tuning.calibration_jobs import load_latest_job, load_latest_jobs_for_prefixes
 from mediaforce.tuning.quality_risk import build_quality_risk_contract
 from mediaforce.web.runtime.folder_actions import quality_risk_blocks_production
 from mediaforce.web.runtime.folder_tuning_advice import review_gate
 from mediaforce.web.runtime.job_runtime import retryable_saved_sample_job, sample_target_size_failure
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
-    cached_calibration_loader, effective_production_approval
+    SampleWait, cached_calibration_loader, effective_production_approval, holds_approval, sample_wait, season_prefix_of
 
 PageStateKey = Literal[
     "needs_test",
+    "waiting_for_kind",
+    "waiting_for_measurement",
     "sample_waiting",
     "making_test",
     "ready_to_compare",
@@ -133,6 +100,8 @@ class PageState:
     # Which approval governs the folder: its own or a parent folder's ("folder"), or its kind of content's ("kind").
     approval_source: str | None = None
     approval_kind: str | None = None
+    needs_you: bool = False
+    wait_detail: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -144,6 +113,8 @@ class PageState:
             "source_job": self.source_job.to_payload() if self.source_job is not None else None,
             "approval_source": self.approval_source,
             "approval_kind": self.approval_kind,
+            "needs_you": self.needs_you,
+            "wait_detail": self.wait_detail,
         }
 
 
@@ -163,6 +134,7 @@ class PageStateFacts:
     # The approval governing this folder, from the nearest folder holding one.
     approval: EffectiveApproval | None = None
     approval_review_blocked: bool = False
+    sample_wait: SampleWait | None = None
     # The staged-file summary, when the caller read one.
     staged_integrity: Mapping[str, Any] | None = None
     # The scope's lifecycle payload with its motion-pattern counts, for a TV scope.
@@ -177,10 +149,17 @@ class PageStateSources:
 
 def decide_page_state(facts: PageStateFacts) -> PageState:
     state = _decide_page_state(facts)
+    state = replace(state, needs_you=_needs_you(state, facts))
     approval = facts.approval
     if approval is None:
         return state
     return replace(state, approval_source=approval.source, approval_kind=approval.kind)
+
+
+def _needs_you(state: PageState, facts: PageStateFacts) -> bool:
+    return state.key in {"ready_to_compare", "needs_help"} or state.primary_action == "decide_motion" or (
+        state.key == "making_season" and bool(object_dict(facts.workflow).get("needs_owner"))
+    )
 
 
 def _decide_page_state(facts: PageStateFacts) -> PageState:
@@ -190,6 +169,10 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
     sample_job = object_dict(facts.sample_job)
     sample_status = str(sample_job.get("status") or "")
     calibration = object_dict(facts.calibration) if facts.calibration is not None else None
+    wait = facts.sample_wait if not facts.approval_review_blocked else None
+    follows_kind = wait.kind if wait is not None else None
+    if wait and sample_status not in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES:
+        sample_job, sample_status, calibration = {}, "", None
 
     if lane == "processing":
         return PageState("making_season", "active", source_job=_source_job(encode_job, "encode"))
@@ -210,8 +193,6 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
     awaits_review = bool(gate and gate.get("status") == "needs_approval" and browser_ready and not sample_active)
     calibration_source = _calibration_source(facts.prefix, calibration, sample_job)
 
-    if lane == "blocked" and not awaits_review:
-        return PageState("needs_help", "attention", recovery_kind="files", primary_action="review_files")
     if sample_status in SAMPLE_RUNNING_STATUSES:
         return PageState("making_test", "active", source_job=_source_job(sample_job, "sample"))
     if sample_status in SAMPLE_WAITING_STATUSES:
@@ -220,6 +201,8 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
             "attention" if sample_status == "retry_backoff" else "quiet",
             source_job=_source_job(sample_job, "sample"),
         )
+    if lane == "blocked" and not awaits_review:
+        return PageState("needs_help", "attention", recovery_kind="files", primary_action="review_files")
     if sample_status in SAMPLE_FAILED_STATUSES and not _settled_by_approval(sample_job, calibration):
         failure = _sample_failure(sample_job)
         return PageState(
@@ -245,6 +228,9 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
         return PageState("ready_to_finish", "ready", primary_action=_workflow_action(workflow, "promote_outputs"))
     if lane == "complete" or workflow.get("state") == "complete":
         return PageState("finished", "success")
+
+    if wait is not None and wait.measurement_reasons is not None:
+        return PageState("waiting_for_measurement", "quiet", wait_detail=_measurement_wait_detail(wait.measurement_reasons))
 
     approval = facts.approval
     if approval is not None and approval.current and approval.contract is not None:
@@ -279,7 +265,16 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
             failure="missing_clips",
             source_job=calibration_source,
         )
+    if follows_kind:
+        return PageState("waiting_for_kind", "quiet", approval_source="kind", approval_kind=follows_kind)
     return PageState("needs_test", "quiet", primary_action="make_sample")
+
+
+def _measurement_wait_detail(reasons: tuple[str, ...]) -> str | None:
+    if not reasons:
+        return None
+    summaries = {plain_failure_summary(reason, failure_kind=reason) for reason in reasons}
+    return "Measuring is blocked. " + " ".join(sorted(summary for summary in summaries if summary))
 
 
 def folder_page_state(
@@ -353,13 +348,23 @@ def _facts(
 ) -> PageStateFacts:
     source_job_id = str(object_dict(workflow).get("source_job_id") or "")
     approval = effective_production_approval(config, prefix, load_calibration)
+    calibration = load_calibration(config, prefix)
+    wait = None
+    if (season_prefix_of(config, prefix) == prefix
+            and str(object_dict(sample_job).get("status") or "") not in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES):
+        if approval is None:
+            wait = sample_wait(config, prefix, load_calibration)
+        elif (approval.kind is not None and approval.current and calibration is not None
+              and not holds_approval(calibration)):
+            wait = SampleWait(kind=approval.kind)
     return PageStateFacts(
         prefix=prefix,
         workflow=workflow,
         encode_job=load_encode_job(connection, source_job_id) if source_job_id else None,
         sample_job=sample_job if _is_sample_job(sample_job) else None,
-        calibration=load_calibration(config, prefix),
+        calibration=calibration,
         approval=approval,
+        sample_wait=wait,
         approval_review_blocked=review_blocked(approval) if approval is not None and approval.current else False,
         staged_integrity=staged_integrity,
         lifecycle=lifecycle,

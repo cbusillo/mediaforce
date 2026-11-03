@@ -56,10 +56,6 @@ class MediaScopeTests(unittest.TestCase):
             ("tv/Show/Season 2", "Show · Season 2", "Show", "Season"),
         )
         self.assertEqual(
-            web_app._tv_series_folder_group("tv/Show/Season 2/Episode 1.mkv"),
-            ("tv/Show", "Show", "TV series", "Series"),
-        )
-        self.assertEqual(
             web_app._folder_group("movies/Foo.mkv"),
             ("movies/Foo.mkv", "Foo", "Movies", "Title"),
         )

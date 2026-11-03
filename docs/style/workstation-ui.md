@@ -44,10 +44,10 @@ has to look up is a defect.
 - Keep the mode navigation, metric summary, current-work summary, notices,
   toolbar, register, and selected-detail expansion in the same order and at the
   same offsets across all three modes.
-- The active mode tab supplies visible page identity. Keep the semantic `h1`
-  available to assistive technology, but do not add a hero heading or subtitle
-  above the library work.
-- Use one compact four-metric strip and one compact current-work summary. Do not
+- The Mac sidebar's Library choice and the window title identify the active
+  library. Library itself combines them. Do not repeat the library choice as
+  a second filter in Media.
+- Use one compact storage summary and one compact current-work summary. Do not
   duplicate active rows as a card gallery or repeat one recommended row as a
   hero block.
 - Let metrics and current work sit calmly on the workstation canvas. The
@@ -113,8 +113,8 @@ has to look up is a defect.
   cadence, shard, quality memory, or internal job IDs as interface language.
 - Button text names the actual effect and scope. A queued action says it queues;
   an immediate action says it starts now; replacement says which file changes.
-- Approval records the user's judgment about the sample. Compression admission
-  remains a separate commitment and action. Compression, checking,
+- Approval records the user's judgment about the sample. `DIRECTION.md`
+  governs automatic admission under saved approvals. Compression, checking,
   and replacement remain distinct phases on screen; each finished production
   file is checked and published automatically under its current approval.
   Manual checking and publishing are explicit overrides. Deleting rollback

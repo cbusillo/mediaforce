@@ -363,6 +363,7 @@ def settings_schedule_profile_rows_for_config(config: MediaforceConfig, *, min_r
                     "all_day_days_of_week": list(normalized["all_day_days_of_week"]),
                     "start_hour": str(normalized["start_hour"]),
                     "end_hour": str(normalized["end_hour"]),
+                    "finish_current_file": normalized["finish_current_file"],
                 }
             )
     return index_schedule_profile_rows(rows, min_rows=min_rows)
@@ -380,6 +381,7 @@ def index_schedule_profile_rows(rows: list[dict[str, Any]], *, min_rows: int = 1
             ),
             "start_hour": row.get("start_hour", str(DEFAULT_SCHEDULER_POLICY["start_hour"])),
             "end_hour": row.get("end_hour", str(DEFAULT_SCHEDULER_POLICY["end_hour"])),
+            "finish_current_file": row.get("finish_current_file") is True,
         }
         for index, row in enumerate(rows)
     ]
@@ -644,6 +646,7 @@ def normalize_encode_queue_scheduler(raw: dict[str, Any] | None) -> dict[str, An
     normalized = {
         "mode": mode,
         "timezone": timezone,
+        "finish_current_file": payload.get("finish_current_file") is True,
         "start_hour": start_hour,
         "end_hour": end_hour,
         "days_of_week": days_of_week,
@@ -967,9 +970,9 @@ def build_runtime_metadata_settings(
 ) -> dict[str, Any]:
     """Build the `metadata` runtime settings from the Plex and TMDB tab: on/off for each and the Plex address.
 
-    Key variable names, refresh intervals and the TMDB address carry over from `saved`, normalized as the website
-    save does. Every saved Plex path carries over verbatim, including one kept for a removed library, since the
-    Libraries side owns those paths and keeps them so a removal can be undone.
+    Key variable names, refresh intervals and the TMDB address carry over from `saved`, normalized before saving.
+    Every saved Plex path carries over verbatim, including one kept for a removed library, since the Libraries
+    side owns those paths and keeps them so a removal can be undone.
     """
     if not isinstance(plex.get("enabled"), bool) or not isinstance(tmdb.get("enabled"), bool):
         raise SettingsValidationError("Choose on or off for Plex and TMDB.")
@@ -1011,9 +1014,9 @@ COMPRESSION_WHOLE_FIELDS = {"tallest_picture", "grain"}
 
 
 def compression_settings_facts(*, video_defaults: dict[str, str], revision: str) -> dict[str, Any]:
-    """The Mac app's Compression tab: the compression defaults the website edits, under the tab's own names.
+    """The Mac app's Compression tab, under the tab's own names.
 
-    `video_defaults` is `settings_video_defaults_for_config`, the values the website's form starts from.
+    `video_defaults` is `settings_video_defaults_for_config`.
     """
     facts: dict[str, Any] = {}
     for name, key in COMPRESSION_FIELDS.items():
@@ -1035,11 +1038,11 @@ def compression_settings_facts(*, video_defaults: dict[str, str], revision: str)
 
 
 def build_runtime_video_settings(*, edits: dict[str, Any], saved: dict[str, str]) -> dict[str, Any]:
-    """Build the `video` runtime settings from the Compression tab's fields, validated as the website save is.
+    """Build validated `video` runtime settings from the Compression tab's fields.
 
-    `saved` is `settings_video_defaults_for_config`, so defaults the tab does not show carry over as the website
-    form would send them. As on the website, changing the size limit holds samples to the same new limit; an
-    unchanged limit leaves the saved sample limit alone. Every field is required, and a choice the website does
+    `saved` is `settings_video_defaults_for_config`, so defaults the tab does not show carry over.
+    Changing the size limit holds samples to the same new limit; an
+    unchanged limit leaves the saved sample limit alone. Every field is required, and a choice the tab does
     not offer is refused instead of quietly replaced.
     """
     video_defaults: dict[str, Any] = dict(saved)
@@ -1223,6 +1226,7 @@ def computer_settings_facts(
                 "all_day_days": list(row.get("all_day_days_of_week") or []),
                 "start_hour": _whole(row.get("start_hour"), int(str(DEFAULT_SCHEDULER_POLICY["start_hour"]))),
                 "end_hour": _whole(row.get("end_hour"), int(str(DEFAULT_SCHEDULER_POLICY["end_hour"]))),
+                "finish_current_file": row.get("finish_current_file") is True,
             }
             for row in schedule_rows
         ],
@@ -1286,6 +1290,7 @@ def computer_section_settings(
             "all_day_days_of_week": _strings(item.get("all_day_days")),
             "start_hour": start_hour,
             "end_hour": end_hour,
+            **({"finish_current_file": item["finish_current_file"] is True} if "finish_current_file" in item else {}),
         })
 
     remote_rows: list[dict[str, Any]] = []
@@ -1355,48 +1360,6 @@ def _new_schedule_key(name: str, used_keys: set[str]) -> str:
     return key
 
 
-def build_runtime_settings_payload(
-        *,
-        libraries: list[dict[str, Any]],
-        remote_hosts: list[dict[str, Any]],
-        transcode_root: str,
-        catalog_refresh_hours: Any = DEFAULT_CATALOG_REFRESH_HOURS,
-        video_defaults: dict[str, Any] | None = None,
-        encode_queue_scheduler: dict[str, Any],
-        schedule_profiles: list[dict[str, Any]],
-        metadata: dict[str, Any] | None = None,
-        existing_library_types: dict[str, str] | None = None,
-        existing_libraries: dict[str, dict[str, Any]] | None = None,
-        existing_library_paths: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    _reject_submitted_secrets(metadata)
-    media, plex_library_roots = build_runtime_media_settings(
-        libraries=libraries,
-        transcode_root=transcode_root,
-        catalog_refresh_hours=catalog_refresh_hours,
-        existing_library_types=existing_library_types,
-        existing_libraries=existing_libraries,
-        existing_library_paths=existing_library_paths,
-    )
-    known_library_keys = set(media["source_roots"])
-    computers = build_runtime_computer_settings(
-        remote_hosts=remote_hosts,
-        encode_queue_scheduler=encode_queue_scheduler,
-        schedule_profiles=schedule_profiles,
-        known_library_keys=known_library_keys,
-    )
-    normalized_video_defaults = normalize_video_defaults(video_defaults)
-    metadata_payload = dict(metadata) if isinstance(metadata, dict) else {}
-    plex_payload = dict(metadata_payload.get("plex")) if isinstance(metadata_payload.get("plex"), dict) else {}
-    plex_payload["library_roots"] = plex_library_roots
-    metadata_payload["plex"] = plex_payload
-    normalized_metadata = normalize_metadata_settings(metadata_payload, known_library_keys=known_library_keys)
-    return {
-        "media": media,
-        "video": normalized_video_defaults,
-        **computers,
-        "metadata": normalized_metadata,
-    }
 
 
 def build_runtime_computer_settings(
@@ -1530,6 +1493,7 @@ def build_runtime_computer_settings(
                 "all_day_days_of_week": all_day_days_of_week,
                 "start_hour": start_hour_text,
                 "end_hour": end_hour_text,
+                "finish_current_file": row.get("finish_current_file"),
             }
         )
         normalized_profiles.append(
@@ -1542,6 +1506,7 @@ def build_runtime_computer_settings(
                 "all_day_days_of_week": list(normalized["all_day_days_of_week"]),
                 "start_hour": normalized["start_hour"],
                 "end_hour": normalized["end_hour"],
+                **({"finish_current_file": normalized["finish_current_file"]} if "finish_current_file" in row else {}),
             }
         )
         seen_profile_keys.add(key_text)
@@ -1569,21 +1534,6 @@ def build_runtime_computer_settings(
 
 def _paths_overlap(left: Path, right: Path) -> bool:
     return left == right or left in right.parents or right in left.parents
-
-
-def _reject_submitted_secrets(value: Any, *, path: tuple[str, ...] = ()) -> None:
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            key_text = str(key).strip().lower()
-            next_path = (*path, key_text)
-            secret_key = key_text in {"token", "password", "secret", "api_key", "apikey"}
-            if secret_key and nested is not None and nested != "" and nested is not False:
-                raise SettingsValidationError("Credential values are not accepted in Settings.")
-            _reject_submitted_secrets(nested, path=next_path)
-        return
-    if isinstance(value, list):
-        for nested in value:
-            _reject_submitted_secrets(nested, path=path)
 
 
 def normalize_metadata_settings(
@@ -1722,7 +1672,9 @@ def normalize_video_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def merge_runtime_settings_payload(existing: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+def merge_runtime_settings_payload(
+        existing: dict[str, Any], updates: dict[str, Any], *, schedule_defaults: Collection[dict[str, Any]] = (),
+) -> dict[str, Any]:
     merged = dict(existing)
     if "encode_queue" in updates:
         merged.pop("heavy_queue", None)
@@ -1733,6 +1685,25 @@ def merge_runtime_settings_payload(existing: dict[str, Any], updates: dict[str, 
             merged[key] = nested
             continue
         merged[key] = value
+    updated_queue = updates.get("encode_queue")
+    if isinstance(updated_queue, dict) and isinstance(updated_queue.get("schedule_profiles"), list):
+        existing_queue = existing.get("encode_queue")
+        saved_profiles = list(schedule_defaults)
+        if isinstance(existing_queue, dict) and isinstance(existing_queue.get("schedule_profiles"), list):
+            saved_profiles.extend(existing_queue["schedule_profiles"])
+        saved_close_options = {
+            canonical_schedule_profile_key(profile.get("key") or profile.get("name")): profile.get("finish_current_file") is True
+            for profile in saved_profiles if isinstance(profile, dict)
+        }
+        merged["encode_queue"]["schedule_profiles"] = [
+            {
+                **profile,
+                "finish_current_file": profile.get(
+                    "finish_current_file", saved_close_options.get(canonical_schedule_profile_key(profile.get("key")), False),
+                ) is True,
+            }
+            for profile in updated_queue["schedule_profiles"]
+        ]
     return merged
 
 

@@ -3,12 +3,13 @@ import json
 import os
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from itertools import batched
 from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import uuid4
 
-from sqlalchemy import exists, inspect, literal_column, or_, select, update
+from sqlalchemy import ColumnElement, Select, exists, inspect, literal_column, select, update
 
 from mediaforce.core.db import DBClient, DBRow
 from mediaforce.core.db_tables import library_items, source_admissions, source_generations, source_measurements, \
@@ -208,10 +209,11 @@ def version_locations(connection: DBClient, versions: Sequence[Mapping[str, Any]
         locations[version["version_id"]] = None if identity.get("unavailability") else identity.get("path")
     if not locations:
         return locations
-    moves = connection.execute(select(source_moves.c.version_id, source_moves.c.to_path, source_transitions.c.outcome).join(source_transitions)
-                               .where(source_moves.c.version_id.in_(locations))
-                               .order_by(source_transitions.c.recorded_at.desc(), source_transitions.c.expected_revision.desc(),
-                                         source_moves.c.ordinal.desc())).mappings().all()
+    moves = _evidence_rows(
+        connection, select(source_moves.c.version_id, source_moves.c.to_path, source_transitions.c.outcome).join(source_transitions)
+        .order_by(source_transitions.c.recorded_at.desc(), source_transitions.c.expected_revision.desc(), source_moves.c.ordinal.desc()),
+        source_moves.c.version_id, locations,
+    )
     resolved = set()
     for move in moves:
         version_id = move["version_id"]
@@ -235,6 +237,17 @@ class SourceEvidenceContext:
     unresolved_output_rule: bool
     output_index_hash: str
 
+    _digests: frozenset[str] = field(init=False)
+    _undigested_by_size: dict[int | None, list[Mapping[str, Any]]] = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_digests", frozenset(str(row["sha256"]) for row in self.outputs if row.get("sha256")))
+        undigested: dict[int | None, list[Mapping[str, Any]]] = defaultdict(list)
+        for row in self.outputs:
+            if not row.get("sha256"):
+                undigested[row.get("size_bytes")].append(row)
+        object.__setattr__(self, "_undigested_by_size", dict(undigested))
+
     def rule_conflicts(self, codec: object) -> bool:
         return self.unresolved_output_rule or self.known_rule_conflicts(codec)
 
@@ -243,9 +256,14 @@ class SourceEvidenceContext:
         return normalize_codec(codec) in self.conflicting_output_codecs
 
     def output_check(self, candidate: Mapping[str, Any] | DBRow) -> str:
-        outputs = self.outputs if candidate.get("sha256") else self.sampled_outputs.get(
-            (candidate.get("sample_fingerprint"), candidate.get("size_bytes")), (),
-        )
+        if candidate.get("sha256"):
+            if candidate["sha256"] in self._digests:
+                return "match"
+            size = candidate.get("size_bytes")
+            outputs = ([row for found in self._undigested_by_size.values() for row in found] if size is None
+                       else [*self._undigested_by_size.get(size, ()), *self._undigested_by_size.get(None, ())])
+        else:
+            outputs = self.sampled_outputs.get((candidate.get("sample_fingerprint"), candidate.get("size_bytes")), ())
         return known_output_check(candidate, outputs)
 
 
@@ -335,28 +353,118 @@ def known_output_check(candidate: Mapping[str, Any] | DBRow,
 
 
 def load_source_evidence(connection: DBClient, item_id: int, *, context: SourceEvidenceContext | None = None) -> SourceEvidence:
-    item = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one_or_none()
+    return load_source_evidence_bulk(connection, [item_id], context=context)[item_id]
+
+
+def _evidence_rows(
+        connection: DBClient, query: Select[Any], column: ColumnElement[Any], values: Iterable[str | int],
+) -> list[DBRow]:
+    return [row for batch in batched(tuple(dict.fromkeys(values)), 500)
+            for row in connection.execute(query.where(column.in_(batch))).mappings()]
+
+
+def load_source_evidence_bulk(
+        connection: DBClient,
+        item_ids: Iterable[int],
+        *,
+        context: SourceEvidenceContext | None = None,
+) -> dict[int, SourceEvidence]:
+    requested = tuple(dict.fromkeys(int(item_id) for item_id in item_ids))
+    if not requested:
+        return {}
+    items = {int(row["id"]): row for row in _evidence_rows(connection, select(library_items), library_items.c.id, requested)}
+    active_ids = {str(row["active_source_version_id"]) for row in items.values() if row["active_source_version_id"]}
+    current_versions = {str(row["version_id"]): row
+                        for row in _evidence_rows(connection, select(source_versions), source_versions.c.version_id, active_ids)}
+    generations = {str(row["generation_id"]) for row in current_versions.values()}
+    superseded = select(source_admissions.c.supersedes_id).where(source_admissions.c.supersedes_id.is_not(None))
+    admission_rows = _evidence_rows(connection, select(source_admissions).where(source_admissions.c.admission_id.not_in(superseded)),
+                                    source_admissions.c.generation_id, generations) if generations else ()
+    admissions_by_generation: dict[str, list[DBRow]] = defaultdict(list)
+    for row in admission_rows:
+        admissions_by_generation[str(row["generation_id"])].append(row)
+    original_ids = {str(rows[0]["version_id"]) for rows in admissions_by_generation.values() if len(rows) == 1}
+    originals = {str(row["version_id"]): row
+                 for row in _evidence_rows(connection, select(source_versions), source_versions.c.version_id, original_ids)}
+    pending_items = {int(row["library_item_id"]) for row in _evidence_rows(
+        connection, select(source_transitions.c.library_item_id).where(source_transitions.c.outcome.in_(("prepared", "unresolved"))),
+        source_transitions.c.library_item_id, requested,
+    )}
+    readable_measurement_ids = {
+        str(measurement_id)
+        for rows in admissions_by_generation.values() for row in rows
+        if len(rows) == 1 and row["basis"] == "readable-source"
+        for measurement_id in json.loads(row["checks_json"]).get("measurement_ids", [])
+    }
+    measurement_query = select(source_measurements, literal_column("source_measurements.rowid").label("_rowid"))
+    measurement_rows = _evidence_rows(connection, measurement_query, source_measurements.c.version_id, original_ids)
+    measurement_rows += _evidence_rows(connection, measurement_query, source_measurements.c.measurement_id,
+                                        readable_measurement_ids - {str(row["measurement_id"]) for row in measurement_rows})
+    measurement_rows.sort(key=lambda row: int(row["_rowid"]), reverse=True)
+    measurements = _MeasurementRows(measurement_rows)
+    locations = version_locations(connection, list(originals.values()))
+
+    def load_context() -> SourceEvidenceContext:
+        nonlocal context
+        if context is None:
+            context = load_source_evidence_context(connection)
+        return context
+
+    return {
+        item_id: _classify_source_evidence(
+            connection, item_id, items.get(item_id), current_versions, admissions_by_generation,
+            originals, measurements, pending_items, locations, load_context,
+        )
+        for item_id in requested
+    }
+
+
+class _MeasurementRows:
+    def __init__(self, rows: Sequence[DBRow]) -> None:
+        self._by_version: dict[tuple[str, str], list[DBRow]] = defaultdict(list)
+        self._by_id = {str(row["measurement_id"]): row for row in rows}
+        self._order = {str(row["measurement_id"]): index for index, row in enumerate(rows)}
+        for row in rows:
+            self._by_version[str(row["version_id"]), str(row["kind"])].append(row)
+
+    def for_original(self, version_id: str, kind: str, allowed_ids: set[str]) -> list[DBRow]:
+        rows = {str(row["measurement_id"]): row for row in self._by_version.get((version_id, kind), ())}
+        for measurement_id in allowed_ids:
+            row = self._by_id.get(measurement_id)
+            if row is not None and row["kind"] == kind:
+                rows[measurement_id] = row
+        return sorted(rows.values(), key=lambda row: self._order[str(row["measurement_id"])])
+
+
+def _classify_source_evidence(
+        connection: DBClient,
+        item_id: int,
+        item: DBRow | None,
+        current_versions: Mapping[str, DBRow],
+        admissions_by_generation: Mapping[str, Sequence[DBRow]],
+        originals: Mapping[str, DBRow],
+        measurements: _MeasurementRows,
+        pending_items: set[int],
+        locations: Mapping[str, str | None],
+        load_context: Callable[[], SourceEvidenceContext],
+) -> SourceEvidence:
     active = str((item or {}).get("active_source_version_id") or "") or None
     traits: dict[EvidenceKind, SourceTrait] = {kind: SourceTrait(kind) for kind in EVIDENCE_KINDS}
     empty = SourceEvidence(None, active, None, "unknown", None, {}, traits)
     if not active or item is None:
         return empty
-    current = connection.execute(select(source_versions).where(source_versions.c.version_id == active)).mappings().one()
+    current = current_versions[active]
     generation = str(current["generation_id"])
     empty = SourceEvidence(generation, active, None, "unknown", None, {}, traits)
-    if (pending_source_operation(connection, item_id) or current["size_bytes"] != item["size_bytes"]
+    if (item_id in pending_items or current["size_bytes"] != item["size_bytes"]
             or (current["sample_fingerprint"] and current["sample_fingerprint"] != item["content_version_fingerprint"])):
         return SourceEvidence(generation, active, None, "unknown", None, {},
                               {kind: SourceTrait(kind, reason="source_attachment_unresolved") for kind in EVIDENCE_KINDS})
-    superseded = select(source_admissions.c.supersedes_id).where(source_admissions.c.supersedes_id.is_not(None))
-    admissions = connection.execute(select(source_admissions).where(
-        source_admissions.c.generation_id == generation,
-        source_admissions.c.admission_id.not_in(superseded),
-    )).mappings().all()
+    admissions = admissions_by_generation.get(generation, ())
     if len(admissions) != 1:
         return empty
     admission = admissions[0]
-    original = connection.execute(select(source_versions).where(source_versions.c.version_id == admission["version_id"])).mappings().one()
+    original = originals[str(admission["version_id"])]
     checks = json.loads(admission["checks_json"])
     historical = (admission["tier"] == "probable" and admission["basis"] == "historical-plan"
                   and original["role"] == "input"
@@ -368,24 +476,21 @@ def load_source_evidence(connection: DBClient, item_id: int, *, context: SourceE
     if readable:
         from mediaforce.library.source_intake import assess_readable_source
 
-        refreshed = assess_readable_source(connection, cast(dict[str, Any], dict(original)), checks.get("raw_probe", {}), context=context)
+        refreshed = assess_readable_source(connection, cast(dict[str, Any], dict(original)), checks.get("raw_probe", {}), load_context=load_context)
         reason = refreshed.get("reason") or ""
         if (checks.get("codec_rule_hash") != refreshed.get("codec_rule_hash")
                 or checks.get("encoder_rule_hash") != refreshed.get("encoder_rule_hash")):
             reason = "original_rule_changed"
     if historical:
-        context = context or load_source_evidence_context(connection)
+        context = load_context()
         reason = "historical_output_conflict" if context.rule_conflicts(original["video_codec"]) else ""
         output_check = context.output_check(original)
         if output_check in {"match", "unresolved"}:
             reason = "known_output_match" if output_check == "match" else "possible_output_match"
     # Protected owner confirmation and strict binding are owned by #999. Application-DB rows alone confer no authority.
     for kind in EVIDENCE_KINDS:
-        rows = connection.execute(select(source_measurements).where(
-            or_(source_measurements.c.version_id == original["version_id"],
-                source_measurements.c.measurement_id.in_(checks.get("measurement_ids", []) if readable else [])),
-            source_measurements.c.kind == kind,
-        ).order_by(literal_column("source_measurements.rowid").desc())).mappings().all()
+        allowed_ids = set(checks.get("measurement_ids", []) if readable else [])
+        rows = measurements.for_original(str(original["version_id"]), kind, allowed_ids)
         eligible = [row for row in rows if not reason and row["binding"] == "historical-plan-sampled"
                     and _historical_measurement_matches(row, checks)]
         if readable and not reason:
@@ -399,7 +504,7 @@ def load_source_evidence(connection: DBClient, item_id: int, *, context: SourceE
                                            tuple(row["measurement_id"] for row in eligible), summary, None)
                 continue
         traits[kind] = SourceTrait(kind, reason=reason or ("conflicting_measurements" if eligible else "missing_source_measurement"))
-    location = version_location(connection, original)
+    location = locations[original["version_id"]]
     availability = "available" if readable and not reason and location else "unavailable" if checks.get("unavailability") or not location else "unknown"
     return SourceEvidence(generation, active, original["version_id"], availability, location,
                           {**json.loads(original["profile_json"]), "source_size_bytes": original["size_bytes"],

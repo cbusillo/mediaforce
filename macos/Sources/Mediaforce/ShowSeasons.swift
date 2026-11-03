@@ -13,15 +13,19 @@ struct ShowSeasons: View {
             Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 18, verticalSpacing: 8) {
                 ForEach(show.seasons) { season in
                     GridRow {
-                        Text(Words.seasonName(season))
+                        Button(Words.seasonName(season)) { openItem(season.prefix) }
+                            .buttonStyle(QuietLinkStyle(primary: true))
                         Text(Words.count(season.episodeCount, "episode"))
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                         Text(Words.size(season.bytes))
                             .monospacedDigit()
                             .gridColumnAlignment(.trailing)
-                        Text(Words.tvSeasonState(season))
-                            .help(Words.sampleFailure(season.failure) ?? "")
+                        HStack(alignment: .firstTextBaseline, spacing: 5) {
+                            if season.needsYou { WaitingMark() }
+                            Text(Words.tvSeasonState(season))
+                        }
+                        .help(Words.sampleFailure(season.failure) ?? "")
                         Button(Words.seasonButton(season)) {
                             if season.opensSample {
                                 openSample(season.prefix)

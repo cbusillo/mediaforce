@@ -19,11 +19,18 @@ struct MediaforceClient: Sendable {
 
     let baseURL: URL
     var session: URLSession = .shared
+    var renderLoads: RenderLoads?
 
     func facts() async throws -> MainWindowFacts {
         var request = URLRequest(url: baseURL.appending(path: "api/app/main-window"))
         request.timeoutInterval = Self.factsTimeout
         return try await decode(MainWindowFacts.self, from: request)
+    }
+
+    func activity() async throws -> ActivityFacts {
+        var request = URLRequest(url: baseURL.appending(path: "api/app/activity"))
+        request.timeoutInterval = Self.factsTimeout
+        return try await decode(ActivityFacts.self, from: request)
     }
 
     func tvShows() async throws -> TVShowsFacts {
@@ -45,8 +52,12 @@ struct MediaforceClient: Sendable {
     }
 
     func poster(titlePrefix: String) async -> NSImage? {
+        guard !Task.isCancelled else { return nil }
         let url = baseURL.appending(path: "api/app/posters").appending(path: titlePrefix)
-        guard let (data, response) = try? await session.data(from: url),
+        await renderLoads?.begin(url.path)
+        let result = try? await session.data(from: url)
+        await renderLoads?.finish(url.path)
+        guard let (data, response) = result,
               (response as? HTTPURLResponse)?.statusCode == 200 else {
             return nil
         }
@@ -59,8 +70,8 @@ struct MediaforceClient: Sendable {
         return try await decode(SampleFacts.self, from: request)
     }
 
-    func approveSample(_ prefix: String, confirm: [String], draftHash: String) async throws -> SampleActionResult {
-        try await sampleAction(prefix, "approve", body: ["confirm": confirm, "reviewed_draft_hash": draftHash])
+    func approveSample(_ prefix: String, confirm: [String], draftHash: String, scope: String = "season") async throws -> SampleActionResult {
+        try await sampleAction(prefix, "approve", body: ["confirm": confirm, "reviewed_draft_hash": draftHash, "approval_scope": scope])
     }
 
     func makeSample(_ prefix: String, size: String?, balance: String?) async throws -> SampleActionResult {
@@ -214,10 +225,20 @@ struct MediaforceClient: Sendable {
         return data
     }
 
-    private func decode<Value: Decodable>(_ type: Value.Type, from request: URLRequest) async throws -> Value {
-        let (data, response) = try await session.data(for: request)
-        try Self.requireSuccess(response)
-        return try JSONDecoder.mediaforce.decode(type, from: data)
+    func decode<Value: Decodable>(_ type: Value.Type, from request: URLRequest) async throws -> Value {
+        try Task.checkCancellation()
+        let path = request.url?.path ?? ""
+        await renderLoads?.begin(path)
+        do {
+            let (data, response) = try await session.data(for: request)
+            try Self.requireSuccess(response)
+            let value = try JSONDecoder.mediaforce.decode(type, from: data)
+            await renderLoads?.finish(path)
+            return value
+        } catch {
+            await renderLoads?.finish(path, failure: String(describing: error))
+            throw error
+        }
     }
 
     private static func requireSuccess(_ response: URLResponse) throws {

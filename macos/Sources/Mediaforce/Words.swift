@@ -1,6 +1,39 @@
 import Foundation
 
 enum Words {
+    static let needsYou = "Needs you"
+    static let library = "Library"
+
+    static func folderName(_ prefix: String) -> String {
+        prefix.split(separator: "/").last.map(String.init) ?? prefix
+    }
+
+    static func sampleTitle(_ season: String) -> String {
+        "\(sample): \(season)"
+    }
+
+    static func backTitle(_ place: Place) -> String {
+        switch place {
+        case .library: library
+        case .libraryKind(let kind): mediaKind(kind)
+        case .mediaKind(let kind, _): kind == .everything ? media : mediaKind(kind)
+        case .activity: "Activity"
+        case .needsYou: needsYou
+        case .spaceSaved: spaceSaved
+        case .media: media
+        case .kind(let code): kindName(code)
+        case .seasonsWithoutKind: seasonsWithoutKindTitle
+        case .item(let prefix): folderName(prefix)
+        case .sample(let prefix): sampleTitle(folderName(prefix))
+        case .computer: "Computers"
+        }
+    }
+
+    static func libraryReadFailure(_ kind: MediaKind, hasPrevious: Bool) -> String {
+        let state = hasPrevious ? "list may be out of date" : "didn't load"
+        return "\(mediaKind(kind)) \(state). Retrying."
+    }
+
     static func size(_ bytes: Int64) -> String {
         let value = Double(bytes)
         if value >= 1e12 { return (value / 1e12).formatted(.number.precision(.fractionLength(2))) + " TB" }
@@ -14,12 +47,20 @@ enum Words {
         return "\(show), Season \(season)"
     }
 
+    /// A season's page title and subtitle: the season, then its show. A show sampled whole is named alone.
+    static func seasonTitle(_ show: String, _ season: Int?) -> (season: String, show: String) {
+        guard let season else { return (show, "") }
+        return ("Season \(season)", show)
+    }
+
     static func computerState(_ code: String) -> String {
         switch code {
         case "ready": "Ready"
         case "busy": "Compressing"
+        case "finishing_file": "Finishing this file, then waiting for its work window"
+        case "schedule_disabled": "Work is turned off for this computer"
         case "checking": "Checking this computer"
-        case "outside_schedule": "Off schedule"
+        case "outside_schedule": "Waiting for its work window"
         case "cooling_down": "Resting after repeated failures"
         case "not_encoding": "Makes samples only"
         case "storage_unreachable": "Can't reach shared storage"
@@ -48,15 +89,6 @@ enum Words {
     static let restartQuestion = "Restart Mediaforce?"
     static let restartMessage = "Anything being compressed or sampled right now is interrupted."
     static let settingsDidNotLoad = "Mediaforce is running, but these settings didn't load."
-
-    static func serverSymbol(_ situation: ServerSituation) -> String {
-        switch situation {
-        case .checking: "ellipsis.circle"
-        case .notSetUp: "shippingbox"
-        case .notRunning: "moon.zzz"
-        case .inTrouble: "exclamationmark.triangle"
-        }
-    }
 
     static func serverHeadline(_ situation: ServerSituation) -> String {
         switch situation {
@@ -103,13 +135,6 @@ enum Words {
     static let accountPassword = "Account password"
     static let workWindowsItem = "Work windows"
 
-    /// States where a computer is fine as it is; every other state has something to fix.
-    private static let computerStatesFine: Set<String> = ["ready", "busy", "outside_schedule", "not_encoding", "checking", "away", "reconnecting", "unreachable"]
-
-    static func computerNeedsYou(_ state: String?) -> Bool {
-        state.map { !computerStatesFine.contains($0) } ?? false
-    }
-
     static func accountPasswordPrompt(_ name: String) -> String {
         "Password for \(name.isEmpty ? "this computer" : name)"
     }
@@ -152,6 +177,8 @@ enum Words {
         case ("needs_help", _): "Sample needs making again"
         case ("ready_to_make", _): "Approved"
         case ("needs_test", _): "Needs sample"
+        case ("waiting_for_measurement", _): "Waiting for measuring"
+        case ("waiting_for_kind", _): "Waiting for its kind"
         case ("sample_waiting", _): "Sample waiting"
         case ("making_test", _): "Making sample"
         case ("making_season", _): "Compressing"
@@ -190,12 +217,14 @@ enum Words {
 extension Words {
     static func workHeadline(_ facts: MainWindowFacts) -> String {
         let work = facts.work
-        if work.pausedByOwner { return "Paused." }
-        if work.stopReasons.contains("storage_unavailable") { return "Paused. This Mac can't see the media library." }
-        if work.stopReasons.contains("no_computer_ready") { return "Waiting for a computer." }
-        if work.runningCount > 0 { return "Compressing." }
-        if work.waitingCount > 0 { return "Waiting to start." }
-        return facts.samples.waitingOnYou.isEmpty ? "All caught up." : "Waiting for you."
+        if work.pausedByOwner { return "Paused" }
+        if work.stopReasons.contains("storage_unavailable") { return "Paused: this Mac can't see the media library" }
+        if work.stopReasons.contains("no_computer_ready") { return "Waiting for a computer" }
+        if work.runningCount > 0 { return "Compressing" }
+        if work.waitingCount > 0 { return "Waiting to start" }
+        if !work.originalCheckWaitReasons.isEmpty { return "Waiting to check new originals" }
+        if work.checksPaused { return checksPausedBar }
+        return Attention.waitingOnYou(facts) > 0 ? "Waiting for you" : "All caught up"
     }
 
     static func workExplanation(_ facts: MainWindowFacts) -> String? {
@@ -203,6 +232,9 @@ extension Words {
         var sentences: [String] = []
         if work.pausedByOwner {
             sentences.append("Nothing new starts until you resume. Work already running finishes first.")
+        }
+        if work.checksPaused {
+            sentences.append("Checks are paused. Files needing these checks wait until you resume.")
         }
         if work.stopReasons.contains("storage_unavailable") {
             sentences.append(work.pausedByOwner
@@ -212,8 +244,15 @@ extension Words {
         if work.stopReasons.contains("no_computer_ready") {
             sentences.append("Work is waiting and no computer can take it right now. See Computers for why.")
         }
-        if sentences.isEmpty, work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
+        sentences.append(contentsOf: work.originalCheckWaitReasons)
+        if work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
             sentences.append("Nothing is being compressed. \(count(facts.samples.waitingOnYou.count, "sample")) under Samples need you first.")
+        }
+        if !work.kindsNeedingYou.isEmpty {
+            sentences.append("\(count(work.kindsNeedingYou.count, "kind")) waiting in Needs you.")
+        }
+        if !work.seasonsNeedingYou.isEmpty {
+            sentences.append("\(count(work.seasonsNeedingYou.count, "season")) waiting for you in Media.")
         }
         return sentences.isEmpty ? nil : sentences.joined(separator: " ")
     }
@@ -360,6 +399,27 @@ extension Words {
 }
 
 extension Words {
+    static let watchSample = "Watch sample"
+    static let watchApprovedSample = "Watch approved sample"
+    static let approveOnlySeason = "Approve only this season"
+
+    static func sampleApproval(scope: String) -> String {
+        scope == "season" ? approveSample : "Approve \(kindName(scope))"
+    }
+
+    static func sampleResult(_ result: SampleActionResult) -> ActionNotice? {
+        if let code = result.kindCode {
+            var notice = ActionNotice.kindNotExtended(code)
+            if result.compressing != true {
+                let queue = result.needsChoice ? ActionNotice.compressNeedsChoice : .approvedNotCompressing
+                notice = ActionNotice(title: notice.title, message: notice.message + " " + queue.message)
+            }
+            return notice
+        }
+        if result.compressing == true { return nil }
+        return result.needsChoice ? .compressNeedsChoice : .approvedNotCompressing
+    }
+
     static let approveSample = "Approve and compress the season"
     static let makeSampleAgain = "Make sample again"
     static let makeSample = "Make sample"
@@ -371,14 +431,14 @@ extension Words {
     static let cancel = "Cancel"
     static let resume = "Resume"
     static let pausedBar = "Mediaforce is paused. Nothing new starts."
-    static let none = "None"
+    static let checksPausedBar = "Checks are paused."
     static let next = "Next"
     static let looksGood = "Looks Good"
     static let appName = "Mediaforce"
     static let lookForNewFilesNow = "Look for New Files"
     static let openMediaforce = "Open Mediaforce"
     static let settingsEllipsis = "Settings…"
-    static let resumeHelp = "Resume work on every computer."
+    static let resumeHelp = "Resume compression and paused checks."
     static let menuNotConnected = "Mediaforce isn't answering. Open it to see why."
 
     /// The line under the menu bar switch: what Mediaforce is doing, or why it isn't.
@@ -394,14 +454,13 @@ extension Words {
             return more > 0 ? "Compressing \(name) and \(more) more" : "Compressing \(name)"
         }
         if work.waitingCount > 0 { return "Waiting to start" }
+        if work.checksPaused { return checksPausedBar }
         return Attention.waitingOnYou(facts) > 0 ? waitingForYou : "Up to date"
     }
     static let tryAgain = "Try Again"
     static let spotCheckNoEpisode = "None of this show's episodes still has its original backup to compare."
     static let spotCheckUnanswered = "Mediaforce didn't answer, so this show can't play yet."
     static let spaceSaved = "Space saved"
-    static let originalBackups = "Original backups"
-    static let originalBackupsHelp = "When a season is replaced, its originals wait here until you delete them on Space saved."
     static let spotCheckFirst = "Spot-check before deleting"
     static let spotCheckBackups = "Spot-check what these backups hold"
 
@@ -448,7 +507,6 @@ extension Words {
     static let sample = "Sample"
     static let play = "Play"
     static let pause = "Pause"
-    static let startOver = "Start over"
     static let hear = "Hear"
     static let momentChoice = "Moment"
     static let sampleCoverageUnknown = "Coverage was not recorded for this sample."
@@ -481,12 +539,16 @@ extension Words {
         switch (facts.state, facts.action) {
         case ("making_test", _): "Making the sample now."
         case ("sample_waiting", _): "The sample waits for a free computer."
-        case ("ready_to_compare", _): "The sample is ready. Watch it next to the original."
+        case ("ready_to_compare", _): facts.approvalKind.map {
+            "Watch the sample. Approving it sets how all \(kindName($0).lowercased()) shows should look."
+        } ?? "The sample is ready. Watch it next to the original."
         case ("needs_help", "choose_size"): "The sample can't reach the size goal at good quality. Choose another size."
         case ("needs_help", "retry_encode"): "Compressing stopped. Finished episodes are safe; the rest need trying again."
         case ("needs_help", "review_files"): "Some files need you before the season can go on."
         case ("needs_help", _): "The sample needs making again."
         case ("needs_test", _): "This season has no sample yet."
+        case ("waiting_for_measurement", _): facts.waitDetail ?? "This season needs original measurements before its kind can be chosen."
+        case ("waiting_for_kind", _): "This season will follow the choice for its kind of content."
         case ("ready_to_make", _): "Approved. The season waits to be compressed."
         case ("making_season", _): "Compressing the season."
         case ("motion_held", "decide_motion"): "Some episodes need a decision about their motion pattern."
@@ -544,6 +606,10 @@ extension Words {
 }
 
 extension ActionNotice {
+    static func kindNotExtended(_ code: String) -> ActionNotice {
+        ActionNotice(title: "This season was approved; its kind wasn't", message: Words.kindRefusal(code))
+    }
+
     static let sampleRefused = ActionNotice(
         title: "Mediaforce didn't do that",
         message: "It refused the request. The page shows what Mediaforce reports now."
@@ -552,6 +618,11 @@ extension ActionNotice {
     static let approvedNotCompressing = ActionNotice(
         title: "Compressing didn't start",
         message: "The sample is approved, but the season isn't compressing. Press Start compressing to try again."
+    )
+
+    static let approvalScopeChanged = ActionNotice(
+        title: "This sample no longer decides the kind",
+        message: "Approve only this season, or open the kind to review its current choice. Nothing was approved."
     )
 
     static let sampleChanged = ActionNotice(
@@ -593,7 +664,10 @@ extension Words {
     }
 
     static func tvSeasonState(_ season: TVShowsFacts.Season) -> String {
-        if season.filesNeedYou { return "Compressing. Some files need you." }
+        if season.state == "waiting_for_measurement", let detail = season.waitDetail { return detail }
+        if season.needsYou, !["ready_to_compare", "needs_help"].contains(season.state), season.action != "decide_motion" {
+            return "\(seasonState(season.state, season.action)). Some files need you."
+        }
         if season.checksOnly { return "Approved. Motion-pattern checks run first." }
         return seasonState(season.state, season.action)
     }
@@ -813,6 +887,8 @@ extension Words {
     static let allDayOn = "All day"
     static let startsAt = "From"
     static let endsAt = "Until"
+    static let finishCurrentFile = "Finish the current file when the window closes"
+    static let finishCurrentFileHelp = "No new files start after closing. With this off, an interrupted file starts over in the next window."
     static let workWindowHelp = "When Until is earlier than From, the window runs overnight. Times are each computer's own."
     static let keepComputer = "Keep computer"
     static let keepWorkWindow = "Keep work window"
@@ -1084,21 +1160,33 @@ extension Words {
         case "measuring": "Finding the right size"
         case "getting_ready": "Getting ready"
         case "checking": "Checking the compressed copy"
-        case "waiting": file.validation == "remaking" ? "Didn't pass its check, being made again" : "Waiting its turn"
+        case "waiting":
+            file.waitReason?.code == "controller_work_window" ? "Waiting for this Mac's work window"
+                : file.validation == "remaking" ? "Didn't pass its check, being made again" : "Waiting its turn"
         default: "Not compressed yet"
         }
     }
 
     static func waitingReason(_ file: ItemFacts.File) -> String {
+        var reasons: [String] = []
         if let question = file.sizeQuestion {
-            return "To look right it needs \(size(question.smallestQualitySafeBytes)), more than its \(size(question.goalBytes)) goal."
+            reasons.append("To look right it needs \(size(question.smallestQualitySafeBytes)), more than its \(size(question.goalBytes)) goal.")
+        } else if file.stage == "needs_you" || file.waitReason?.code == "controller_work_window" {
+            reasons.append(waitingReason(file.waitReason, validation: file.validation))
         }
-        let computer = file.waitReason?.computer ?? "the computer"
-        return switch file.waitReason?.code ?? file.validation {
+        reasons.append(contentsOf: (file.additionalWaitReasons ?? []).map { waitingReason($0) })
+        return reasons.joined(separator: " ")
+    }
+
+    private static func waitingReason(_ reason: ItemFacts.WaitReason?, validation: String? = nil) -> String {
+        let computer = reason?.computer ?? "the computer"
+        return switch reason?.code ?? validation {
+        case "controller_work_window": "This Mac's checks and publishing are waiting for its next work window."
+        case "controller_work_disabled": "This Mac has no work window for checking and publishing. See Computers."
         case "check_failed", "failed": "The compressed copy didn't pass its check, so the original stays in the library."
         case "publish_failed": "Mediaforce couldn't check or publish this copy after several tries. Check this file."
         case "publish_unsafe": "Publishing stopped, and Mediaforce couldn't put the files back. Check and restore this file before publishing it."
-        case "not_made_again": notMadeAgain(file.waitReason?.blockers ?? [])
+        case "not_made_again": notMadeAgain(reason?.blockers ?? [])
         case "size_held": "It came out much smaller than its sample. Keep this copy, or make it again."
         case "stopped": "It was stopped before it finished."
         case "restart_stopped":
@@ -1232,7 +1320,7 @@ extension Words {
 
     static func playerCaption(_ file: ItemFacts.File, comparing: Bool) -> String {
         if comparing, let before = file.originalBytes {
-            return "\(fileName(file)): \(beforeAfter(before, file.bytes)). Drag across the picture to compare."
+            return "\(fileName(file)): \(beforeAfter(before, file.bytes))."
         }
         if file.compressed { return "\(fileName(file)): \(size(file.bytes)). Its original backup is deleted." }
         return "\(fileName(file)): \(size(file.bytes)), as it is now."
@@ -1265,17 +1353,17 @@ extension Words {
         switch mode {
         case "on": "Yes"
         case "off": "No"
-        default: "Follow TMDB"
+        default: "As listed online"
         }
     }
 
     static func stillAiringExplanation(_ airing: ItemFacts.StillAiring) -> String {
-        let tmdb = switch airing.airing {
-        case true?: " TMDB says it is still airing."
-        case false?: " TMDB says it has ended."
+        let listing = switch airing.airing {
+        case true?: " Its online listing says it is still airing."
+        case false?: " Its online listing says it has ended."
         case nil: ""
         }
-        return "While a show is still airing, Mediaforce leaves its newest season alone until the season ends.\(tmdb)"
+        return "While a show is still airing, Mediaforce leaves its newest season alone until the season ends.\(listing)"
     }
 }
 
@@ -1285,6 +1373,7 @@ extension Words {
         case .approve, .makeAgain, .makeSample, .chooseSize, .tryAnotherSize, .openSample: "Watch the Sample"
         case .startCompressing: startCompressing
         case .checkFiles: "Check New Files"
+        case .reviewFiles: "Review Files"
         case .replaceOriginals: "Replace Originals…"
         case .retryUnfinished: "Retry Unfinished Episodes"
         case .decideMotion: "Keep These Originals…"
@@ -1331,12 +1420,12 @@ extension Words {
 extension Words {
     static let media = "Media"
     static let seasonsHeading = "Seasons"
-    static let kindLabel = "Kind"
     static let viewLabel = "View"
     static let tableView = "Show as a table"
     static let posterView = "Show as posters"
     static let searchMedia = "Search"
-    static let noMatchingMedia = "Nothing matches. Try another kind, state or search."
+    static let noMatchingMedia = "Nothing matches."
+    static let clearFilters = "Clear Filters"
 
     static func mediaKind(_ kind: MediaKind) -> String {
         switch kind {
@@ -1366,8 +1455,12 @@ extension Words {
     static let exitFullScreen = "Exit full screen"
     static let actualSize = "Actual size"
     static let actualSizeHelp = "Show every pixel. Both sides pan together."
-    static let oneAtATimeHelp = "Click the picture to switch between the original and the compressed episode"
+    static func oneAtATimeHelp(_ other: String) -> String {
+        "Click the picture to switch between the original and the \(other.lowercased())"
+    }
     static let couldNotPlayEpisode = "Couldn't play this episode."
+    static let couldNotPlaySample = "Couldn't play this moment of the sample."
+    static let gettingSampleReady = "Getting the sample ready to play"
     static let gettingEpisodeReady = "Getting the episode ready to play"
     static let seasonsWithoutKindTitle = "Seasons that don't fit a kind"
     static let showEverything = "Show Everything"
@@ -1428,6 +1521,7 @@ extension Words {
 
     static func kindRefusal(_ code: String?) -> String {
         switch code {
+        case "sample_changed": "The approved sample changed before it could be used for this kind. The kind wasn't changed."
         case "approval_not_current": "That show's sample approval has changed. Approve its sample again first."
         case "size_goal_not_scalable": "That setting is a size per episode, so it can't carry to other shows."
         case "source_kind_differs": "That show's sample was made on a season of another kind."
@@ -1448,7 +1542,7 @@ extension Words {
         code == "mixed" ? "mixed kinds" : "not measured yet"
     }
 
-    static func playerLayout(_ layout: KindPlayerLayout) -> String {
+    static func playerLayout(_ layout: CompareLayout) -> String {
         switch layout {
         case .sideBySide: "Side by side"
         case .wipe: "Wipe"

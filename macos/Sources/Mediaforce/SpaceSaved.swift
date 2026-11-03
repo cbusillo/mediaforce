@@ -7,6 +7,7 @@ struct SpaceSavedPage: View {
 
     let facts: MainWindowFacts
     let model: MainWindowModel
+    let openItem: (String) -> Void
 
     var body: some View {
         // Around the page, so it reaches the page's own scroll view.
@@ -17,7 +18,7 @@ struct SpaceSavedPage: View {
                     Text(Words.noBackupsToCheck)
                         .foregroundStyle(.secondary)
                 } else {
-                    SpotCheck(shows: saved.shows, model: model)
+                    SpotCheck(shows: saved.shows, model: model, openItem: openItem)
                         .id(Self.spotCheckID)
                 }
                 SpaceSavedBar(
@@ -85,6 +86,8 @@ struct SpaceSavedFacts: Sendable {
 struct SpotCheck: View {
     let shows: [SpaceSavedFacts.Show]
     let model: MainWindowModel
+    // Opens the season the episode being checked belongs to.
+    let openItem: (String) -> Void
     @State private var showPrefix: String?
     @State private var loaded = Loaded.loading
     // Each load takes the next number; only the latest one may change what the player shows.
@@ -108,13 +111,14 @@ struct SpotCheck: View {
                 Text(Words.spotCheckFirst).font(.headline)
                 Spacer()
                 if case .episode(_, let season, let file) = loaded {
-                    Text(Words.spotCheckFile(season, file)).foregroundStyle(.secondary)
+                    Button(Words.spotCheckFile(season, file)) { openItem(season) }
+                        .buttonStyle(QuietLinkStyle())
                 }
             }
             .frame(maxWidth: 760)
             switch loaded {
             case .episode(_, let season, let file):
-                ItemPlayer(file: file, client: model.client) {
+                FilePlayer(file: file, model: model) {
                     Task { await putOriginalBack(season, file) }
                 }
                 .id("\(file.id) \(file.stage) \(file.originalBackup)")
@@ -125,7 +129,10 @@ struct SpotCheck: View {
                 VStack(spacing: 10) {
                     Text(loaded.failedToLoad ? Words.spotCheckUnanswered : Words.spotCheckNoEpisode)
                         .foregroundStyle(.secondary)
-                    Button(Words.tryAgain) { Task { await load() } }
+                    // Asking again only helps when Mediaforce didn't answer; a show with no backup to compare moves on with Next.
+                    if loaded.failedToLoad {
+                        Button(Words.tryAgain) { Task { await load() } }
+                    }
                 }
                 .frame(maxWidth: 760, minHeight: 200)
             }
@@ -262,8 +269,8 @@ struct SpaceSavedBar: View {
     let backupBytes: Int64
     var openBackups: (() -> Void)?
 
-    private var nowBytes: Int64 { library.tv.totalBytes + library.movies.totalBytes + library.other.totalBytes }
-    private var stillOriginalBytes: Int64 { library.tv.originalBytes + library.movies.originalBytes + library.other.originalBytes }
+    private var nowBytes: Int64 { MediaKind.everything.totalBytes(in: library) }
+    private var stillOriginalBytes: Int64 { MediaKind.everything.originalBytes(in: library) }
     private var compressedBytes: Int64 { nowBytes - stillOriginalBytes }
 
     var body: some View {

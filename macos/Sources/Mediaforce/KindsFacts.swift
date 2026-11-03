@@ -18,16 +18,28 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         let approval: Approval?
         // The season whose sample is being made or waits to be watched; nil when none is.
         let sampleSeason: String?
+        var sampleReady: Bool? = nil
+        var sampleStatus: String? = nil
         var id: String { kind }
 
         var sampleShow: String? { sampleSeason?.split(separator: "/").prefix(2).joined(separator: "/") }
+        var showsSampleFirst: Bool { oneTime || settings.isEmpty || sampleSetting != nil }
+
+        var offersSample: Bool {
+            sampleSeason == nil || (sampleReady == false && ["pending_review", "completed"].contains(sampleStatus ?? ""))
+        }
+
+        var sampleSetting: Setting? {
+            guard let sampleSeason else { return nil }
+            return settings.first { sampleSeason == $0.fromPrefix || sampleSeason.hasPrefix("\($0.fromPrefix)/") }
+        }
 
         /// The setting the page plays first: the decided one, else the first with an episode to watch.
         var firstSetting: Setting? {
             if let approval {
                 return settings.first { $0.fromPrefix == approval.fromPrefix } ?? approval.setting
             }
-            return settings.first { $0.libraryItemId != nil } ?? settings.first
+            return sampleSetting ?? settings.first { $0.libraryItemId != nil } ?? settings.first
         }
     }
 
@@ -55,6 +67,7 @@ struct KindsFacts: Decodable, Sendable, Equatable {
     struct Approval: Decodable, Sendable, Equatable {
         let fromPrefix: String
         let approvedAt: String?
+        let sampleMoments: [SampleFacts.Moment]?
         let sizeGoalMode: String?
         let sizeGoalMb: Double?
         let libraryItemId: Int?
@@ -82,9 +95,7 @@ extension MediaforceClient {
     func kinds() async throws -> KindsFacts {
         var request = URLRequest(url: baseURL.appending(path: "api/app/kinds"))
         request.timeoutInterval = Self.factsTimeout
-        let (data, response) = try await session.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
-        return try JSONDecoder.mediaforce.decode(KindsFacts.self, from: data)
+        return try await decode(KindsFacts.self, from: request)
     }
 
     /// Uses a show's own approval for every season of the kind; a refusal answers 409 with a code the app words.

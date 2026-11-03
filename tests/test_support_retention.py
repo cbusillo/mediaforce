@@ -10,6 +10,7 @@ import pytest
 from mediaforce import state_cleanup
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db
+from mediaforce.core.db_tables import encode_jobs
 from mediaforce.library.run_manifests import build_run_manifest, write_manifest
 
 DAY = 86400
@@ -117,6 +118,20 @@ def test_old_run_plan_without_source_traits_is_removed(config: MediaforceConfig)
     _sweep(config)
 
     assert not path.exists()
+
+
+@pytest.mark.parametrize("status", ["failed", "stopped"])
+def test_retained_problem_jobs_keep_their_file_membership_evidence(config: MediaforceConfig, status: str) -> None:
+    path = _old_run_plan(config)
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(encode_jobs.insert().values(
+            job_id="retained-question", prefix="tv/Show", status=status, job_kind="shard", manifest_path=str(path),
+            host_json="{}", created_at="before-cleanup", updated_at="before-cleanup",
+        ))
+
+    _sweep(config)
+
+    assert path.exists()
 
 
 @pytest.mark.parametrize("contents", [b"{broken", b"\xff", b"[]", b'{"items": [null]}'])
@@ -244,3 +259,42 @@ def test_failed_attempts_cannot_age_out_the_active_rollback(config: MediaforceCo
     _sweep(config)
 
     assert (active / "before.sqlite").exists()
+
+
+
+def test_kind_evidence_outlives_transient_review_cleanup_until_the_kind_is_stopped(config: MediaforceConfig) -> None:
+    from mediaforce.web.runtime.kind_approvals import APPROVABLE_KINDS, kind_approval_file, stop_kind_approval
+
+    watched = _work_folder(config.paths.review_dir, "watched-sample", age_days=30)
+    unused = _work_folder(config.paths.review_dir, "unused-sample", age_days=30)
+    kind = APPROVABLE_KINDS[0]
+    approval_file = kind_approval_file(config, kind)
+    approval_file.parent.mkdir(parents=True)
+    clip = f"/review-media/{watched.name}/before.sqlite"
+    approval_file.write_text(json.dumps({
+        "kind": kind, "browser_review_ready": True,
+        "review_pairs": [{"source_clip": {"path": clip}, "preview_clip": {"path": clip}}],
+    }))
+
+    _sweep(config)
+
+    assert watched.exists() and not unused.exists()
+    assert stop_kind_approval(config, kind)
+    _sweep(config)
+    assert not watched.exists()
+
+
+@pytest.mark.parametrize("contents", ['{broken', '[]'])
+def test_unreadable_kind_evidence_preserves_review_files(config: MediaforceConfig, contents: str) -> None:
+    from mediaforce.web.runtime.kind_approvals import APPROVABLE_KINDS, kind_approval_file
+
+    watched = _work_folder(config.paths.review_dir, "watched-sample", age_days=30)
+    approval_file = kind_approval_file(config, APPROVABLE_KINDS[0])
+    approval_file.parent.mkdir(parents=True)
+    approval_file.write_text(contents)
+    unrelated_scratch = _work_folder(config.staging_root / "_calibration", "scratch", age_days=30)
+
+    _sweep(config)
+
+    assert watched.exists()
+    assert not unrelated_scratch.exists()

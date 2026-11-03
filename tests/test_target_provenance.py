@@ -10,6 +10,7 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.library.run_manifests import build_run_manifest
 from mediaforce.tuning.target_provenance import (
     EXACT_ITEM_TARGET_BELOW_QUALITY_SAFE_MINIMUM,
+    TARGET_SIZE_PROVENANCE_SCHEMA_VERSION,
     exact_item_target_provenance_blocker,
     target_size_provenance,
 )
@@ -211,7 +212,7 @@ class TargetProvenanceTests(unittest.TestCase):
             duration_seconds=2_700.0,
         )
 
-        self.assertEqual(provenance["schema_version"], 1)
+        self.assertEqual(provenance["schema_version"], TARGET_SIZE_PROVENANCE_SCHEMA_VERSION)
         self.assertEqual(provenance["source"], "config_default")
         self.assertIsNone(provenance["override_prefix"])
         self.assertGreater(provenance["requested_target_bytes"], 0)
@@ -247,7 +248,7 @@ class TargetProvenanceTests(unittest.TestCase):
         manifest = build_run_manifest([row], config)
 
         provenance = manifest["items"][0]["target_size_provenance"]
-        self.assertEqual(provenance["schema_version"], 1)
+        self.assertEqual(provenance["schema_version"], TARGET_SIZE_PROVENANCE_SCHEMA_VERSION)
         self.assertEqual(provenance["source"], "ancestor_override")
         self.assertEqual(provenance["override_prefix"], "tv/Example")
         self.assertEqual(provenance["requested_target_bytes"], 225_000_000)

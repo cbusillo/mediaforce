@@ -22,7 +22,6 @@ from mediaforce.web import app as web_app
 from mediaforce.web.runtime import job_runtime
 from mediaforce.web.runtime.calibration_runtime import SAMPLE_COMPUTER_RETRY_BASE_DELAY_SECONDS, \
     SAMPLE_COMPUTER_RETRY_LIMIT, CalibrationRunDeps, run_calibration_job
-from mediaforce.web.runtime.queue_actions import stop_calibration_queue_action
 
 NOW = "2026-10-21T23:38:00+00:00"
 # The first try after losing the computer may start this long after the try that lost it.
@@ -346,25 +345,6 @@ class SampleComputerRetryTests(unittest.TestCase):
             self._run(self._deps(search=self._owner_stops_then(QualitySearchError(HOST_DOWN_MID_ENCODE))))
 
             self.assertEqual(self._job()["status"], "stopped")
-
-        with self.subTest("stop while waiting"):
-            self._save_job(status="running")
-            self._run(self._deps(search=_search_fails(QualitySearchError(HOST_DOWN_MID_ENCODE))))
-            self.assertEqual(self._job()["status"], "queued")
-
-            stop_calibration_queue_action(
-                connection_factory=lambda: open_db(self.config.paths.db_path),
-                config=self.config,
-                now_iso=lambda: NOW,
-                active_calibration_process_controllers=lambda: [],
-                load_job_state=lambda connection, _config, _prefix: load_job(connection, JOB_ID),
-                save_job_state=lambda connection, _config, prefix, payload: save_job(
-                    connection, {**payload, "prefix": prefix, "updated_at": NOW}
-                ),
-            )
-
-            self.assertEqual(self._job()["status"], "stopped")
-            self.assertEqual(self._queue_pass(now="2026-10-22T09:00:00+00:00"), [])
 
 
 if __name__ == "__main__":

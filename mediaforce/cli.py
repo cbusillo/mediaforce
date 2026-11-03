@@ -14,6 +14,7 @@ from mediaforce.core.config import (
     migrate_config_state,
 )
 from mediaforce.core.db import DBClient, open_db, open_readonly_db
+from mediaforce.core.process_control import ScheduleWindowClosedError
 from mediaforce.core.db_tables import run_manifests as run_manifests_table
 from mediaforce.execution import HeldFile, describe_item_plan, encode_manifest_items, promote_manifest_items, \
     validate_manifest_items
@@ -285,7 +286,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             stderr=bool(getattr(args, "stderr", False)),
             lines=int(getattr(args, "lines", 80)),
         )
-    return _main(args, load_config(args.config))
+    try:
+        return _main(args, load_config(args.config))
+    except ScheduleWindowClosedError as exc:
+        print(f"Mediaforce is waiting: {exc}")
+        return 2
 
 
 def _main(
@@ -315,6 +320,7 @@ def _main(
                 connection,
                 library_types=config.library_type_map,
                 folder_approved=lambda prefix: _current_folder_approval(config, prefix),
+                measurement_roots=config.source_root_map,
             )
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0

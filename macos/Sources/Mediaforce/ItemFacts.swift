@@ -23,6 +23,7 @@ struct ItemFacts: Decodable, Sendable {
         let stage: String
         let validation: String?
         let waitReason: WaitReason?
+        let additionalWaitReasons: [WaitReason]?
         let keptReason: String?
         let heldReason: String?
         let percentComplete: Int?
@@ -35,12 +36,12 @@ struct ItemFacts: Decodable, Sendable {
         var inShowPage = false
 
         private enum CodingKeys: String, CodingKey {
-            case libraryItemId, relPath, name, season, episode, stage, validation, waitReason, keptReason, heldReason
+            case libraryItemId, relPath, name, season, episode, stage, validation, waitReason, additionalWaitReasons, keptReason, heldReason
             case percentComplete, sizeQuestion, bytes, originalBytes, originalBackup
         }
 
         var compressed: Bool { stage == "published" }
-        var needsYou: Bool { stage == "needs_you" }
+        var needsYou: Bool { stage == "needs_you" || !(additionalWaitReasons ?? []).isEmpty }
     }
 
     /// Why a file waits on the Director, as a code with any values its words need.
@@ -79,6 +80,18 @@ struct ItemFacts: Decodable, Sendable {
             file.inShowPage = true
             return file
         }
+    }
+
+    func workActions(_ actions: [SampleFacts.Action]) -> [SampleFacts.Action] {
+        actions.filter { $0 != .reviewFiles || !waiting.isEmpty }
+    }
+
+    func selectedFile(_ id: File.ID?) -> File? {
+        files.first { $0.id == id }
+            ?? files.first { $0.needsYou }
+            ?? files.first { $0.originalBackup }
+            ?? files.first { $0.compressed }
+            ?? files.first
     }
 
     var waiting: [File] { files.filter(\.needsYou) }
@@ -126,9 +139,7 @@ extension MediaforceClient {
     func item(_ prefix: String) async throws -> ItemFacts {
         var request = URLRequest(url: baseURL.appending(path: "api/app/items").appending(path: prefix))
         request.timeoutInterval = Self.factsTimeout
-        let (data, response) = try await session.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
-        var facts = try JSONDecoder.mediaforce.decode(ItemFacts.self, from: data)
+        var facts = try await decode(ItemFacts.self, from: request)
         facts.markShowPage()
         return facts
     }

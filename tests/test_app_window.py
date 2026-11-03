@@ -7,10 +7,17 @@ from typing import Any
 import pytest
 
 from mediaforce.core.db import DBClient, open_db
-from mediaforce.core.db_tables import encode_jobs, item_events, library_items, motion_keep_decisions, staged_artifacts
+from mediaforce.core.db_tables import evidence_queue_state, encode_jobs, item_events, library_item_evidence_state, library_items, \
+    motion_keep_decisions, staged_artifacts
+from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND
 from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, save_queue_state
+from mediaforce.library.background_work import background_work_is_paused, set_background_work_paused
+from mediaforce.library.evidence_queue import evidence_queue_summary
 from mediaforce.web.runtime import host_status
+from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, samples_to_remake
 from mediaforce.web.runtime.app_window import app_window_payload, tv_shows_payload
+from mediaforce.web.runtime.host_runtime import _running_encode_jobs_for_hosts
+from mediaforce.web.runtime.encode_scheduler import format_eta_seconds
 
 LIBRARY_TYPES = {"tv": "tv", "movies": "movie", "other": "other"}
 READY_STORAGE = {"mounts": [{"mount_point": "/Volumes/media", "status": "ready", "last_failure_kind": None}]}
@@ -234,7 +241,9 @@ def test_biggest_not_started_leaves_out_shows_with_any_work(connection: DBClient
     _replaced(connection, "tv/Lucifer/Season 2/e1.mkv", saved=10, at=NOW)
     _item(connection, "tv/Monk/Season 1/e1.mkv", size=3000)
     cards = [
-        {"prefix": "tv/Psych/Season 1", "page_state": {"key": "ready_to_compare", "primary_action": "review_sample"}},
+        {"prefix": "tv/Psych/Season 1", "page_state": {
+            "key": "ready_to_compare", "primary_action": "review_sample", "needs_you": True,
+        }},
         {"prefix": "tv/Monk/Season 1", "page_state": {"key": "ready_to_make", "primary_action": "queue_encode"}},
     ]
 
@@ -251,8 +260,11 @@ def test_biggest_not_started_leaves_out_shows_with_any_work(connection: DBClient
 def test_samples_split_into_waiting_on_owner_and_approved_not_started(connection: DBClient) -> None:
     cards = [
         {"prefix": "tv/A/Season 1", "page_state": {"key": "needs_help", "recovery_kind": "test",
-                                                   "primary_action": "make_sample", "failure": "missing_clips"}},
-        {"prefix": "tv/B/Season 2", "page_state": {"key": "ready_to_compare", "primary_action": "review_sample"}},
+                                                      "primary_action": "make_sample", "failure": "missing_clips",
+                                                      "needs_you": True}},
+        {"prefix": "tv/B/Season 2", "page_state": {
+            "key": "ready_to_compare", "primary_action": "review_sample", "needs_you": True,
+        }},
         {"prefix": "tv/C/Season 1", "page_state": {"key": "ready_to_make", "primary_action": "queue_encode"}},
         {"prefix": "tv/D/Season 1", "page_state": {"key": "needs_help", "recovery_kind": "files"}},
         {"prefix": "tv/E/Season 1", "page_state": {"key": "needs_test", "primary_action": "make_sample"}},
@@ -273,6 +285,7 @@ def test_computer_states_are_codes(connection: DBClient) -> None:
         _computer("studio", active_encode_count=1, active_flag="busy"),
         _computer("mbp"),
         _computer("night", schedule_open=False, active_flag="idle"),
+        _computer("off", schedule_open=False, schedule_profile="never"),
         _computer("cooling", active_flag="cooldown"),
         _computer("sampler", capabilities=["sample_calibration"]),
         _computer("mini", available=False, check_failure="password_needed"),
@@ -286,9 +299,28 @@ def test_computer_states_are_codes(connection: DBClient) -> None:
     states = [(computer["key"], computer["state"]) for computer in _payload(connection, computers=computers)["computers"]]
 
     assert states == [
-        ("studio", "busy"), ("mbp", "ready"), ("night", "outside_schedule"), ("cooling", "cooling_down"),
+        ("studio", "busy"), ("mbp", "ready"), ("night", "outside_schedule"), ("off", "schedule_disabled"), ("cooling", "cooling_down"),
         ("sampler", "not_encoding"), ("mini", "password_needed"), ("server", "storage_unreachable"),
         ("odd", "not_ready"), ("staging", "storage_unreachable"), ("refused", "not_ready"), ("new", "checking"),
+    ]
+
+
+def test_computer_attention_excludes_cooldown_but_includes_actionable_states_and_reasons(connection: DBClient) -> None:
+    computers = _payload(connection, computers=[
+        _computer("cooling", active_flag="cooldown"),
+        _computer("away", available=False, recovery={"absence_state": "away"}),
+        _computer("reconnecting", available=False, recovery={"status": "retrying"}, storage_recovery_available=True),
+        _computer("outside", schedule_open=False),
+        _computer("storage", available=False, missing_mounts=["/Volumes/media"]),
+        _computer("python", available=False, check_failure="python_missing"),
+        _computer("address", available=False, check_failure="no_address"),
+        _computer("password", available=False, check_failure="password_needed"),
+        _computer("recovery", available=False, recovery={"status": "action_required", "reason": "Sign in again"}),
+    ])["computers"]
+
+    assert [(computer["key"], computer["needs_you"]) for computer in computers] == [
+        ("cooling", False), ("away", False), ("reconnecting", False), ("outside", False), ("storage", False),
+        ("python", True), ("address", True), ("password", True), ("recovery", True),
     ]
 
 
@@ -319,6 +351,41 @@ def test_work_says_whether_it_is_paused_and_why_it_stopped(
     )["work"]
 
     assert (work["state"], work["paused_by_owner"], work["stop_reasons"]) == (expected_state, paused, expected_reasons)
+
+
+def test_saved_background_pause_is_visible_and_preserved_by_native_reads(connection: DBClient) -> None:
+    set_background_work_paused(connection, is_paused=True)
+    connection.commit()
+
+    for _ in range(2):
+        work = _payload(connection)["work"]
+        assert work["state"] == "paused"
+        assert work["paused_by_owner"] is True
+        assert background_work_is_paused(connection)
+
+
+def test_paused_fingerprint_batch_is_visible_without_changing_encode_state(connection: DBClient) -> None:
+    item_id = _item(connection, "tv/A/Season 1/e1.mkv")
+    baseline = _payload(connection)["work"]
+    connection.execute(
+        library_item_evidence_state.insert().values(
+            library_item_id=item_id, evidence_kind=MEDIA_FINGERPRINT_EVIDENCE_KIND, state="analysis_required",
+            policy_hash="policy", work_batch_id="batch-1", work_status="queued", updated_at=NOW,
+        )
+    )
+    connection.execute(
+        evidence_queue_state.insert().values(
+            queue_name="evidence", batch_id="batch-1", status="paused", evidence_kinds_json='["media_fingerprint"]',
+            is_paused=1, cancel_requested=0, item_count=1, updated_at=NOW,
+        )
+    )
+    connection.commit()
+
+    for _ in range(2):
+        work = _payload(connection)["work"]
+        assert work["checks_paused"] is True
+        assert (work["state"], work["stop_reasons"]) == (baseline["state"], baseline["stop_reasons"])
+        assert evidence_queue_summary(connection)["is_paused"] is True
 
 
 def test_work_names_each_season_being_compressed_once(connection: DBClient) -> None:
@@ -411,3 +478,103 @@ def test_computer_only_claims_reconnection_when_its_storage_can_be_reconnected(
     row["recovery"]["status"] = "action_required"
     [computer] = _payload(connection, computers=[row])["computers"]
     assert computer["attention_reason"] is None
+
+
+@pytest.mark.parametrize(
+    ("bypass", "deadline", "current_option", "expected"),
+    [(False, None, False, "finishing_file"), (False, NOW, True, "busy"), (True, None, True, "busy")],
+)
+def test_closed_window_copy_follows_the_running_jobs_recorded_close_behavior(
+    connection: DBClient, bypass: bool, deadline: str | None, current_option: bool, expected: str,
+) -> None:
+    _encode_job(connection, "tv/Show/Season 1", status="running", host_key="studio")
+    connection.execute(encode_jobs.update().values(
+        item_count=1, bypass_schedule=bypass, schedule_close_deadline_at=deadline,
+    ))
+    jobs = _running_encode_jobs_for_hosts(connection, format_eta_seconds=format_eta_seconds)
+    computer = _computer(
+        "studio", schedule_open=False, active_encode_count=1, finish_current_file=current_option, running_jobs=jobs,
+    )
+    assert _payload(connection, computers=[computer])["computers"][0]["state"] == expected
+
+
+def test_non_sample_season_attention_reaches_main_window_without_counting_samples_twice(connection: DBClient) -> None:
+    cards = [
+        {"prefix": "tv/A/Season 1", "page_state": {"key": "ready_to_compare", "needs_you": True}},
+        {"prefix": "tv/B/Season 2", "page_state": {"key": "making_season", "needs_you": True}},
+        {"prefix": "tv/C/Season 3", "page_state": {"key": "sample_waiting", "needs_you": False}},
+    ]
+    facts = _payload(connection, cards=cards)
+    assert [sample["prefix"] for sample in facts["samples"]["waiting_on_you"]] == ["tv/A/Season 1"]
+    assert [season["prefix"] for season in facts["work"]["seasons_needing_you"]] == ["tv/B/Season 2"]
+
+
+@pytest.mark.parametrize("state", ["ready_to_compare", "making_season"])
+def test_kind_decision_replaces_its_sample_row_but_keeps_other_season_decisions(connection: DBClient, state: str) -> None:
+    prefix = "tv/Drama/Season 1"
+    cards = [{"prefix": prefix, "page_state": {"key": state, "needs_you": True}},
+             {"prefix": "tv/Other/Season 1", "page_state": {"key": "needs_help", "needs_you": True}}]
+    kinds = [{"kind": "darker_live_action", "sample_season": prefix, "needs_you": True},
+             {"kind": "bright_live_action", "sample_season": "tv/Other/Season 1", "needs_you": False}]
+    facts = app_window_payload(
+        connection, library_types=LIBRARY_TYPES, season_cards=cards, computers=[], controller_storage=READY_STORAGE,
+        storage_admits_work=True, observed_at=datetime.now(UTC), kinds=kinds,
+    )
+    assert facts["work"]["kinds_needing_you"] == [{"kind": kinds[0]["kind"], "sample_season": prefix}]
+    assert not facts["samples"]["waiting_on_you"]
+    expected = [cards[1]["prefix"]] if state == "ready_to_compare" else [prefix, cards[1]["prefix"]]
+    assert [season["prefix"] for season in facts["work"]["seasons_needing_you"]] == expected
+
+
+@pytest.mark.parametrize("sample_ready", [False, True])
+def test_waiting_kind_reaches_needs_you_before_its_sample_exists_and_keeps_unrelated_decisions(
+        connection: DBClient, sample_ready: bool,
+) -> None:
+    prefix = "tv/Drama/Season 1"
+    kind = {"kind": "darker_live_action", "sample_season": prefix if sample_ready else None,
+            "sample_status": "pending_review" if sample_ready else "not_started", "sample_ready": sample_ready,
+            "one_time": False, "needs_you": True}
+    facts = app_window_payload(
+        connection, library_types=LIBRARY_TYPES,
+        season_cards=[{"prefix": prefix, "page_state": {"key": "ready_to_compare", "needs_you": True}}],
+        computers=[], controller_storage=READY_STORAGE, storage_admits_work=True, observed_at=datetime.now(UTC), kinds=[kind],
+    )
+    pending = facts["work"]["kinds_needing_you"]
+    assert len(pending) == 1
+    assert pending[0]["sample_ready"] == sample_ready
+    assert pending[0]["sample_season"] == kind["sample_season"]
+    assert bool(facts["samples"]["waiting_on_you"]) != sample_ready
+
+
+def test_kind_sample_failure_is_one_reachable_decision(connection: DBClient) -> None:
+    prefix = "tv/Drama/Season 1"
+    facts = app_window_payload(
+        connection, library_types=LIBRARY_TYPES,
+        season_cards=[{"prefix": prefix, "page_state": {"key": "needs_help", "recovery_kind": "test", "needs_you": True}}],
+        computers=[], controller_storage=READY_STORAGE, storage_admits_work=True, observed_at=datetime.now(UTC),
+        kinds=[{"kind": "darker_live_action", "sample_season": prefix, "sample_status": "failed",
+                "sample_ready": False, "needs_you": True}],
+    )
+    assert len(facts["work"]["kinds_needing_you"]) == 1
+    assert not facts["samples"]["waiting_on_you"] and not facts["work"]["seasons_needing_you"]
+
+
+@pytest.mark.parametrize("exhausted", [False, True])
+@pytest.mark.parametrize("has_kind", [False, True])
+def test_automatic_sample_retries_stay_quiet_until_the_existing_retry_limit(
+        connection: DBClient, exhausted: bool, has_kind: bool,
+) -> None:
+    prefix = "tv/Drama/Season 1"
+    cards = [{"prefix": prefix, "page_state": {"key": "needs_help", "recovery_kind": "test", "primary_action": "retry_sample",
+                                               "failure": "worker_restart", "needs_you": True}}]
+    remaking = samples_to_remake(cards, lambda _prefix: SAMPLE_REMAKE_LIMIT if exhausted else 0)
+    kinds = [{"kind": "darker_live_action", "sample_season": prefix, "sample_status": "failed",
+              "sample_ready": False, "needs_you": True}] if has_kind else []
+    facts = app_window_payload(
+        connection, library_types=LIBRARY_TYPES, season_cards=cards, kinds=kinds, remaking_samples=remaking,
+        computers=[], controller_storage=READY_STORAGE, storage_admits_work=True, observed_at=datetime.now(UTC),
+    )
+    if has_kind:
+        assert facts["work"]["kinds_needing_you"][0]["sample_status"] == ("failed" if exhausted else "retry_backoff")
+    assert bool(facts["samples"]["waiting_on_you"]) == (exhausted and not has_kind)
+    assert not facts["work"]["seasons_needing_you"]

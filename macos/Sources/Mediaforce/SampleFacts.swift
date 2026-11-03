@@ -6,6 +6,7 @@ struct SampleFacts: Decodable, Sendable {
     let show: String
     let season: Int?
     let state: String?
+    let waitDetail: String?
     let action: String?
     let failure: String?
     let moments: [Moment]
@@ -17,6 +18,7 @@ struct SampleFacts: Decodable, Sendable {
     let goalBytes: Int64
     let sizeStatus: String?
     let draftHash: String?
+    let approvalKind: String?
     // The latest a running sample should be ready by, from comparable finished samples; nil when they can't tell.
     let readyInSeconds: Int?
     let sizeChoices: [SizeChoice]
@@ -49,10 +51,10 @@ struct SampleFacts: Decodable, Sendable {
 
     enum Action: Hashable {
         case approve, makeAgain, makeSample, chooseSize, tryAnotherSize, openSample, startCompressing
-        case checkFiles, replaceOriginals, retryUnfinished, decideMotion
+        case checkFiles, replaceOriginals, retryUnfinished, decideMotion, reviewFiles
     }
 
-    static let seasonPageActions: Set<Action> = [.checkFiles, .replaceOriginals, .retryUnfinished, .decideMotion]
+    static let seasonPageActions: Set<Action> = [.checkFiles, .replaceOriginals, .retryUnfinished, .decideMotion, .reviewFiles]
     static let inProgressStates: Set<String> = ["making_test", "sample_waiting", "making_season"]
     // A sample being made, or waiting for a computer, already has its page to follow it on.
     static let sampleMakingStates: Set<String> = ["making_test", "sample_waiting"]
@@ -80,18 +82,43 @@ struct SampleFacts: Decodable, Sendable {
         case "validate_outputs": return [.checkFiles]
         case "promote_outputs": return [.replaceOriginals]
         case "decide_motion": return [.decideMotion]
-        // A blocked file (a failed check or a missing copy) and a state with no native step show no action yet (#1088, #1140).
+        case "review_files": return [.reviewFiles]
         default: return []
         }
     }
 }
 
+struct SampleChoices {
+    var selectedBalance: String?
+    var askingSize = false
+
+    func balance(in facts: SampleFacts?) -> String? {
+        selectedBalance == facts?.balanceChoices.first(where: \.selected)?.key ? nil : selectedBalance
+    }
+
+    mutating func compressed(_ result: SampleActionResult, facts: SampleFacts?) -> ActionNotice? {
+        askingSize = result.needsChoice && facts?.sizeChoices.isEmpty == false
+        return result.ok ? Words.sampleResult(result) : .sampleRefused
+    }
+
+    mutating func made(_ result: SampleActionResult, facts: SampleFacts?) -> ActionNotice? {
+        if result.ok { selectedBalance = nil }
+        askingSize = result.code == "choose_size" && facts?.sizeChoices.isEmpty == false
+        return result.ok || askingSize ? nil : .sampleRefused
+    }
+}
+
 struct SampleApproval: Equatable {
     let reviewedDraftHash: String
+    var scope = "season"
     var confirmed: [String] = []
 
+    func changeNotice(_ facts: SampleFacts?) -> ActionNotice {
+        facts?.draftHash == reviewedDraftHash ? .approvalScopeChanged : .sampleChanged
+    }
+
     func stillReviewed(_ facts: SampleFacts?) -> Bool {
-        (facts?.draftHash ?? "") == reviewedDraftHash
+        (facts?.draftHash ?? "") == reviewedDraftHash && (scope == "season" || facts?.approvalKind == scope)
     }
 }
 
@@ -99,6 +126,7 @@ struct SampleActionResult: Decodable, Sendable {
     let ok: Bool
     let code: String?
     let compressing: Bool?
+    let kindCode: String?
     let reason: String?
 
     static let choiceReasons: Set<String> = ["confirm_legacy_size", "confirm_compression_goal", "approval_needs_fresh_sample"]

@@ -6,8 +6,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import Column, MetaData, Table, Text
 
 from mediaforce.ops import controller_deploy, login_item, runtime_install
+from mediaforce.core.config import ConfigPaths, MediaforceConfig
+from mediaforce.core.db import open_db
 
 
 def _independent_clone(root: Path) -> None:
@@ -124,36 +127,58 @@ def test_deploy_refuses_unpaused_or_running_work(paused: bool, encodes: int, sam
 
 
 @pytest.mark.parametrize(
-    "outcome", ["healthy", "unhealthy", "slow", "resume-lost", "backup-failed", "prepare-failed", "app-install-failed"],
+    "outcome", ["healthy", "unhealthy", "slow", "resume-lost", "backup-failed", "prepare-failed", "app-install-failed", "trim-failed"],
 )
-def test_deploy_switch_preserves_previous_runtime_and_backup(tmp_path: Path, outcome: str) -> None:
+@pytest.mark.parametrize("stopped,initially_paused", [(False, True), (True, False), (True, True)])
+@pytest.mark.parametrize("legacy_rollback", [False, True])
+def test_deploy_switch_preserves_previous_runtime_and_backup(
+    tmp_path: Path, outcome: str, stopped: bool, initially_paused: bool, legacy_rollback: bool,
+) -> None:
     from http.client import RemoteDisconnected
     from urllib.error import URLError
+    from mediaforce.core.utils import timestamp
+    from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
 
     home, old = tmp_path / "home", tmp_path / "worktrees/legacy"
     candidate = runtime_install.runtime_directory(home) / "releases/candidate"
+    if not legacy_rollback:
+        old = candidate.parent / "previous"
+    older = [candidate.parent / f"older-{index}" for index in range(4)]
+    for index, release in enumerate(older):
+        _independent_clone(release)
+        os.utime(release, (index + 1, index + 1))
+    if outcome == "trim-failed":
+        (candidate.parent / "unknown-directory").mkdir()
     database = tmp_path / "configured-state/library.sqlite3"
     stage = database.parent / "deployments/fixture-stage"
-    old.mkdir(parents=True)
+    _independent_clone(old)
     (old / "retained-output").write_text("keep")
+    os.utime(old, (0, 0))
     _independent_clone(candidate)
     paths = login_item.LoginItemPaths(old, home)
     paths.plist.parent.mkdir(parents=True)
     original = login_item.render_login_item_plist(paths)
     paths.plist.write_bytes(original)
     database.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(database) as connection:
-        connection.execute("create table jobs (id integer)")
-        connection.execute("insert into jobs values (42)")
+    with open_db(database) as connection:
+        connection.exec_driver_sql("create table jobs (id integer)")
+        connection.exec_driver_sql("insert into jobs values (42)")
+        state = load_queue_state(connection)
+        state.update(is_paused=initially_paused, updated_at=timestamp())
+        save_queue_state(connection, state)
+    config = _stopped_config(tmp_path, database)
     dashboard = {
         "encode_queue": {"state": {"is_paused": True}, "running_count": 0},
         "calibration_queue": {"sample": {"running_count": 0}, "full": {"running_count": 0}},
     }
     resume_requests: list[bool] = []
-    service_running = True
+    resume_queue = not stopped or not initially_paused
+    service_running = not stopped
     clock = [0.0]
 
     def api(_base_url: str, route: str, *, post: bool = False) -> dict:
+        if stopped and route.startswith("/api/dashboard?"):
+            raise AssertionError("stopped deployment must not query the old server")
         if route == "/api/dashboard/scan-job":
             if outcome == "unhealthy":
                 raise URLError("candidate unavailable")
@@ -168,6 +193,9 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(tmp_path: Path, out
     def switch(target_paths: login_item.LoginItemPaths) -> str:
         nonlocal service_running
         service_running = True
+        if stopped:
+            with sqlite3.connect(database) as database_read:
+                assert database_read.execute("select is_paused from encode_queue_state").fetchone() == (1,)
         target_paths.plist.write_bytes(login_item.render_login_item_plist(target_paths))
         return "updated"
 
@@ -193,10 +221,13 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(tmp_path: Path, out
             raise OSError("Applications folder not writable")
 
     actual_backup = controller_deploy.backup_database
-    def backup(source: Path, destination: Path) -> None:
+    def backup(source: Path, destination: Path, *, pause_queue: bool = False) -> None:
+        # The real _deploy must back up the original state before it pauses the source.
+        with sqlite3.connect(source) as source_connection:
+            assert source_connection.execute("select is_paused from encode_queue_state").fetchone() == (int(initially_paused),)
         if outcome == "backup-failed":
             raise OSError("backup volume unavailable")
-        actual_backup(source, destination)
+        actual_backup(source, destination, pause_queue=pause_queue)
 
     with patch.object(controller_deploy, "_api", side_effect=api), patch.object(
         controller_deploy, "_run", side_effect=git
@@ -214,16 +245,20 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(tmp_path: Path, out
     ), patch.object(controller_deploy.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, b"", b"")), patch.object(
         controller_deploy.time, "sleep", side_effect=sleep
     ), patch.object(controller_deploy.time, "monotonic", side_effect=lambda: clock[0]):
-        if outcome in {"healthy", "slow"}:
-            controller_deploy._deploy(tmp_path / "source", "main", stage, home, "http://fixture", database=database, startup_timeout=90)
+        if outcome in {"healthy", "slow"} or (outcome == "resume-lost" and not resume_queue):
+            controller_deploy._deploy(tmp_path / "source", "main", stage, home, "http://fixture", database=database, startup_timeout=90, stopped_config=config if stopped else None)
         else:
             with pytest.raises((RuntimeError, OSError)):
-                controller_deploy._deploy(tmp_path / "source", "main", stage, home, "http://fixture", database=database, startup_timeout=90)
-    assert service_running is (outcome != "unhealthy")
-    healthy_candidate = outcome in {"healthy", "slow", "resume-lost", "app-install-failed"}
-    assert resume_requests == ([True] if healthy_candidate else [])
+                controller_deploy._deploy(tmp_path / "source", "main", stage, home, "http://fixture", database=database, startup_timeout=90, stopped_config=config if stopped else None)
+    assert service_running is (outcome != "unhealthy" and (not stopped or outcome not in {"backup-failed", "prepare-failed"}))
+    healthy_candidate = outcome in {"healthy", "slow", "resume-lost", "app-install-failed", "trim-failed"}
+    assert resume_requests == ([True] if healthy_candidate and resume_queue else [])
     assert installed_apps == ([candidate] if healthy_candidate else [])
     assert (old / "retained-output").read_text() == "keep"
+    trimmed = outcome in {"healthy", "slow"} or (outcome == "resume-lost" and not resume_queue)
+    assert [release.exists() for release in older] == (
+        [False, False, legacy_rollback, True] if trimmed else [True] * len(older)
+    )
     if outcome == "prepare-failed":
         assert not stage.exists()
         return
@@ -242,6 +277,54 @@ def _built_app(release: Path, marker: str) -> None:
     contents = controller_deploy.built_mac_app(release) / "Contents"
     contents.mkdir(parents=True)
     (contents / "Info.plist").write_text(marker)
+
+
+@pytest.mark.parametrize("extra_count", [0, 4])
+@pytest.mark.parametrize("invalid", [None, "missing-stage", "missing-rollback", "same-release", "redirected-release", "worktree", "candidate-mismatch"])
+def test_trim_requires_known_running_and_rollback_before_removing_clones(
+    tmp_path: Path, extra_count: int, invalid: str | None,
+) -> None:
+    home = tmp_path / "home"
+    support = tmp_path / "custom-support"
+    running = runtime_install.runtime_directory(home) / "releases/running"
+    previous = running.parent / "previous"
+    extras = [running.parent / f"extra-{index}" for index in range(extra_count)]
+    for index, release in enumerate([running, previous, *extras]):
+        _independent_clone(release)
+        os.utime(release, (index, index))
+    finder_file = running.parent / ".DS_Store"
+    finder_file.write_bytes(b"Finder metadata")
+    stage = support / "deployments/active"
+    stage.mkdir(parents=True)
+    paths = login_item.LoginItemPaths(running, home)
+    paths.plist.parent.mkdir(parents=True)
+    paths.plist.write_bytes(login_item.render_login_item_plist(paths))
+    rollback = previous
+    if invalid == "missing-rollback":
+        rollback = running.parent / "missing"
+    elif invalid == "same-release":
+        rollback = running
+    elif invalid == "redirected-release":
+        (running.parent / "alias").symlink_to(previous, target_is_directory=True)
+    elif invalid == "worktree":
+        (previous / ".git").rmdir()
+        (previous / ".git").write_text("gitdir: elsewhere")
+    (stage / "launch-item.before.plist").write_bytes(
+        login_item.render_login_item_plist(login_item.LoginItemPaths(rollback, home))
+    )
+    (stage / "candidate.txt").write_text(str(previous if invalid == "candidate-mismatch" else running))
+    if invalid != "missing-stage":
+        runtime_install.retain_deploy_stage(support, stage)
+    if invalid:
+        with pytest.raises(RuntimeError):
+            controller_deploy.trim_releases(home, support)
+        assert all(release.exists() for release in extras)
+    else:
+        controller_deploy.trim_releases(home, support)
+        assert [release.exists() for release in extras] == [False] * max(0, extra_count - 1) + [True] * min(1, extra_count)
+    assert running.is_dir() and previous.is_dir()
+    assert finder_file.read_bytes() == b"Finder metadata"
+    assert (stage / "launch-item.before.plist").is_file()
 
 
 def _app_at(path: Path, marker: str) -> None:
@@ -363,3 +446,84 @@ def test_a_deploy_waits_for_the_cleanup_its_own_pause_started(tmp_path: Path) ->
         deploy()
     holder.join()
     deployed.assert_called_once()
+
+
+def _stopped_config(root: Path, database: Path) -> MediaforceConfig:
+    return MediaforceConfig(
+        raw={"media": {"source_roots": {}, "staging_root": str(root / "staging"), "archive_root": str(root / "archive")}},
+        paths=ConfigPaths(project_root=root, config_path=root / "config.toml", db_path=database,
+                          run_manifest_dir=root / "runs", web_state_dir=root / "web", review_dir=root / "review",
+                          runtime_settings_path=root / "settings.json", runtime_reservation_dir=root / "reservations"),
+    )
+
+
+@pytest.mark.parametrize("table,column,status", [
+    ("encode_jobs", "status", "running"), ("calibration_jobs", "status", "starting"),
+    ("scan_runs", "status", "running"), ("library_item_evidence_state", "work_status", "running"),
+])
+def test_stopped_deploy_refuses_recorded_running_work(tmp_path: Path, table: str, column: str, status: str) -> None:
+    database = tmp_path / "library.sqlite3"
+    with open_db(database) as connection:
+        running = Table(table, MetaData(), Column(column, Text))
+        running.drop(connection)
+        running.create(connection)
+        connection.execute(running.insert().values({column: status}))
+    with patch.object(controller_deploy.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, b"", b"")):
+        with pytest.raises(RuntimeError):
+            controller_deploy.require_stopped_idle_controller(_stopped_config(tmp_path, database))
+
+
+@pytest.mark.parametrize("result", [
+    subprocess.CompletedProcess([], 0, b"123", b""), subprocess.CompletedProcess([], 1, b"", b"permission denied"),
+    subprocess.CompletedProcess([], 2, b"", b""),
+])
+def test_stopped_deploy_refuses_unknown_or_open_listener(result: subprocess.CompletedProcess[bytes]) -> None:
+    with patch.object(controller_deploy.subprocess, "run", return_value=result):
+        with pytest.raises(RuntimeError):
+            controller_deploy.require_closed_listener()
+
+
+def test_stopped_deploy_holds_and_releases_runtime_lease(tmp_path: Path) -> None:
+    from collections.abc import Callable
+    from typing import Any
+
+    from mediaforce.web.runtime_lock import assert_mediaforce_runtime_lock_held, MediaforceRuntimeLockOwnershipError
+
+    database = tmp_path / "library.sqlite3"
+    with open_db(database):
+        pass
+    config = _stopped_config(tmp_path, database)
+
+    def switch(*_args: object, stopped_config: MediaforceConfig,
+               release_stopped_runtime: Callable[[], None], **_kwargs: Any) -> None:
+        lease = assert_mediaforce_runtime_lock_held()
+        assert stopped_config is config
+        release_stopped_runtime()
+        with pytest.raises(MediaforceRuntimeLockOwnershipError):
+            lease.assert_active()
+
+    with patch("mediaforce.ops.controller_deploy.load_config", return_value=config), patch.object(
+        controller_deploy, "_deploy", side_effect=switch
+    ):
+        controller_deploy.deploy(tmp_path / "source", "main", tmp_path / "stage", tmp_path / "home", "http://fixture",
+                                 database=database, stopped=True)
+
+
+def test_paused_rollback_backup_preserves_work_and_leaves_source_queue_unchanged(tmp_path: Path) -> None:
+    from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
+
+    source, backup = tmp_path / "source.sqlite", tmp_path / "before.sqlite"
+    retained_job = "retained-job"
+    work_id = 42
+    with open_db(source) as connection:
+        state = load_queue_state(connection)
+        state.update(is_paused=False, stop_requested=True, active_job_id=retained_job, updated_at="2026-10-29T00:00:00+00:00")
+        save_queue_state(connection, state)
+        connection.exec_driver_sql("CREATE TABLE retained_work (job INTEGER)")
+        connection.exec_driver_sql("INSERT INTO retained_work VALUES (?)", (work_id,))
+    controller_deploy.backup_database(source, backup, pause_queue=True)
+    with sqlite3.connect(source) as connection:
+        assert connection.execute("SELECT is_paused FROM encode_queue_state").fetchone() == (0,)
+    with sqlite3.connect(backup) as connection:
+        assert connection.execute("SELECT is_paused, stop_requested, active_job_id FROM encode_queue_state").fetchone() == (1, 1, retained_job)
+        assert connection.execute("SELECT job FROM retained_work").fetchall() == [(work_id,)]

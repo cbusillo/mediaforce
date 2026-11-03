@@ -1,6 +1,5 @@
 import SwiftUI
 
-@main
 struct MediaforceApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
@@ -20,7 +19,7 @@ struct MediaforceApp: App {
         MenuBarExtra {
             MenuBarPanel(model: appDelegate.model)
         } label: {
-            Image(nsImage: MenuBarGlyph.image(waiting: appDelegate.model.facts.map(Attention.waitingOnYou) ?? 0 > 0))
+            MenuBarLabel(model: appDelegate.model)
         }
         .menuBarExtraStyle(.window)
         Settings {

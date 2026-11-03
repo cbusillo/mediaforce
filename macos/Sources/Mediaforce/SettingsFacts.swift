@@ -146,6 +146,7 @@ struct ComputerSettingsFacts: Decodable, Sendable, Equatable {
         var allDayDays: [String]
         var startHour: Int
         var endHour: Int
+        var finishCurrentFile: Bool? = nil
     }
 
     struct Library: Decodable, Sendable, Equatable {

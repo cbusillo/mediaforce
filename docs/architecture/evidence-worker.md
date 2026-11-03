@@ -97,6 +97,50 @@ qualify their own next file while other units analyze, retaining the full
 device-bound digest and all admission checks. They do not each prefetch the same
 queued original, avoiding redundant digest reads and preparation cancellation.
 
+A new full-file original hash runs on the controller only within that computer's
+own work window. An open measuring computer does not open the controller's
+window. New hashes wait in the existing queue without taking leases or spending
+attempts; valid cached hashes and measured results remain usable by another
+computer whose window is open. The full hash still belongs to the controller
+and retains its source-identity checks. Admission and serial prefetch recheck
+the controller's window before reading new bytes. A hash already under way
+follows that window's finish-current-file setting; a hard close defers it without
+spending an attempt. Priority selection excludes new hashes that cannot start,
+so they do not interrupt eligible work. With no configured controller computer,
+the existing local behavior remains available. Waiting rows use `waiting_window`
+with their next due time and a plain reason, without taking a lease or changing
+their attempt budget. The normal autostart preparation refreshes those waits
+before counting runnable work, including when a changed schedule opens early.
+Loop discovery refreshes them before returning too. A decision check or a newly
+qualified source leaves its old window wait as soon as it no longer needs a new
+hash; a cached identity that no longer matches the catalog stays held. The
+descriptor observation remains the final authority before any cached hash is
+reused. If that observation finds a replaced file whose catalog facts did not
+change, the attempted check waits until the next opening instead of being
+released and reclaimed throughout the closed window. A missing opening uses the
+existing background retry delay. Opening the schedule early releases that wait;
+its reason stays visible too. A measurement receipt alone never stands in for
+the full original hash. A full
+hash that already finished is retained when the window closes after its last
+read; hard-close guards still stop the next chunk from being read.
+The Mac's current work explanation includes each distinct window reason while
+other eligible work continues. All default, web and CLI workers read the same
+schedule-aware computer projection. Standalone defaults use the current host
+collector so a cold status cache cannot masquerade as unavailable computers.
+
+The controller's window also admits catalog scans, automatic file checks and
+publishing, and transient cleanup. Automatic scans wait outside that window.
+A requested refresh remains queued, with its window wait recorded, even when
+periodic refreshing is off. Its existing worker waits outside database
+transactions, reads current settings when the window opens, and resumes after
+an interruption or restart. A scan rechecks before each file and before
+reconciling missing sources; a retry uses a new scan ID and retains completed
+catalog progress. Publishing rechecks before each file. File pages show a
+window wait only for copies eligible for automatic checking, without changing
+saved validation or attempt counts; a missing future window is stated plainly.
+Remote measuring and encoding retain their own computers' schedules. Reading
+the kinds report remains available at any time and starts no measuring work.
+
 ## Durable state
 
 `library_item_evidence_state` owns one independent work unit for each
@@ -140,7 +184,7 @@ active batch at decision priority, and lets the rest of a production selection
 queue; the user sees each held item in Activity. A new batch created for a
 production run starts unpaused, and the web app's evidence-autostart worker
 runs any unpaused batch with claimable work, so held files are checked without
-anyone pressing `Start analysis`. The global background pause, a paused batch,
+an explicit analysis request. The global background pause, a paused batch,
 and cancellation still stop it. Sample checks still create a paused batch. A retained
 terminal failure is reported as a failure and requires an explicit item retry;
 repeating the blocked action does not reset its attempt budget. Fingerprint
@@ -316,7 +360,7 @@ computer, never on the controller:
   status cache as the web, while schedules are recomputed for every selection.
   Prefetch commit guards do no host checks or network work under write locks.
 - Pause prevents new claims but does not interrupt the active safe unit.
-- The global background-work pause prevents new catalog scans, batch creation,
+- A retained global background-work pause prevents new catalog scans, batch creation,
   queue resumes, and evidence claims. A scan or evidence update already running
   is allowed to finish safely. A queued scan rechecks the switch before it opens
   a source.
@@ -329,40 +373,21 @@ computer, never on the controller:
   required, the row completes its policy-only pass and returns to the bounded
   representative planner instead of fanning out into immediate analysis.
 
-## User flow
+## Controls
 
-The Activity workstation exposes the same bounded state machine:
+The native Mac app's library refresh runs inventory only. The same inventory
+also runs on its configured background schedule. Evidence needed for approved
+production work is queued and processed automatically; a problem stays with
+its file while other eligible work continues.
 
-1. `Refresh catalog` performs inventory only. It updates changed file facts and
-   never starts cadence or fingerprint analysis. The same inventory also runs
-   by itself: a leader-owned worker starts one when the last finished refresh
-   is older than `media.catalog_refresh_hours` (default 6, `0` turns it off).
-   Settings exposes this interval under Metadata. The worker re-runs a refresh
-   that a restart interrupted, and waits 30 minutes after a
-   failed one. It never runs from a read path and it honours
-   `Pause new background work`. The catalog is shown as stale after two missed
-   intervals, or after a day when automatic refresh is off.
-2. `Prepare analysis` chooses one explicit item, folder, or root scope, evidence
-   kinds, and a maximum number of updates. The new batch is paused.
-3. `Start analysis` launches one process-local bounded runner. It exits when the
-   prepared batch completes, reaches its update budget, or becomes blocked.
-4. `Pause after this item`, `Resume analysis`, and `Cancel batch` write durable
-   queue controls near the visible scope and progress.
-5. `Pause new background work` is separate from encode approval and processing
-   controls. It governs catalog inventory and evidence analysis only.
+Explicit bounded analysis remains available through the CLI commands below.
+Queue pause, resume and cancellation retain their existing durable state.
 
-The active item and backlog show both why evidence needs an update and why that
-work is scheduled now. Decision-blocking cadence rows are labelled as blocking a
-sample or production action; policy-only rows explicitly say that no media read
-is required.
-
-The workstation polls while a catalog scan or evidence runner is active and
-returns to manual refresh when idle. Backlog totals are paired with filters and
-pagination so every counted evidence update remains reachable. Source-root
-warnings use the scanner's preserved-cache messages rather than discarding the
-last known catalog.
-
-The CLI remains available for advanced or scripted operation.
+A global background pause saved by the retired web page appears as paused in
+the Mac app. A paused active evidence batch with claimable work appears there
+too. Resume clears the global and encode pauses and resumes that same evidence
+batch atomically, while cancelled batches and terminal evidence rows retain
+their state.
 
 Create a paused folder pilot:
 

@@ -11,7 +11,8 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import encode_jobs
-from mediaforce.core.type_defs import object_list
+from mediaforce.core.type_defs import object_dict, object_list
+from mediaforce.reviewing.clips import review_file_from_url
 from mediaforce.encoding.quality import (
     default_local_quality_temp_root,
     legacy_local_quality_temp_root,
@@ -21,6 +22,7 @@ from mediaforce.hosts import DEFAULT_HOST_CAPABILITIES
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.remote import run_remote_command
 from mediaforce.ops.runtime_install import RuntimeProtectionError, paths_overlap, protected_runtime_roots, retained_deploy_stage, runtime_activity
+from mediaforce.hosts.work_window import controller_work_allowed
 
 SECONDS_PER_DAY = 86400
 SECONDS_PER_MINUTE = 60
@@ -49,6 +51,8 @@ class CleanupProcessSnapshot:
 
 
 def purge_transient_artifacts(config: MediaforceConfig, *, force: bool = False) -> bool:
+    if not controller_work_allowed(config):
+        return False
     if not force and not _cleanup_is_due(config):
         return False
 
@@ -85,7 +89,12 @@ def _purge_due_transient_artifacts(config: MediaforceConfig) -> bool:
     cutoff = now - (retention_days * SECONDS_PER_DAY)
     temp_cutoff = max(cutoff, now - _orphan_temp_retention_seconds(config))
     process_snapshot = _cleanup_process_snapshot(config)
-    _prune_children(config.paths.review_dir, cutoff)
+    try:
+        kind_review_paths = _retained_kind_review_paths(config)
+    except RuntimeProtectionError as exc:
+        LOGGER.warning("%s", exc)
+    else:
+        _prune_children(config.paths.review_dir, cutoff, protected_paths=kind_review_paths)
     for staging_root in staging_roots:
         root_verified = not _root_requires_unverified_process_check(
             staging_root, process_snapshot
@@ -116,6 +125,28 @@ def _purge_due_transient_artifacts(config: MediaforceConfig) -> bool:
     )
     _write_cleanup_stamp(config)
     return True
+
+
+def _retained_kind_review_paths(config: MediaforceConfig) -> tuple[Path, ...]:
+    from mediaforce.web.runtime.kind_approvals import APPROVABLE_KINDS, kind_approval_file
+    from mediaforce.web.runtime.app_samples import sample_moments
+
+    paths = []
+    for kind in APPROVABLE_KINDS:
+        try:
+            payload = json.loads(kind_approval_file(config, kind).read_text())
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            raise RuntimeProtectionError("Cannot read kind sample evidence; review cleanup skipped") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeProtectionError("Invalid kind sample evidence; review cleanup skipped")
+        for moment in sample_moments(payload):
+            for side in ("original", "sample"):
+                path = review_file_from_url(config.paths.review_dir, str(object_dict(moment.get(side)).get("url") or ""))
+                if path is not None:
+                    paths.append(path)
+    return tuple(paths)
 
 
 def _retention_days(config: MediaforceConfig) -> int:
@@ -179,6 +210,7 @@ def _prune_children(
     *,
     active_commands: tuple[str, ...] = (),
     root_verified: bool = True,
+    protected_paths: tuple[Path, ...] = (),
 ) -> None:
     if not root.exists():
         return
@@ -187,6 +219,8 @@ def _prune_children(
     except OSError:
         return
     for child in children:
+        if any(paths_overlap(child, protected) for protected in protected_paths):
+            continue
         if _mtime(child) >= cutoff:
             continue
         if _should_skip_process_owned_path(
@@ -281,7 +315,7 @@ def _prune_run_manifests(config: MediaforceConfig, cutoff: float) -> None:
     root = config.paths.run_manifest_dir
     if not root.exists():
         return
-    protected_paths = _active_manifest_paths(config)
+    protected_paths = _retained_manifest_paths(config)
     try:
         paths = list(root.glob("*.json"))
     except OSError:
@@ -322,7 +356,7 @@ def _run_manifest_has_source_traits(path: Path) -> bool:
     )
 
 
-def _active_manifest_paths(config: MediaforceConfig) -> set[Path]:
+def _retained_manifest_paths(config: MediaforceConfig) -> set[Path]:
     if not config.paths.db_path.exists():
         return set()
     protected: set[Path] = set()
@@ -343,7 +377,7 @@ def _active_manifest_paths(config: MediaforceConfig) -> set[Path]:
     for row in rows:
         status = f"{row['status'] or ''}".strip()
         manifest_path = f"{row['manifest_path'] or ''}".strip()
-        if not manifest_path or status not in ACTIVE_ARTIFACT_STATUSES:
+        if not manifest_path or status == "completed":
             continue
         protected.add(Path(manifest_path).expanduser().resolve())
     return protected

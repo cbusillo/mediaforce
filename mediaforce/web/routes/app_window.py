@@ -18,18 +18,27 @@ def register_app_window_routes(
         movies_payload: Callable[[], dict[str, Any]],
         other_media_payload: Callable[[], dict[str, Any]],
         sample_payload: Callable[[str], dict[str, Any] | None],
-        approve_sample_action: Callable[[str, Collection[str], str], dict[str, Any]],
+        approve_sample_action: Callable[[str, Collection[str], str, str], dict[str, Any]],
         make_sample_action: Callable[[str, str | None, str | None], dict[str, Any]],
         compress_season_action: Callable[[str], dict[str, Any]],
         item_payload: Callable[[str], dict[str, Any] | None] | None = None,
         player_file: Callable[[int, str], Path | None] | None = None,
+        activity_payload: Callable[[], dict[str, Any]] | None = None,
         kinds_payload: Callable[[], dict[str, Any]] | None = None,
         approve_kind_action: Callable[[str, str], dict[str, Any]] | None = None,
         stop_kind_action: Callable[[str], dict[str, Any]] | None = None,
 ) -> None:
+
     @app.get("/api/app/main-window")
     def api_app_main_window() -> JSONResponse:
         return JSONResponse(main_window_payload())
+
+    if activity_payload is not None:
+        read_activity = activity_payload
+
+        @app.get("/api/app/activity")
+        def api_app_activity() -> JSONResponse:
+            return JSONResponse(read_activity())
 
     @app.get("/api/app/tv-shows")
     def api_app_tv_shows() -> JSONResponse:
@@ -95,6 +104,7 @@ def register_app_window_routes(
             prefix.strip("/"),
             {value for value in confirm if isinstance(value, str)} if isinstance(confirm, list) else set(),
             str(body.get("reviewed_draft_hash") or ""),
+            str(body.get("approval_scope") or "season"),
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 

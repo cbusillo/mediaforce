@@ -162,10 +162,20 @@ Guidance:
     - one approval per kind of content (darker or bright live action), copied
       from a current folder approval with a size per 45 minutes, and the
       calibration loader that lets the approval resolver find it
-    - the background choice of the next waiting season a kind approval covers,
+    - the background choice of the next waiting season a current folder, show,
+      or kind approval covers,
       largest first and one at a time: never while work is paused or a run is
-      queued or running (checked again inside the queueing transaction), never
-      a season whose last run ended badly, and not again for a season already
+      queued or running (checked again inside the queueing transaction). Each
+      file follows its newest runnable-job outcome across scopes, using saved
+      manifest IDs and indexes, with paths for legacy manifests. A question or
+      Stop holds that file while its siblings continue. A newer completion
+      settles only that file's older question; retained writer custody still
+      waits for its own bound reconciliation. Cleanup keeps the saved file
+      membership while a referenced job remains unfinished. Unknown membership holds
+      the overlapping scope. Only eligible IDs join a new run, leaving prior
+      question and custody records intact; admission rechecks those IDs inside
+      its transaction. Finished staged files follow their existing workflow
+      lane instead of being remade. Selection does not repeat a season already
       tried under the same approval with the same waiting files; attempts are
       kept beside the kind approvals, and a refused season is retried after
       six hours
@@ -220,7 +230,7 @@ Guidance:
   - `page_state.py`
     - the one `page_state` a folder page and its library card lead with: a
       state key, tone, recovery kind, primary action, failure kind and the job
-      or saved sample that decided it, on `/api/folders/<prefix>/status` and on
+      or saved sample that decided it, in the native sample/item facts and
       each TV folder card
     - decided from database rows and saved samples, never from the hour-long
       sample notice: the workflow state's wider-run rules for encode work, the
@@ -247,18 +257,29 @@ Guidance:
     - the read-only projection reads each item's whole stored evidence row,
       so a source or policy changed since measuring needs a check on the page
       exactly as it does in the synchronized queue
+  - `file_encode_outcomes.py`
+    - automatic admission and episode pages share each file's newest outcome,
+      using saved item IDs with legacy path fallback and strict file selection
+    - retained writer holds remain separate from current work, so an older
+      attempt cannot hide a running file or its newer size question; every
+      unresolved reason appears in the existing file waiting box
+    - unknown held membership covers its whole saved scope on the page as well
+      as in admission; progress is a display hint only for work with no hold
+    - unknown completed membership cannot clear a question, and historical
+      progress and computer data is decoded only after membership can match
+    - a checked copy or settled keep choice supersedes its own run's ordinary
+      explanation; independent writer custody remains an additional reason
   - `folder_tuning_helpers.py`
   - `folder_tuning_advice.py`
   - `folder_tuning_runtime.py`
   - `folder_ai_tuning.py`
   - `dashboard_payloads.py`
-  - `settings_payloads.py`
   - `tool_capabilities.py`
     - explicit-lifecycle ffmpeg capability snapshots used by read-only payloads
 
 Guidance:
 
-- `web/app.py` is still large (over 5,000 lines). Add new route-specific behavior in `web/routes/` or `web/runtime/` rather
+- `web/app.py` still owns the application wiring. Add new route-specific behavior in `web/routes/` or `web/runtime/` rather
   than growing `web/app.py`.
 - Only trim more from `web/app.py` when a clearly mechanical helper cluster or
   removable compatibility wrapper appears.
@@ -272,6 +293,9 @@ Guidance:
 
 ### `mediaforce/hosts/`
 
+- `work_window.py`
+  - controller-side heavy-work admission using the same schedule evaluator as
+    encode computers, independently of remote computer availability
 - `transport.py`
   - SSH command execution, SCP/rsync helpers, shell/path helpers
   - remote work that wakes a computer also keeps it awake while it runs: on a

@@ -1,7 +1,7 @@
 import asyncio
 import json
-from collections.abc import Collection
-from typing import Any, cast
+from collections.abc import Collection, Mapping
+from typing import Any, Literal, cast
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -12,7 +12,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime import folder_actions
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_sample, make_sample, sample_facts, \
-    samples_to_remake, start_compressing
+    kind_sample_candidates, prepare_waiting_samples, samples_to_remake, start_compressing
 
 PREFIX = "tv/Lucifer/Season 2"
 
@@ -195,19 +195,20 @@ def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_di
             app, main_window_payload=dict, tv_shows_payload=dict, movies_payload=dict, other_media_payload=dict,
             sample_payload=lambda _prefix: None,
             make_sample_action=lambda *_args: {},
-            approve_sample_action=lambda prefix, confirm, draft_hash: approve_sample(
-                prefix, confirm, draft_hash, save_profile=save, queue_encode=queue,
+            approve_sample_action=lambda prefix, confirm, draft_hash, scope: approve_sample(
+                prefix, confirm, draft_hash, save_profile=save, queue_encode=queue, scope=scope,
             ),
             compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=queue),
         )
         return _route(app, f"/api/app/samples/{{prefix:path}}/{action}", "POST")
 
     ok = {"ok": True}
-    watched = {"reviewed_draft_hash": "draft-1"}
+    watched = {"reviewed_draft_hash": "draft-1", "approval_scope": "season"}
     assert _post(endpoint(ok, ok), {"confirm": ["size_tradeoff", 7], **watched}) == (
         200, {"ok": True, "compressing": True, "reason": None},
     )
     assert saved[-1] == (PREFIX, False, True, "draft-1", "")
+    assert _post(endpoint(ok, ok), {"reviewed_draft_hash": "draft-1"})[1]["ok"]
     assert _post(endpoint(folder_actions.ReviewedDraftChanged(), ok), watched) == (
         409, {"ok": False, "code": "sample_changed"},
     )
@@ -331,6 +332,43 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     assert calls == []
 
 
+@pytest.mark.parametrize("reason", ["confirm_legacy_size", "confirm_compression_goal"])
+def test_native_size_confirmation_routes_make_a_fresh_sample_with_the_chosen_goal(
+        reason: Literal["confirm_legacy_size", "confirm_compression_goal"],
+) -> None:
+    requested: list[dict[str, Any] | None] = []
+    folder = _folder()
+
+    def queue(*_args: Any) -> dict[str, Any]:
+        raise folder_actions.QueueNeedsChoice(reason, "Choose a size.")
+
+    def make(prefix: str, size: str | None, balance: str | None) -> dict[str, Any]:
+        assert prefix == PREFIX
+        return make_sample(
+            folder, _status("ready_to_make", "queue_encode"), size, balance,
+            ai_tune=lambda _prefix, _note, _host, requested_intent, _token: requested.append(requested_intent) or {"ok": True},
+            retry_saved=lambda *_args: pytest.fail("A size confirmation must make a fresh sample"),
+        )
+
+    app = FastAPI()
+    register_app_window_routes(
+        app, main_window_payload=dict, tv_shows_payload=dict, movies_payload=dict, other_media_payload=dict,
+        sample_payload=lambda _prefix: None, make_sample_action=make,
+        approve_sample_action=lambda *_args: {},
+        compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=queue),
+    )
+    compress = _route(app, "/api/app/samples/{prefix:path}/compress", "POST")
+    response = asyncio.run(compress(PREFIX))
+    assert json.loads(response.body)["reason"] == reason
+    make_route = _route(app, "/api/app/samples/{prefix:path}/make", "POST")
+    assert _post(make_route, {"size": "smaller", "balance": "reference"}) == (200, {"ok": True, "code": None})
+    intent = requested.pop()
+    assert intent is not None
+    assert intent["size_goal"] == folder["size_goal_options"][1]["operator_intent"]["size_goal"]
+    assert intent["compression_intent"] == folder["compression_intent_options"][0]["compression_intent"]
+    assert not requested
+
+
 def test_a_running_sample_says_when_it_should_be_ready_only_when_comparable_samples_tell() -> None:
     def running(estimate: dict[str, Any] | None, key: str = "making_test") -> dict[str, Any]:
         return {**_status(key, None), "exact_calibration_job": {"progress": {"estimate": estimate}}}
@@ -359,3 +397,119 @@ def test_a_sample_that_needs_making_again_is_made_again_until_it_fails_too_often
     assert samples_to_remake(cards, lambda prefix: failures.get(prefix, 0)) == [
         "tv/Clips gone/Season 1", "tv/Failed once/Season 1",
     ]
+
+
+@pytest.mark.parametrize("scope", ["darker_live_action", "season", "bright_live_action"])
+def test_representative_approval_uses_the_explicit_reviewed_scope(scope: str) -> None:
+    calls: list[str] = []
+    result = approve_sample(
+        PREFIX, set(), "draft-1", scope=scope, representative_kind="darker_live_action",
+        save_profile=lambda *_args: calls.append("save") or {"ok": True},
+        queue_encode=lambda *_args: calls.append("queue") or {"ok": True},
+        approve_kind=lambda kind, prefix, draft: calls.append(f"kind:{kind}:{prefix}:{draft}") or {"ok": True},
+    )
+    if scope == "bright_live_action":
+        assert result == {"ok": False, "code": "approval_scope_changed"}
+        assert calls == []
+    else:
+        assert result["ok"] and result["compressing"]
+        assert calls == (["save", f"kind:{scope}:{PREFIX}:draft-1", "queue"] if scope != "season" else ["save", "queue"])
+
+
+@pytest.mark.parametrize("kind_code", ["source_kind_differs", "sample_changed"])
+def test_a_post_save_kind_refusal_reports_the_saved_season_and_real_queue_result(kind_code: str) -> None:
+    calls: list[str] = []
+    result = approve_sample(
+        PREFIX, set(), "draft-1", scope="darker_live_action", representative_kind="darker_live_action",
+        save_profile=lambda *_args: calls.append("save") or {"ok": True},
+        queue_encode=lambda *_args: calls.append("queue") or {"ok": False, "code": "free_space_reserve"},
+        approve_kind=lambda *_args: {"ok": False, "code": kind_code},
+    )
+    assert result == {"ok": True, "compressing": False, "reason": "free_space_reserve", "kind_code": kind_code}
+    assert calls == ["save", "queue"]
+
+
+@pytest.mark.parametrize("state", ["needs_test", "waiting_for_kind", "making_test", "ready_to_compare", "waiting_for_measurement", "needs_help"])
+def test_first_kind_sample_uses_existing_sample_flow_only_when_it_can_start(state: str) -> None:
+    kinds = [{"kind": "bright_live_action", "approval": None, "sample_season": None,
+              "shows": [{"sample_season": PREFIX}]}]
+    cards = [{"prefix": PREFIX, **_status(state, None)}]
+    assert kind_sample_candidates(kinds, cards)["bright_live_action"] == ([PREFIX] if state in {"needs_test", "waiting_for_kind"} else [])
+    for settled in [{"approval": {"from_prefix": PREFIX}}, {"sample_season": PREFIX}, {"settings": [{"from_prefix": PREFIX}]}]:
+        assert not kind_sample_candidates([kinds[0] | settled], cards)
+
+
+def test_first_kind_sample_candidates_keep_ranked_fallbacks() -> None:
+    kinds = [{"kind": kind, "approval": None, "sample_season": None,
+              "shows": [{"sample_season": prefix}, {"sample_season": other}]}
+             for kind, prefix, other in [("bright_live_action", PREFIX, "tv/Other Live/Season 1"),
+                                         ("cartoon", "tv/Cartoon/Season 1", "tv/Other Cartoon/Season 1")]]
+    cards = [{"prefix": prefix, **_status("needs_test", "make_sample")}
+             for prefix in [PREFIX, "tv/Other Live/Season 1", "tv/Cartoon/Season 1", "tv/Other Cartoon/Season 1"]]
+    assert kind_sample_candidates(kinds, cards) == {"bright_live_action": [PREFIX, "tv/Other Live/Season 1"],
+                                                  "cartoon": ["tv/Cartoon/Season 1", "tv/Other Cartoon/Season 1"]}
+    cards[0] = {"prefix": PREFIX, **_status("making_test", "make_sample")}
+    assert kind_sample_candidates(kinds, cards)["bright_live_action"] == ["tv/Other Live/Season 1"]
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_sample_sweep_falls_back_stops_after_success_and_keeps_other_kinds_moving(changed: bool) -> None:
+    prefixes = ["tv/A/Season 1", "tv/B/Season 1", "tv/C/Season 1", "tv/Cartoon/Season 1"]
+    cards = [{"prefix": prefix, **_status("needs_test", "make_sample")} for prefix in prefixes]
+    kinds = [{"kind": "bright_live_action", "shows": [{"sample_season": prefix} for prefix in prefixes[:3]]},
+             {"kind": "cartoon", "shows": [{"sample_season": prefixes[3]}]}]
+    attempted: list[str] = []
+
+    def fresh(prefix: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        key = "ready_to_make" if changed and prefix == prefixes[0] else "needs_test"
+        return {"prefix": prefix}, _status(key, "make_sample")
+
+    def make(folder: Mapping[str, Any], _status_payload: Mapping[str, Any]) -> dict[str, Any]:
+        prefix = folder["prefix"]
+        attempted.append(prefix)
+        return {"ok": prefix != prefixes[0]}
+
+    prepare_waiting_samples(cards, kinds, load_payloads=fresh, failed_in_a_row=lambda _prefix: 0, make=make)
+    assert attempted == ([prefixes[1], prefixes[3]] if changed else [prefixes[0], prefixes[1], prefixes[3]])
+
+
+@pytest.mark.parametrize("code", ["refused", "choose_size", "choose_balance"])
+def test_first_sample_start_failures_retry_then_ask_and_success_or_settings_clear_the_wait(code: str) -> None:
+    cards = [{"prefix": PREFIX, **_status("needs_test", "make_sample")}]
+    kind = {"kind": "bright_live_action", "shows": [{"sample_season": PREFIX}]}
+    successful = False
+    attempted: list[str] = []
+
+    def fresh(prefix: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        return {"prefix": prefix}, _status("needs_test", "make_sample")
+
+    def make(folder: Mapping[str, Any], _status_payload: Mapping[str, Any]) -> dict[str, Any]:
+        attempted.append(folder["prefix"])
+        return {"ok": successful, "code": code}
+
+    first = prepare_waiting_samples(cards, [kind], load_payloads=fresh, failed_in_a_row=lambda _prefix: 0, make=make)
+    assert first["bright_live_action"].prefix == PREFIX
+    assert first["bright_live_action"].reason == ("retry_backoff" if code == "refused" else code)
+    second = prepare_waiting_samples(cards, [kind], load_payloads=fresh, failed_in_a_row=lambda _prefix: 0, make=make, previous=first)
+    assert second["bright_live_action"].reason == ("sample_blocked" if code == "refused" else code)
+    successful = True
+    assert not prepare_waiting_samples(cards, [kind], load_payloads=fresh, failed_in_a_row=lambda _prefix: 0, make=make, previous=second)
+    assert len(attempted) == 3
+    settled = kind | {"settings": [{"from_prefix": PREFIX}]}
+    assert not prepare_waiting_samples(cards, [settled], load_payloads=fresh, failed_in_a_row=lambda _prefix: 0, make=make, previous=second)
+    assert len(attempted) == 3
+
+
+def test_a_first_sample_that_could_not_be_attempted_stays_quiet_across_sweeps() -> None:
+    cards = [{"prefix": PREFIX, **_status("needs_test", "make_sample")}]
+    kinds = [{"kind": "bright_live_action", "shows": [{"sample_season": PREFIX}]}]
+    attempted: list[str] = []
+
+    def make(folder: Mapping[str, Any], _status_payload: Mapping[str, Any]) -> dict[str, Any]:
+        attempted.append(folder["prefix"])
+        return {"ok": False}
+
+    first = prepare_waiting_samples(cards, kinds, load_payloads=lambda _prefix: None, failed_in_a_row=lambda _prefix: 0, make=make)
+    second = prepare_waiting_samples(cards, kinds, load_payloads=lambda _prefix: None, failed_in_a_row=lambda _prefix: 0, make=make, previous=first)
+    assert not attempted
+    assert first["bright_live_action"].reason == second["bright_live_action"].reason == "retry_backoff"

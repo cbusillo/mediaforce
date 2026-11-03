@@ -15,12 +15,13 @@ final class ItemTests: XCTestCase {
 
     private func file(_ id: Int, stage: String, bytes: Int64, original: Int64? = nil, backup: Bool = false,
                       validation: String? = nil, kept: String? = nil, question: String = "null",
-                      waitReason: String = "null") -> String {
+                      waitReason: String = "null", additionalWaitReasons: String = "[]") -> String {
         let quoted = { (value: String?) in value.map { #""\#($0)""# } ?? "null" }
         return #"""
         {"library_item_id": \#(id), "rel_path": "tv/Futurama/Season 2/Futurama.S02E0\#(id).mkv",
          "name": "Futurama.S02E0\#(id).mkv", "episode": \#(id), "stage": "\#(stage)", "validation": \#(quoted(validation)),
-         "wait_reason": \#(waitReason), "kept_reason": \#(quoted(kept)), "held_reason": null, "percent_complete": null, "size_question": \#(question),
+         "wait_reason": \#(waitReason), "additional_wait_reasons": \#(additionalWaitReasons),
+         "kept_reason": \#(quoted(kept)), "held_reason": null, "percent_complete": null, "size_question": \#(question),
          "bytes": \#(bytes), "original_bytes": \#(original.map(String.init) ?? "null"), "original_backup": \#(backup)}
         """#
     }
@@ -48,6 +49,42 @@ final class ItemTests: XCTestCase {
         XCTAssertEqual(Words.fileState(season.files[0]), "Kept original: you put the original back")
         XCTAssertEqual(Words.fileState(season.files[1]), "Didn't pass its check")
         XCTAssertTrue(Words.waitingReason(season.files[1]).hasPrefix("The compressed copy didn't pass its check"))
+    }
+
+    func testAutomaticallyKeptOriginalsSayWhyWithoutAskingForAnotherDecision() throws {
+        let reasons = ["check_failed", "over_size"]
+        let season = try facts(reasons.enumerated().map { index, reason in
+            file(index + 1, stage: "kept_original", bytes: 500, validation: "failed", kept: reason)
+        })
+
+        XCTAssertTrue(season.waiting.isEmpty)
+        for (file, reason) in zip(season.files, reasons) {
+            XCTAssertNotEqual(Words.keptReason("motion_\(reason)"), Words.keptReason(""))
+            XCTAssertTrue(Words.fileState(file).contains(Words.keptReason("motion_\(reason)")))
+        }
+    }
+
+    func testReviewFilesSelectsAWaitingFileWhileKeepingAnExplicitSelection() throws {
+        let season = try facts([
+            file(1, stage: "published", bytes: 100, original: 700, backup: true),
+            file(2, stage: "kept_original", bytes: 500, kept: "check_failed"),
+            file(3, stage: "needs_you", bytes: 900, validation: "size_held"),
+        ])
+
+        XCTAssertEqual(season.selectedFile(nil)?.id, season.waiting.first?.id)
+        XCTAssertEqual(season.selectedFile(1)?.id, 1)
+        XCTAssertEqual(season.selectedFile(999)?.id, season.waiting.first?.id)
+        let finished = try facts([file(1, stage: "published", bytes: 100, original: 700, backup: true)])
+        XCTAssertEqual(finished.selectedFile(nil)?.id, finished.files.first?.id)
+    }
+
+    func testAnAutomaticRetryDoesNotOfferAnEmptyFileReview() throws {
+        let retrying = try facts([file(1, stage: "waiting", bytes: 900, validation: "failed")])
+        let waiting = try facts([file(1, stage: "needs_you", bytes: 900, validation: "size_held")])
+        let actions: [SampleFacts.Action] = [.reviewFiles, .retryUnfinished]
+
+        XCTAssertEqual(retrying.workActions(actions), [.retryUnfinished])
+        XCTAssertEqual(waiting.workActions(actions), actions)
     }
 
     func testEachWaitSaysWhyInPlainWords() throws {
@@ -92,6 +129,19 @@ final class ItemTests: XCTestCase {
         XCTAssertEqual(Set(season.files.map(Words.waitingReason)).count, 3)
     }
 
+    func testScheduledWorkWaitsWithoutAskingForAttention() throws {
+        let season = try facts([
+            file(1, stage: "waiting", bytes: 100, waitReason: #"{"code": "controller_work_window"}"#),
+            file(2, stage: "waiting", bytes: 100,
+                 additionalWaitReasons: #"[{"code": "controller_work_disabled"}]"#),
+        ])
+
+        XCTAssertEqual(season.waiting.map(\.libraryItemId), [2])
+        XCTAssertFalse(season.files[0].needsYou)
+        XCTAssertNotEqual(Words.fileState(season.files[0]), Words.fileState(season.files[1]))
+        XCTAssertFalse(Words.waitingReason(season.files[0]).isEmpty)
+    }
+
     func testASizeQuestionNamesBothSizes() throws {
         let question = #"{"job_id": "job-7", "rel_path": "x", "goal_bytes": 300000000, "smallest_quality_safe_bytes": 420000000, "reason": "quality_needs_more"}"#
         let season = try facts([file(7, stage: "needs_you", bytes: 900, question: question)])
@@ -103,6 +153,27 @@ final class ItemTests: XCTestCase {
         XCTAssertEqual(Words.allowLarger(try XCTUnwrap(waiting.sizeQuestion)), "Allow 420 MB")
     }
 
+    func testAdditionalHoldsKeepCurrentWorkAndSizeChoicesVisible() throws {
+        let computer = "Review Mini"
+        let oldHold = #"[{"code": "restart_stopped", "computer": "\#(computer)"}]"#
+        let question = #"{"job_id": "current-question", "rel_path": "x", "goal_bytes": 300000000, "smallest_quality_safe_bytes": 420000000}"#
+        let baseline = try facts([
+            file(1, stage: "compressing", bytes: 900),
+            file(2, stage: "needs_you", bytes: 900, question: question),
+        ])
+        let held = try facts([
+            file(1, stage: "compressing", bytes: 900, additionalWaitReasons: oldHold),
+            file(2, stage: "needs_you", bytes: 900, question: question, additionalWaitReasons: oldHold),
+        ])
+
+        XCTAssertEqual(held.waiting.map(\.libraryItemId), held.files.map(\.libraryItemId))
+        XCTAssertEqual(Words.fileState(held.files[0]), Words.fileState(baseline.files[0]))
+        XCTAssertEqual(held.files[1].sizeQuestion?.jobId, baseline.files[1].sizeQuestion?.jobId)
+        XCTAssertTrue(Words.waitingReason(held.files[0]).contains(computer))
+        XCTAssertTrue(Words.waitingReason(held.files[1]).contains(Words.waitingReason(baseline.files[1])))
+        XCTAssertTrue(Words.waitingReason(held.files[1]).contains(computer))
+    }
+
     func testTheShowChoicesDecodeForTheSettingsSection() throws {
         let season = try facts(
             [file(1, stage: "published", bytes: 1)],
@@ -112,7 +183,8 @@ final class ItemTests: XCTestCase {
 
         XCTAssertEqual(season.sound?.options.map(Words.soundName), ["Film", "Speech-heavy"])
         let airing = try XCTUnwrap(season.stillAiring)
-        XCTAssertTrue(Words.stillAiringExplanation(airing).hasSuffix("TMDB says it has ended."))
+        XCTAssertEqual(airing.seriesPrefix, "tv/Futurama")
+        XCTAssertEqual(airing.airing, false)
     }
 
     func testANotificationOpensThePageItIsAbout() {

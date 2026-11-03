@@ -27,6 +27,8 @@ struct ServerStatusView: View {
     var problem: ServerProblem?
     // Read each time the window draws this card, so setting Mediaforce up while it is open shows at the next check.
     var serviceInstalled = BackgroundService.isInstalled
+    // In the main window the window's title says the headline, as every page is named; in Settings it heads the card.
+    var headlineInTitleBar = false
     let retry: () -> Void
     @State private var working = false
     @State private var serviceRefusal: String?
@@ -35,13 +37,11 @@ struct ServerStatusView: View {
     var body: some View {
         let situation = ServerSituation(state, serviceInstalled: serviceInstalled)
         VStack(spacing: 14) {
-            Image(systemName: Words.serverSymbol(situation))
-                .font(.system(size: 44, weight: .light))
-                .foregroundStyle(.secondary)
-                .frame(height: 56)
-            Text(Words.serverHeadline(situation))
-                .font(.system(size: 24, weight: .bold))
-                .multilineTextAlignment(.center)
+            if !headlineInTitleBar {
+                Text(Words.serverHeadline(situation))
+                    .font(.title2.weight(.semibold))
+                    .multilineTextAlignment(.center)
+            }
             Text(Words.serverSentence(situation))
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)

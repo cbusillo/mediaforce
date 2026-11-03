@@ -4,21 +4,30 @@ import SwiftUI
 struct PageFrame<Content: View>: View {
     let title: String
     var subtitle = ""
+    var scrolls = true
     @ViewBuilder let content: Content
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                content
+        Group {
+            if scrolls {
+                ScrollView { document }
+            } else {
+                document
             }
-            .padding(.horizontal, 34)
-            .padding(.vertical, 20)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollBounceBehavior(.basedOnSize)
         .background(Color(nsColor: .textBackgroundColor))
         .navigationTitle(title)
         .navigationSubtitle(subtitle)
+    }
+
+    private var document: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            content
+        }
+        .padding(.horizontal, 34)
+        .padding(.vertical, 20)
+        .frame(maxWidth: .infinity, maxHeight: scrolls ? nil : .infinity, alignment: .topLeading)
     }
 }
 
@@ -26,6 +35,9 @@ struct PageFrame<Content: View>: View {
 struct RefreshingPage<Facts: Sendable, Content: View>: View {
     let title: String
     var subtitle = ""
+    var scrolls = true
+    // A subtitle that counts what the facts hold; the plain subtitle stands until they arrive.
+    var factsSubtitle: ((Facts) -> String)?
     let load: @MainActor () async throws -> Facts
     @ViewBuilder let content: (Facts) -> Content
     @State private var facts: Facts?
@@ -33,7 +45,7 @@ struct RefreshingPage<Facts: Sendable, Content: View>: View {
     @State private var lastHeard: Date?
 
     var body: some View {
-        PageFrame(title: title, subtitle: subtitle) {
+        PageFrame(title: title, subtitle: facts.flatMap { factsSubtitle?($0) } ?? subtitle, scrolls: scrolls) {
             if let facts {
                 if refreshFailed {
                     StaleNotice(connection: .failing, lastHeard: lastHeard)
@@ -78,3 +90,23 @@ struct LibraryStatePicker: View {
     }
 }
 
+/// A decision as one plain line with its buttons beside it, as on a kind's page. When the buttons leave the line too
+/// little room, they move under it instead of squeezing it.
+struct DecisionLine<Line: View, Buttons: View>: View {
+    @ViewBuilder let line: Line
+    @ViewBuilder let buttons: Buttons
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                line
+                Spacer(minLength: 12)
+                HStack(spacing: 8) { buttons }.fixedSize()
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                line.fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) { buttons }.fixedSize()
+            }
+        }
+    }
+}

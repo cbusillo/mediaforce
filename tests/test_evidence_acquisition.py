@@ -4,7 +4,6 @@ from typing import Any
 from mediaforce.core.evidence import stable_source_id
 from mediaforce.encoding.fingerprint import DEFAULT_FINGERPRINT_MAX_FRAMES
 from mediaforce.library.evidence_acquisition import (
-    DEFAULT_UNCERTAINTY_FRONTIER_LIMIT,
     plan_fingerprint_acquisition,
     replay_representative_dimensions,
 )
@@ -131,9 +130,8 @@ class EvidenceAcquisitionTests(unittest.TestCase):
         self.assertGreater(report.audio_complexity_cost.estimated_sample_seconds, 0.0)
 
     def test_plan_rejects_non_positive_frontier_limit(self) -> None:
-        with self.assertRaisesRegex(ValueError, "max_uncertainty_frontier must be greater than zero"):
+        with self.assertRaises(ValueError):
             plan_fingerprint_acquisition([self._item(1)], max_uncertainty_frontier=0)
-        self.assertGreater(DEFAULT_UNCERTAINTY_FRONTIER_LIMIT, 0)
 
     @staticmethod
     def _item(

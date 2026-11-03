@@ -1,10 +1,10 @@
 import logging
 import threading
 import time
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from concurrent.futures import Future, ThreadPoolExecutor
 from types import TracebackType
-from typing import Protocol
+from typing import Any, Protocol
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
@@ -16,10 +16,11 @@ from mediaforce.library.evidence_queue import (
     EvidenceWorkClaim,
     next_evidence_work_query,
     original_intake_hold,
+    refresh_controller_digest_waits,
     waiting_evidence_host_roots,
 )
 from mediaforce.library.source_intake import assess_source_input
-from mediaforce.library.evidence_hosts import remote_evidence_hosts
+from mediaforce.library.evidence_hosts import collect_evidence_host_rows, controller_digest_window, remote_evidence_hosts
 
 
 class StopSignal(Protocol):
@@ -27,11 +28,13 @@ class StopSignal(Protocol):
 
 
 class SourceAdmissionPrefetcher:
-    def __init__(self, *, stop_event: StopSignal | None, logger: logging.Logger, deadline: float | None = None) -> None:
+    def __init__(self, *, stop_event: StopSignal | None, logger: logging.Logger, deadline: float | None = None,
+                 evidence_host_rows: Callable[[MediaforceConfig], list[dict[str, Any]]] = collect_evidence_host_rows) -> None:
         self._stop_event = stop_event
         self._closed = threading.Event()
         self._deadline = deadline
         self._logger = logger
+        self._evidence_host_rows = evidence_host_rows
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="original-admission")
         self._future: Future[None] | None = None
 
@@ -52,7 +55,9 @@ class SourceAdmissionPrefetcher:
             self._logger.exception("Original admission preparation could not start; continuing the current file")
 
     def _prepare_next(self, config: MediaforceConfig, claim: EvidenceWorkClaim, roots: frozenset[str]) -> None:
+        window = controller_digest_window(config, self._evidence_host_rows)
         with open_db(config.paths.db_path) as connection:
+            refresh_controller_digest_waits(connection, window)
             item_id = self._next_item(config, connection, claim, roots)
         if item_id is not None:
             self._prepare(config, claim, item_id, roots)
@@ -107,6 +112,7 @@ class SourceAdmissionPrefetcher:
         try:
             check_cancelled()
             with controller.activity_guard(check_cancelled):
-                assess_source_input(config, item_id, controller, check_cancelled, before_commit=require_runnable)
+                assess_source_input(config, item_id, controller, controller.throw_if_cancelled, before_commit=require_runnable,
+                    digest_guard=lambda: controller_digest_window(config, self._evidence_host_rows).guard(controller))
         finally:
             controller.reset()

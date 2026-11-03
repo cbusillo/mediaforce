@@ -27,6 +27,11 @@ The current implementation covers:
 - discovery and inventory into SQLite, refreshed in the background
 - the Mac app: TV, Movies, and Other libraries, Activity, Finished, and
   Settings, talking to the local server's API
+- “Needs you” gathers every item counted by the Dock badge, with links to sample decisions,
+  kind approvals, seasons, computers, and original-backup cleanup. Opening the app from the Dock, its waiting
+  menu-bar notice, or a notification shows the list while anything waits
+- the Mac Media table fills the available window below its filters, with one
+  scrollbar for its rows and a visible column header while browsing
 - per-file sample, encode, and machine validation across configured encode
   hosts, with work-window schedules
 - measured evidence (motion pattern, media fingerprint) checked automatically
@@ -36,7 +41,29 @@ The current implementation covers:
   original-file archival under the transcode root,
   and user-approved cleanup of those rollback copies
 
-A sample is still approved per show. Finished production files are checked and
+Approving a live-action kind’s representative sample approves the kind across
+its shows. The kind keeps the watched sample as its evidence. Choose
+“Approve only this season” for a season-only decision.
+Live-action seasons can follow one approval for their kind of content. Older unapproved
+season samples stop asking separately when they finished before the kind was
+approved or before its newest sample was requested. Newer samples, uncertain timing,
+and existing folder approvals keep their own decision. While the kind waits for a
+choice, its newest sample stays available, even after that season finishes.
+Every unapproved kind with waiting shows appears in Needs you, including while
+its sample is being prepared or needs attention. Mediaforce automatically requests
+a first sample using the existing sample queue and size settings. Needs you
+notifies when the sample is ready to watch or needs a decision. An existing
+approved setting comes first. An unsuitable sample stays reachable and stops
+automatic sampling of further shows until that kind's choice is settled.
+Cartoons and 4K continue to need
+a choice for each show. Seasons missing original measurements wait for measuring without a sample decision, even
+when an older sample is saved. After measuring, they follow their kind; measured
+seasons without a reusable kind keep their own sample decisions. A blocked
+measurement names its reason and next action on the season and sample page:
+library processing needs enabling when disabled, or files need support to identify
+their format safely. Files already excluded from conversion do not block measuring
+the remaining originals. It does not ask for approval of the old sample.
+Saved sample files are retained. Finished production files are checked and
 published automatically one at a time under their current approval. Manual
 checking and publishing remain explicit overrides. Rollback copies stay until
 the user approves cleanup.
@@ -75,7 +102,7 @@ For migration authoring and review workflow, see
 `docs/development/database-tooling.md`.
 
 Transient calibration artifacts are also cleaned up automatically. By default,
-Mediaforce purges cached review clips, temporary calibration manifests, and
+Mediaforce purges cached review clips that no kind approval still references, temporary calibration manifests, and
 `/Volumes/media/transcode/_calibration/` scratch outputs after `14` days.
 While the server or CLI is in active use, it also retries that cleanup sweep at
 most once per hour so stale files get another chance to disappear if an earlier
@@ -114,12 +141,68 @@ automatic balanced default.
 - runtime state: stored under `~/Library/Application Support/mediaforce/`
   and `~/Library/Caches/mediaforce/review/`
 
+### Mac page screenshots
+
+Run the app executable directly to render live server data into PNGs in light
+and dark. Rendering draws its own page hierarchy into a window that is never
+shown, with no Computer Use or Screen Recording permission. Run it in a
+logged-in macOS session:
+
+```bash
+/Applications/Mediaforce.app/Contents/MacOS/Mediaforce render /path/to/captures
+```
+
+Use a task build's executable before its source is installed. The default set
+includes Library and each library, Needs you, Activity, Space saved, Media,
+every Settings section and kind, and available examples of a show, season,
+sample, movie and other folder. Missing live states are not manufactured.
+Select specific pages with repeated `--page` options:
+
+```bash
+Mediaforce render /path/to/captures --page needs-you --page 'sample:tv/Show/Season 1'
+```
+
+Other page names are `library`, `tv`, `movies`, `other`, `activity`,
+`space-saved`, `media`, `kind:CODE`, `item:PREFIX`, `settings:libraries`,
+`settings:compression`, `settings:computers` and `settings:metadata`.
+`--server URL` selects another server; the default is the app's local server.
+`--width POINTS` and `--height POINTS` adjust the viewport. Settings retain
+their normal form width. Use a new empty output directory for each run so old
+PNGs cannot be mistaken for current evidence. A page whose required data fails to load makes the command
+fail instead of producing a successful loading-state capture.
+
+Agents post these PNGs on the owning issue or PR for appearance evidence.
+They show the actual shared page content and title bar, without the sidebar
+or Settings tab selector: those native vibrant selections cannot be captured
+faithfully in an unshown window. Screenshots prove appearance, not click
+routing; video frames in the compare player may be blank. The macOS CI render
+job exercises the same renderer in the native test gate, reusing existing fixtures, and
+keeps its PNGs in the `mac-pages` artifact. It fails for unreadable or blank
+pages; it does not compare pixel hashes against a saved design.
+
 ## Commands
 
 On macOS, Mediaforce now prefers Homebrew's `ffmpeg-full` and `ffprobe` from
 `/opt/homebrew/opt/ffmpeg-full/bin` when present so VMAF support survives PATH
 changes and normal formula upgrades. You can override either binary with
 `MEDIAFORCE_FFMPEG` or `MEDIAFORCE_FFPROBE`.
+
+Library in the Mac sidebar combines TV, Movies and Other. Expand Library to
+browse TV or Movies on their own; Other appears when it contains media. Each
+uses the same storage summary and state shelves, opening the existing show,
+movie or folder page. TV's finished seasons, approved samples and biggest
+unstarted shows remain available in Library and TV. Browse all opens the
+complete Media list for the selected library, and a shelf heading opens that
+state. The separate Media sidebar entry shows everything. State, search and
+table/poster controls stay in Media, without a second library picker.
+All summaries show current size and how much remains original; the combined
+Library also links to total space saved. Storage totals and computer status
+remain visible when a list cannot load.
+
+The sidebar keeps the last kinds received while retrying an unanswered refresh.
+
+The compression list counts current file questions. Published files and files settled by a
+later run stop asking for attention; their saved compression-job history stays intact.
 
 API reads only report persisted catalog and job state; opening or
 polling a page does not start scans, host probes, or media analysis. Catalog
@@ -153,6 +236,17 @@ and cancels the remainder. See `docs/architecture/evidence-worker.md`.
 
 The TV library (`/` or `/folders`) lists shows. Open a show for show-wide
 actions, or a season for season actions.
+
+The Mac app's back button shows a chevron and the name of the page you came
+from, then returns to it, including Media, Space saved, a kind, or another
+show, season or sample.
+Changing the selection in the sidebar starts a new browsing path.
+Opening a page from a notification or the menu bar keeps a way back to the
+page already open in the window.
+
+In the Mac app, a show's seasons follow the player and show choices, so loading
+the season list leaves the player in place. The file list highlights the file
+shown in the player, including the first file chosen when the page opens.
 
 Folder calibration now uses a size-first review flow by default. The checked-in
 defaults aim for roughly 300 MB per 45-minute episode at up to 1080p, then use
@@ -495,6 +589,9 @@ per-show or per-season tuning there.
 Bench-approved drafts are saved locally in runtime settings so future runs on
 that machine can reuse them without changing the tracked repo defaults.
 
+Plex posters are requested at display-sized dimensions to avoid downloading
+full-size artwork.
+
 Use the Mac app's Settings for ordered typed library roots, the transcode folder,
 remote host definitions, the Plex server URL, and Plex-to-Mediaforce path
 mappings so those environment details stay off the checked-in repo. Library
@@ -680,6 +777,16 @@ operating system exposes one, use fixed UTC offsets only as a compatibility
 fallback, and publish exact UTC close and next-open transitions for runtime
 enforcement and user surfaces.
 
+Work windows can instead allow the current file to finish. Enable that close
+behavior in Settings → Computers → Work windows.
+A file admitted before closing finishes its encode, checks and normal publication;
+no next file starts until the window opens again. This avoids throwing away a
+partial encode on a computer used for other work during the day. Duration
+estimates still hold back files unlikely to fit before closing; the option
+protects a running file when that estimate was too short. Legacy multi-file
+jobs retain their hard stop; new queue work is one file per job. Manual
+`Bypass scheduler` requests still explicitly override the work window.
+
 Bounded host schedules are hard execution windows. A non-bypassed quality
 search or episode encode receives the selected host's absolute UTC close
 deadline; controller-side cancellation and a host-side watchdog stop encode
@@ -717,6 +824,11 @@ estimates stay blank until one exists: quality search and an unmeasured job
 never show `0s`. Queue and season estimates cover only work that will run on
 its own and say how many items they leave out because they wait for you or did
 not finish.
+
+The Mac app's Review Files action opens the item page with a waiting file
+selected. On the item page it brings the waiting files into view. Files kept original after repeated failed checks or an
+oversized copy say why beside the file and no longer ask for a decision,
+even while a failed copy waits for automatic cleanup.
 
 Transient SSH transport failures, including a remote host reboot or an OpenSSH
 `closed by remote host` disconnect, enter bounded retry backoff instead of
@@ -816,3 +928,15 @@ target: large 1080p H.264 episodes with DTS 5.1 audio and low grain.
 Promotion moves the original source into `/Volumes/media/transcode/_replaced`
 before replacing it with the staged `.mkv`, which keeps rollback straightforward
 without leaving the active library in an ambiguous state.
+
+The Mac app's Activity page puts every computer on the same next-24-hours
+clock. Shaded stretches show work windows; current and estimated files sit on
+those stretches. Each working computer shows progress and a finish estimate
+when one is known. The numbered line-up names the file, estimated start and
+computer; unknown starts remain listed. These forecasts use the existing
+computer history and window rules, and may change as computers become free.
+Activity reads its forecast only while the page is open. The next approved season is named below them. “Held back for you” uses the
+same waiting items and links as Needs you, including original-backup cleanup.
+
+Past attempts still marked as held remain available below the current decisions;
+Activity does not clear those records or count them as new decisions.

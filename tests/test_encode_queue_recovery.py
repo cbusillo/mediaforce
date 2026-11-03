@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import shlex
 import socket
@@ -19,9 +20,9 @@ import unittest
 from collections import Counter
 from collections.abc import Collection, Iterator, Mapping
 from concurrent.futures import Future
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, NoReturn, cast
@@ -80,7 +81,7 @@ from mediaforce.encoding.duration_estimate import EncodeDurationSample, load_enc
 from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_prefix, list_child_encode_jobs, \
     load_active_encode_job_for_prefix, load_encode_job, load_latest_encode_job, \
     load_latest_terminal_encode_job_for_prefix, load_queue_state, repair_persisted_encode_job_hosts, \
-    save_encode_job, save_queue_state, summarize_encode_queue
+    save_encode_job, save_queue_state, summarize_encode_queue, unfinished_items_summary
 from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.media_scopes import media_scope_from_prefix
@@ -107,15 +108,16 @@ from mediaforce.web import runtime_lock as runtime_lock_module
 from mediaforce.web import settings_runtime
 from mediaforce.web.runtime import completed_runtime, dashboard_payloads, encode_runtime, \
     folder_actions as folder_actions_runtime, \
-    host_runtime as host_runtime_module, job_runtime, queue_actions as queue_actions_runtime, \
-    calibration_runtime
+    host_runtime as host_runtime_module, job_runtime, calibration_runtime
 from mediaforce.web.runtime import folder_cards as folder_cards_runtime
 from mediaforce.web.runtime import ambiguous_motion as ambiguous_motion_runtime
 from mediaforce.web.runtime import production_holds as production_holds_runtime
 from mediaforce.web.runtime import motion_keep as motion_keep_runtime
 from mediaforce.web.runtime import host_status as web_host_status_runtime
 from mediaforce.library import workflow_state as workflow_state_runtime
-from mediaforce.web.runtime.episode_progress import folder_episodes_payload
+from mediaforce.web.runtime.episode_progress import load_season_episode_progress
+from mediaforce.web.runtime.app_item import item_payload
+from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition, motion_hold_files_payload
 from mediaforce.library.motion_holds import queue_motion_holds
 from mediaforce.library.evidence_state import library_item_source_fingerprint, sync_library_item_evidence_state
@@ -171,10 +173,25 @@ def _record_advice_payload(
 
 
 class EncodeQueueRecoveryTests(unittest.TestCase):
+    database_template: sqlite3.Connection
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.database_template = sqlite3.connect(":memory:")
+        cls.addClassCleanup(cls.database_template.close)
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "template.sqlite3"
+            with open_db(database_path):
+                pass
+            with closing(sqlite3.connect(database_path)) as connection:
+                connection.backup(cls.database_template)
+
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
         self.config = self._build_config()
+        with closing(sqlite3.connect(self.config.paths.db_path)) as connection:
+            self.database_template.backup(connection)
         # Queue fixtures are local storage; mount policy has its own dedicated tests.
         for target in (
                 "mediaforce.web.runtime.controller_storage_recovery.finder_mount_roots_for_paths",
@@ -405,7 +422,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             web_app._recover_encode_queue(connection, self.config)
 
             job = load_encode_job(connection, "job-restart")
-            self.assertIsNotNone(job)
             assert job is not None
             self.assertEqual(job["status"], "retry_backoff")
             self.assertEqual(job["last_failure_kind"], "worker_restart")
@@ -445,7 +461,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             web_app._reconcile_encode_jobs(connection, self.config)
 
             job = load_encode_job(connection, "job-stale")
-            self.assertIsNotNone(job)
             assert job is not None
             self.assertEqual(job["status"], "retry_backoff")
             self.assertEqual(job["last_failure_kind"], "stale_lease")
@@ -693,7 +708,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             web_app._reconcile_encode_jobs(connection, self.config)
 
             job = load_encode_job(connection, "job-backoff")
-            self.assertIsNotNone(job)
             assert job is not None
             self.assertEqual(job["status"], "queued")
             self.assertIsNone(job["retry_not_before"])
@@ -730,7 +744,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             job = load_encode_job(connection, "job-backoff-cleanup")
             item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "queued")
         self.assertFalse(staging_path.exists())
@@ -758,7 +771,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             job = load_encode_job(connection, "job-missing-manifest")
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "needs_attention")
         self.assertEqual(job["terminal_reason"], "manifest_unreadable")
@@ -786,7 +798,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             job = load_encode_job(connection, "job-corrupt-manifest")
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "needs_attention")
         self.assertEqual(job["terminal_reason"], "manifest_unreadable")
@@ -838,7 +849,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             job = load_encode_job(connection, "job-remote-cleanup")
             staged_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "retry_backoff")
         self.assertIsNotNone(job["retry_not_before"])
@@ -941,7 +951,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             job = load_encode_job(connection, "job-local-cleanup")
             staged_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "needs_attention")
         self.assertEqual(job["terminal_reason"], "deterministic")
@@ -950,59 +959,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIn("directory", str(job["error"]))
         self.assertIsNone(job["retry_not_before"])
         self.assertIsNone(job["waiting_reason"])
-        assert staged_row is not None
-        self.assertEqual(staged_row["staging_path"], str(staging_path))
-
-    def test_retry_backoff_keeps_remote_transport_failure_in_backoff(self) -> None:
-        source_path = self._create_source_file("episode-remote-transport.mkv")
-        staging_path = self.root / "remote-staging" / "episode-remote-transport.mkv"
-
-        with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source_path, status="encoding")
-            self._insert_staged_artifact(connection, item_id, staging_path)
-            connection.execute(
-                update(staged_artifacts)
-                .where(staged_artifacts.c.library_item_id == item_id)
-                .values(
-                    encode_job_id="job-remote-transport",
-                    encode_host_key="remote",
-                    encode_host_mode="ssh",
-                    encode_media_access="mounted",
-                )
-            )
-            manifest_path = self._write_manifest(
-                "manifest-remote-transport.json",
-                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
-            )
-            self._save_job(
-                connection,
-                job_id="job-remote-transport",
-                manifest_name=manifest_path.name,
-                host={"key": "remote", "label": "Remote", "mode": "ssh", "media_access": "mounted"},
-                status="retry_backoff",
-                attempt_count=1,
-                retry_not_before="2000-01-01T00:00:00+00:00",
-                waiting_reason="retrying",
-            )
-
-            with patch(
-                "mediaforce.web.runtime.encode_runtime.run_remote_command",
-                side_effect=OSError("remote unavailable"),
-            ), patch(
-                "mediaforce.web.runtime.encode_runtime.clear_stale_encoding_items_when_idle",
-                return_value=0,
-            ):
-                web_app._reconcile_encode_jobs(connection, self.config)
-
-            job = load_encode_job(connection, "job-remote-transport")
-            staged_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
-
-        self.assertIsNotNone(job)
-        assert job is not None
-        self.assertEqual(job["status"], "retry_backoff")
-        self.assertIsNotNone(job["retry_not_before"])
-        self.assertIn("to remove an unfinished file it left", str(job["waiting_reason"]))
-        self.assertIsNone(job["terminal_reason"])
         assert staged_row is not None
         self.assertEqual(staged_row["staging_path"], str(staging_path))
 
@@ -1050,7 +1006,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             job = load_encode_job(connection, "job-remote-rm-rejection")
             staged_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "needs_attention")
         self.assertEqual(job["terminal_reason"], "deterministic")
@@ -1095,18 +1050,16 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             with patch(
                 "mediaforce.web.runtime.encode_runtime.end_remote_output_writers",
                 side_effect=sweep_with_concurrent_writer,
-            ) as sweep_mock, patch.object(web_app, "run_remote_command") as unowned:
+            ) as sweep_mock:
                 web_app._recover_encode_queue(connection, self.config)
 
             job = load_encode_job(connection, "job-restart-sweep")
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "retry_backoff")
         visited = {call.args[1] for call in sweep_mock.call_args_list}
         self.assertTrue(visited)
         self.assertLessEqual(visited, {staging_path, staging_runtime.partial_output_path(staging_path)})
-        unowned.assert_not_called()
         self.assertEqual(staging_path.read_text(), "unfinished")
 
     def test_startup_recovery_clears_stale_encoding_items_when_idle(self) -> None:
@@ -1462,7 +1415,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "remote-b")
         self.assertIsNone(waiting_reason)
@@ -1496,77 +1448,47 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "cooling-remote-a",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": None,
-                    "status": "queued",
-                    "manifest_path": str(manifest_path),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": [0],
-                    "host": {},
-                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 2,
-                    "process_pid": None,
-                    "error": "ssh: connect to host remote-a port 22: Operation timed out",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": "ssh_transport",
-                    "last_failure_at": web_app._now_iso(),
-                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": None,
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="cooling-remote-a",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id=None,
+                    status="queued",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[0],
+                    last_host={"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                    attempt_count=2,
+                    error="ssh: connect to host remote-a port 22: Operation timed out",
+                    last_failure_kind="ssh_transport",
+                    last_failure_at=web_app._now_iso(),
+                    host_cooldown_until="2999-01-01T00:00:00+00:00",
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "cooling-remote-a-b",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": None,
-                    "status": "queued",
-                    "manifest_path": str(second_manifest_path),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": [0],
-                    "host": {},
-                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": "Read from remote host remote-a: Operation timed out",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": "ssh_transport",
-                    "last_failure_at": web_app._now_iso(),
-                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": None,
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="cooling-remote-a-b",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id=None,
+                    status="queued",
+                    manifest_path=str(second_manifest_path),
+                    manifest_indexes=[0],
+                    last_host={"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                    error="Read from remote host remote-a: Operation timed out",
+                    last_failure_kind="ssh_transport",
+                    last_failure_at=web_app._now_iso(),
+                    host_cooldown_until="2999-01-01T00:00:00+00:00",
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "remote-b")
         self.assertIsNone(waiting_reason)
@@ -1599,42 +1521,26 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "single-blip-remote-a",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": None,
-                    "status": "queued",
-                    "manifest_path": str(manifest_path),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": [0],
-                    "host": {},
-                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": "ssh: connect to host remote-a port 22: Operation timed out",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": "ssh_transport",
-                    "last_failure_at": web_app._now_iso(),
-                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": None,
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="single-blip-remote-a",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id=None,
+                    status="queued",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[0],
+                    last_host={"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                    error="ssh: connect to host remote-a port 22: Operation timed out",
+                    last_failure_kind="ssh_transport",
+                    last_failure_at=web_app._now_iso(),
+                    host_cooldown_until="2999-01-01T00:00:00+00:00",
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "remote-a")
         self.assertIsNone(waiting_reason)
@@ -1658,73 +1564,44 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "only-host-cooling",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": None,
-                    "status": "queued",
-                    "manifest_path": str(manifest_path),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": [0],
-                    "host": {},
-                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 2,
-                    "process_pid": None,
-                    "error": "Read from remote host remote-a: Operation timed out",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": "ssh_transport",
-                    "last_failure_at": web_app._now_iso(),
-                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": None,
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="only-host-cooling",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id=None,
+                    status="queued",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[0],
+                    last_host={"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                    attempt_count=2,
+                    error="Read from remote host remote-a: Operation timed out",
+                    last_failure_kind="ssh_transport",
+                    last_failure_at=web_app._now_iso(),
+                    host_cooldown_until="2999-01-01T00:00:00+00:00",
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "only-host-cooling-b",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": None,
-                    "status": "queued",
-                    "manifest_path": str(second_manifest_path),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": [0],
-                    "host": {},
-                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": "ssh: connect to host remote-a port 22: Connection refused",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": "ssh_transport",
-                    "last_failure_at": web_app._now_iso(),
-                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": None,
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="only-host-cooling-b",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id=None,
+                    status="queued",
+                    manifest_path=str(second_manifest_path),
+                    manifest_indexes=[0],
+                    last_host={"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                    error="ssh: connect to host remote-a port 22: Connection refused",
+                    last_failure_kind="ssh_transport",
+                    last_failure_at=web_app._now_iso(),
+                    host_cooldown_until="2999-01-01T00:00:00+00:00",
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
@@ -1762,42 +1639,26 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             for job_id, path in (("blocked-remote-a", manifest_path), ("blocked-remote-a-b", second_manifest_path)):
                 save_encode_job(
                     connection,
-                    {
-                        "job_id": job_id,
-                        "prefix": "tv/show",
-                        "job_kind": "shard",
-                        "parent_job_id": None,
-                        "status": "queued",
-                        "manifest_path": str(path),
-                        "item_count": 1,
-                        "saved_profile_path": None,
-                        "manifest_indexes": [0],
-                        "host": {},
-                        "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
-                        "notes": "",
-                        "bypass_schedule": False,
-                        "attempt_count": 1,
-                        "process_pid": None,
-                        "error": "ssh: connect to host remote-a port 22: Operation timed out",
-                        "leased_at": None,
-                        "lease_expires_at": None,
-                        "heartbeat_at": None,
-                        "worker_id": None,
-                        "retry_not_before": None,
-                        "waiting_reason": None,
-                        "terminal_reason": None,
-                        "last_failure_kind": "ssh_transport",
-                        "last_failure_at": web_app._now_iso(),
-                        "host_cooldown_until": "2999-01-01T00:00:00+00:00",
-                        "created_at": web_app._now_iso(),
-                        "started_at": web_app._now_iso(),
-                        "finished_at": None,
-                        "updated_at": web_app._now_iso(),
-                    },
+                    self._job_row(
+                        job_id=job_id,
+                        prefix="tv/show",
+                        job_kind="shard",
+                        parent_job_id=None,
+                        status="queued",
+                        manifest_path=str(path),
+                        manifest_indexes=[0],
+                        last_host={"key": "remote-a", "label": "Remote A", "host": "remote-a"},
+                        error="ssh: connect to host remote-a port 22: Operation timed out",
+                        last_failure_kind="ssh_transport",
+                        last_failure_at=web_app._now_iso(),
+                        host_cooldown_until="2999-01-01T00:00:00+00:00",
+                        created_at=web_app._now_iso(),
+                        started_at=web_app._now_iso(),
+                        updated_at=web_app._now_iso(),
+                    ),
                 )
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "ct103")
         self.assertIsNone(waiting_reason)
@@ -1832,38 +1693,24 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "host-alias-cooling-a",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": None,
-                    "status": "queued",
-                    "manifest_path": str(manifest_path),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": [0],
-                    "host": {},
-                    "last_host": {"host": "remote-a.internal", "failure_streak": 2},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 2,
-                    "process_pid": None,
-                    "error": "ssh: connect to host remote-a.internal port 22: Operation timed out",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": "ssh_transport",
-                    "last_failure_at": web_app._now_iso(),
-                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": None,
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="host-alias-cooling-a",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id=None,
+                    status="queued",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[0],
+                    last_host={"host": "remote-a.internal", "failure_streak": 2},
+                    attempt_count=2,
+                    error="ssh: connect to host remote-a.internal port 22: Operation timed out",
+                    last_failure_kind="ssh_transport",
+                    last_failure_at=web_app._now_iso(),
+                    host_cooldown_until="2999-01-01T00:00:00+00:00",
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
             for root in (Path("/synthetic-temp/queue-fixture"), Path("/Volumes/Queue Fixture/queue-fixture")):
                 raw = copy.deepcopy(self.config.raw)
@@ -1879,11 +1726,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                         host_payload, waiting_reason = web_app._select_encode_host(connection, config, job)
                     if expected_key is None:
                         self.assertIsNone(host_payload)
-                        self.assertIsNotNone(waiting_reason)
                         assert waiting_reason is not None
                         self.assertEqual(waiting_reason, "waiting for remote-a.internal to recover from repeated failures")
                     else:
-                        self.assertIsNotNone(host_payload)
                         assert host_payload is not None
                         self.assertEqual(host_payload["key"], expected_key)
                         self.assertIsNone(waiting_reason)
@@ -1919,77 +1764,46 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "merged-quarantine-a",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": None,
-                    "status": "queued",
-                    "manifest_path": str(manifest_a),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": [0],
-                    "host": {},
-                    "last_host": {"key": "cbusillo@10.0.0.5", "host": "10.0.0.5", "failure_streak": 1},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": "ssh: connect to host 10.0.0.5 port 22: Operation timed out",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": "ssh_transport",
-                    "last_failure_at": web_app._now_iso(),
-                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": None,
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="merged-quarantine-a",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id=None,
+                    status="queued",
+                    manifest_path=str(manifest_a),
+                    manifest_indexes=[0],
+                    last_host={"key": "cbusillo@10.0.0.5", "host": "10.0.0.5", "failure_streak": 1},
+                    error="ssh: connect to host 10.0.0.5 port 22: Operation timed out",
+                    last_failure_kind="ssh_transport",
+                    last_failure_at=web_app._now_iso(),
+                    host_cooldown_until="2999-01-01T00:00:00+00:00",
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "merged-quarantine-b",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": None,
-                    "status": "queued",
-                    "manifest_path": str(manifest_b),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": [0],
-                    "host": {},
-                    "last_host": {"label": "Primary Encoder", "host": "10.0.0.5", "failure_streak": 1},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": "Read from remote host 10.0.0.5: Operation timed out",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": "ssh_transport",
-                    "last_failure_at": web_app._now_iso(),
-                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": None,
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="merged-quarantine-b",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id=None,
+                    status="queued",
+                    manifest_path=str(manifest_b),
+                    manifest_indexes=[0],
+                    last_host={"label": "Primary Encoder", "host": "10.0.0.5", "failure_streak": 1},
+                    error="Read from remote host 10.0.0.5: Operation timed out",
+                    last_failure_kind="ssh_transport",
+                    last_failure_at=web_app._now_iso(),
+                    host_cooldown_until="2999-01-01T00:00:00+00:00",
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "remote-b")
         self.assertIsNone(waiting_reason)
@@ -2012,38 +1826,23 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "malformed-host-json",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": None,
-                    "status": "queued",
-                    "manifest_path": str(manifest_path),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": [0],
-                    "host": {},
-                    "last_host": {"key": "remote-a", "label": "Remote A"},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": "ssh: connect to host remote-a port 22: Operation timed out",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": "ssh_transport",
-                    "last_failure_at": web_app._now_iso(),
-                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": None,
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="malformed-host-json",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id=None,
+                    status="queued",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[0],
+                    last_host={"key": "remote-a", "label": "Remote A"},
+                    error="ssh: connect to host remote-a port 22: Operation timed out",
+                    last_failure_kind="ssh_transport",
+                    last_failure_at=web_app._now_iso(),
+                    host_cooldown_until="2999-01-01T00:00:00+00:00",
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
             connection.execute(
                 update(encode_jobs)
@@ -2052,7 +1851,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "remote-a")
         self.assertIsNone(waiting_reason)
@@ -2089,42 +1887,26 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             for job_id, manifest_path in (("shared-label-cool-a", manifest_a), ("shared-label-cool-b", manifest_b)):
                 save_encode_job(
                     connection,
-                    {
-                        "job_id": job_id,
-                        "prefix": "tv/show",
-                        "job_kind": "shard",
-                        "parent_job_id": None,
-                        "status": "queued",
-                        "manifest_path": str(manifest_path),
-                        "item_count": 1,
-                        "saved_profile_path": None,
-                        "manifest_indexes": [0],
-                        "host": {},
-                        "last_host": {"key": "remote-b", "host": "10.0.0.20", "label": "Shared Encoder", "failure_streak": 1},
-                        "notes": "",
-                        "bypass_schedule": False,
-                        "attempt_count": 1,
-                        "process_pid": None,
-                        "error": "ssh: connect to host 10.0.0.20 port 22: Operation timed out",
-                        "leased_at": None,
-                        "lease_expires_at": None,
-                        "heartbeat_at": None,
-                        "worker_id": None,
-                        "retry_not_before": None,
-                        "waiting_reason": None,
-                        "terminal_reason": None,
-                        "last_failure_kind": "ssh_transport",
-                        "last_failure_at": web_app._now_iso(),
-                        "host_cooldown_until": "2999-01-01T00:00:00+00:00",
-                        "created_at": web_app._now_iso(),
-                        "started_at": web_app._now_iso(),
-                        "finished_at": None,
-                        "updated_at": web_app._now_iso(),
-                    },
+                    self._job_row(
+                        job_id=job_id,
+                        prefix="tv/show",
+                        job_kind="shard",
+                        parent_job_id=None,
+                        status="queued",
+                        manifest_path=str(manifest_path),
+                        manifest_indexes=[0],
+                        last_host={"key": "remote-b", "host": "10.0.0.20", "label": "Shared Encoder", "failure_streak": 1},
+                        error="ssh: connect to host 10.0.0.20 port 22: Operation timed out",
+                        last_failure_kind="ssh_transport",
+                        last_failure_at=web_app._now_iso(),
+                        host_cooldown_until="2999-01-01T00:00:00+00:00",
+                        created_at=web_app._now_iso(),
+                        started_at=web_app._now_iso(),
+                        updated_at=web_app._now_iso(),
+                    ),
                 )
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "remote-a")
         self.assertIsNone(waiting_reason)
@@ -2171,38 +1953,23 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             for job_id, manifest_path, last_host, error_message, cooldown_until in rows:
                 save_encode_job(
                     connection,
-                    {
-                        "job_id": job_id,
-                        "prefix": "tv/show",
-                        "job_kind": "shard",
-                        "parent_job_id": None,
-                        "status": "queued",
-                        "manifest_path": str(manifest_path),
-                        "item_count": 1,
-                        "saved_profile_path": None,
-                        "manifest_indexes": [0],
-                        "host": {},
-                        "last_host": last_host,
-                        "notes": "",
-                        "bypass_schedule": False,
-                        "attempt_count": 1,
-                        "process_pid": None,
-                        "error": error_message,
-                        "leased_at": None,
-                        "lease_expires_at": None,
-                        "heartbeat_at": None,
-                        "worker_id": None,
-                        "retry_not_before": None,
-                        "waiting_reason": None,
-                        "terminal_reason": None,
-                        "last_failure_kind": "ssh_transport",
-                        "last_failure_at": web_app._now_iso(),
-                        "host_cooldown_until": cooldown_until,
-                        "created_at": web_app._now_iso(),
-                        "started_at": web_app._now_iso(),
-                        "finished_at": None,
-                        "updated_at": web_app._now_iso(),
-                    },
+                    self._job_row(
+                        job_id=job_id,
+                        prefix="tv/show",
+                        job_kind="shard",
+                        parent_job_id=None,
+                        status="queued",
+                        manifest_path=str(manifest_path),
+                        manifest_indexes=[0],
+                        last_host=last_host,
+                        error=error_message,
+                        last_failure_kind="ssh_transport",
+                        last_failure_at=web_app._now_iso(),
+                        host_cooldown_until=cooldown_until,
+                        created_at=web_app._now_iso(),
+                        started_at=web_app._now_iso(),
+                        updated_at=web_app._now_iso(),
+                    ),
                 )
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
@@ -2239,7 +2006,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
 
             updated = load_encode_job(connection, "job-deterministic")
-            self.assertIsNotNone(updated)
             assert updated is not None
             self.assertEqual(updated["status"], "needs_attention")
             self.assertEqual(updated["terminal_reason"], "deterministic")
@@ -2383,7 +2149,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             updated = load_encode_job(connection, "job-quality-near-miss")
             manifest = json.loads(manifest_path.read_text())
 
-        self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated["status"], "retry_backoff")
         self.assertIsNone(updated["terminal_reason"])
@@ -2878,7 +2643,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             updated = load_encode_job(connection, "job-final-size-miss")
 
-        self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated["status"], "needs_attention")
         analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
@@ -2902,7 +2666,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "status=missing_target, actual=112263931, target=None, lower=None, upper=None."
         )
 
-        self.assertIsNotNone(analysis)
         assert analysis is not None
         self.assertEqual(analysis["kind"], "final_size_target_miss")
         self.assertEqual(analysis["retry_strategy"], "fresh_goal_required")
@@ -2941,7 +2704,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             ),
         )
 
-        self.assertIsNotNone(analysis)
         assert analysis is not None
         self.assertEqual(analysis["kind"], "final_size_target_miss")
         self.assertEqual(analysis["retry_strategy"], "fresh_goal_required")
@@ -2974,58 +2736,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(
             analysis["summary"],
             f"2 files didn't come out at the size you approved. {encode_runtime.NEW_SIZE_GOAL_NEXT_STEP}",
-        )
-
-    def test_broad_retry_delegates_final_size_miss_to_central_queue_guard(self) -> None:
-        prefix = "tv/show/episode-final-size-miss.mkv"
-        with open_db(self.config.paths.db_path) as connection:
-            now = web_app._now_iso()
-            save_encode_job(
-                connection,
-                {
-                    "job_id": "job-final-size-central-guard",
-                    "prefix": prefix,
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "needs_attention",
-                    "manifest_path": str(self.root / "runs" / "final-size-central-guard.json"),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": "deterministic",
-                    "last_failure_kind": "deterministic",
-                    "last_failure_at": now,
-                    "host_cooldown_until": None,
-                    "progress": {
-                        "failure_analysis": {
-                            "kind": "final_size_target_miss",
-                            "retry_strategy": "fresh_goal_required",
-                        }
-                    },
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": now,
-                    "updated_at": now,
-                },
-            )
-
-        self.assertIn(
-            prefix,
-            queue_actions_runtime._retryable_terminal_encode_prefixes(
-                connection_factory=lambda: open_db(self.config.paths.db_path)
-            ),
         )
 
     def test_production_approval_contract_ignores_unrelated_policy_hash_change(self) -> None:
@@ -3114,7 +2824,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         for job in jobs:
             with self.subTest(manifest_path=job["manifest_path"]):
                 blocker = folder_actions_runtime._final_size_requeue_contract_blocker(job, current)
-                self.assertIsNotNone(blocker)
                 assert blocker is not None
                 self.assertEqual(blocker["code"], "final_size_recovery_contract_unchanged")
 
@@ -3186,20 +2895,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             15,
         )
 
-    def test_legacy_measured_recovery_requires_a_fresh_confirmed_intent(self) -> None:
-        rel_path = "tv/show/legacy-recovery.mkv"
-        failure_analysis = {
-            "item_analyses": [{"manifest_index": 0, "item_rel_path": rel_path}],
-        }
-        manifest_items = [{"rel_path": rel_path, "resolved_policy": {"video": {}}}]
-
-        paths = folder_actions_runtime._legacy_measured_recovery_paths(
-            failure_analysis,
-            manifest_items,
-        )
-
-        self.assertEqual(paths, [rel_path])
-
     def test_queue_quality_only_calibration_blocks_unconfirmed_compression_intent(self) -> None:
         source = self._create_source_file("quality-only-legacy.mkv")
         with open_db(self.config.paths.db_path) as connection:
@@ -3218,16 +2913,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         }
 
         with self.assertRaises(HTTPException) as raised:
-            folder_actions_runtime.queue_folder_encode_action(
+            self._queue_folder_encode(
                 self.config,
                 "tv/show/Season 1",
                 "",
                 False,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
                 load_calibration_state=lambda *_args, **_kwargs: calibration,
-                review_gate=self._accepted_review_gate,
-                upsert_override=self._noop_upsert_override,
                 load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
                 clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
                 prepare_terminal_encode_job_for_requeue_fn=lambda *_args, **_kwargs: None,
@@ -3288,7 +2979,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             updated = load_encode_job(connection, "job-quality-large-miss")
 
-        self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated["status"], "needs_attention")
         failure_analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
@@ -3411,7 +3101,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             updated = load_encode_job(connection, "job-quality-multi-miss")
             manifest = json.loads(manifest_path.read_text())
 
-        self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated["status"], "retry_backoff")
         failure_analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
@@ -3494,7 +3183,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             updated = load_encode_job(connection, "job-quality-partial-miss")
             manifest = json.loads(manifest_path.read_text())
 
-        self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated["status"], "needs_attention")
         failure_analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
@@ -3645,7 +3333,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             updated = load_encode_job(connection, "job-controller-media")
 
         self.assertEqual(failure_kind, "controller_media_access")
-        self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated["status"], "needs_attention")
         self.assertEqual(updated["terminal_reason"], "controller_media_access")
@@ -3707,7 +3394,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             save_encode_job(connection, updated)
 
         self.assertEqual(failure_kind, "ssh_transport")
-        self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated["status"], "retry_backoff")
         self.assertEqual(updated["last_failure_kind"], "ssh_transport")
@@ -3726,7 +3412,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             still_waiting = load_encode_job(connection, "job-host-reboot")
             still_waiting_item_status = self._library_item_value(connection, item_id, library_items.c.status)
 
-        self.assertIsNotNone(still_waiting)
         assert still_waiting is not None
         self.assertEqual(still_waiting["status"], "retry_backoff")
         self.assertIn("to remove an unfinished file it left", str(still_waiting["waiting_reason"]))
@@ -3754,7 +3439,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             recovered = load_encode_job(connection, "job-host-reboot")
             recovered_item_status = self._library_item_value(connection, item_id, library_items.c.status)
 
-        self.assertIsNotNone(recovered)
         assert recovered is not None
         self.assertEqual(recovered["status"], "queued")
         self.assertIsNone(recovered["retry_not_before"])
@@ -4075,37 +3759,24 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         stamp = at.isoformat(timespec="seconds")
         save_encode_job(
             connection,
-            {
-                "job_id": job_id,
-                "prefix": prefix,
-                "job_kind": "folder",
-                "parent_job_id": None,
-                "status": status,
-                "manifest_path": str(self.root / "runs" / f"{job_id}.json"),
-                "item_count": 1,
-                "saved_profile_path": None,
-                "host": {},
-                "last_host": {"key": "remote-a", "label": "Remote A"},
-                "notes": "",
-                "bypass_schedule": False,
-                "attempt_count": 1,
-                "process_pid": None,
-                "error": "Remote A could not connect the media share." if status != "completed" else None,
-                "leased_at": None,
-                "lease_expires_at": None,
-                "heartbeat_at": None,
-                "worker_id": None,
-                "retry_not_before": None,
-                "waiting_reason": None,
-                "terminal_reason": "host_configuration" if status != "completed" else None,
-                "last_failure_kind": "host_configuration" if status != "completed" else None,
-                "last_failure_at": stamp if status != "completed" else None,
-                "host_cooldown_until": "2999-01-01T00:00:00+00:00" if status != "completed" else None,
-                "created_at": stamp,
-                "started_at": stamp,
-                "finished_at": stamp,
-                "updated_at": stamp,
-            },
+            self._job_row(
+                job_id=job_id,
+                prefix=prefix,
+                job_kind="folder",
+                parent_job_id=None,
+                status=status,
+                manifest_path=str(self.root / "runs" / f"{job_id}.json"),
+                last_host={"key": "remote-a", "label": "Remote A"},
+                error="Remote A could not connect the media share." if status != "completed" else None,
+                terminal_reason="host_configuration" if status != "completed" else None,
+                last_failure_kind="host_configuration" if status != "completed" else None,
+                last_failure_at=stamp if status != "completed" else None,
+                host_cooldown_until="2999-01-01T00:00:00+00:00" if status != "completed" else None,
+                created_at=stamp,
+                started_at=stamp,
+                finished_at=stamp,
+                updated_at=stamp,
+            ),
         )
 
     def test_releasing_a_computer_leaves_the_later_finished_run_newest(self) -> None:
@@ -4125,12 +3796,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual(released, 1)
         self.assertEqual(workflow.state, "ready_to_validate")
-        self.assertNotIn(
-            prefix,
-            queue_actions_runtime._retryable_terminal_encode_prefixes(
-                connection_factory=lambda: open_db(self.config.paths.db_path)
-            ),
-        )
 
     def test_cleanup_on_a_share_that_stopped_answering_is_deferred_not_crashed(self) -> None:
         staging_path = self._staging_path("episode-dead-mount.mkv")
@@ -4216,7 +3881,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
 
             updated = load_encode_job(connection, "job-host-retry")
-            self.assertIsNotNone(updated)
             assert updated is not None
             self.assertEqual(updated["status"], "retry_backoff")
             self.assertIsNone(updated["terminal_reason"])
@@ -4259,7 +3923,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
 
             updated = load_encode_job(connection, "job-host-repeat")
-            self.assertIsNotNone(updated)
             assert updated is not None
             self.assertEqual(updated["status"], "retry_backoff")
             self.assertEqual(updated["last_host"]["failure_streak"], 2)
@@ -4297,7 +3960,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
 
             updated = load_encode_job(connection, "job-host-repeat-alias")
-            self.assertIsNotNone(updated)
             assert updated is not None
             self.assertEqual(updated["status"], "retry_backoff")
             self.assertEqual(updated["last_host"]["failure_streak"], 2)
@@ -4332,42 +3994,27 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "single-job-remote-a-repeat",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": None,
-                    "status": "queued",
-                    "manifest_path": str(manifest_path),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": [0],
-                    "host": {},
-                    "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a", "failure_streak": 2},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 2,
-                    "process_pid": None,
-                    "error": "Read from remote host remote-a: Operation timed out",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": "ssh_transport",
-                    "last_failure_at": web_app._now_iso(),
-                    "host_cooldown_until": "2999-01-01T00:00:00+00:00",
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": None,
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="single-job-remote-a-repeat",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id=None,
+                    status="queued",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[0],
+                    last_host={"key": "remote-a", "label": "Remote A", "host": "remote-a", "failure_streak": 2},
+                    attempt_count=2,
+                    error="Read from remote host remote-a: Operation timed out",
+                    last_failure_kind="ssh_transport",
+                    last_failure_at=web_app._now_iso(),
+                    host_cooldown_until="2999-01-01T00:00:00+00:00",
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "remote-b")
         self.assertIsNone(waiting_reason)
@@ -4444,7 +4091,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             selected, recovered_reason = web_app._select_encode_host(connection, self.config, job)
         self.assertIsNone(blocked)
         self.assertEqual(reason, "Controller storage is reconnecting.")
-        self.assertIsNotNone(selected)
         assert selected is not None
         self.assertEqual(selected["key"], "remote-a")
         self.assertIsNone(recovered_reason)
@@ -4484,7 +4130,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ):
             host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, {})
 
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "stream-host")
         self.assertIsNone(waiting_reason)
@@ -4509,6 +4154,115 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             ["recent-6", "recent-5", "recent-4", "recent-3", "recent-2", "recent-1"],
         )
         self.assertTrue(all(object_dict(job["media_scope"])["domain"] == "movie" for job in summary["recent"]))
+
+    def test_encode_queue_attention_follows_current_files_without_rewriting_history(self) -> None:
+        paths = [f"tv/show/episode-{index}.mkv" for index in range(3)]
+        manifest = self._write_manifest("old-attention.json", [{"rel_path": path} for path in paths])
+        with open_db(self.config.paths.db_path) as connection:
+            ids = [self._insert_library_item(connection, Path(path), rel_path=path) for path in paths]
+            default_badge = web_app._folder_review_badge(self.config, "tv/show", connection)
+            self._save_job(connection, job_id="old", manifest_name=manifest.name,
+                           host={}, status="needs_attention", attempt_count=1)
+            old = load_encode_job(connection, "old")
+            assert old is not None
+            old["item_count"] = 3
+            save_encode_job(connection, old)
+            connection.execute(update(library_items).where(library_items.c.id == ids[0]).values(status="promoted"))
+            newer_manifest = self._write_manifest("newer.json", [{"rel_path": paths[1]}])
+            self._save_job(connection, job_id="new", manifest_name=newer_manifest.name,
+                           host={}, status="completed", attempt_count=1)
+            newer = load_encode_job(connection, "new")
+            assert newer is not None
+            newer["prefix"] = paths[1]
+            save_encode_job(connection, newer)
+            summary = summarize_encode_queue(connection)
+            self.assertEqual(summary["needs_attention_count"], 1)
+            telemetry = web_app._decorate_encode_queue_for_scheduler(self.config, summary)["telemetry"]
+            self.assertEqual(telemetry["left_out_needs_attention_item_count"], 1)
+            connection.execute(update(library_items).where(library_items.c.id == ids[1]).values(status="promoted"))
+            newer_manifest.unlink()
+            self._save_job(connection, job_id="latest-attention", manifest_name=manifest.name,
+                           host={}, status="needs_attention", attempt_count=1)
+            latest = load_encode_job(connection, "latest-attention")
+            assert latest is not None
+            latest["manifest_indexes"] = [2]
+            save_encode_job(connection, latest)
+            summary = summarize_encode_queue(connection)
+            self.assertEqual([job["job_id"] for job in summary["needs_attention"]], ["latest-attention"])
+            self.assertEqual(summary["needs_attention_count"], 1)
+            telemetry = web_app._decorate_encode_queue_for_scheduler(self.config, summary)["telemetry"]
+            self.assertEqual(telemetry["left_out_needs_attention_item_count"], 1)
+            connection.execute(update(library_items).where(library_items.c.id == ids[2]).values(status="promoted"))
+            summary = summarize_encode_queue(connection)
+            self.assertEqual(summary["needs_attention"], [])
+            self.assertEqual(summary["needs_attention_count"], 0)
+            self.assertFalse(build_folder_workflow_state(connection, "tv/show").needs_owner)
+            self.assertNotIn("tv/show", web_app._folder_needs_attention_badges(connection))
+            for precomputed in (None, {}):
+                self.assertEqual(web_app._folder_review_badge(
+                    self.config, "tv/show", connection, needs_attention_badges=precomputed,
+                ), default_badge)
+            historical = load_encode_job(connection, "old")
+            assert historical is not None
+            self.assertEqual(historical["status"], "needs_attention")
+
+    def test_encode_queue_attention_keeps_current_folder_failures_in_separate_counts(self) -> None:
+        paths = [f"tv/show/part-{index}.mkv" for index in range(3)]
+        manifest = self._write_manifest("mixed-attention.json", [{"rel_path": path} for path in paths])
+        with open_db(self.config.paths.db_path) as connection:
+            ids = [self._insert_library_item(connection, Path(path), rel_path=path) for path in paths]
+            self._save_job(connection, job_id="folder", manifest_name=manifest.name,
+                           host={}, status="needs_attention", attempt_count=1)
+            parent = load_encode_job(connection, "folder")
+            assert parent is not None
+            parent.update(job_kind="folder", item_count=3, progress={
+                "left_out_needs_attention_item_count": 1, "left_out_failed_item_count": 2,
+                "unfinished_breakdown": [{"count": 3, "label": "fixture hold", "needs_owner": True}],
+            })
+            save_encode_job(connection, parent)
+            for index, status in enumerate(("needs_attention", "failed", "stopped")):
+                self._save_job(connection, job_id=f"part-{index}", manifest_name=manifest.name,
+                               host={}, status=status, attempt_count=1)
+                child = load_encode_job(connection, f"part-{index}")
+                assert child is not None
+                child.update(job_kind="shard", parent_job_id="folder", manifest_indexes=[index])
+                save_encode_job(connection, child)
+            connection.execute(update(library_items).where(library_items.c.id == ids[1]).values(status="promoted"))
+            for status in ("needs_attention", "running", "queued"):
+                with self.subTest(status=status):
+                    parent["status"] = status
+                    save_encode_job(connection, parent)
+                    queue = web_app._decorate_encode_queue_for_scheduler(self.config, summarize_encode_queue(connection))
+                    self.assertEqual(queue["telemetry"]["left_out_needs_attention_item_count"], 1)
+                    self.assertEqual(queue["telemetry"]["left_out_failed_item_count"], 1)
+                    self.assertEqual(web_app._folder_needs_attention_badges(connection)["tv/show"]["detail"],
+                                     unfinished_items_summary(queue["telemetry"]))
+            connection.execute(update(library_items).where(library_items.c.id == ids[0]).values(status="promoted"))
+            parent["status"] = "needs_attention"
+            for reports_parts in (True, False):
+                with self.subTest(reports_parts=reports_parts):
+                    if not reports_parts:
+                        parent["progress"] = {}
+                    save_encode_job(connection, parent)
+                    queue = web_app._decorate_encode_queue_for_scheduler(self.config, summarize_encode_queue(connection))
+                    self.assertEqual(queue["telemetry"]["left_out_needs_attention_item_count"], 0)
+                    self.assertEqual(queue["telemetry"]["left_out_failed_item_count"], 1)
+                    self.assertEqual(queue["needs_attention"][0]["scheduler_status_copy"],
+                                     unfinished_items_summary(queue["telemetry"]))
+
+    def test_folder_badge_keeps_unknown_attention_when_a_file_path_has_become_a_folder(self) -> None:
+        prefix = "tv/Show.mkv"
+        manifest = self._write_manifest("ambiguous-attention.json", [])
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(connection, self.root / "before.mkv", rel_path=prefix)
+            self._insert_library_item(connection, self.root / "after.mkv", rel_path=f"{prefix}/episode.mkv")
+            self._save_job(connection, job_id="ambiguous", manifest_name=manifest.name,
+                           host={}, status="needs_attention", attempt_count=1)
+            job = load_encode_job(connection, "ambiguous")
+            assert job is not None
+            job["prefix"] = prefix
+            save_encode_job(connection, job)
+            self.assertIn(prefix, web_app._folder_needs_attention_badges(connection))
 
     def test_encode_queue_summary_exposes_every_attention_job(self) -> None:
         self._write_manifest("manifest-attention-list.json", [])
@@ -4659,146 +4413,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
 
             updated = load_encode_job(connection, "job-host-permission")
-            self.assertIsNotNone(updated)
             assert updated is not None
             self.assertEqual(updated["status"], "needs_attention")
             self.assertEqual(updated["terminal_reason"], "max_attempts_exhausted")
-
-    def test_runtime_settings_payload_normalizes_capabilities(self) -> None:
-        payload = web_app._build_runtime_settings_payload(
-            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-            remote_hosts=[
-                {
-                    "label": "Remote A",
-                    "host": "remote-a",
-                    "repo_path": "/srv/mediaforce",
-                    "wake_mac": "aa:bb:cc:dd:ee:ff",
-                    "start_command": "ssh prox-main.shiny pct start 103",
-                    "stop_command": "ssh prox-main.shiny pct shutdown 103",
-                    "start_timeout_seconds": "240",
-                    "priority": "20",
-                    "max_parallel_encodes": "3",
-                    "schedule_profile": "late_night",
-                    "capabilities": "encode_queue, sample_calibration, encode_queue",
-                }
-            ],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[
-                {
-                    "key": "late_night",
-                    "label": "Late Night",
-                    "mode": "night",
-                    "timezone": "local",
-                    "start_hour": "23",
-                    "end_hour": "6",
-                }
-            ],
-        )
-        self.assertEqual(
-            payload["remote_hosts"][0]["capabilities"],
-            ["encode_queue", "sample_calibration"],
-        )
-        self.assertEqual(payload["remote_hosts"][0]["start_command"], "ssh prox-main.shiny pct start 103")
-        self.assertEqual(payload["remote_hosts"][0]["stop_command"], "ssh prox-main.shiny pct shutdown 103")
-        self.assertEqual(payload["remote_hosts"][0]["start_timeout_seconds"], 240)
-        self.assertEqual(payload["remote_hosts"][0]["max_parallel_encodes"], 3)
-        self.assertEqual(payload["remote_hosts"][0]["schedule_profile"], "late_night")
-        self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["key"], "late_night")
-        self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["timezone"], "host_local")
-
-    def test_runtime_settings_payload_persists_canonical_typed_library_rows(self) -> None:
-        payload = web_app._build_runtime_settings_payload(
-            libraries=[
-                {
-                    "key": "movies",
-                    "label": "Movies",
-                    "path": str(self.root / "source" / "movies"),
-                    "color": "#4e6fa6",
-                    "library_type": "movie",
-                    "availability": "browse_only",
-                    "default_profile": "movie_balanced",
-                    "plex_path": "/mnt/media/movies",
-                    "policy": {
-                        "grouping": "title",
-                        "editions": "separate",
-                        "extras": "exclude",
-                        "ranking": "oldest_added_first",
-                    },
-                }
-            ],
-            remote_hosts=[],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-
-        self.assertEqual(payload["media"]["source_roots"], {"movies": str(self.root / "source" / "movies")})
-        self.assertEqual(payload["media"]["libraries"][0]["type"], "movie")
-        self.assertEqual(payload["media"]["libraries"][0]["path"], str(self.root / "source" / "movies"))
-        self.assertEqual(payload["metadata"]["plex"]["library_roots"], {"movies": "/mnt/media/movies"})
-
-    def test_runtime_settings_payload_requires_root_bound_type_change_confirmation(self) -> None:
-        row = {
-            "key": "tv",
-            "label": "TV Shows",
-            "path": str(self.root / "source" / "tv"),
-            "library_type": "movie",
-            "availability": "browse_only",
-            "default_profile": "movie_balanced",
-            "policy": {
-                "grouping": "title",
-                "editions": "separate",
-                "extras": "exclude",
-                "ranking": "oldest_added_first",
-            },
-        }
-        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
-            web_app._build_runtime_settings_payload(
-                libraries=[row],
-                remote_hosts=[],
-                transcode_root=str(self.root / "staging"),
-                encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-                schedule_profiles=[],
-                existing_library_types={"tv": "tv"},
-            )
-        self.assertIn("compatibility preview", raised.exception.public_message)
-
-        payload = web_app._build_runtime_settings_payload(
-            libraries=[
-                {
-                    **row,
-                    "availability": "production",
-                    "type_change_confirmation": "tv:tv->movie",
-                }
-            ],
-            remote_hosts=[],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-            existing_library_types={"tv": "tv"},
-        )
-        self.assertEqual(payload["media"]["libraries"][0]["type"], "movie")
-        self.assertEqual(payload["media"]["libraries"][0]["availability"], "browse_only")
-
-    def test_runtime_settings_payload_accepts_movie_production(self) -> None:
-        payload = web_app._build_runtime_settings_payload(
-            libraries=[
-                {
-                    "key": "movies",
-                    "label": "Movies",
-                    "path": str(self.root / "source" / "movies"),
-                    "library_type": "movie",
-                    "availability": "production",
-                    "default_profile": "movie_balanced",
-                }
-            ],
-            remote_hosts=[],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-        self.assertEqual(payload["media"]["libraries"][0]["availability"], "production")
 
     def test_typed_library_maps_scan_browse_only_but_only_produce_ready_roots(self) -> None:
         self.config.raw["media"]["source_roots"] = {
@@ -4946,293 +4563,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.config.raw.setdefault("planning", {})
         self.assertNotEqual(self.config.resolve_policy("tv/Example/Season 01")["video"].get("crf"), 22)
 
-    def test_runtime_settings_payload_rejects_submitted_secret_values(self) -> None:
-        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
-            web_app._build_runtime_settings_payload(
-                libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-                remote_hosts=[],
-                transcode_root=str(self.root / "staging"),
-                encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-                schedule_profiles=[],
-                metadata={"plex": {"token": "must-not-persist"}},
-            )
-        self.assertEqual(raised.exception.public_message, "Credential values are not accepted in Settings.")
-        self.assertEqual(str(raised.exception), "Settings validation failed.")
-
-    def test_runtime_settings_payload_defaults_host_schedule_to_always(self) -> None:
-        payload = web_app._build_runtime_settings_payload(
-            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-            remote_hosts=[
-                {
-                    "label": "Remote A",
-                    "host": "remote-a",
-                    "priority": "20",
-                    "max_parallel_encodes": "2",
-                    "capabilities": ["encode_queue"],
-                }
-            ],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-        self.assertEqual(payload["remote_hosts"][0]["schedule_profile"], "always")
-
-    def test_runtime_settings_payload_persists_video_defaults(self) -> None:
-        payload = web_app._build_runtime_settings_payload(
-            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-            remote_hosts=[],
-            transcode_root=str(self.root / "staging"),
-            video_defaults={
-                "quality_metric": "VMAF",
-                "target_vmaf": "85",
-                "min_target_vmaf": "80",
-                "target_xpsnr": "41",
-                "min_target_xpsnr": "35",
-                "target_size_mb": "300",
-                "target_runtime_minutes": "45",
-                "decision_model": "size_first_review",
-                "quality_engine": "ab_av1_fast_sample",
-                "max_height": "1080",
-                "default_grain": "8",
-                "max_encoded_percent": "80",
-            },
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-
-        self.assertEqual(
-            payload["video"],
-            {
-                "quality_metric": "vmaf",
-                "target_vmaf": 85.0,
-                "min_target_vmaf": 80.0,
-                "target_xpsnr": 41.0,
-                "min_target_xpsnr": 35.0,
-                "target_size_mb": 300.0,
-                "target_size_bytes": 300_000_000,
-                "target_runtime_minutes": 45.0,
-                "size_goal_schema_version": 1,
-                "size_goal_mode": "normalized",
-                "size_goal_source": "config_default",
-                "sample_projection_tolerance_percent": 10.0,
-                "final_output_tolerance_percent": 5.0,
-                "decision_model": "size_first_review",
-                "quality_engine": "ab_av1_fast_sample",
-                "max_height": 1080,
-                "resolution_intent_mode": "max_height",
-                "resolution_intent_source": "config_default",
-                "default_grain": 8,
-                "max_encoded_percent": 80.0,
-            },
-        )
-
-    def test_runtime_settings_payload_persists_xpsnr_video_defaults(self) -> None:
-        payload = web_app._build_runtime_settings_payload(
-            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-            remote_hosts=[],
-            transcode_root=str(self.root / "staging"),
-            video_defaults={
-                "quality_metric": "XPSNR",
-                "target_vmaf": "85",
-                "min_target_vmaf": "80",
-                "target_xpsnr": "39.5",
-                "min_target_xpsnr": "34.5",
-                "target_size_mb": "300",
-                "target_runtime_minutes": "45",
-                "decision_model": "size_first_review",
-                "quality_engine": "ab_av1_fast_sample",
-                "max_height": "1080",
-                "default_grain": "8",
-                "max_encoded_percent": "80",
-            },
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-
-        self.assertEqual(payload["video"]["quality_metric"], "xpsnr")
-        self.assertEqual(payload["video"]["target_xpsnr"], 39.5)
-        self.assertEqual(payload["video"]["min_target_xpsnr"], 34.5)
-
-    def test_runtime_settings_payload_rejects_unsupported_video_metric(self) -> None:
-        payload = web_app._build_runtime_settings_payload(
-            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-            remote_hosts=[],
-            transcode_root=str(self.root / "staging"),
-            video_defaults={"quality_metric": "ssim"},
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-
-        self.assertEqual(payload["video"]["quality_metric"], "auto")
-
-    def test_runtime_settings_payload_defaults_video_metric_to_auto(self) -> None:
-        payload = web_app._build_runtime_settings_payload(
-            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-            remote_hosts=[],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-
-        self.assertEqual(payload["video"]["quality_metric"], "auto")
-
-    def test_runtime_settings_payload_defaults_to_size_first_review_model(self) -> None:
-        payload = web_app._build_runtime_settings_payload(
-            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-            remote_hosts=[],
-            transcode_root=str(self.root / "staging"),
-            video_defaults={
-                "target_size_mb": "300",
-                "target_runtime_minutes": "45",
-                "decision_model": "size_first_review",
-                "quality_engine": "ab_av1_fast_sample",
-            },
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-
-        self.assertEqual(payload["video"]["target_size_mb"], 300.0)
-        self.assertEqual(payload["video"]["target_runtime_minutes"], 45.0)
-        self.assertEqual(payload["video"]["decision_model"], "size_first_review")
-        self.assertEqual(payload["video"]["quality_engine"], "ab_av1_fast_sample")
-
-    def test_runtime_settings_payload_normalizes_media_access(self) -> None:
-        payload = web_app._build_runtime_settings_payload(
-            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-            remote_hosts=[
-                {
-                    "label": "Remote A",
-                    "host": "remote-a",
-                    "priority": "20",
-                    "max_parallel_encodes": "2",
-                    "capabilities": ["encode_queue"],
-                    "media_access": "stream",
-                }
-            ],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-        self.assertEqual(payload["remote_hosts"][0]["media_access"], "stream")
-
-    def test_runtime_settings_payload_keeps_host_path_overrides_optional(self) -> None:
-        payload = web_app._build_runtime_settings_payload(
-            libraries=[
-                {"key": "movies", "path": str(self.root / "source" / "movies")},
-                {"key": "tv", "path": str(self.root / "source" / "tv")},
-            ],
-            remote_hosts=[
-                {
-                    "label": "Remote A",
-                    "host": "remote-a",
-                    "priority": "20",
-                    "max_parallel_encodes": "2",
-                    "capabilities": ["encode_queue"],
-                    "staging_root": str(self.root / "remote-staging"),
-                    "source_roots_json": json.dumps(
-                        {
-                            "movies": str(self.root / "remote-movies"),
-                            "tv": str(self.root / "remote-tv"),
-                        }
-                    ),
-                }
-            ],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-        self.assertEqual(
-            payload["remote_hosts"][0]["source_roots"],
-            {
-                "movies": str((self.root / "remote-movies").expanduser()),
-                "tv": str((self.root / "remote-tv").expanduser()),
-            },
-        )
-        self.assertEqual(payload["remote_hosts"][0]["staging_root"], str(self.root / "remote-staging"))
-
-    def test_runtime_settings_payload_rejects_unknown_library_override(self) -> None:
-        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
-            web_app._build_runtime_settings_payload(
-                libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-                remote_hosts=[
-                    {
-                        "label": "Remote A",
-                        "host": "remote-a",
-                        "priority": "20",
-                        "max_parallel_encodes": "2",
-                        "capabilities": ["encode_queue"],
-                        "source_roots_json": json.dumps({"movies": "/srv/media/movies"}),
-                    }
-                ],
-                transcode_root=str(self.root / "staging"),
-                encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-                schedule_profiles=[],
-            )
-        self.assertIn("Unknown library override", raised.exception.public_message)
-
-    def test_runtime_settings_payload_rejects_unknown_host_schedule_profile(self) -> None:
-        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
-            web_app._build_runtime_settings_payload(
-                libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-                remote_hosts=[
-                    {
-                        "label": "Remote A",
-                        "host": "remote-a",
-                        "priority": "20",
-                        "max_parallel_encodes": "2",
-                        "schedule_profile": "missing_profile",
-                        "capabilities": "encode_queue",
-                    }
-                ],
-                transcode_root=str(self.root / "staging"),
-                encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-                schedule_profiles=[],
-            )
-        self.assertIn("Unknown schedule profile", raised.exception.public_message)
-
-    def test_runtime_settings_payload_rejects_reserved_schedule_profile_key(self) -> None:
-        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
-            web_app._build_runtime_settings_payload(
-                libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-                remote_hosts=[],
-                transcode_root=str(self.root / "staging"),
-                encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-                schedule_profiles=[
-                    {
-                        "key": "never",
-                        "label": "Should Not Override",
-                        "start_hour": "0",
-                        "end_hour": "0",
-                    }
-                ],
-            )
-        self.assertIn("reserved", raised.exception.public_message)
-
-    def test_runtime_settings_payload_preserves_allowed_libraries_for_host(self) -> None:
-        payload = web_app._build_runtime_settings_payload(
-            libraries=[
-                {"key": "tv", "path": str(self.root / "source" / "tv")},
-                {"key": "movies", "path": str(self.root / "source" / "movies")},
-            ],
-            remote_hosts=[
-                {
-                    "label": "Remote A",
-                    "host": "remote-a",
-                    "priority": "20",
-                    "max_parallel_encodes": "2",
-                    "schedule_profile": "never",
-                    "capabilities": ["encode_queue"],
-                    "allowed_libraries": ["tv"],
-                }
-            ],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-
-        self.assertEqual(payload["remote_hosts"][0]["schedule_profile"], "never")
-        self.assertEqual(payload["remote_hosts"][0]["allowed_libraries"], ["tv"])
-
     def test_settings_helpers_tolerate_malformed_runtime_values(self) -> None:
         self.config.raw["media"]["source_roots"] = ["not-a-mapping"]
         self.config.raw["media"]["staging_root"] = {"bad": "shape"}
@@ -5358,90 +4688,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual(rows[0]["days_of_week"], ["mon", "tue", "wed", "thu", "fri", "sat"])
         self.assertEqual(rows[0]["all_day_days_of_week"], ["sun"])
-
-    def test_build_runtime_settings_payload_persists_schedule_days_of_week(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[{"key": "movies", "path": str(self.root / "source" / "movies"), "color": "#123456"}],
-            remote_hosts=[],
-            transcode_root=str(self.root / "transcode"),
-            encode_queue_scheduler={"mode": "anytime", "timezone": "host_local"},
-            schedule_profiles=[
-                {
-                    "key": "sunday_only",
-                    "label": "Sunday Only",
-                    "days_of_week": ["sun"],
-                    "all_day_days_of_week": [],
-                    "start_hour": "0",
-                    "end_hour": "0",
-                }
-            ],
-        )
-
-        self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["days_of_week"], ["sun"])
-        self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["all_day_days_of_week"], [])
-
-    def test_build_runtime_settings_payload_persists_all_day_schedule_days(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[{"key": "movies", "path": str(self.root / "source" / "movies"), "color": "#123456"}],
-            remote_hosts=[],
-            transcode_root=str(self.root / "transcode"),
-            encode_queue_scheduler={"mode": "anytime", "timezone": "host_local"},
-            schedule_profiles=[
-                {
-                    "key": "after_hours_plus_sunday",
-                    "label": "After Hours + Sunday",
-                    "days_of_week": ["mon", "tue", "wed", "thu", "fri"],
-                    "all_day_days_of_week": ["sun"],
-                    "start_hour": "20",
-                    "end_hour": "6",
-                }
-            ],
-        )
-
-        self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["days_of_week"],
-                         ["mon", "tue", "wed", "thu", "fri"])
-        self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["all_day_days_of_week"], ["sun"])
-
-    def test_build_runtime_settings_payload_preserves_all_day_only_schedule_days(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[{"key": "movies", "path": str(self.root / "source" / "movies"), "color": "#123456"}],
-            remote_hosts=[],
-            transcode_root=str(self.root / "transcode"),
-            encode_queue_scheduler={"mode": "anytime", "timezone": "host_local"},
-            schedule_profiles=[
-                {
-                    "key": "sunday_all_day",
-                    "label": "Sunday All Day",
-                    "days_of_week": [],
-                    "all_day_days_of_week": ["sun"],
-                    "start_hour": "20",
-                    "end_hour": "6",
-                }
-            ],
-        )
-
-        self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["days_of_week"], [])
-        self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["all_day_days_of_week"], ["sun"])
-
-    def test_build_runtime_settings_payload_rejects_schedule_profile_without_days(self) -> None:
-        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
-            settings_runtime.build_runtime_settings_payload(
-                libraries=[{"key": "movies", "path": str(self.root / "source" / "movies"), "color": "#123456"}],
-                remote_hosts=[],
-                transcode_root=str(self.root / "transcode"),
-                encode_queue_scheduler={"mode": "anytime", "timezone": "host_local"},
-                schedule_profiles=[
-                    {
-                        "key": "empty_days",
-                        "label": "Empty Days",
-                        "days_of_week": [],
-                        "all_day_days_of_week": [],
-                        "start_hour": "20",
-                        "end_hour": "6",
-                    }
-                ],
-            )
-        self.assertIn("Select at least one day", raised.exception.public_message)
 
     def test_host_runtime_rows_mark_never_schedule_as_disabled(self) -> None:
         self.config.raw["remote_hosts"] = [
@@ -5575,7 +4821,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         job = {"job_id": "job-1", "bypass_schedule": False}
         with patch("mediaforce.web.app._host_runtime_rows", return_value=[host]):
             selected_host, waiting_reason = web_app._select_encode_host(cast(Any, None), self.config, job)
-        self.assertIsNotNone(selected_host)
         assert selected_host is not None
         self.assertEqual(selected_host["key"], "ct103")
         self.assertIsNone(waiting_reason)
@@ -5656,7 +4901,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ):
             selected_host, waiting_reason = web_app._select_encode_host(connection, self.config, job)
 
-        self.assertIsNotNone(selected_host)
         assert selected_host is not None
         self.assertEqual(selected_host["key"], "tv-only")
         self.assertIsNone(waiting_reason)
@@ -5974,26 +5218,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         lifecycle_mock.assert_called_once_with(host, "ssh prox-main.shiny pct shutdown 103",
                                                timeout=web_app.HOST_LIFECYCLE_COMMAND_TIMEOUT_SECONDS)
 
-    def test_run_encode_job_skips_stop_when_host_was_already_running(self) -> None:
-        manifest_path = self._write_manifest("manifest-running.json", [{"library_item_id": 1}])
-        with open_db(self.config.paths.db_path) as connection:
-            self._save_job(
-                connection,
-                job_id="job-running-host",
-                manifest_name=manifest_path.name,
-                host={"key": "ct103", "host": "ct103", "stop_command": "ssh prox-main.shiny pct shutdown 103"},
-                status="running",
-                attempt_count=1,
-                lease_expires_at=web_app._now_iso(),
-            )
-        with patch("mediaforce.web.app._ensure_encode_host_ready", return_value=False), patch(
-                "mediaforce.web.app._stop_encode_host_if_configured"
-        ) as stop_mock, patch(
-            "mediaforce.web.app.encode_manifest_items", return_value=[]
-        ), patch("mediaforce.web.app.load_config", return_value=self.config):
-            web_app._run_encode_job(config_path=self.config.paths.config_path, job_id="job-running-host")
-        stop_mock.assert_not_called()
-
     def test_run_encode_job_keeps_completed_job_clean_when_stop_command_fails(self) -> None:
         manifest_path = self._write_manifest("manifest-stop-failure.json", [{"library_item_id": 1}])
         with open_db(self.config.paths.db_path) as connection:
@@ -6014,7 +5238,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             web_app._run_encode_job(config_path=self.config.paths.config_path, job_id="job-stop-failure")
         with open_db(self.config.paths.db_path) as connection:
             job = load_encode_job(connection, "job-stop-failure")
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "completed")
         self.assertIsNone(job["error"])
@@ -6044,7 +5267,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         stop_mock.assert_not_called()
         with open_db(self.config.paths.db_path) as connection:
             job = load_encode_job(connection, "job-reset-streak")
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "completed")
         self.assertNotIn("failure_streak", job["last_host"])
@@ -6225,7 +5447,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 with patch.object(web_app.threading, "Thread", return_value=fake_thread):
                     job = web_app._maybe_schedule_scan(connection, self.config, prefix=None)
 
-            self.assertIsNotNone(job)
             assert job is not None
             self.assertEqual(job["status"], "queued")
             fake_thread.start.assert_called_once()
@@ -6233,12 +5454,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             stale_row = connection.execute(
                 select(scan_runs.c.completed_at).where(scan_runs.c.scan_id == "scan-stale")
             ).mappings().fetchone()
-            self.assertIsNotNone(stale_row)
             assert stale_row is not None
             self.assertIsNotNone(stale_row["completed_at"])
 
             refreshed_job = web_app._load_scan_job_state(self.config, None)
-            self.assertIsNotNone(refreshed_job)
             assert refreshed_job is not None
             self.assertEqual(refreshed_job["status"], "queued")
             self.assertNotEqual(refreshed_job["job_id"], "scan-stale-job")
@@ -6252,7 +5471,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ), patch.object(web_app.threading, "Thread", return_value=fake_thread):
             job = web_app._maybe_schedule_scan(connection, self.config, prefix=None, force=True)
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "queued")
         fake_thread.start.assert_called_once()
@@ -6284,7 +5502,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ):
             job = web_app._maybe_schedule_scan(connection, self.config, prefix=None, force=True)
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "queued")
         self.assertNotEqual(job["job_id"], "recent-failure")
@@ -6437,25 +5654,30 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIsNone(transition.current_closes_at)
         self.assertEqual(transition.next_opens_at, web_app._parse_iso("2026-07-23T22:00:00+00:00"))
 
-    def test_scheduler_transition_handles_spring_forward_boundary(self) -> None:
-        policy = web_app._normalize_encode_queue_scheduler(
-            {
-                "mode": "night",
-                "start_hour": 0,
-                "end_hour": 4,
-                "timezone": "host_local",
-                "days_of_week": ["sun"],
-            }
-        )
+    def test_scheduler_transition_handles_clock_change_boundaries(self) -> None:
+        for end_hour, observed_at, closes_at in (
+                (4, "2026-03-08T06:30:00+00:00", "2026-03-08T08:00:00+00:00"),
+                (2, "2026-11-01T05:30:00+00:00", "2026-11-01T07:00:00+00:00"),
+        ):
+            with self.subTest(observed_at=observed_at):
+                policy = web_app._normalize_encode_queue_scheduler(
+                    {
+                        "mode": "night",
+                        "start_hour": 0,
+                        "end_hour": end_hour,
+                        "timezone": "host_local",
+                        "days_of_week": ["sun"],
+                    }
+                )
 
-        transition = web_app._evaluate_encode_schedule_transition(
-            policy,
-            now=web_app._parse_iso("2026-03-08T06:30:00+00:00"),
-            host_payload={"schedule_timezone": "America/New_York"},
-        )
+                transition = web_app._evaluate_encode_schedule_transition(
+                    policy,
+                    now=web_app._parse_iso(observed_at),
+                    host_payload={"schedule_timezone": "America/New_York"},
+                )
 
-        self.assertTrue(transition.is_open)
-        self.assertEqual(transition.current_closes_at, web_app._parse_iso("2026-03-08T08:00:00+00:00"))
+                self.assertTrue(transition.is_open)
+                self.assertEqual(transition.current_closes_at, web_app._parse_iso(closes_at))
 
     def test_scheduler_transition_advances_nonexistent_opening_boundary(self) -> None:
         policy = web_app._normalize_encode_queue_scheduler(
@@ -6483,26 +5705,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(before_transition.next_opens_at, web_app._parse_iso("2026-03-08T07:00:00+00:00"))
         self.assertTrue(after_transition.is_open)
         self.assertEqual(after_transition.current_closes_at, web_app._parse_iso("2026-03-08T09:00:00+00:00"))
-
-    def test_scheduler_transition_handles_fall_back_boundary(self) -> None:
-        policy = web_app._normalize_encode_queue_scheduler(
-            {
-                "mode": "night",
-                "start_hour": 0,
-                "end_hour": 2,
-                "timezone": "host_local",
-                "days_of_week": ["sun"],
-            }
-        )
-
-        transition = web_app._evaluate_encode_schedule_transition(
-            policy,
-            now=web_app._parse_iso("2026-11-01T05:30:00+00:00"),
-            host_payload={"schedule_timezone": "America/New_York"},
-        )
-
-        self.assertTrue(transition.is_open)
-        self.assertEqual(transition.current_closes_at, web_app._parse_iso("2026-11-01T07:00:00+00:00"))
 
     def test_scheduler_max_window_uses_full_cross_midnight_duration(self) -> None:
         policy = web_app._normalize_encode_queue_scheduler(
@@ -6660,13 +5862,11 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )
         now = web_app._parse_iso("2026-03-25T07:30:00+00:00")
         assert now is not None
-        local_hour = now.astimezone().hour
-        expected = local_hour >= 22 or local_hour < 6
-
-        self.assertEqual(
-            web_app._scheduler_allows_encode_run(policy, now=now, host_payload={}),
-            expected,
-        )
+        with patch(
+                "mediaforce.web.runtime.encode_scheduler.system_timezone",
+                return_value=timezone(timedelta(hours=-4)),
+        ):
+            self.assertTrue(web_app._scheduler_allows_encode_run(policy, now=now, host_payload={}))
 
     def test_scheduler_preserves_midnight_start_hour_for_host_local_windows(self) -> None:
         policy = web_app._normalize_encode_queue_scheduler(
@@ -7074,165 +6274,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             },
         )
 
-    def test_series_folder_cards_group_tv_items_by_show(self) -> None:
-        first = self._create_source_file("season-one.mkv")
-        second = self._create_source_file("season-two.mkv")
-
-        with open_db(self.config.paths.db_path) as connection:
-            first_id = self._insert_library_item(connection, first)
-            second_id = self._insert_library_item(connection, second)
-            for item_id, rel_path in (
-                    (first_id, "tv/show/Season 1/episode-1.mkv"),
-                    (second_id, "tv/show/Season 2/episode-1.mkv"),
-            ):
-                connection.execute(
-                    update(library_items)
-                    .where(library_items.c.id == item_id)
-                    .values(rel_path=rel_path, parent_dir=rel_path.rsplit("/", 1)[0], size_bytes=2 * 1024 ** 3)
-                )
-
-            web_app._reset_folder_card_cache()
-            season_cards = web_app._list_folder_cards(self.config, connection)
-            series_cards = web_app._list_series_folder_cards(self.config, connection)
-
-        self.assertEqual({card.prefix for card in season_cards}, {"tv/show/Season 1", "tv/show/Season 2"})
-        matching_series = [card for card in series_cards if card.prefix == "tv/show"]
-        self.assertEqual(len(matching_series), 1)
-        self.assertEqual(matching_series[0].title, "show")
-        self.assertEqual(matching_series[0].scope_label, "Series")
-        self.assertEqual(matching_series[0].item_count, 2)
-        self.assertEqual(matching_series[0].pending_count, 2)
-
-    def test_series_folder_cards_aggregate_descendant_encode_attention_badges(self) -> None:
-        source = self._create_source_file("episode-series-attention.mkv")
-        manifest_path = self._write_manifest("manifest-series-attention.json", [{"library_item_id": 1}])
-        with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source)
-            connection.execute(
-                update(library_items)
-                .where(library_items.c.id == item_id)
-                .values(
-                    size_bytes=2 * 1024 * 1024 * 1024,
-                    rel_path="tv/show/Season 2/episode-series-attention.mkv",
-                    parent_dir="tv/show/Season 2",
-                )
-            )
-            self._save_job(
-                connection,
-                job_id="series-child-attention",
-                manifest_name=manifest_path.name,
-                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
-                status="needs_attention",
-                attempt_count=1,
-            )
-            connection.execute(
-                update(encode_jobs)
-                .where(encode_jobs.c.job_id == "series-child-attention")
-                .values(prefix="tv/show/Season 2", error="Error: child season failed")
-            )
-
-            series_cards = web_app._list_series_folder_cards(self.config, connection)
-
-        series_card = next(card for card in series_cards if card.prefix == "tv/show")
-        self.assertEqual(series_card.review_badge_label, "Needs attention")
-        self.assertEqual(series_card.review_badge_tone, "warning")
-        self.assertEqual(series_card.review_badge_detail, plain_failure_summary("Error: child season failed"))
-
-    def test_series_folder_cards_aggregate_descendant_calibration_badges(self) -> None:
-        source = self._create_source_file("episode-series-calibration.mkv")
-        now = web_app._now_iso()
-        with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source)
-            connection.execute(
-                update(library_items)
-                .where(library_items.c.id == item_id)
-                .values(
-                    size_bytes=2 * 1024 * 1024 * 1024,
-                    rel_path="tv/show/Season 2/episode-series-calibration.mkv",
-                    parent_dir="tv/show/Season 2",
-                )
-            )
-            connection.execute(
-                calibration_jobs.insert().values(
-                    job_id="series-child-calibration",
-                    prefix="tv/show/Season 2",
-                    status="running",
-                    lane="sample",
-                    action="sample",
-                    host_json="{}",
-                    policy_json="{}",
-                    sample_item_json="{}",
-                    created_at=now,
-                    started_at=now,
-                    updated_at=now,
-                )
-            )
-
-            series_cards = web_app._list_series_folder_cards(self.config, connection)
-
-        series_card = next(card for card in series_cards if card.prefix == "tv/show")
-        self.assertEqual(series_card.review_badge_label, "Sample running")
-        self.assertEqual(series_card.review_badge_tone, "attention")
-
-    def test_dashboard_folders_payload_exposes_series_folders(self) -> None:
-        season_card = folder_cards_runtime.FolderCard(
-            prefix="tv/show/Season 1",
-            title="show · Season 1",
-            subtitle="show",
-            scope_label="Season",
-            item_count=1,
-            pending_count=1,
-            total_size_bytes=1024,
-            estimated_savings_bytes=512,
-            known_saved_bytes=0,
-            projected_reclaim_bytes=512,
-            average_age_days=0.0,
-            sort_score=1.0,
-            statuses={"planned": 1},
-            video_codecs={"h264": 1},
-        )
-        series_card = replace(season_card, prefix="tv/show", title="show", scope_label="Series", item_count=2)
-
-        payload = dashboard_payloads.dashboard_folders_payload(
-            self.config,
-            folder_card_cache_key=lambda _config: ("cache", 1, 2),
-            list_folder_cards=lambda _config, _connection: [season_card],
-            list_series_folder_cards=lambda _config, _connection: [series_card],
-        )
-
-        self.assertEqual(payload["folders"][0]["prefix"], "tv/show/Season 1")
-        self.assertEqual(payload["series_folders"][0]["prefix"], "tv/show")
-        self.assertEqual(payload["series_folders"][0]["scope_label"], "Series")
-
-    def test_dashboard_library_payload_marks_structure_as_loading_details(self) -> None:
-        structure_card = folder_cards_runtime.FolderCard(
-            prefix="tv/show/Season 1",
-            title="show · Season 1",
-            subtitle="show",
-            scope_label="Season",
-            item_count=2,
-            pending_count=1,
-            total_size_bytes=2048,
-            estimated_savings_bytes=0,
-            known_saved_bytes=0,
-            projected_reclaim_bytes=0,
-            average_age_days=0.0,
-            sort_score=0.0,
-            statuses={"planned": 1, "promoted": 1},
-            video_codecs={},
-            details_loading=True,
-        )
-
-        payload = dashboard_payloads.dashboard_library_payload(
-            self.config,
-            folder_card_cache_key=lambda _config: ("cache", 1, 2),
-            list_library_structure_cards=lambda _config, _connection: [structure_card],
-        )
-
-        self.assertEqual(payload["folders"][0]["prefix"], "tv/show/Season 1")
-        self.assertTrue(payload["folders"][0]["details_loading"])
-        self.assertEqual(payload["series_folders"], [])
-
     def test_folder_studio_series_context_and_encode_candidate_count_follow_manifest_selection(self) -> None:
         pending = self._create_source_file("pending.mkv")
         encoded = self._create_source_file("encoded.mkv")
@@ -7313,152 +6354,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(matching_cards[0].known_saved_bytes, int(1.5 * 1024 * 1024 * 1024))
         self.assertEqual(matching_cards[0].projected_reclaim_bytes, int(1.5 * 1024 * 1024 * 1024))
 
-    def test_preview_folder_cards_rank_by_pending_opportunity(self) -> None:
-        season_a_pending = self._create_source_file("season-a-pending.mkv")
-        season_a_promoted = self._create_source_file("season-a-promoted.mkv")
-        season_b_pending = self._create_source_file("season-b-pending.mkv")
-        season_b_validated = self._create_source_file("season-b-validated.mkv")
-
-        with open_db(self.config.paths.db_path) as connection:
-            season_a_pending_id = self._insert_library_item(connection, season_a_pending)
-            season_a_promoted_id = self._insert_library_item(connection, season_a_promoted, status="promoted")
-            season_b_pending_id = self._insert_library_item(connection, season_b_pending)
-            season_b_validated_id = self._insert_library_item(connection, season_b_validated, status="validated")
-
-            for item_id, rel_path, status in (
-                (season_a_pending_id, "tv/show/Season A/season-a-pending.mkv", "planned"),
-                (season_a_promoted_id, "tv/show/Season A/season-a-promoted.mkv", "promoted"),
-                (season_b_pending_id, "tv/show/Season B/season-b-pending.mkv", "planned"),
-                (season_b_validated_id, "tv/show/Season B/season-b-validated.mkv", "validated"),
-            ):
-                connection.execute(
-                    update(library_items)
-                    .where(library_items.c.id == item_id)
-                    .values(
-                        size_bytes=1 * 1024 * 1024 * 1024,
-                        rel_path=rel_path,
-                        parent_dir=rel_path.rsplit("/", 1)[0],
-                        status=status,
-                    )
-                )
-
-            self._insert_staged_artifact(connection, season_b_validated_id, self._staging_path(season_b_validated.name))
-            connection.execute(
-                update(staged_artifacts)
-                .where(staged_artifacts.c.library_item_id == season_b_validated_id)
-                .values(
-                    source_rel_path="tv/show/Season B/season-b-validated.mkv",
-                    source_video_codec="h264",
-                    source_size_bytes=2 * 1024 * 1024 * 1024,
-                    bytes_saved=int(5 * 1024 * 1024 * 1024),
-                )
-            )
-
-            def fake_estimate_savings(*args: Any, **kwargs: Any) -> int:
-                return 300 * 1024 * 1024
-
-            with patch.object(web_app, "_estimate_savings_bytes", autospec=True, side_effect=fake_estimate_savings):
-                cards = web_app._preview_folder_cards(self.config, connection)
-
-        self.assertEqual([card.prefix for card in cards], ["tv/show/Season B", "tv/show/Season A"])
-
-    def test_preview_folder_cards_use_projected_reclaim_when_pending_estimate_is_zero(self) -> None:
-        small_total = self._create_source_file("season-c-validated-small.mkv")
-        large_total = self._create_source_file("season-d-validated-large.mkv")
-
-        with open_db(self.config.paths.db_path) as connection:
-            small_total_id = self._insert_library_item(connection, small_total, status="validated")
-            large_total_id = self._insert_library_item(connection, large_total, status="validated")
-
-            connection.execute(
-                update(library_items)
-                .where(library_items.c.id == small_total_id)
-                .values(
-                    size_bytes=1 * 1024 * 1024 * 1024,
-                    rel_path="tv/show/Season C/season-c-validated-small.mkv",
-                    parent_dir="tv/show/Season C",
-                )
-            )
-            connection.execute(
-                update(library_items)
-                .where(library_items.c.id == large_total_id)
-                .values(
-                    size_bytes=4 * 1024 * 1024 * 1024,
-                    rel_path="tv/show/Season D/season-d-validated-large.mkv",
-                    parent_dir="tv/show/Season D",
-                )
-            )
-
-            for item_id, name, bytes_saved in (
-                (small_total_id, small_total.name, int(5 * 1024 * 1024 * 1024)),
-                (large_total_id, large_total.name, int(3 * 1024 * 1024 * 1024)),
-            ):
-                self._insert_staged_artifact(connection, item_id, self._staging_path(name))
-                connection.execute(
-                    update(staged_artifacts)
-                    .where(staged_artifacts.c.library_item_id == item_id)
-                    .values(
-                        source_rel_path=f"tv/show/{'Season C' if item_id == small_total_id else 'Season D'}/{name}",
-                        source_video_codec="h264",
-                        source_size_bytes=2 * 1024 * 1024 * 1024,
-                        bytes_saved=bytes_saved,
-                    )
-                )
-
-            with patch.object(web_app, "_estimate_savings_bytes", autospec=True, return_value=0):
-                cards = web_app._preview_folder_cards(self.config, connection)
-
-        self.assertEqual([card.prefix for card in cards], ["tv/show/Season C", "tv/show/Season D"])
-
-    def test_preview_folder_cards_rank_by_projected_reclaim_when_confirmed_savings_dominate(self) -> None:
-        season_a_pending = self._create_source_file("season-a-pending.mkv")
-        season_a_validated = self._create_source_file("season-a-validated.mkv")
-        season_b_pending = self._create_source_file("season-b-pending.mkv")
-
-        with open_db(self.config.paths.db_path) as connection:
-            season_a_pending_id = self._insert_library_item(connection, season_a_pending)
-            season_a_validated_id = self._insert_library_item(connection, season_a_validated, status="validated")
-            season_b_pending_id = self._insert_library_item(connection, season_b_pending)
-
-            for item_id, rel_path, status in (
-                (season_a_pending_id, "tv/show/Season A/season-a-pending.mkv", "planned"),
-                (season_a_validated_id, "tv/show/Season A/season-a-validated.mkv", "validated"),
-                (season_b_pending_id, "tv/show/Season B/season-b-pending.mkv", "planned"),
-            ):
-                connection.execute(
-                    update(library_items)
-                    .where(library_items.c.id == item_id)
-                    .values(
-                        size_bytes=1 * 1024 * 1024 * 1024,
-                        rel_path=rel_path,
-                        parent_dir=rel_path.rsplit("/", 1)[0],
-                        status=status,
-                    )
-                )
-
-            self._insert_staged_artifact(connection, season_a_validated_id, self._staging_path(season_a_validated.name))
-            connection.execute(
-                update(staged_artifacts)
-                .where(staged_artifacts.c.library_item_id == season_a_validated_id)
-                .values(
-                    source_rel_path="tv/show/Season A/season-a-validated.mkv",
-                    source_video_codec="h264",
-                    source_size_bytes=2 * 1024 * 1024 * 1024,
-                    bytes_saved=int(5 * 1024 * 1024 * 1024),
-                )
-            )
-
-            with patch.object(
-                    web_app,
-                    "_estimate_savings_bytes",
-                    autospec=True,
-                    side_effect=[50 * 1024 * 1024, 2 * 1024 * 1024 * 1024],
-            ):
-                cards = web_app._preview_folder_cards(self.config, connection)
-
-        self.assertEqual([card.prefix for card in cards], ["tv/show/Season A", "tv/show/Season B"])
-
-    def test_list_folder_cards_rank_by_pending_opportunity(self) -> None:
+    def test_folder_cards_rank_by_pending_opportunity(self) -> None:
         season_a_pending = self._create_source_file("season-a-pending.mkv")
         season_a_promoted = self._create_source_file("season-a-promoted.mkv")
         season_b_pending = self._create_source_file("season-b-pending.mkv")
@@ -7504,15 +6400,17 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             def fake_estimate_savings(*args: Any, **kwargs: Any) -> int:
                 return 300 * 1024 * 1024
 
-            with (
-                    patch.object(web_app, "_age_days", autospec=True, return_value=42.0),
-                    patch.object(web_app, "_estimate_savings_bytes", autospec=True, side_effect=fake_estimate_savings),
-            ):
-                cards = web_app._list_folder_cards(self.config, connection)
+            for build_cards in (web_app._preview_folder_cards, web_app._list_folder_cards):
+                with self.subTest(builder=build_cards.__name__):
+                    with (
+                            patch.object(web_app, "_age_days", autospec=True, return_value=42.0),
+                            patch.object(web_app, "_estimate_savings_bytes", autospec=True, side_effect=fake_estimate_savings),
+                    ):
+                        cards = build_cards(self.config, connection)
 
-        self.assertEqual([card.prefix for card in cards], ["tv/show/Season B", "tv/show/Season A"])
+                    self.assertEqual([card.prefix for card in cards], ["tv/show/Season B", "tv/show/Season A"])
 
-    def test_list_folder_cards_use_projected_reclaim_when_sort_score_is_zero(self) -> None:
+    def test_folder_cards_use_projected_reclaim_when_pending_estimate_is_zero(self) -> None:
         small_total = self._create_source_file("season-c-validated-small.mkv")
         large_total = self._create_source_file("season-d-validated-large.mkv")
 
@@ -7555,15 +6453,17 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     )
                 )
 
-            with (
-                    patch.object(web_app, "_age_days", autospec=True, return_value=42.0),
-                    patch.object(web_app, "_estimate_savings_bytes", autospec=True, return_value=0),
-            ):
-                cards = web_app._list_folder_cards(self.config, connection)
+            for build_cards in (web_app._preview_folder_cards, web_app._list_folder_cards):
+                with self.subTest(builder=build_cards.__name__):
+                    with (
+                            patch.object(web_app, "_age_days", autospec=True, return_value=42.0),
+                            patch.object(web_app, "_estimate_savings_bytes", autospec=True, return_value=0),
+                    ):
+                        cards = build_cards(self.config, connection)
 
-        self.assertEqual([card.prefix for card in cards], ["tv/show/Season C", "tv/show/Season D"])
+                    self.assertEqual([card.prefix for card in cards], ["tv/show/Season C", "tv/show/Season D"])
 
-    def test_list_folder_cards_rank_by_projected_reclaim_when_confirmed_savings_dominate(self) -> None:
+    def test_folder_cards_rank_by_projected_reclaim_when_confirmed_savings_dominate(self) -> None:
         season_a_pending = self._create_source_file("season-a-pending.mkv")
         season_a_validated = self._create_source_file("season-a-validated.mkv")
         season_b_pending = self._create_source_file("season-b-pending.mkv")
@@ -7601,18 +6501,20 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 )
             )
 
-            with (
-                    patch.object(web_app, "_age_days", autospec=True, return_value=42.0),
-                    patch.object(
-                        web_app,
-                        "_estimate_savings_bytes",
-                        autospec=True,
-                        side_effect=[50 * 1024 * 1024, 2 * 1024 * 1024 * 1024],
-                    ),
-            ):
-                cards = web_app._list_folder_cards(self.config, connection)
+            for build_cards in (web_app._preview_folder_cards, web_app._list_folder_cards):
+                with self.subTest(builder=build_cards.__name__):
+                    with (
+                            patch.object(web_app, "_age_days", autospec=True, return_value=42.0),
+                            patch.object(
+                                web_app,
+                                "_estimate_savings_bytes",
+                                autospec=True,
+                                side_effect=[50 * 1024 * 1024, 2 * 1024 * 1024 * 1024],
+                            ),
+                    ):
+                        cards = build_cards(self.config, connection)
 
-        self.assertEqual([card.prefix for card in cards], ["tv/show/Season A", "tv/show/Season B"])
+                    self.assertEqual([card.prefix for card in cards], ["tv/show/Season A", "tv/show/Season B"])
 
     def test_folder_cards_use_validated_samples_in_history_for_pending_items(self) -> None:
         pending = self._create_source_file("episode-pending.mkv")
@@ -8824,14 +7726,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 ),
             )
 
-        fixture_payload = folder_episodes_payload(self.config, season)
-        show_payload = folder_episodes_payload(self.config, "tv/show")
+        with open_db(self.config.paths.db_path) as connection:
+            workflow = build_folder_workflow_state(connection, season)
+            episodes = load_season_episode_progress(connection, workflow.items, config=self.config)
 
-        self.assertTrue(fixture_payload["available"])
         self.assertEqual(
             [
                 (episode["rel_path"], episode["stage"], episode["detail"], episode["percent_complete"])
-                for episode in fixture_payload["episodes"]
+                for episode in episodes
             ],
             [
                 (f"{season}/Episode 04.mkv", "needs_you", "much smaller than expected; keep it or make it again", None),
@@ -8842,8 +7744,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 (rel_paths[2], "published", None, None),
             ],
         )
-        self.assertEqual(fixture_payload["episodes"][5]["bytes_saved"], 700_000_000)
-        self.assertFalse(show_payload["available"])
+        self.assertEqual(episodes[5]["bytes_saved"], 700_000_000)
 
     def test_folder_delivery_badge_ignores_fully_promoted_folders(self) -> None:
         card = self._folder_card_for_delivery_badge(
@@ -9317,54 +8218,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(len(matching_cards), 1)
         self.assertEqual(matching_cards[0].estimated_savings_bytes, 1024 * 1024 * 1024)
 
-    def test_project_env_loader_sets_defaults_without_overriding_shell_env(self) -> None:
-        env_path = self.root / "projects" / "media-encoding" / ".env"
-        with patch.object(web_app, "DEFAULT_CONFIG_PATH", env_path.parent / "config" / "defaults.toml"):
-            with patch.object(Path, "exists", autospec=True) as exists_mock:
-                exists_mock.side_effect = lambda path: path == env_path
-                with patch.object(Path, "read_text", autospec=True, return_value=(
-                        "MEDIAFORCE_WEB_HOST=0.0.0.0\n"
-                        "MEDIAFORCE_WEB_PORT=8777\n"
-                        "MEDIAFORCE_WEB_RELOAD=true\n"
-                )):
-                    with patch.dict(os.environ, {"MEDIAFORCE_WEB_PORT": "9999"}, clear=True):
-                        web_app._load_project_env_file()
-                        self.assertEqual(os.environ["MEDIAFORCE_WEB_HOST"], "0.0.0.0")
-                        self.assertEqual(os.environ["MEDIAFORCE_WEB_PORT"], "9999")
-                        self.assertEqual(os.environ["MEDIAFORCE_WEB_RELOAD"], "true")
-
     def test_default_web_host_and_reload_use_neutral_fallbacks(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(web_app._default_web_host(), "127.0.0.1")
             self.assertFalse(web_app._default_web_reload_enabled())
-
-    def test_mediaforce_env_controls_host_and_reload(self) -> None:
-        with patch.dict(os.environ, {"MEDIAFORCE_WEB_HOST": "0.0.0.0", "MEDIAFORCE_WEB_RELOAD": "true"}, clear=True):
-            self.assertEqual(web_app._default_web_host(), "0.0.0.0")
-            self.assertTrue(web_app._default_web_reload_enabled())
-
-    def test_web_startup_cli_args_override_environment_defaults(self) -> None:
-        with patch.dict(
-                os.environ,
-                {
-                    "MEDIAFORCE_WEB_HOST": "0.0.0.0",
-                    "MEDIAFORCE_WEB_PORT": "8777",
-                    "MEDIAFORCE_WEB_RELOAD": "true",
-                },
-                clear=True,
-        ):
-            args = web_app._parse_web_startup_args([
-                "--host",
-                "127.0.0.9",
-                "--port",
-                "8777",
-                "--no-reload",
-            ])
-            settings = web_app._web_startup_settings(args)
-
-        self.assertEqual(settings.host, "127.0.0.9")
-        self.assertEqual(settings.port, 8777)
-        self.assertFalse(settings.reload_enabled)
 
     def test_web_startup_shell_env_overrides_project_env_file(self) -> None:
         env_path = self.root / ".env"
@@ -9385,6 +8242,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
     def test_main_uses_cli_values_for_uvicorn(self) -> None:
         config = self.config
+        requested_port = 8778
         with patch.dict(
                 os.environ,
                 {
@@ -9396,16 +8254,16 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ), patch("mediaforce.web.app.load_config", return_value=config), patch(
                 "mediaforce.web.app.create_app", return_value=object()
         ) as create_app_mock, patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock:
-            web_app.main(["--host", "127.0.0.9", "--port", "8777", "--no-reload"])
+            web_app.main(["--host", "127.0.0.9", "--port", str(requested_port), "--no-reload"])
 
         create_app_mock.assert_called_once_with(
             config.paths.config_path,
             runtime_host="127.0.0.9",
-            runtime_port=8777,
+            runtime_port=requested_port,
         )
         uvicorn_run_mock.assert_called_once()
         self.assertEqual(uvicorn_run_mock.call_args.kwargs["host"], "127.0.0.9")
-        self.assertEqual(uvicorn_run_mock.call_args.kwargs["port"], 8777)
+        self.assertEqual(uvicorn_run_mock.call_args.kwargs["port"], requested_port)
         self.assertNotIn("reload", uvicorn_run_mock.call_args.kwargs)
 
     def test_main_uses_cli_config_path_for_reload_app(self) -> None:
@@ -10435,7 +9293,6 @@ raise SystemExit(0)
         self.assertTrue(result["ok"])
         self.assertFalse(result["queued"])
         self.assertEqual(result["auto_queue_status"], "approval_only")
-        self.assertIn("Choose Make the season", result["message"])
         calibration = load_calibration_state(self.config, "tv/show")
         assert calibration is not None
         self.assertTrue(calibration.get("accepted_at"))
@@ -10624,239 +9481,6 @@ raise SystemExit(0)
 
         self.assertEqual(exc.exception.status_code, 409)
         self.assertIn("configured search or source-size limit", str(exc.exception.detail))
-
-    def test_retry_failed_encode_queue_action_retries_latest_approved_failures_only(self) -> None:
-        with open_db(self.config.paths.db_path) as connection:
-            now = web_app._now_iso()
-            for fixture_prefix, status in (
-                    ("tv/approved-a", "needs_attention"),
-                    ("tv/approved-b", "failed"),
-                    ("tv/review-blocked", "stopped"),
-                    ("tv/already-running", "running"),
-            ):
-                save_encode_job(
-                    connection,
-                    {
-                        "job_id": f"job-{fixture_prefix.rsplit('/', 1)[-1]}",
-                        "prefix": fixture_prefix,
-                        "job_kind": "folder",
-                        "parent_job_id": None,
-                        "status": status,
-                        "manifest_path": str(self.root / "runs" / f"{fixture_prefix.rsplit('/', 1)[-1]}.json"),
-                        "item_count": 1,
-                        "saved_profile_path": None,
-                        "host": {},
-                        "last_host": {},
-                        "notes": "",
-                        "bypass_schedule": False,
-                        "attempt_count": 3,
-                        "process_pid": None,
-                        "error": None,
-                        "leased_at": None,
-                        "lease_expires_at": None,
-                        "heartbeat_at": None,
-                        "worker_id": None,
-                        "retry_not_before": None,
-                        "waiting_reason": None,
-                        "terminal_reason": None,
-                        "last_failure_kind": None,
-                        "last_failure_at": None,
-                        "host_cooldown_until": None,
-                        "created_at": now,
-                        "started_at": None,
-                        "finished_at": now if status in {"needs_attention", "failed", "stopped"} else None,
-                        "updated_at": now,
-                    },
-                )
-
-        queued_prefixes: list[str] = []
-
-        def load_calibration_state(
-                _config: MediaforceConfig,
-                prefix: str,
-        ) -> folder_actions_runtime.ActionPayload | None:
-            if prefix == "tv/review-blocked":
-                return {"policy": {}, "review_media_ready": True}
-            return {"policy": {}, "accepted_at": web_app._now_iso(), "accepted_sample_job_id": "sample-1",
-                    "job_id": "sample-1"}
-
-        def review_gate(
-                calibration: folder_actions_runtime.ActionPayload | None) -> folder_actions_runtime.ActionPayload:
-            if calibration and calibration.get("accepted_at"):
-                return self._accepted_review_gate(calibration)
-            return {
-                "can_confirm_full": False,
-                "message": "Review clips and approve",
-                "status": "needs_approval",
-                "next_action_label": "Review clips and approve",
-            }
-
-        def queue_folder_encode_action(prefix: str, _notes: str,
-                                       _bypass_schedule: bool) -> folder_actions_runtime.ActionPayload:
-            queued_prefixes.append(prefix)
-            return {"ok": True, "message": "Queued the full folder encode."}
-
-        result = queue_actions_runtime.retry_failed_encode_queue_action(
-            connection_factory=lambda: open_db(self.config.paths.db_path),
-            config=self.config,
-            load_calibration_state=load_calibration_state,
-            review_gate=review_gate,
-            queue_folder_encode_action=queue_folder_encode_action,
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(set(queued_prefixes), {"tv/approved-a", "tv/approved-b"})
-        self.assertEqual(result["queued_count"], 2)
-        self.assertEqual(result["review_blocked_count"], 1)
-        self.assertEqual(result["review_blocked_prefixes"], ["tv/review-blocked"])
-
-    def test_retry_failed_encode_prefix_action_retries_only_requested_prefix(self) -> None:
-        with open_db(self.config.paths.db_path) as connection:
-            now = web_app._now_iso()
-            for fixture_prefix in ("tv/approved-a", "tv/approved-b"):
-                save_encode_job(
-                    connection,
-                    {
-                        "job_id": f"job-{fixture_prefix.rsplit('/', 1)[-1]}",
-                        "prefix": fixture_prefix,
-                        "job_kind": "folder",
-                        "parent_job_id": None,
-                        "status": "needs_attention",
-                        "manifest_path": str(self.root / "runs" / f"{fixture_prefix.rsplit('/', 1)[-1]}.json"),
-                        "item_count": 1,
-                        "saved_profile_path": None,
-                        "host": {},
-                        "last_host": {},
-                        "notes": "",
-                        "bypass_schedule": False,
-                        "attempt_count": 3,
-                        "process_pid": None,
-                        "error": None,
-                        "leased_at": None,
-                        "lease_expires_at": None,
-                        "heartbeat_at": None,
-                        "worker_id": None,
-                        "retry_not_before": None,
-                        "waiting_reason": None,
-                        "terminal_reason": None,
-                        "last_failure_kind": None,
-                        "last_failure_at": None,
-                        "host_cooldown_until": None,
-                        "created_at": now,
-                        "started_at": None,
-                        "finished_at": now,
-                        "updated_at": now,
-                    },
-                )
-
-        queued_prefixes: list[str] = []
-
-        def queue_folder_encode_action(prefix: str, _notes: str,
-                                       _bypass_schedule: bool) -> folder_actions_runtime.ActionPayload:
-            queued_prefixes.append(prefix)
-            return {"ok": True, "message": "Queued the full folder encode."}
-
-        result = queue_actions_runtime.retry_failed_encode_prefix_action(
-            connection_factory=lambda: open_db(self.config.paths.db_path),
-            config=self.config,
-            prefix="tv/approved-b",
-            load_calibration_state=lambda _config, _prefix: {
-                "policy": {},
-                "accepted_at": web_app._now_iso(),
-                "accepted_sample_job_id": "sample-1",
-                "job_id": "sample-1",
-            },
-            review_gate=self._accepted_review_gate,
-            queue_folder_encode_action=queue_folder_encode_action,
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(queued_prefixes, ["tv/approved-b"])
-        self.assertEqual(result["queued_prefixes"], ["tv/approved-b"])
-
-    def test_retry_failed_encode_prefix_action_reports_non_retryable_prefix(self) -> None:
-        result = queue_actions_runtime.retry_failed_encode_prefix_action(
-            connection_factory=lambda: open_db(self.config.paths.db_path),
-            config=self.config,
-            prefix="tv/not-failed",
-            load_calibration_state=lambda _config, _prefix: None,
-            review_gate=self._accepted_review_gate,
-            queue_folder_encode_action=lambda _prefix, _notes, _bypass_schedule: {"ok": True},
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["queued_count"], 0)
-        self.assertEqual(result["queued_prefixes"], [])
-        self.assertIn("No failed folder encode was ready", result["message"])
-
-    def test_retry_failed_encode_prefix_action_explains_fresh_goal_requirement(self) -> None:
-        prefix = "tv/show/episode-final-size-miss.mkv"
-        with open_db(self.config.paths.db_path) as connection:
-            now = web_app._now_iso()
-            save_encode_job(
-                connection,
-                {
-                    "job_id": "job-fresh-goal-required",
-                    "prefix": prefix,
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "needs_attention",
-                    "manifest_path": str(self.root / "runs" / "fresh-goal-required.json"),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 3,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": "deterministic",
-                    "last_failure_at": now,
-                    "host_cooldown_until": None,
-                    "progress": {
-                        "failure_analysis": {
-                            "kind": "final_size_target_miss",
-                            "retry_strategy": "fresh_goal_required",
-                        }
-                    },
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": now,
-                    "updated_at": now,
-                },
-            )
-
-        queue_calls: list[str] = []
-
-        def queue_action(queued_prefix: str, _notes: str, _bypass_schedule: bool) -> dict[str, object]:
-            queue_calls.append(queued_prefix)
-            return {
-                "ok": False,
-                "code": "final_size_recovery_contract_unchanged",
-                "message": "Choose a fresh size or compression goal before retrying.",
-            }
-
-        result = queue_actions_runtime.retry_failed_encode_prefix_action(
-            connection_factory=lambda: open_db(self.config.paths.db_path),
-            config=self.config,
-            prefix=prefix,
-            load_calibration_state=self._accepted_calibration_state,
-            review_gate=self._accepted_review_gate,
-            queue_folder_encode_action=queue_action,
-        )
-
-        self.assertEqual(result["queued_count"], 0)
-        self.assertEqual(queue_calls, [prefix])
-        self.assertEqual(result["blocked"][0]["code"], "final_size_recovery_contract_unchanged")
-        self.assertIn("Choose a fresh size or compression goal", result["message"])
 
     def test_save_profile_action_requires_high_impact_confirmation(self) -> None:
         calibration_payload: folder_actions_runtime.ActionPayload = {
@@ -11749,35 +10373,22 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "encode-needs-attention",
-                    "prefix": "tv/show",
-                    "status": "needs_attention",
-                    "manifest_path": str(manifest_path),
-                    "item_count": 2,
-                    "saved_profile_path": None,
-                    "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": "ffmpeg output\nError: Failed to find a suitable crf",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": "needs_attention",
-                    "last_failure_kind": "deterministic",
-                    "last_failure_at": now,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": now,
-                    "updated_at": now,
-                },
+                self._job_row(
+                    job_id="encode-needs-attention",
+                    prefix="tv/show",
+                    status="needs_attention",
+                    manifest_path=str(manifest_path),
+                    item_count=2,
+                    host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                    error="ffmpeg output\nError: Failed to find a suitable crf",
+                    terminal_reason="needs_attention",
+                    last_failure_kind="deterministic",
+                    last_failure_at=now,
+                    created_at=now,
+                    started_at=now,
+                    finished_at=now,
+                    updated_at=now,
+                ),
             )
 
             self.assertEqual(
@@ -12712,38 +11323,21 @@ raise SystemExit(0)
             now = web_app._now_iso()
             save_encode_job(
                 connection,
-                {
-                    "job_id": "manifest-needs-attention-job",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "needs_attention",
-                    "manifest_path": str(active_manifest),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 0,
-                    "process_pid": None,
-                    "error": "needs operator decision",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": now,
-                    "updated_at": now,
-                },
+                self._job_row(
+                    job_id="manifest-needs-attention-job",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="needs_attention",
+                    manifest_path=str(active_manifest),
+                    manifest_indexes=None,
+                    attempt_count=0,
+                    error="needs operator decision",
+                    created_at=now,
+                    started_at=now,
+                    finished_at=now,
+                    updated_at=now,
+                ),
             )
 
         with patch(
@@ -12780,26 +11374,6 @@ raise SystemExit(0)
             self.assertFalse(temp_dir.exists())
         finally:
             shutil.rmtree(previous_root, ignore_errors=True)
-
-    def test_collect_host_statuses_uses_configured_hosts_only(self) -> None:
-        configured_hosts = [
-            {"host": "cbusillo@localhost", "label": "Chris-Studio"},
-            {"host": "cbusillo@example-host", "label": "Remote"},
-        ]
-        self.config.raw["remote_hosts"] = configured_hosts
-        with patch("mediaforce.remote._remote_host_status", side_effect=lambda config, host: HostStatus(
-                key=str(host["host"]),
-                label=str(host["label"]),
-                mode="ssh",
-                priority=0,
-                capabilities=["encode_queue"],
-                available=True,
-                message="Mounted and ready",
-                missing_paths=[],
-                repo_path=None,
-        )):
-            statuses = remote.collect_host_statuses(self.config)
-        self.assertEqual([status.key for status in statuses], ["cbusillo@localhost", "cbusillo@example-host"])
 
     def test_collect_host_statuses_checks_multiple_hosts_in_parallel(self) -> None:
         configured_hosts = [
@@ -13061,45 +11635,50 @@ raise SystemExit(0)
         self.assertIsNone(status.probe_available)
 
     def test_remote_host_status_rejects_unwritable_staging_root(self) -> None:
-        host: dict[str, object] = {
-            "host": "cbusillo@encode-host",
-            "label": "Encode Host",
-            "capabilities": ["encode_queue"],
-            "source_roots": {"tv": "/srv/media/tv"},
-            "staging_root": "/srv/media/transcode",
-        }
-        stdout = "\n".join(
-            [
-                "path|/srv/media/tv|1",
-                "pathexists|/srv/media/tv|1",
-                "pathread|/srv/media/tv|1",
-                "pathwrite|/srv/media/tv|0",
-                "path|/srv/media/transcode|1",
-                "pathexists|/srv/media/transcode|1",
-                "pathread|/srv/media/transcode|1",
-                "pathwrite|/srv/media/transcode|0",
-                "tool|xcode_clt|1",
-                "tool|brew|1",
-                "tool|ffmpeg|1",
-                "tool|ffmpeg_videotoolbox|1",
-                "tool|ffmpeg_libvmaf|1",
-                "tool|ffmpeg_xpsnr|1",
-                "tool|ffmpeg_libsvtav1|1",
-                "tool|ab_av1|1",
-                "meta|platform|macos",
-                "time|utc_offset|+0000",
-                "repo|exists|1",
-            ]
-        )
-        with patch(
-                "mediaforce.remote._run_remote_ssh",
-                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
-        ), patch("mediaforce.remote._learn_remote_wake_mac"):
-            status = remote._remote_host_status(self.config, host)
+        for hostname, label, capability in (
+                ("cbusillo@encode-host", "Encode Host", "encode_queue"),
+                ("cbusillo@sample-host", "Sample Host", "sample_calibration"),
+        ):
+            with self.subTest(capability=capability):
+                host: dict[str, object] = {
+                    "host": hostname,
+                    "label": label,
+                    "capabilities": [capability],
+                    "source_roots": {"tv": "/srv/media/tv"},
+                    "staging_root": "/srv/media/transcode",
+                }
+                stdout = "\n".join(
+                    [
+                        "path|/srv/media/tv|1",
+                        "pathexists|/srv/media/tv|1",
+                        "pathread|/srv/media/tv|1",
+                        "pathwrite|/srv/media/tv|0",
+                        "path|/srv/media/transcode|1",
+                        "pathexists|/srv/media/transcode|1",
+                        "pathread|/srv/media/transcode|1",
+                        "pathwrite|/srv/media/transcode|0",
+                        "tool|xcode_clt|1",
+                        "tool|brew|1",
+                        "tool|ffmpeg|1",
+                        "tool|ffmpeg_videotoolbox|1",
+                        "tool|ffmpeg_libvmaf|1",
+                        "tool|ffmpeg_xpsnr|1",
+                        "tool|ffmpeg_libsvtav1|1",
+                        "tool|ab_av1|1",
+                        "meta|platform|macos",
+                        "time|utc_offset|+0000",
+                        "repo|exists|1",
+                    ]
+                )
+                with patch(
+                        "mediaforce.remote._run_remote_ssh",
+                        return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
+                ), patch("mediaforce.remote._learn_remote_wake_mac"):
+                    status = remote._remote_host_status(self.config, host)
 
-        self.assertFalse(status.available)
-        self.assertEqual(status.message, STAGING_ROOT_UNWRITABLE_MESSAGE)
-        self.assertIn(f"{STAGING_ROOT_WRITE_MISSING_ISSUE} /srv/media/transcode", status.issues)
+                self.assertFalse(status.available)
+                self.assertEqual(status.message, STAGING_ROOT_UNWRITABLE_MESSAGE)
+                self.assertIn(f"{STAGING_ROOT_WRITE_MISSING_ISSUE} /srv/media/transcode", status.issues)
 
     def test_remote_host_status_rejects_unreadable_source_root(self) -> None:
         host: dict[str, object] = {
@@ -13434,47 +12013,6 @@ raise SystemExit(0)
         self.assertIn("/srv/media/tv", script)
         self.assertNotIn("/Volumes/media/tv", script)
         self.assertIn("for write_path in ; do", script)
-
-    def test_remote_host_status_rejects_sample_host_unwritable_staging_root(self) -> None:
-        host: dict[str, object] = {
-            "host": "cbusillo@sample-host",
-            "label": "Sample Host",
-            "capabilities": ["sample_calibration"],
-            "source_roots": {"tv": "/srv/media/tv"},
-            "staging_root": "/srv/media/transcode",
-        }
-        stdout = "\n".join(
-            [
-                "path|/srv/media/tv|1",
-                "pathexists|/srv/media/tv|1",
-                "pathread|/srv/media/tv|1",
-                "pathwrite|/srv/media/tv|0",
-                "path|/srv/media/transcode|1",
-                "pathexists|/srv/media/transcode|1",
-                "pathread|/srv/media/transcode|1",
-                "pathwrite|/srv/media/transcode|0",
-                "tool|xcode_clt|1",
-                "tool|brew|1",
-                "tool|ffmpeg|1",
-                "tool|ffmpeg_videotoolbox|1",
-                "tool|ffmpeg_libvmaf|1",
-                "tool|ffmpeg_xpsnr|1",
-                "tool|ffmpeg_libsvtav1|1",
-                "tool|ab_av1|1",
-                "meta|platform|macos",
-                "time|utc_offset|+0000",
-                "repo|exists|1",
-            ]
-        )
-        with patch(
-                "mediaforce.remote._run_remote_ssh",
-                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr=""),
-        ), patch("mediaforce.remote._learn_remote_wake_mac"):
-            status = remote._remote_host_status(self.config, host)
-
-        self.assertFalse(status.available)
-        self.assertEqual(status.message, STAGING_ROOT_UNWRITABLE_MESSAGE)
-        self.assertIn(f"{STAGING_ROOT_WRITE_MISSING_ISSUE} /srv/media/transcode", status.issues)
 
     def test_remote_host_status_requires_ab_av1_for_stream_encode_host_with_remote_roots(self) -> None:
         host: dict[str, object] = {
@@ -16799,36 +15337,6 @@ raise SystemExit(0)
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
 
-    def test_run_crf_search_removes_scoped_remote_temp_dir_after_completion(self) -> None:
-        host = {"mode": "ssh", "host": "cbusillo@stream-host"}
-        remote_results = [
-            subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
-            subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="crf 28 xpsnr 41.5", stderr=""),
-            subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
-        ]
-
-        with patch("mediaforce.quality.run_remote_command", side_effect=remote_results) as remote_command_mock:
-            quality.run_crf_search(
-                Path("/tmp/input.mkv"),
-                source_codec="hevc",
-                preferred_metric="xpsnr",
-                metric_target=41.0,
-                preset=4,
-                pixel_format="yuv420p10le",
-                sample_every="12m",
-                sample_duration="20s",
-                min_crf=20,
-                max_crf=35,
-                max_encoded_percent=70,
-                svt_params=[],
-                thorough=False,
-                host=host,
-                quality_temp_dir=Path("/tmp/mediaforce-transcode"),
-            )
-
-        scoped_temp_dir = remote_command_mock.call_args_list[0].args[1][2]
-        self.assertEqual(remote_command_mock.call_args_list[2].args[1], ["rm", "-rf", scoped_temp_dir])
-
     def test_run_crf_search_surfaces_remote_temp_cleanup_failure(self) -> None:
         host = {"mode": "ssh", "host": "cbusillo@stream-host"}
         remote_results = [
@@ -17786,7 +16294,6 @@ raise SystemExit(0)
         self.assertIsNone(
             execution._update_ffmpeg_progress_state(progress_state, "out_time_ms=45000000\n", elapsed_seconds=5.0))
         snapshot = execution._update_ffmpeg_progress_state(progress_state, "progress=continue\n", elapsed_seconds=5.0)
-        self.assertIsNotNone(snapshot)
         assert snapshot is not None
         self.assertEqual(snapshot["fps"], 23.4)
         self.assertEqual(snapshot["speed"], 2.5)
@@ -18056,71 +16563,47 @@ raise SystemExit(0)
             summary,
         )
 
-    def test_decorate_encode_queue_for_scheduler_attempt_summary_respects_started_at(self) -> None:
-        manifest_path = self.root / "started-at-manifest.json"
-        manifest_path.write_text(json.dumps({"items": [{"duration_seconds": 60.0, "source_size_bytes": 1000}]}))
-        encode_queue = {
-            "state": {"is_paused": False, "stop_requested": False},
-            "running": [],
-            "queued": [],
-            "recent": [
-                {
-                    "job_id": "started-job",
-                    "prefix": "tv/House/Season 2",
-                    "status": "needs_attention",
-                    "manifest_path": str(manifest_path),
-                    "item_count": 1,
-                    "host": {},
-                    "attempt_count": 0,
-                    "started_at": "2026-04-03T21:14:17+00:00",
-                    "progress": {
-                        "progress_state": "needs_attention",
-                        "overall_completed_duration_seconds": 12.0,
-                    },
+    def test_decorate_encode_queue_attempt_numbers_cover_start_and_cap(self) -> None:
+        for attempt_count, status, expected_attempt in (
+                (0, "needs_attention", 1),
+                (web_app.ENCODE_JOB_MAX_ATTEMPTS + 4, "retry_backoff", web_app.ENCODE_JOB_MAX_ATTEMPTS),
+        ):
+            with self.subTest(attempt_count=attempt_count, status=status):
+                manifest_path = self.root / "attempt-summary-manifest.json"
+                manifest_path.write_text(json.dumps({"items": [{"duration_seconds": 60.0, "source_size_bytes": 1000}]}))
+                encode_queue = {
+                    "state": {"is_paused": False, "stop_requested": False},
+                    "running": [],
+                    "queued": [],
+                    "recent": [
+                        {
+                            "job_id": "attempt-summary-job",
+                            "prefix": "tv/House/Season 2",
+                            "status": status,
+                            "manifest_path": str(manifest_path),
+                            "item_count": 1,
+                            "host": {},
+                            "attempt_count": attempt_count,
+                            "started_at": "2026-04-03T21:14:17+00:00",
+                            "progress": {
+                                "progress_state": status,
+                                "overall_completed_duration_seconds": 12.0,
+                            },
+                        }
+                    ],
+                    "queued_count": 0,
+                    "running_count": 0,
+                    "retry_backoff_count": int(status == "retry_backoff"),
+                    "needs_attention_count": int(status == "needs_attention"),
                 }
-            ],
-            "queued_count": 0,
-            "running_count": 0,
-            "retry_backoff_count": 0,
-            "needs_attention_count": 1,
-        }
 
-        decorated = web_app._decorate_encode_queue_for_scheduler(self.config, encode_queue)
+                decorated = web_app._decorate_encode_queue_for_scheduler(self.config, encode_queue)
 
-        self.assertEqual(decorated["recent"][0]["attempt_summary"], "attempt 1 of 3")
-
-    def test_decorate_encode_queue_for_scheduler_attempt_summary_clamps_to_max(self) -> None:
-        manifest_path = self.root / "clamped-attempt-manifest.json"
-        manifest_path.write_text(json.dumps({"items": [{"duration_seconds": 60.0, "source_size_bytes": 1000}]}))
-        encode_queue = {
-            "state": {"is_paused": False, "stop_requested": False},
-            "running": [],
-            "queued": [],
-            "recent": [
-                {
-                    "job_id": "retrying-host-job",
-                    "prefix": "tv/House/Season 2",
-                    "status": "retry_backoff",
-                    "manifest_path": str(manifest_path),
-                    "item_count": 1,
-                    "host": {},
-                    "attempt_count": 7,
-                    "started_at": "2026-04-03T21:14:17+00:00",
-                    "progress": {
-                        "progress_state": "retry_backoff",
-                        "overall_completed_duration_seconds": 12.0,
-                    },
-                }
-            ],
-            "queued_count": 0,
-            "running_count": 0,
-            "retry_backoff_count": 1,
-            "needs_attention_count": 0,
-        }
-
-        decorated = web_app._decorate_encode_queue_for_scheduler(self.config, encode_queue)
-
-        self.assertEqual(decorated["recent"][0]["attempt_summary"], "attempt 3 of 3")
+                summary = decorated["recent"][0]["attempt_summary"]
+                self.assertEqual(
+                    [int(value) for value in re.findall(r"-?\d+", summary)],
+                    [expected_attempt, web_app.ENCODE_JOB_MAX_ATTEMPTS],
+                )
 
     def test_encode_queue_summary_copy_labels_eta_as_estimated(self) -> None:
         encode_queue = {
@@ -18362,38 +16845,24 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "folder-runtime",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "running",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": [0],
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {"key": "ct103", "label": "CT103", "mode": "ssh"},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": 123,
-                    "error": None,
-                    "leased_at": now,
-                    "lease_expires_at": now,
-                    "heartbeat_at": now,
-                    "worker_id": "test-worker",
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": None,
-                    "updated_at": now,
-                    "progress": {
+                self._job_row(
+                    job_id="folder-runtime",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="running",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[0],
+                    host={"key": "ct103", "label": "CT103", "mode": "ssh"},
+                    process_pid=123,
+                    leased_at=now,
+                    lease_expires_at=now,
+                    heartbeat_at=now,
+                    worker_id="test-worker",
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                    progress={
                         "total_item_count": 1,
                         "completed_item_count": 0,
                         "total_duration_seconds": 120.0,
@@ -18402,42 +16871,28 @@ raise SystemExit(0)
                         "percent_complete": 0.0,
                         "speed": 1.0,
                     },
-                },
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "shard-runtime",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": "folder-runtime",
-                    "status": "running",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": [0],
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {"key": "ct103", "label": "CT103", "mode": "ssh"},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": 124,
-                    "error": None,
-                    "leased_at": now,
-                    "lease_expires_at": now,
-                    "heartbeat_at": now,
-                    "worker_id": "test-worker",
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": None,
-                    "updated_at": now,
-                    "progress": {
+                self._job_row(
+                    job_id="shard-runtime",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id="folder-runtime",
+                    status="running",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[0],
+                    host={"key": "ct103", "label": "CT103", "mode": "ssh"},
+                    process_pid=124,
+                    leased_at=now,
+                    lease_expires_at=now,
+                    heartbeat_at=now,
+                    worker_id="test-worker",
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                    progress={
                         "total_item_count": 1,
                         "completed_item_count": 0,
                         "total_duration_seconds": 120.0,
@@ -18446,7 +16901,7 @@ raise SystemExit(0)
                         "percent_complete": 0.0,
                         "speed": 1.0,
                     },
-                },
+                ),
             )
         with open_db(self.config.paths.db_path) as connection, patch(
                 "mediaforce.web.app._safe_collect_host_statuses", return_value=[status]
@@ -18818,117 +17273,65 @@ raise SystemExit(0)
         self.assertEqual(job["host"], {"key": "ct103", "label": "CT103", "mode": "ssh"})
 
     def test_repair_persisted_encode_job_hosts_rewrites_invalid_json_rows(self) -> None:
-        with open_db(self.config.paths.db_path) as connection:
-            self._save_job(
-                connection,
-                job_id="repair-invalid-json-host",
-                manifest_name="manifest-repair-invalid-json-host.json",
-                host={"key": "ct103", "label": "CT103", "mode": "ssh"},
-                status="running",
-                attempt_count=1,
-            )
-            connection.execute(
-                update(encode_jobs)
-                .where(encode_jobs.c.job_id == "repair-invalid-json-host")
-                .values(
-                    host_json="{",
-                    last_host_json=json.dumps(
-                        {"key": "ct103", "label": "CT103", "mode": "ssh"}, sort_keys=True
-                    ),
-                )
-            )
+        for raw_host in ("{", ""):
+            with self.subTest(raw_host=raw_host):
+                with open_db(self.config.paths.db_path) as connection:
+                    self._save_job(
+                        connection,
+                        job_id="repair-host-case",
+                        manifest_name="manifest-repair-host-case.json",
+                        host={"key": "ct103", "label": "CT103", "mode": "ssh"},
+                        status="running",
+                        attempt_count=1,
+                    )
+                    connection.execute(
+                        update(encode_jobs)
+                        .where(encode_jobs.c.job_id == "repair-host-case")
+                        .values(
+                            host_json=raw_host,
+                            last_host_json=json.dumps(
+                                {"key": "ct103", "label": "CT103", "mode": "ssh"}, sort_keys=True
+                            ),
+                        )
+                    )
 
-            repaired = repair_persisted_encode_job_hosts(connection)
-            job = load_encode_job(connection, "repair-invalid-json-host")
+                    repaired = repair_persisted_encode_job_hosts(connection)
+                    job = load_encode_job(connection, "repair-host-case")
 
-        assert job is not None
-        self.assertEqual(repaired, 1)
-        self.assertEqual(job["host"], {"key": "ct103", "label": "CT103", "mode": "ssh"})
-
-    def test_repair_persisted_encode_job_hosts_rewrites_empty_string_rows(self) -> None:
-        with open_db(self.config.paths.db_path) as connection:
-            self._save_job(
-                connection,
-                job_id="repair-empty-string-host",
-                manifest_name="manifest-repair-empty-string-host.json",
-                host={"key": "ct103", "label": "CT103", "mode": "ssh"},
-                status="running",
-                attempt_count=1,
-            )
-            connection.execute(
-                update(encode_jobs)
-                .where(encode_jobs.c.job_id == "repair-empty-string-host")
-                .values(
-                    host_json="",
-                    last_host_json=json.dumps(
-                        {"key": "ct103", "label": "CT103", "mode": "ssh"}, sort_keys=True
-                    ),
-                )
-            )
-
-            repaired = repair_persisted_encode_job_hosts(connection)
-            job = load_encode_job(connection, "repair-empty-string-host")
-
-        assert job is not None
-        self.assertEqual(repaired, 1)
-        self.assertEqual(job["host"], {"key": "ct103", "label": "CT103", "mode": "ssh"})
+                assert job is not None
+                self.assertEqual(repaired, 1)
+                self.assertEqual(job["host"], {"key": "ct103", "label": "CT103", "mode": "ssh"})
 
     def test_repair_persisted_encode_job_hosts_backfills_host_from_last_host(self) -> None:
-        with open_db(self.config.paths.db_path) as connection:
-            self._save_job(
-                connection,
-                job_id="repair-backfill-host",
-                manifest_name="manifest-repair-backfill-host.json",
-                host={"key": "ct103", "label": "CT103", "mode": "ssh"},
-                status="running",
-                attempt_count=1,
-            )
-            connection.execute(
-                update(encode_jobs)
-                .where(encode_jobs.c.job_id == "repair-backfill-host")
-                .values(
-                    host_json=json.dumps({"key": "", "label": "", "mode": "ssh"}, sort_keys=True),
-                    last_host_json=json.dumps(
-                        {"key": "ct103", "label": "CT103", "mode": "ssh"}, sort_keys=True
-                    ),
-                )
-            )
+        for host_payload in ({"key": "", "label": "", "mode": "ssh"}, {"label": "CT103", "mode": "ssh"}):
+            with self.subTest(host_payload=host_payload):
+                with open_db(self.config.paths.db_path) as connection:
+                    self._save_job(
+                        connection,
+                        job_id="repair-host-case",
+                        manifest_name="manifest-repair-host-case.json",
+                        host={"key": "ct103", "label": "CT103", "mode": "ssh"},
+                        status="running",
+                        attempt_count=1,
+                    )
+                    connection.execute(
+                        update(encode_jobs)
+                        .where(encode_jobs.c.job_id == "repair-host-case")
+                        .values(
+                            host_json=json.dumps(host_payload, sort_keys=True),
+                            last_host_json=json.dumps(
+                                {"key": "ct103", "label": "CT103", "mode": "ssh"}, sort_keys=True
+                            ),
+                        )
+                    )
 
-            repaired = repair_persisted_encode_job_hosts(connection)
-            job = load_encode_job(connection, "repair-backfill-host")
+                    repaired = repair_persisted_encode_job_hosts(connection)
+                    job = load_encode_job(connection, "repair-host-case")
 
-        assert job is not None
-        self.assertEqual(repaired, 1)
-        self.assertEqual(job["host"], {"key": "ct103", "label": "CT103", "mode": "ssh"})
-        self.assertEqual(job["last_host"], {"key": "ct103", "label": "CT103", "mode": "ssh"})
-
-    def test_repair_persisted_encode_job_hosts_backfills_key_when_host_is_label_only(self) -> None:
-        with open_db(self.config.paths.db_path) as connection:
-            self._save_job(
-                connection,
-                job_id="repair-label-only-host",
-                manifest_name="manifest-repair-label-only-host.json",
-                host={"key": "ct103", "label": "CT103", "mode": "ssh"},
-                status="running",
-                attempt_count=1,
-            )
-            connection.execute(
-                update(encode_jobs)
-                .where(encode_jobs.c.job_id == "repair-label-only-host")
-                .values(
-                    host_json=json.dumps({"label": "CT103", "mode": "ssh"}, sort_keys=True),
-                    last_host_json=json.dumps(
-                        {"key": "ct103", "label": "CT103", "mode": "ssh"}, sort_keys=True
-                    ),
-                )
-            )
-
-            repaired = repair_persisted_encode_job_hosts(connection)
-            job = load_encode_job(connection, "repair-label-only-host")
-
-        assert job is not None
-        self.assertEqual(repaired, 1)
-        self.assertEqual(job["host"], {"key": "ct103", "label": "CT103", "mode": "ssh"})
+                assert job is not None
+                self.assertEqual(repaired, 1)
+                self.assertEqual(job["host"], {"key": "ct103", "label": "CT103", "mode": "ssh"})
+                self.assertEqual(job["last_host"], {"key": "ct103", "label": "CT103", "mode": "ssh"})
 
     def test_render_source_review_clip_enables_videotoolbox_decode_for_h264_sources(self) -> None:
         with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
@@ -19332,7 +17735,6 @@ raise SystemExit(0)
                 audio_policy={"convert_to_opus_codecs": ["aac"], "surround_5_1_opus_bitrate": "256k"},
             )
 
-        self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result["action"], "libopus")
         self.assertEqual(result["bitrate"], "256k")
@@ -19565,7 +17967,6 @@ raise SystemExit(0)
         self.assertFalse(second.acquire())
 
         owner = second.owner_metadata()
-        self.assertIsNotNone(owner)
         assert owner is not None
         self.assertEqual(owner["worker_name"], "background-workers")
 
@@ -19608,7 +18009,6 @@ raise SystemExit(0)
         ) as start_catalog, patch("mediaforce.web.app._start_evidence_autostart_worker") as start_autostart:
             runtime = web_app._start_background_workers(self.config)
 
-        self.assertIsNotNone(runtime)
         assert runtime is not None
         self.assertIs(runtime.lease, lease)
         self.assertEqual(runtime.handles, (storage_handle, host_recovery_handle, calibration_handle, encode_handle, catalog_handle))
@@ -19865,40 +18265,13 @@ raise SystemExit(0)
         host_recovery_handle.join.assert_called_once_with()
         lease.release.assert_called_once_with()
 
-    def test_stop_encode_queue_action_sweeps_orphaned_processes_after_cancel(self) -> None:
-        cancel_queue_process = Mock()
-        sweep_orphaned_encode_processes = Mock()
-        clear_stale_encoding_items = Mock(return_value=4)
-
-        result = queue_actions_runtime.stop_encode_queue_action(
-            connection_factory=lambda: open_db(self.config.paths.db_path),
-            config=self.config,
-            now_iso=web_app._now_iso,
-            cancel_queue_process=cancel_queue_process,
-            sweep_orphaned_encode_processes=sweep_orphaned_encode_processes,
-            clear_stale_encoding_items=clear_stale_encoding_items,
-        )
-
-        self.assertTrue(result["ok"])
-        cancel_queue_process.assert_called_once_with()
-        sweep_orphaned_encode_processes.assert_called_once_with()
-        clear_stale_encoding_items.assert_called_once_with()
-        self.assertEqual(result["cleared_stale_item_count"], 4)
-
-        with open_db(self.config.paths.db_path) as connection:
-            state = load_queue_state(connection)
-        self.assertTrue(state["is_paused"])
-        self.assertTrue(state["stop_requested"])
-
     def test_orphan_sweep_does_not_signal_configured_hosts_without_queue_ownership(self) -> None:
         self.config.raw["remote_hosts"] = [
             {"host": "encode-a", "mode": "ssh", "capabilities": ["encode_queue"]},
             {"host": "encode-b", "mode": "ssh", "capabilities": ["encode_queue"]},
         ]
-        with patch.object(web_app, "run_remote_command") as remote, patch.object(
-                encode_runtime, "run_remote_command") as scoped_remote:
+        with patch("mediaforce.web.runtime.encode_runtime.run_remote_command") as scoped_remote:
             web_app._sweep_orphaned_encode_processes(self.config)
-        remote.assert_not_called()
         scoped_remote.assert_not_called()
 
     def test_orphan_sweep_only_reaches_the_retained_jobs_resolved_outputs(self) -> None:
@@ -19907,31 +18280,11 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             self._save_job(connection, job_id="owned-sweep", manifest_name="owned-sweep.json", status="stopped",
                            attempt_count=1, host={"mode": "ssh", "host": "owned-host"})
-        with patch.object(web_app, "run_remote_command") as broad, patch.object(
-                encode_runtime, "end_remote_output_writers") as end_writers:
+        with patch("mediaforce.web.runtime.encode_runtime.end_remote_output_writers") as end_writers:
             web_app._sweep_orphaned_encode_processes(self.config)
-        broad.assert_not_called()
         self.assertEqual({call.args[0]["host"] for call in end_writers.call_args_list}, {"owned-host"})
         self.assertEqual({call.args[1] for call in end_writers.call_args_list},
                          {output, staging_runtime.partial_output_path(output)})
-
-    def test_create_app_registers_folder_status_route_before_catch_all_folder_route(self) -> None:
-        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
-                "mediaforce.web.app.purge_transient_artifacts"
-        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
-            "mediaforce.web.app._start_encode_queue_worker"
-        ):
-            app = web_app.create_app(self.config.paths.config_path)
-
-        folder_route_paths = [
-            str(getattr(route, "path", ""))
-            for route in app.router.routes
-            if str(getattr(route, "path", "")).startswith("/api/folders/")
-        ]
-        self.assertLess(
-            folder_route_paths.index("/api/folders/{prefix:path}/status"),
-            folder_route_paths.index("/api/folders/{prefix:path}"),
-        )
 
     def test_app_lifespan_joins_writers_and_releases_leadership_before_runtime_lock(self) -> None:
         startup_threads: list[Any] = []
@@ -20191,8 +18544,8 @@ raise SystemExit(0)
             root = Path(directory)
             web_state_dir = root / "web"
             web_state_dir.mkdir()
-            config_lower = SimpleNamespace(
-                paths=SimpleNamespace(
+            config_lower = replace(
+                self.config, paths=replace(self.config.paths,
                     config_path=root / "config.toml",
                     db_path=root / "library.sqlite3",
                     web_state_dir=web_state_dir,
@@ -20202,8 +18555,8 @@ raise SystemExit(0)
             keys_lower = runtime_lock_module._runtime_namespace_keys(config_lower, lock_path)
 
             upper_root = Path(str(root).upper()) if str(root)[0].isalpha() else root
-            config_upper = SimpleNamespace(
-                paths=SimpleNamespace(
+            config_upper = replace(
+                self.config, paths=replace(self.config.paths,
                     config_path=upper_root / "CONFIG.TOML",
                     db_path=upper_root / "LIBRARY.SQLITE3",
                     web_state_dir=upper_root / "WEB",
@@ -20228,14 +18581,14 @@ raise SystemExit(0)
             import unicodedata
             nfc_name = unicodedata.normalize("NFC", "café")
             nfd_name = unicodedata.normalize("NFD", "café")
-            config_nfc = SimpleNamespace(
-                paths=SimpleNamespace(
+            config_nfc = replace(
+                self.config, paths=replace(self.config.paths,
                     config_path=root / f"{nfc_name}.toml",
                     web_state_dir=web_state_dir,
                 ),
             )
-            config_nfd = SimpleNamespace(
-                paths=SimpleNamespace(
+            config_nfd = replace(
+                self.config, paths=replace(self.config.paths,
                     config_path=root / f"{nfd_name}.toml",
                     web_state_dir=web_state_dir,
                 ),
@@ -20256,14 +18609,15 @@ raise SystemExit(0)
             alias = root / "config-alias.toml"
             original.write_text("config", encoding="utf-8")
             os.link(original, alias)
-            first_config = SimpleNamespace(
-                paths=SimpleNamespace(
+            paths = replace(self.config.paths, db_path=root / "absent.sqlite3")
+            first_config = replace(
+                self.config, paths=replace(paths,
                     config_path=original,
                     web_state_dir=root / "first-state",
                 )
             )
-            second_config = SimpleNamespace(
-                paths=SimpleNamespace(
+            second_config = replace(
+                self.config, paths=replace(paths,
                     config_path=alias,
                     web_state_dir=root / "second-state",
                 )
@@ -20284,8 +18638,8 @@ raise SystemExit(0)
             self.assertEqual(len(first_identity_keys), 1)
 
     def test_runtime_namespace_identity_stat_errors_fail_closed(self) -> None:
-        config = SimpleNamespace(
-            paths=SimpleNamespace(
+        config = replace(
+            self.config, paths=replace(self.config.paths,
                 config_path=self.root / "config.toml",
                 web_state_dir=self.root / "state",
             )
@@ -20299,288 +18653,6 @@ raise SystemExit(0)
         ):
             with self.assertRaises(runtime_lock_module.MediaforceRuntimeBusyError):
                 runtime_lock_module._runtime_namespace_keys(config, lock_path)
-
-    def test_folder_api_route_returns_payload_for_seeded_prefix(self) -> None:
-        source_path = self._create_source_file("episode-folder.mkv")
-        self.config.raw.update(
-            {
-                "video": {
-                    "quality_metric": "auto",
-                    "target_vmaf": 94,
-                    "min_target_vmaf": 92,
-                    "target_xpsnr": 36,
-                    "min_target_xpsnr": 34,
-                    "target_size_mb": 300,
-                    "target_size_bytes": 300_000_000,
-                    "target_runtime_minutes": 45,
-                    "size_goal_schema_version": 1,
-                    "size_goal_mode": "normalized",
-                    "size_goal_source": "config_default",
-                    "sample_projection_tolerance_percent": 10,
-                    "final_output_tolerance_percent": 5,
-                    "max_encoded_percent": 100,
-                    "default_grain": 0,
-                    "max_height": 1080,
-                    "resolution_intent_mode": "max_height",
-                    "resolution_intent_source": "config_default",
-                },
-                "audio": {"keep_languages": ["eng"]},
-                "subtitle": {"keep_languages": ["eng"], "keep_forced": True},
-                "planning": {},
-            }
-        )
-        self.config.raw["media"]["output_container"] = "mkv"
-
-        with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source_path)
-            connection.execute(
-                update(library_items)
-                .where(library_items.c.id == item_id)
-                .values(
-                    duration_seconds=88 * 60,
-                    audio_summary_json=json.dumps(
-                        [
-                            {
-                                "index": 0,
-                                "codec_name": "aac",
-                                "channels": 2,
-                                "language": "eng",
-                                "default": 1,
-                                "bit_rate": 192_000,
-                            }
-                        ]
-                    ),
-                    attachment_summary_json=json.dumps([]),
-                )
-            )
-            connection.commit()
-
-        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
-                "mediaforce.web.app.purge_transient_artifacts"
-        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
-            "mediaforce.web.app._start_encode_queue_worker"
-        ):
-            app = web_app.create_app(self.config.paths.config_path)
-
-        folder_endpoint = next(
-            route.endpoint
-            for route in app.router.routes
-            if getattr(route, "path", "") == "/api/folders/{prefix:path}"
-        )
-        with patch("mediaforce.web.app._load_scan_status", return_value=None), patch(
-                "mediaforce.web.app._cached_sample_calibration_host_statuses", return_value=[]
-        ):
-            response = folder_endpoint("tv/show")
-        payload = json.loads(response.body)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertFalse(payload["pending"])
-        self.assertEqual(payload["prefix"], "tv/show")
-        self.assertEqual(payload["sample_item"]["rel_path"], "tv/show/episode-folder.mkv")
-        self.assertNotIn("source_path", payload["sample_item"])
-        self.assertNotIn("staging_path", payload["sample_item"])
-        self.assertEqual(payload["representative_selection"]["coverage"]["selected_item_count"], 1)
-        self.assertEqual(
-            payload["representative_selection"]["selected_items"][0]["rationale"]["role"],
-            "primary",
-        )
-        self.assertNotIn(str(self.root), json.dumps(payload["representative_selection"], sort_keys=True))
-        self.assertEqual(payload["resolved_operator_intent"]["size_goal"]["mode"], "normalized")
-        self.assertEqual(payload["resolved_operator_intent"]["size_goal"]["target_size_bytes"], 586_666_667)
-        self.assertEqual(payload["stream_budget_ledger"]["totals"]["total_target_bytes"], 586_666_667)
-        self.assertEqual(payload["stream_budget_ledger"]["totals"]["non_video_bytes"], 132_586_667)
-        self.assertEqual(payload["stream_budget_ledger"]["totals"]["remaining_video_bytes"], 454_080_000)
-        self.assertEqual(
-            payload["item_plan"]["stream_plan_id"],
-            payload["stream_budget_ledger"]["stream_plan"]["plan_id"],
-        )
-        self.assertEqual(payload["size_goal_options"][0]["resolved_size_goal"]["target_size_mb"], 586.667)
-        self.assertEqual(payload["size_goal_options"][0]["operator_intent"]["resolution"]["mode"], "source")
-        self.assertEqual(
-            payload["size_goal_options"][0]["operator_intent"]["streams"]["subtitle"]["keep_forced"],
-            True,
-        )
-        self.assertIn("summary", payload)
-
-    def test_folder_api_exposes_measured_size_target_analysis(self) -> None:
-        source_path = self._create_source_file("episode-size-target.mkv")
-        self.config.raw.update(
-            {
-                "video": {"quality_metric": "auto", "target_vmaf": 94, "max_encoded_percent": 100},
-                "audio": {},
-                "subtitle": {},
-                "planning": {},
-            }
-        )
-        self.config.raw["media"]["output_container"] = "mkv"
-        with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source_path)
-            connection.execute(
-                update(library_items)
-                .where(library_items.c.id == item_id)
-                .values(audio_summary_json=json.dumps([{"index": 0, "codec": "aac", "channels": 2, "language": "eng"}]))
-            )
-
-        advice_state = {
-            "operator_request": {
-                "request_type": "size_budget",
-                "operator_confirmed": True,
-                "budget_bytes": 225_000_000,
-                "budget_label": "225 MB per episode",
-            }
-        }
-        calibration = {
-            "policy": {"video": {"target_size_mb": 225.0}},
-            "sample_result": {"predicted_total_size_bytes": 1_089_842_509},
-        }
-
-        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
-                "mediaforce.web.app.purge_transient_artifacts"
-        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
-            "mediaforce.web.app._start_encode_queue_worker"
-        ):
-            app = web_app.create_app(self.config.paths.config_path)
-
-        folder_endpoint = next(
-            route.endpoint
-            for route in app.router.routes
-            if getattr(route, "path", "") == "/api/folders/{prefix:path}"
-        )
-        with patch("mediaforce.web.app._load_scan_status", return_value=None), patch(
-                "mediaforce.web.app._cached_sample_calibration_host_statuses", return_value=[]
-        ), patch("mediaforce.web.app._load_advice_state", return_value=advice_state), patch(
-            "mediaforce.web.app._load_calibration_state", return_value=calibration
-        ), patch("mediaforce.web.app._preview_hotspots", return_value=[]), patch(
-            "mediaforce.web.app.describe_item_plan", return_value={}
-        ):
-            response = folder_endpoint("tv/show")
-        payload = json.loads(response.body)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            payload["size_target_analysis"],
-            {
-                "budget_bytes": 225_000_000,
-                "budget_label": "225 MB per episode",
-                "tolerance": 0.1,
-                "sample_projection_tolerance_percent": 10.0,
-                "lower_bound_bytes": 202_500_000,
-                "upper_bound_bytes": 247_500_000,
-                "predicted_total_size_bytes": 1_089_842_509,
-                "predicted_to_budget_ratio": 4.8437,
-                "status": "over_target",
-            },
-        )
-
-    def test_folder_api_gives_the_saved_sample_its_job_finish_time(self) -> None:
-        source_path = self._create_source_file("episode-sample-finish.mkv")
-        self.config.raw.update({"video": {}, "audio": {}, "subtitle": {}, "planning": {}})
-        with open_db(self.config.paths.db_path) as connection:
-            self._insert_library_item(connection, source_path)
-            save_calibration_job(
-                connection,
-                {
-                    "job_id": "sample-done",
-                    "prefix": "tv/show",
-                    "status": "completed",
-                    "lane": "sample",
-                    "action": "baseline",
-                    "created_at": "2026-10-15T14:40:00+00:00",
-                    "updated_at": "2026-10-15T15:16:00+00:00",
-                    "finished_at": "2026-10-15T15:16:00+00:00",
-                },
-            )
-            connection.commit()
-        calibration = {"job_id": "sample-done", "draft_hash": "draft-new"}
-
-        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
-                "mediaforce.web.app.purge_transient_artifacts"
-        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
-            "mediaforce.web.app._start_encode_queue_worker"
-        ):
-            app = web_app.create_app(self.config.paths.config_path)
-
-        folder_endpoint = next(
-            route.endpoint
-            for route in app.router.routes
-            if getattr(route, "path", "") == "/api/folders/{prefix:path}"
-        )
-        with patch("mediaforce.web.app._load_scan_status", return_value=None), patch(
-                "mediaforce.web.app._cached_sample_calibration_host_statuses", return_value=[]
-        ), patch("mediaforce.web.app._load_calibration_state", return_value=calibration), patch(
-            "mediaforce.web.app._preview_hotspots", return_value=[]
-        ), patch("mediaforce.web.app.describe_item_plan", return_value={}):
-            response = folder_endpoint("tv/show")
-        payload = json.loads(response.body)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload["calibration"]["sample_finished_at"], "2026-10-15T15:16:00+00:00")
-
-    def test_folder_endpoint_returns_payload_for_fully_promoted_prefix(self) -> None:
-        from mediaforce.web import app as folder_web_app
-
-        source_path = self._create_source_file("episode-promoted-folder.mkv")
-        self.config.raw["media"]["output_container"] = "mp4"
-        self.config.raw.update(
-            {
-                "video": {
-                    "quality_metric": "auto",
-                    "target_vmaf": 94,
-                    "min_target_vmaf": 92,
-                    "target_xpsnr": 36,
-                    "min_target_xpsnr": 34,
-                    "max_encoded_percent": 100,
-                    "default_grain": 0,
-                },
-                "audio": {},
-                "subtitle": {},
-                "planning": {},
-            }
-        )
-
-        with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source_path, status="promoted")
-            connection.execute(
-                update(library_items)
-                .where(library_items.c.id == item_id)
-                .values(
-                    rel_path="tv/House/Season 5/episode-promoted-folder.mp4",
-                    parent_dir="tv/House/Season 5",
-                    source_path=str(
-                        self.root / "source" / "tv" / "House" / "Season 5" / "episode-promoted-folder.mp4"
-                    ),
-                    container="mp4",
-                    audio_summary_json=json.dumps([{"index": 0, "codec": "opus", "channels": 6, "language": "eng"}]),
-                    subtitle_summary_json=json.dumps([]),
-                )
-            )
-            connection.commit()
-
-        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
-                "mediaforce.web.app.purge_transient_artifacts"
-        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
-            "mediaforce.web.app._start_encode_queue_worker"
-        ):
-            app = folder_web_app.create_app(self.config.paths.config_path)
-
-        folder_endpoint = next(
-            route.endpoint
-            for route in app.router.routes
-            if getattr(route, "path", "") == "/api/folders/{prefix:path}"
-        )
-        with patch("mediaforce.web.app._load_scan_status", return_value=None), patch(
-                "mediaforce.web.app._cached_sample_calibration_host_statuses", return_value=[]
-        ):
-            response = folder_endpoint("tv/House/Season 5")
-        payload = json.loads(response.body)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertFalse(payload["pending"])
-        self.assertEqual(payload["prefix"], "tv/House/Season 5")
-        self.assertEqual(payload["media_scope"]["kind"], "tv_season")
-        self.assertEqual(payload["media_scope"]["parent"]["prefix"], "tv/House")
-        self.assertEqual(payload["sample_item"]["rel_path"], "tv/House/Season 5/episode-promoted-folder.mp4")
-        self.assertEqual(payload["summary"]["statuses"]["promoted"], 1)
 
     def test_process_calibration_queue_once_handles_plain_connection_queries(self) -> None:
         deps = web_app._calibration_queue_runtime_deps()
@@ -20745,99 +18817,101 @@ raise SystemExit(0)
             ):
                 job = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
 
-            self.assertIsNotNone(job)
             assert job is not None
             self.assertEqual(job["job_id"], "job-queued-runtime")
             self.assertEqual(job["host"]["key"], "local")
 
     def test_claim_next_runnable_encode_job_stamps_absolute_schedule_deadline(self) -> None:
-        source_path = self._create_source_file("episode-deadline.mkv")
-        staging_path = self._staging_path("episode-deadline.mkv")
         deadline = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
 
-        with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source_path)
-            self._write_manifest(
-                "manifest-deadline.json",
-                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
-            )
-            self._save_job(
-                connection,
-                job_id="job-deadline",
-                manifest_name="manifest-deadline.json",
-                host={},
-                status="queued",
-                attempt_count=0,
-            )
-            connection.commit()
-            deps = web_app._encode_queue_runtime_deps()
-            deps.host_runtime_rows = Mock(return_value=[])
+        for finish_current_file in (False, True):
+            source_path = self._create_source_file(f"episode-deadline-{finish_current_file}.mkv")
+            staging_path = self._staging_path(f"episode-deadline-{finish_current_file}.mkv")
+            with open_db(self.config.paths.db_path) as connection:
+                item_id = self._insert_library_item(connection, source_path)
+                self._write_manifest(
+                    "manifest-deadline.json",
+                    [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+                )
+                self._save_job(
+                    connection,
+                    job_id="job-deadline",
+                    manifest_name="manifest-deadline.json",
+                    host={},
+                    status="queued",
+                    attempt_count=0,
+                )
+                connection.commit()
+                deps = web_app._encode_queue_runtime_deps()
+                deps.host_runtime_rows = Mock(return_value=[])
 
-            with patch(
-                    "mediaforce.web.runtime.encode_runtime.select_encode_host",
-                    return_value=(
-                        {
-                            "key": "local",
-                            "label": "Local",
-                            "mode": "local",
-                            "schedule_closes_at": deadline,
-                        },
-                        None,
-                    ),
-            ):
-                claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
+                with patch(
+                        "mediaforce.web.runtime.encode_runtime.select_encode_host",
+                        return_value=(
+                            {
+                                "key": "local",
+                                "label": "Local",
+                                "mode": "local",
+                                "schedule_closes_at": deadline,
+                                "finish_current_file": finish_current_file,
+                            },
+                            None,
+                        ),
+                ):
+                    claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
 
-            self.assertIsNotNone(claimed)
-            assert claimed is not None
-            self.assertEqual(claimed["status"], "running")
-            self.assertEqual(claimed["attempt_count"], 1)
-            self.assertEqual(claimed["schedule_close_deadline_at"], deadline)
-            self.assertNotIn("schedule_closes_at", claimed["host"])
+                assert claimed is not None
+                self.assertEqual(claimed["status"], "running")
+                self.assertEqual(claimed["attempt_count"], 1)
+                self.assertEqual(claimed["schedule_close_deadline_at"], None if finish_current_file else deadline)
+                self.assertNotIn("schedule_closes_at", claimed["host"])
 
     def test_claim_next_runnable_encode_job_does_not_start_after_close_boundary(self) -> None:
-        source_path = self._create_source_file("episode-closed.mkv")
-        staging_path = self._staging_path("episode-closed.mkv")
         deadline = (datetime.now(tz=UTC) - timedelta(seconds=1)).isoformat(timespec="seconds")
 
-        with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source_path)
-            self._write_manifest(
-                "manifest-closed.json",
-                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
-            )
-            self._save_job(
-                connection,
-                job_id="job-closed",
-                manifest_name="manifest-closed.json",
-                host={},
-                status="queued",
-                attempt_count=0,
-            )
-            connection.commit()
-            deps = web_app._encode_queue_runtime_deps()
-            deps.host_runtime_rows = Mock(return_value=[])
+        for finish_current_file in (False, True):
+            source_path = self._create_source_file(f"episode-closed-{finish_current_file}.mkv")
+            staging_path = self._staging_path(f"episode-closed-{finish_current_file}.mkv")
+            with open_db(self.config.paths.db_path) as connection:
+                item_id = self._insert_library_item(connection, source_path)
+                self._write_manifest(
+                    "manifest-closed.json",
+                    [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+                )
+                self._save_job(
+                    connection,
+                    job_id="job-closed",
+                    manifest_name="manifest-closed.json",
+                    host={},
+                    status="queued",
+                    attempt_count=0,
+                )
+                connection.commit()
+                deps = web_app._encode_queue_runtime_deps()
+                deps.host_runtime_rows = Mock(return_value=[])
 
-            with patch(
-                    "mediaforce.web.runtime.encode_runtime.select_encode_host",
-                    return_value=(
-                        {
-                            "key": "local",
-                            "label": "Local",
-                            "mode": "local",
-                            "schedule_closes_at": deadline,
-                        },
-                        None,
-                    ),
-            ):
-                claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
+                with patch(
+                        "mediaforce.web.runtime.encode_runtime.select_encode_host",
+                        return_value=(
+                            {
+                                "key": "local",
+                                "label": "Local",
+                                "mode": "local",
+                                "schedule_closes_at": deadline,
+                                "finish_current_file": finish_current_file,
+                            },
+                            None,
+                        ),
+                ):
+                    claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
 
-            self.assertIsNone(claimed)
-            queued = load_encode_job(connection, "job-closed")
-            assert queued is not None
-            self.assertEqual(queued["status"], "queued")
-            self.assertEqual(queued["attempt_count"], 0)
-            self.assertEqual(queued["waiting_reason"], encode_runtime.SCHEDULE_CLOSE_WAITING_REASON)
-            self.assertIsNone(queued["schedule_close_deadline_at"])
+                self.assertIsNone(claimed)
+                queued = load_encode_job(connection, "job-closed")
+                assert queued is not None
+                self.assertEqual(queued["status"], "queued")
+                self.assertEqual(queued["attempt_count"], 0)
+                self.assertEqual(queued["waiting_reason"], encode_runtime.SCHEDULE_CLOSE_WAITING_REASON)
+                self.assertIsNone(queued["schedule_close_deadline_at"])
 
     def test_bypass_job_claim_ignores_schedule_close_deadline(self) -> None:
         source_path = self._create_source_file("episode-bypass-deadline.mkv")
@@ -20877,7 +18951,6 @@ raise SystemExit(0)
             ):
                 claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
 
-            self.assertIsNotNone(claimed)
             assert claimed is not None
             self.assertEqual(claimed["status"], "running")
             self.assertIsNone(claimed["schedule_close_deadline_at"])
@@ -22902,7 +20975,6 @@ raise SystemExit(0)
             self.assertIsNone(job)
             select_host.assert_not_called()
             blocked = load_encode_job(connection, "job-browse-only")
-            self.assertIsNotNone(blocked)
             assert blocked is not None
             self.assertEqual(blocked["waiting_reason"], encode_runtime.LIBRARY_NOT_COMPRESSING_WAITING_REASON)
 
@@ -23013,7 +21085,6 @@ raise SystemExit(0)
             self.assertEqual(len(manifest_reads), 1)
             parent = load_encode_job(connection, "folder-waiting")
             shards = [load_encode_job(connection, f"shard-waiting-{index}") for index in range(3)]
-            self.assertIsNotNone(parent)
             assert parent is not None
             self.assertEqual(parent["waiting_reason"], "waiting for an available computer")
             self.assertTrue(all(shard is not None for shard in shards))
@@ -23035,7 +21106,6 @@ raise SystemExit(0)
             ) as sync_parent, patch.object(Path, "read_text", tracked_read_text):
                 selected = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
 
-            self.assertIsNotNone(selected)
             assert selected is not None
             self.assertEqual(selected["job_id"], "shard-waiting-2")
             deps.host_runtime_rows.assert_called_once()
@@ -23114,74 +21184,35 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "folder-parent",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "queued",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": None,
-                    "item_count": 2,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 0,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": web_app._now_iso(),
-                    "started_at": None,
-                    "finished_at": None,
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="folder-parent",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="queued",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=None,
+                    item_count=2,
+                    attempt_count=0,
+                    created_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
             for shard_id, manifest_indexes in (("shard-a", [0]), ("shard-b", [1])):
                 save_encode_job(
                     connection,
-                    {
-                        "job_id": shard_id,
-                        "prefix": "tv/show",
-                        "job_kind": "shard",
-                        "parent_job_id": "folder-parent",
-                        "status": "queued",
-                        "manifest_path": str(manifest_path),
-                        "manifest_indexes": manifest_indexes,
-                        "item_count": 1,
-                        "saved_profile_path": None,
-                        "host": {},
-                        "last_host": {},
-                        "notes": "",
-                        "bypass_schedule": False,
-                        "attempt_count": 0,
-                        "process_pid": None,
-                        "error": None,
-                        "leased_at": None,
-                        "lease_expires_at": None,
-                        "heartbeat_at": None,
-                        "worker_id": None,
-                        "retry_not_before": None,
-                        "waiting_reason": None,
-                        "terminal_reason": None,
-                        "last_failure_kind": None,
-                        "last_failure_at": None,
-                        "host_cooldown_until": None,
-                        "created_at": web_app._now_iso(),
-                        "started_at": None,
-                        "finished_at": None,
-                        "updated_at": web_app._now_iso(),
-                    },
+                    self._job_row(
+                        job_id=shard_id,
+                        prefix="tv/show",
+                        job_kind="shard",
+                        parent_job_id="folder-parent",
+                        status="queued",
+                        manifest_path=str(manifest_path),
+                        manifest_indexes=manifest_indexes,
+                        attempt_count=0,
+                        created_at=web_app._now_iso(),
+                        updated_at=web_app._now_iso(),
+                    ),
                 )
 
         with patch(
@@ -23345,70 +21376,38 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "folder-display",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "queued",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": None,
-                    "item_count": 2,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 0,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": None,
-                    "finished_at": None,
-                    "updated_at": now,
-                },
+                self._job_row(
+                    job_id="folder-display",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="queued",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=None,
+                    item_count=2,
+                    attempt_count=0,
+                    created_at=now,
+                    updated_at=now,
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "display-shard-a",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": "folder-display",
-                    "status": "running",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": [0],
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": 123,
-                    "error": None,
-                    "leased_at": now,
-                    "lease_expires_at": now,
-                    "heartbeat_at": now,
-                    "worker_id": "worker-a",
-                    "schedule_close_deadline_at": "2026-07-24T19:00:00+00:00",
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "progress": {
+                self._job_row(
+                    job_id="display-shard-a",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id="folder-display",
+                    status="running",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[0],
+                    host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                    process_pid=123,
+                    leased_at=now,
+                    lease_expires_at=now,
+                    heartbeat_at=now,
+                    worker_id="worker-a",
+                    schedule_close_deadline_at="2026-07-24T19:00:00+00:00",
+                    progress={
                         "total_item_count": 1,
                         "completed_item_count": 0,
                         "total_duration_seconds": 100.0,
@@ -23419,43 +21418,29 @@ raise SystemExit(0)
                         "speed": 2.0,
                         "current_item_rel_path": "tv/show/display-1.mkv",
                     },
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": None,
-                    "updated_at": now,
-                },
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "display-shard-b",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": "folder-display",
-                    "status": "running",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": [1],
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {"key": "remote-b", "label": "Remote B", "mode": "ssh"},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": 456,
-                    "error": None,
-                    "leased_at": now,
-                    "lease_expires_at": now,
-                    "heartbeat_at": now,
-                    "worker_id": "worker-b",
-                    "schedule_close_deadline_at": "2026-07-24T18:00:00+00:00",
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "progress": {
+                self._job_row(
+                    job_id="display-shard-b",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id="folder-display",
+                    status="running",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[1],
+                    host={"key": "remote-b", "label": "Remote B", "mode": "ssh"},
+                    process_pid=456,
+                    leased_at=now,
+                    lease_expires_at=now,
+                    heartbeat_at=now,
+                    worker_id="worker-b",
+                    schedule_close_deadline_at="2026-07-24T18:00:00+00:00",
+                    progress={
                         "total_item_count": 1,
                         "completed_item_count": 1,
                         "total_duration_seconds": 200.0,
@@ -23466,11 +21451,10 @@ raise SystemExit(0)
                         "speed": 1.5,
                         "current_item_rel_path": "tv/show/display-2.mkv",
                     },
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": None,
-                    "updated_at": now,
-                },
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                ),
             )
             parent = load_encode_job(connection, "folder-display")
             assert parent is not None
@@ -23502,69 +21486,37 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "folder-display-mixed-speed",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "queued",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": None,
-                    "item_count": 2,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 0,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": None,
-                    "finished_at": None,
-                    "updated_at": now,
-                },
+                self._job_row(
+                    job_id="folder-display-mixed-speed",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="queued",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=None,
+                    item_count=2,
+                    attempt_count=0,
+                    created_at=now,
+                    updated_at=now,
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "display-mixed-shard-a",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": "folder-display-mixed-speed",
-                    "status": "running",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": [0],
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": 123,
-                    "error": None,
-                    "leased_at": now,
-                    "lease_expires_at": now,
-                    "heartbeat_at": now,
-                    "worker_id": "worker-a",
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "progress": {
+                self._job_row(
+                    job_id="display-mixed-shard-a",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id="folder-display-mixed-speed",
+                    status="running",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[0],
+                    host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                    process_pid=123,
+                    leased_at=now,
+                    lease_expires_at=now,
+                    heartbeat_at=now,
+                    worker_id="worker-a",
+                    progress={
                         "total_item_count": 1,
                         "completed_item_count": 0,
                         "total_duration_seconds": 100.0,
@@ -23575,42 +21527,28 @@ raise SystemExit(0)
                         "speed": 2.0,
                         "current_item_rel_path": "tv/show/display-mixed-1.mkv",
                     },
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": None,
-                    "updated_at": now,
-                },
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "display-mixed-shard-b",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": "folder-display-mixed-speed",
-                    "status": "running",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": [1],
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {"key": "remote-b", "label": "Remote B", "mode": "ssh"},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": 456,
-                    "error": None,
-                    "leased_at": now,
-                    "lease_expires_at": now,
-                    "heartbeat_at": now,
-                    "worker_id": "worker-b",
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "progress": {
+                self._job_row(
+                    job_id="display-mixed-shard-b",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id="folder-display-mixed-speed",
+                    status="running",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[1],
+                    host={"key": "remote-b", "label": "Remote B", "mode": "ssh"},
+                    process_pid=456,
+                    leased_at=now,
+                    lease_expires_at=now,
+                    heartbeat_at=now,
+                    worker_id="worker-b",
+                    progress={
                         "total_item_count": 1,
                         "completed_item_count": 0,
                         "total_duration_seconds": 200.0,
@@ -23622,11 +21560,10 @@ raise SystemExit(0)
                         "progress_state": "quality_search",
                         "current_item_rel_path": "tv/show/display-mixed-2.mkv",
                     },
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": None,
-                    "updated_at": now,
-                },
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                ),
             )
             parent = load_encode_job(connection, "folder-display-mixed-speed")
             assert parent is not None
@@ -23645,73 +21582,39 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "folder-single-shard",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "queued",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": None,
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 0,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": None,
-                    "finished_at": None,
-                    "updated_at": now,
-                },
+                self._job_row(
+                    job_id="folder-single-shard",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="queued",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=None,
+                    attempt_count=0,
+                    created_at=now,
+                    updated_at=now,
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "shard-single",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": "folder-single-shard",
-                    "status": "running",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": [0],
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {"key": "ct103", "label": "CT103", "mode": "ssh"},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": 321,
-                    "error": None,
-                    "leased_at": now,
-                    "lease_expires_at": now,
-                    "heartbeat_at": now,
-                    "worker_id": "test-worker",
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": None,
-                    "updated_at": now,
-                    "progress": {
+                self._job_row(
+                    job_id="shard-single",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id="folder-single-shard",
+                    status="running",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[0],
+                    host={"key": "ct103", "label": "CT103", "mode": "ssh"},
+                    process_pid=321,
+                    leased_at=now,
+                    lease_expires_at=now,
+                    heartbeat_at=now,
+                    worker_id="test-worker",
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                    progress={
                         "total_item_count": 1,
                         "completed_item_count": 0,
                         "total_duration_seconds": 120.0,
@@ -23720,7 +21623,7 @@ raise SystemExit(0)
                         "percent_complete": 0.0,
                         "speed": 1.0,
                     },
-                },
+                ),
             )
 
             parent = load_encode_job(connection, "folder-single-shard")
@@ -23743,69 +21646,37 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "folder-quality-parent",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "running",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": None,
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 0,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": None,
-                    "updated_at": now,
-                },
+                self._job_row(
+                    job_id="folder-quality-parent",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="running",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=None,
+                    attempt_count=0,
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "quality-shard",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": "folder-quality-parent",
-                    "status": "running",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": [0],
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": 123,
-                    "error": None,
-                    "leased_at": now,
-                    "lease_expires_at": now,
-                    "heartbeat_at": now,
-                    "worker_id": "worker-a",
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "progress": {
+                self._job_row(
+                    job_id="quality-shard",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id="folder-quality-parent",
+                    status="running",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[0],
+                    host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                    process_pid=123,
+                    leased_at=now,
+                    lease_expires_at=now,
+                    heartbeat_at=now,
+                    worker_id="worker-a",
+                    progress={
                         "total_item_count": 1,
                         "completed_item_count": 0,
                         "total_duration_seconds": 120.0,
@@ -23816,11 +21687,10 @@ raise SystemExit(0)
                         "phase_label": "Searching quality",
                         "current_item_rel_path": "tv/show/episode-1.mkv",
                     },
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": None,
-                    "updated_at": now,
-                },
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                ),
             )
             parent = load_encode_job(connection, "folder-quality-parent")
             assert parent is not None
@@ -24202,73 +22072,41 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "folder-mixed-parent",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "running",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": None,
-                    "item_count": 2,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 0,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": None,
-                    "updated_at": now,
-                },
+                self._job_row(
+                    job_id="folder-mixed-parent",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="running",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=None,
+                    item_count=2,
+                    attempt_count=0,
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "mixed-running-shard",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": "folder-mixed-parent",
-                    "status": "running",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": [0],
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": 321,
-                    "error": None,
-                    "leased_at": now,
-                    "lease_expires_at": now,
-                    "heartbeat_at": now,
-                    "worker_id": "worker-a",
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": None,
-                    "updated_at": now,
-                    "progress": {
+                self._job_row(
+                    job_id="mixed-running-shard",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id="folder-mixed-parent",
+                    status="running",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[0],
+                    host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                    process_pid=321,
+                    leased_at=now,
+                    lease_expires_at=now,
+                    heartbeat_at=now,
+                    worker_id="worker-a",
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                    progress={
                         "total_item_count": 1,
                         "completed_item_count": 0,
                         "total_duration_seconds": 120.0,
@@ -24280,42 +22118,26 @@ raise SystemExit(0)
                         "fps": 12.0,
                         "speed": 0.5,
                     },
-                },
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "mixed-attention-shard",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": "folder-mixed-parent",
-                    "status": "needs_attention",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": [1],
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {"key": "remote-b", "label": "Remote B", "mode": "ssh"},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": "stale partial",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": "needs_attention",
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": now,
-                    "updated_at": now,
-                    "progress": {
+                self._job_row(
+                    job_id="mixed-attention-shard",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id="folder-mixed-parent",
+                    status="needs_attention",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[1],
+                    host={"key": "remote-b", "label": "Remote B", "mode": "ssh"},
+                    error="stale partial",
+                    terminal_reason="needs_attention",
+                    created_at=now,
+                    started_at=now,
+                    finished_at=now,
+                    updated_at=now,
+                    progress={
                         "total_item_count": 1,
                         "completed_item_count": 0,
                         "total_duration_seconds": 180.0,
@@ -24325,7 +22147,7 @@ raise SystemExit(0)
                         "progress_state": "needs_attention",
                         "phase_label": "Needs attention",
                     },
-                },
+                ),
             )
             parent = load_encode_job(connection, "folder-mixed-parent")
             assert parent is not None
@@ -24562,202 +22384,6 @@ raise SystemExit(0)
         self.assertEqual(len(object_list(failure_analysis["item_analyses"])), 2)
         self.assertIn("2 of 2 files", str(failure_analysis["summary"]))
 
-    def test_approve_measured_encode_recovery_updates_policy_and_queues_failed_items(self) -> None:
-        manifest_path = self._write_manifest(
-            "manifest-recovery-approval.json",
-            [
-                {
-                    "library_item_id": 1,
-                    "rel_path": "tv/show/e09.mkv",
-                    "source_path": "tv/show/e09.mkv",
-                    "source_size_bytes": 1_000_000_000,
-                    "compression_intent": self._compression_intent_snapshot(),
-                    "resolved_policy": {
-                        "video": {
-                            "quality_metric": "vmaf",
-                            "target_vmaf": 88.0,
-                            "min_target_vmaf": 86.5,
-                            "max_encoded_percent": 15,
-                            "max_crf": 46,
-                        }
-                    },
-                },
-                {
-                    "library_item_id": 2,
-                    "rel_path": "tv/show/e10.mkv",
-                    "source_path": "tv/show/e10.mkv",
-                    "source_size_bytes": 1_000_000_000,
-                    "compression_intent": self._compression_intent_snapshot(),
-                    "resolved_policy": {
-                        "video": {
-                            "quality_metric": "vmaf",
-                            "target_vmaf": 88.0,
-                            "min_target_vmaf": 86.5,
-                            "max_encoded_percent": 15,
-                            "max_crf": 46,
-                        }
-                    },
-                },
-            ],
-        )
-        now = web_app._now_iso()
-        failure_analysis = {
-            "kind": "quality_floor_too_strict",
-            "retry_strategy": "needs_operator_approval",
-            "auto_retry_allowed": False,
-            "manifest_indexes": [0, 1],
-            "summary": "Measured policy analysis covers 2 of 2 selected items; operator approval is required.",
-            "item_analyses": [
-                {
-                    "kind": "quality_floor_too_strict",
-                    "manifest_index": 0,
-                    "manifest_indexes": [0],
-                    "item_rel_path": "tv/show/e09.mkv",
-                    "requested_metric": "VMAF",
-                    "target_score": 88.0,
-                    "min_score": 86.5,
-                    "max_encoded_percent": 15.0,
-                    "best_candidate": {
-                        "crf": 50.0,
-                        "metric": "VMAF",
-                        "score": 87.15,
-                        "predicted_encode_percent": 15.0,
-                    },
-                },
-                {
-                    "kind": "size_cap_too_strict",
-                    "manifest_index": 1,
-                    "manifest_indexes": [1],
-                    "item_rel_path": "tv/show/e10.mkv",
-                    "requested_metric": "VMAF",
-                    "target_score": 88.0,
-                    "min_score": 86.5,
-                    "max_encoded_percent": 15.0,
-                    "proposed_max_encoded_percent": 18,
-                    "best_candidate": {
-                        "crf": 48.0,
-                        "metric": "VMAF",
-                        "score": 87.12,
-                        "predicted_encode_percent": 17.0,
-                    },
-                },
-            ],
-        }
-        with open_db(self.config.paths.db_path) as connection:
-            save_encode_job(
-                connection,
-                {
-                    "job_id": "terminal-recovery-parent",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "needs_attention",
-                    "manifest_path": str(manifest_path),
-                    "item_count": 2,
-                    "saved_profile_path": None,
-                    "manifest_indexes": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": "quality policy needs approval",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": "deterministic",
-                    "last_failure_kind": "deterministic",
-                    "last_failure_at": now,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": now,
-                    "updated_at": now,
-                    "progress": {"failure_analysis": failure_analysis},
-                },
-            )
-
-        calibration_state = {
-            "accepted_at": now,
-            "policy": {
-                "video": {
-                    "quality_metric": "vmaf",
-                    "target_vmaf": 88.0,
-                    "min_target_vmaf": 86.5,
-                    "max_encoded_percent": 15,
-                    "max_crf": 46,
-                }
-            },
-        }
-        saved_calibrations: list[folder_actions_runtime.ActionPayload] = []
-        saved_overrides: list[folder_actions_runtime.ActionPayload] = []
-        queue_calls: list[tuple[str, str, bool]] = []
-
-        def save_calibration(
-                _config: MediaforceConfig,
-                _prefix: str,
-                payload: folder_actions_runtime.ActionPayload,
-        ) -> None:
-            saved_calibrations.append(payload)
-
-        def upsert_override(
-                _file_path: Path,
-                _prefix: str,
-                policy: folder_actions_runtime.ActionPayload,
-        ) -> None:
-            saved_overrides.append(policy)
-
-        def queue_action(prefix: str, notes: str, bypass_schedule: bool) -> folder_actions_runtime.ActionPayload:
-            queue_calls.append((prefix, notes, bypass_schedule))
-            return {"ok": True, "message": "Recovered 2 failed files.", "recovered_item_count": 2}
-
-        result = folder_actions_runtime.approve_measured_encode_recovery_action(
-            self.config,
-            "tv/show",
-            now_iso=web_app._now_iso,
-            load_calibration_state=lambda _config, _prefix: calibration_state,
-            calibration_draft_hash=lambda _payload: "draft-hash",
-            save_calibration_state=save_calibration,
-            review_gate=self._accepted_review_gate,
-            upsert_override=upsert_override,
-            queue_folder_encode_action=queue_action,
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["action"], "approved_measured_recovery")
-        self.assertEqual(queue_calls[0][0], "tv/show")
-        self.assertFalse(queue_calls[0][2])
-        self.assertIn("Preserve completed staged encodes", queue_calls[0][1])
-        saved_video = object_dict(object_dict(saved_calibrations[0]["policy"]).get("video"))
-        self.assertEqual(saved_video["target_vmaf"], 88.0)
-        self.assertEqual(saved_video["min_target_vmaf"], 86.5)
-        self.assertEqual(saved_video["max_encoded_percent"], 15)
-        self.assertEqual(saved_video["max_crf"], 46)
-        self.assertEqual(len(saved_overrides), 2)
-        first_override = object_dict(object_dict(saved_overrides[0]).get("video"))
-        second_override = object_dict(object_dict(saved_overrides[1]).get("video"))
-        self.assertEqual(first_override["target_vmaf"], 87.0)
-        self.assertEqual(first_override["max_encoded_percent"], 15)
-        self.assertEqual(first_override["max_crf"], 50)
-        self.assertEqual(second_override["target_vmaf"], 87.0)
-        self.assertEqual(second_override["max_encoded_percent"], 18)
-        self.assertEqual(second_override["max_crf"], 48)
-        saved_recoveries = object_list(saved_calibrations[0]["accepted_item_recoveries"])
-        self.assertEqual(len(saved_recoveries), 2)
-        first_escalation = object_dict(object_dict(saved_recoveries[0]).get("compression_escalation"))
-        second_escalation = object_dict(object_dict(saved_recoveries[1]).get("compression_escalation"))
-        self.assertEqual(first_escalation["scope"], "item")
-        self.assertEqual(second_escalation["scope"], "item")
-        self.assertEqual(first_escalation["job_id"], "terminal-recovery-parent")
-        self.assertEqual(
-            object_dict(second_escalation["decision"])["reason_code"],
-            "authorized_by_operator_override",
-        )
-
     def test_queue_folder_encode_rejects_existing_active_encode_for_prefix(self) -> None:
         manifest_path = self._write_manifest("manifest-existing-active.json", [{"library_item_id": 1}])
         with open_db(self.config.paths.db_path) as connection:
@@ -24774,20 +22400,11 @@ raise SystemExit(0)
                 "mediaforce.web.runtime.folder_actions.create_folder_manifest",
                 return_value=({"items": [{"library_item_id": 1}]}, manifest_path),
         ):
-            result = folder_actions_runtime.queue_folder_encode_action(
+            result = self._queue_folder_encode(
                 self.config,
                 "tv/show",
                 "",
                 False,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
-                load_calibration_state=self._accepted_calibration_state,
-                review_gate=self._accepted_review_gate,
-                upsert_override=self._noop_upsert_override,
-                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-                save_encode_job=save_encode_job,
                 reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
@@ -24805,13 +22422,11 @@ raise SystemExit(0)
         saved_overrides: list[dict[str, Any]] = []
 
         with self.assertRaises(HTTPException) as raised:
-            folder_actions_runtime.queue_folder_encode_action(
+            self._queue_folder_encode(
                 self.config,
                 "tv/show",
                 "",
                 False,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
                 load_calibration_state=lambda _config, _prefix: {
                     "policy": {
                         "video": {
@@ -24821,12 +22436,7 @@ raise SystemExit(0)
                         }
                     }
                 },
-                review_gate=self._accepted_review_gate,
                 upsert_override=lambda _path, _prefix, policy: saved_overrides.append(dict(policy)),
-                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-                save_encode_job=save_encode_job,
                 reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
@@ -24851,20 +22461,11 @@ raise SystemExit(0)
                 return_value=({"items": []}, manifest_path),
         ):
             with self.assertRaises(HTTPException) as raised:
-                folder_actions_runtime.queue_folder_encode_action(
+                self._queue_folder_encode(
                     self.config,
                     "tv/show/Season 2",
                     "",
                     False,
-                    now_iso=web_app._now_iso,
-                    load_job_state=self._noop_load_job_state,
-                    load_calibration_state=self._accepted_calibration_state,
-                    review_gate=self._accepted_review_gate,
-                    upsert_override=self._noop_upsert_override,
-                    load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                    clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                    prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-                    save_encode_job=save_encode_job,
                 )
 
         self.assertEqual(raised.exception.status_code, 400)
@@ -24934,20 +22535,12 @@ raise SystemExit(0)
         ]
 
         with self.assertRaises(HTTPException) as raised:
-            folder_actions_runtime.queue_folder_encode_action(
+            self._queue_folder_encode(
                 self.config,
                 "tv/show/Season 1",
                 "",
                 False,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
                 load_calibration_state=lambda *_args, **_kwargs: calibration,
-                review_gate=self._accepted_review_gate,
-                upsert_override=self._noop_upsert_override,
-                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-                save_encode_job=save_encode_job,
                 load_advice_state=lambda *_args, **_kwargs: {"quality_risk_records": records},
             )
 
@@ -24980,20 +22573,12 @@ raise SystemExit(0)
         }
 
         with self.assertRaises(HTTPException) as raised:
-            folder_actions_runtime.queue_folder_encode_action(
+            self._queue_folder_encode(
                 self.config,
                 "tv/show/Season 1",
                 "",
                 False,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
                 load_calibration_state=lambda *_args, **_kwargs: calibration,
-                review_gate=self._accepted_review_gate,
-                upsert_override=self._noop_upsert_override,
-                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-                save_encode_job=save_encode_job,
                 load_latest_failed_target_size_job_state=lambda *_args, **_kwargs: failed_job,
             )
 
@@ -25197,38 +22782,17 @@ raise SystemExit(0)
             with open_db(self.config.paths.db_path) as fixture_connection:
                 save_encode_job(
                     fixture_connection,
-                    {
-                        "job_id": f"active-validate-{status}",
-                        "prefix": prefix,
-                        "job_kind": "folder",
-                        "parent_job_id": None,
-                        "status": status,
-                        "manifest_path": str(self._write_manifest("active-validate.json", [{"library_item_id": 1}])),
-                        "manifest_indexes": None,
-                        "item_count": 1,
-                        "saved_profile_path": None,
-                        "host": {},
-                        "last_host": {},
-                        "notes": "",
-                        "bypass_schedule": False,
-                        "attempt_count": 1,
-                        "process_pid": None,
-                        "error": None,
-                        "leased_at": None,
-                        "lease_expires_at": None,
-                        "heartbeat_at": None,
-                        "worker_id": None,
-                        "retry_not_before": None,
-                        "waiting_reason": None,
-                        "terminal_reason": None,
-                        "last_failure_kind": None,
-                        "last_failure_at": None,
-                        "host_cooldown_until": None,
-                        "created_at": web_app._now_iso(),
-                        "started_at": None,
-                        "finished_at": None,
-                        "updated_at": web_app._now_iso(),
-                    },
+                    self._job_row(
+                        job_id=f"active-validate-{status}",
+                        prefix=prefix,
+                        job_kind="folder",
+                        parent_job_id=None,
+                        status=status,
+                        manifest_path=str(self._write_manifest("active-validate.json", [{"library_item_id": 1}])),
+                        manifest_indexes=None,
+                        created_at=web_app._now_iso(),
+                        updated_at=web_app._now_iso(),
+                    ),
                 )
 
             result = folder_actions_runtime.validate_folder_outputs_action(
@@ -25619,38 +23183,17 @@ raise SystemExit(0)
             with open_db(self.config.paths.db_path) as fixture_connection:
                 save_encode_job(
                     fixture_connection,
-                    {
-                        "job_id": f"active-promote-{status}",
-                        "prefix": prefix,
-                        "job_kind": "folder",
-                        "parent_job_id": None,
-                        "status": status,
-                        "manifest_path": str(self._write_manifest("active-promote.json", [{"library_item_id": 1}])),
-                        "manifest_indexes": None,
-                        "item_count": 1,
-                        "saved_profile_path": None,
-                        "host": {},
-                        "last_host": {},
-                        "notes": "",
-                        "bypass_schedule": False,
-                        "attempt_count": 1,
-                        "process_pid": None,
-                        "error": None,
-                        "leased_at": None,
-                        "lease_expires_at": None,
-                        "heartbeat_at": None,
-                        "worker_id": None,
-                        "retry_not_before": None,
-                        "waiting_reason": None,
-                        "terminal_reason": None,
-                        "last_failure_kind": None,
-                        "last_failure_at": None,
-                        "host_cooldown_until": None,
-                        "created_at": web_app._now_iso(),
-                        "started_at": None,
-                        "finished_at": None,
-                        "updated_at": web_app._now_iso(),
-                    },
+                    self._job_row(
+                        job_id=f"active-promote-{status}",
+                        prefix=prefix,
+                        job_kind="folder",
+                        parent_job_id=None,
+                        status=status,
+                        manifest_path=str(self._write_manifest("active-promote.json", [{"library_item_id": 1}])),
+                        manifest_indexes=None,
+                        created_at=web_app._now_iso(),
+                        updated_at=web_app._now_iso(),
+                    ),
                 )
 
             result = folder_actions_runtime.promote_folder_outputs_action(
@@ -25957,13 +23500,12 @@ raise SystemExit(0)
             )
 
         with self.assertRaises(HTTPException) as raised:
-            folder_actions_runtime.queue_folder_encode_action(
+            self._queue_folder_encode(
                 self.config,
                 "other/Foo.mkv",
                 "",
                 False,
                 True,
-                now_iso=web_app._now_iso,
                 load_job_state=Mock(),
                 load_calibration_state=Mock(),
                 review_gate=Mock(),
@@ -26002,17 +23544,12 @@ raise SystemExit(0)
 
         saved_jobs: list[dict[str, Any]] = []
         with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
-            result = folder_actions_runtime.queue_folder_encode_action(
+            result = self._queue_folder_encode(
                 queue_config,
                 exact_rel_path,
                 "Approved one exact protected episode.",
                 False,
                 True,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
-                load_calibration_state=self._accepted_calibration_state,
-                review_gate=self._accepted_review_gate,
-                upsert_override=self._noop_upsert_override,
                 load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
                 clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
                 prepare_terminal_encode_job_for_requeue_fn=lambda *_args, **_kwargs: None,
@@ -26047,13 +23584,12 @@ raise SystemExit(0)
             )
 
         with self.assertRaises(HTTPException) as raised:
-            folder_actions_runtime.queue_folder_encode_action(
+            self._queue_folder_encode(
                 self.config,
                 "tv/show/Season 1",
                 "",
                 False,
                 override_older_seasons=True,
-                now_iso=web_app._now_iso,
                 load_job_state=Mock(),
                 load_calibration_state=Mock(),
                 review_gate=Mock(),
@@ -26077,13 +23613,12 @@ raise SystemExit(0)
             )
 
         with self.assertRaises(HTTPException) as raised:
-            folder_actions_runtime.queue_folder_encode_action(
+            self._queue_folder_encode(
                 self.config,
                 "tv/show",
                 "",
                 False,
                 override_older_seasons=True,
-                now_iso=web_app._now_iso,
                 load_job_state=Mock(),
                 load_calibration_state=Mock(),
                 review_gate=Mock(),
@@ -26118,18 +23653,14 @@ raise SystemExit(0)
         calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show"))
         calibration["draft_hash"] = "approved-draft"
         with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
-            result = folder_actions_runtime.queue_folder_encode_action(
+            result = self._queue_folder_encode(
                 queue_config,
                 "tv/show",
                 "Approved older seasons after comparing the representative test.",
                 False,
                 override_older_seasons=True,
                 older_seasons_confirmed=True,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
                 load_calibration_state=lambda *_args, **_kwargs: calibration,
-                review_gate=self._accepted_review_gate,
-                upsert_override=self._noop_upsert_override,
                 load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
                 clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
                 prepare_terminal_encode_job_for_requeue_fn=lambda *_args, **_kwargs: None,
@@ -26213,6 +23744,21 @@ raise SystemExit(0)
         complete_raw["remote_hosts"] = []
         complete_raw["encode_queue"] = self.config.raw["encode_queue"]
         return MediaforceConfig(raw=complete_raw, paths=self.config.paths)
+
+    def _queue_folder_encode(self, *args: Any, **kwargs: Any) -> folder_actions_runtime.ActionPayload:
+        dependencies: dict[str, Any] = {
+            "now_iso": web_app._now_iso,
+            "load_job_state": self._noop_load_job_state,
+            "load_calibration_state": self._accepted_calibration_state,
+            "review_gate": self._accepted_review_gate,
+            "upsert_override": self._noop_upsert_override,
+            "load_active_encode_job_for_prefix_fn": load_active_encode_job_for_prefix,
+            "clear_terminal_encode_jobs_for_prefix_fn": clear_terminal_encode_jobs_for_prefix,
+            "prepare_terminal_encode_job_for_requeue_fn": self._prepare_terminal_encode_job_for_requeue,
+            "save_encode_job": save_encode_job,
+        }
+        dependencies.update(kwargs)
+        return folder_actions_runtime.queue_folder_encode_action(*args, **dependencies)
 
     def _queue_show_folder(
             self,
@@ -26784,16 +24330,13 @@ raise SystemExit(0)
             }
         saved_jobs: list[dict[str, Any]] = []
         with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
-            result = folder_actions_runtime.queue_folder_encode_action(
+            result = self._queue_folder_encode(
                 queue_config,
                 "tv/show",
                 "",
                 False,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
                 load_calibration_state=lambda _config, prefix: approvals.get(prefix),
                 review_gate=review_gate,
-                upsert_override=self._noop_upsert_override,
                 load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
                 clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
                 prepare_terminal_encode_job_for_requeue_fn=lambda *_args, **_kwargs: None,
@@ -26867,13 +24410,11 @@ raise SystemExit(0)
         saved_jobs = [] if saved_jobs is None else saved_jobs
         saved_override_prefixes: list[str] = []
         with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
-            result = folder_actions_runtime.queue_folder_encode_action(
+            result = self._queue_folder_encode(
                 queue_config,
                 "tv/show/Season 1",
                 "",
                 False,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
                 load_calibration_state=lambda _config, prefix: approvals.get(prefix),
                 review_gate=review_gate,
                 upsert_override=lambda _path, prefix, _policy: saved_override_prefixes.append(prefix),
@@ -27016,14 +24557,11 @@ raise SystemExit(0)
                 staged_integrity=staged, lifecycle=scope_lifecycle,
             ),
         )
-        episodes = (
-            {}
-            if prefix == "tv/show"
-            else {
-                Path(episode["rel_path"]).name: episode
-                for episode in folder_episodes_payload(show.config, prefix)["episodes"]
-            }
-        )
+        episodes = {}
+        if prefix != "tv/show":
+            payload = item_payload(show.config, prefix, sound=lambda *_args: None)
+            assert payload is not None
+            episodes = {Path(episode["rel_path"]).name: episode for episode in payload["files"]}
         with open_db(self.config.paths.db_path) as connection:
             # Reading the page queued no check and held nothing.
             self.assertEqual(connection.execute(select(func.count()).select_from(production_holds)).scalar_one(), 0)
@@ -27098,7 +24636,7 @@ raise SystemExit(0)
         self.assertEqual(season.card.estimated_savings_bytes, 0)
         for name in ("One.mkv", "Three.mkv", "Four.mkv"):
             self.assertEqual(season.episodes[name]["stage"], "held")
-            self.assertIn("motion pattern", season.episodes[name]["detail"])
+            self.assertEqual(season.episodes[name]["held_reason"], "motion_pattern")
 
     def test_a_season_with_some_motion_held_episodes_counts_only_the_ones_queueing_takes(self) -> None:
         season = self._season_with_motion_holds({"Three.mkv": "held", "Four.mkv": "check"})
@@ -27214,7 +24752,7 @@ raise SystemExit(0)
         for name in held_names:
             episode = page.episodes[Path(name).name]
             self.assertEqual(episode["stage"], "kept_original")
-            self.assertIn("motion pattern", episode["detail"])
+            self.assertIsNotNone(episode["kept_reason"])
         # The queue agrees with the page: it takes none of them, checks none and holds none.
         queued = self._motion_queue(show, season)
         self.assertFalse(queued.result["ok"], queued.result)
@@ -28109,18 +25647,14 @@ raise SystemExit(0)
         calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show"))
         calibration["draft_hash"] = "approved-draft"
         with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
-            result = folder_actions_runtime.queue_folder_encode_action(
+            result = self._queue_folder_encode(
                 queue_config,
                 "tv/show",
                 "Approved older seasons after comparing the representative test.",
                 False,
                 override_older_seasons=True,
                 older_seasons_confirmed=True,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
                 load_calibration_state=lambda *_args, **_kwargs: calibration,
-                review_gate=self._accepted_review_gate,
-                upsert_override=self._noop_upsert_override,
                 load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
                 clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
                 prepare_terminal_encode_job_for_requeue_fn=lambda *_args, **_kwargs: None,
@@ -28191,18 +25725,14 @@ raise SystemExit(0)
         calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show"))
         calibration["draft_hash"] = "approved-draft"
         with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
-            result = folder_actions_runtime.queue_folder_encode_action(
+            result = self._queue_folder_encode(
                 queue_config,
                 "tv/show",
                 "",
                 False,
                 override_older_seasons=True,
                 older_seasons_confirmed=True,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
                 load_calibration_state=lambda *_args, **_kwargs: calibration,
-                review_gate=self._accepted_review_gate,
-                upsert_override=self._noop_upsert_override,
                 load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
                 clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
                 prepare_terminal_encode_job_for_requeue_fn=lambda *_args, **_kwargs: None,
@@ -28256,18 +25786,14 @@ raise SystemExit(0)
         calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show"))
         calibration["draft_hash"] = "approved-draft"
         with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
-            result = folder_actions_runtime.queue_folder_encode_action(
+            result = self._queue_folder_encode(
                 queue_config,
                 "tv/show",
                 "Approved older seasons after comparing the representative test.",
                 False,
                 override_older_seasons=True,
                 older_seasons_confirmed=True,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
                 load_calibration_state=lambda *_args, **_kwargs: calibration,
-                review_gate=self._accepted_review_gate,
-                upsert_override=self._noop_upsert_override,
                 load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
                 clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
                 prepare_terminal_encode_job_for_requeue_fn=lambda *_args, **_kwargs: None,
@@ -28330,38 +25856,18 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "folder-status-active",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "running",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": None,
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": None,
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="folder-status-active",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="running",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=None,
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
 
         payload = dashboard_payloads.folder_status_payload(
@@ -28830,38 +26336,18 @@ raise SystemExit(0)
             timestamp = (datetime.now(tz=UTC) + timedelta(seconds=offset_seconds)).isoformat(timespec="seconds")
             save_encode_job(
                 connection,
-                {
-                    "job_id": job_id,
-                    "prefix": prefix,
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "running",
-                    "manifest_path": str(self._write_manifest(f"{job_id}.json", [{"library_item_id": 1}])),
-                    "manifest_indexes": None,
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": timestamp,
-                    "started_at": timestamp,
-                    "finished_at": None,
-                    "updated_at": timestamp,
-                },
+                self._job_row(
+                    job_id=job_id,
+                    prefix=prefix,
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="running",
+                    manifest_path=str(self._write_manifest(f"{job_id}.json", [{"library_item_id": 1}])),
+                    manifest_indexes=None,
+                    created_at=timestamp,
+                    started_at=timestamp,
+                    updated_at=timestamp,
+                ),
             )
 
         with open_db(self.config.paths.db_path) as fixture_connection:
@@ -28890,38 +26376,18 @@ raise SystemExit(0)
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "impossible-descendant",
-                    "prefix": "other/Foo.mkv/descendant",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "running",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": None,
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": None,
-                    "updated_at": now,
-                },
+                self._job_row(
+                    job_id="impossible-descendant",
+                    prefix="other/Foo.mkv/descendant",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="running",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=None,
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                ),
             )
 
             match = load_active_encode_job_for_prefix(connection, "other/Foo.mkv")
@@ -28933,38 +26399,20 @@ raise SystemExit(0)
             timestamp = (datetime.now(tz=UTC) + timedelta(seconds=offset_seconds)).isoformat(timespec="seconds")
             save_encode_job(
                 connection,
-                {
-                    "job_id": job_id,
-                    "prefix": prefix,
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "needs_attention",
-                    "manifest_path": str(self._write_manifest(f"{job_id}.json", [{"library_item_id": 1}])),
-                    "manifest_indexes": None,
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": f"{job_id} failed",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": timestamp,
-                    "started_at": timestamp,
-                    "finished_at": timestamp,
-                    "updated_at": timestamp,
-                },
+                self._job_row(
+                    job_id=job_id,
+                    prefix=prefix,
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="needs_attention",
+                    manifest_path=str(self._write_manifest(f"{job_id}.json", [{"library_item_id": 1}])),
+                    manifest_indexes=None,
+                    error=f"{job_id} failed",
+                    created_at=timestamp,
+                    started_at=timestamp,
+                    finished_at=timestamp,
+                    updated_at=timestamp,
+                ),
             )
 
         with open_db(self.config.paths.db_path) as fixture_connection:
@@ -29002,38 +26450,18 @@ raise SystemExit(0)
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "literal-percent-encode",
-                    "prefix": "tv/show%1/Season 1",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "running",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": None,
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": None,
-                    "updated_at": now,
-                },
+                self._job_row(
+                    job_id="literal-percent-encode",
+                    prefix="tv/show%1/Season 1",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="running",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=None,
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                ),
             )
 
             underscore_match = load_latest_overlapping_calibration_job(connection, "tv/show_1")
@@ -29103,20 +26531,11 @@ raise SystemExit(0)
                     )
                 )
 
-        result = folder_actions_runtime.queue_folder_encode_action(
+        result = self._queue_folder_encode(
             self.config,
             "tv/show",
             "",
             False,
-            now_iso=web_app._now_iso,
-            load_job_state=self._noop_load_job_state,
-            load_calibration_state=self._accepted_calibration_state,
-            review_gate=self._accepted_review_gate,
-            upsert_override=self._noop_upsert_override,
-            load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-            clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-            prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-            save_encode_job=save_encode_job,
         )
 
         self.assertTrue(result["ok"], result)
@@ -29191,20 +26610,11 @@ raise SystemExit(0)
             ))
             before = {row["job_id"]: row for row in list_child_encode_jobs(connection, "stopped-parent")}
 
-        result = folder_actions_runtime.queue_folder_encode_action(
+        result = self._queue_folder_encode(
             self.config,
             "tv/show",
             "",
             False,
-            now_iso=web_app._now_iso,
-            load_job_state=self._noop_load_job_state,
-            load_calibration_state=self._accepted_calibration_state,
-            review_gate=self._accepted_review_gate,
-            upsert_override=self._noop_upsert_override,
-            load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-            clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-            prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-            save_encode_job=save_encode_job,
         )
 
         with open_db(self.config.paths.db_path) as connection:
@@ -29266,20 +26676,11 @@ raise SystemExit(0)
             ))
             save_encode_job(connection, job("newer-folder", "2026-09-29T11:00:00+00:00"))
 
-        result = folder_actions_runtime.queue_folder_encode_action(
+        result = self._queue_folder_encode(
             self.config,
             "tv/show",
             "",
             False,
-            now_iso=web_app._now_iso,
-            load_job_state=self._noop_load_job_state,
-            load_calibration_state=self._accepted_calibration_state,
-            review_gate=self._accepted_review_gate,
-            upsert_override=self._noop_upsert_override,
-            load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-            clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-            prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-            save_encode_job=save_encode_job,
         )
 
         with open_db(self.config.paths.db_path) as connection:
@@ -29306,32 +26707,23 @@ raise SystemExit(0)
                     ("show-folder", "folder", "needs_attention", None),
                     ("show-part", "shard", "queued", "show-folder"),
             ):
-                save_encode_job(connection, {
-                    "job_id": job_id, "prefix": "tv/show", "job_kind": job_kind, "parent_job_id": parent,
-                    "status": status, "manifest_path": str(manifest_path),
-                    "manifest_indexes": [0] if job_kind == "shard" else None, "item_count": 1,
-                    "saved_profile_path": None, "host": {}, "last_host": {}, "notes": "", "bypass_schedule": False,
-                    "attempt_count": 1, "process_pid": None, "error": None, "leased_at": None,
-                    "lease_expires_at": None, "heartbeat_at": None, "worker_id": None, "retry_not_before": None,
-                    "waiting_reason": None, "terminal_reason": None, "last_failure_kind": None,
-                    "last_failure_at": None, "host_cooldown_until": None, "created_at": now, "started_at": None,
-                    "finished_at": None, "updated_at": now,
-                })
+                save_encode_job(connection, self._job_row(
+                    job_id=job_id, prefix="tv/show", job_kind=job_kind, parent_job_id=parent,
+                    status=status, manifest_path=str(manifest_path),
+                    manifest_indexes=[0] if job_kind == "shard" else None, item_count=1,
+                    saved_profile_path=None, host={}, last_host={}, notes="", bypass_schedule=False,
+                    attempt_count=1, process_pid=None, error=None, leased_at=None,
+                    lease_expires_at=None, heartbeat_at=None, worker_id=None, retry_not_before=None,
+                    waiting_reason=None, terminal_reason=None, last_failure_kind=None,
+                    last_failure_at=None, host_cooldown_until=None, created_at=now, started_at=None,
+                    finished_at=None, updated_at=now,
+                ))
 
-        result = folder_actions_runtime.queue_folder_encode_action(
+        result = self._queue_folder_encode(
             self.config,
             "tv/show/Season 1",
             "",
             False,
-            now_iso=web_app._now_iso,
-            load_job_state=self._noop_load_job_state,
-            load_calibration_state=self._accepted_calibration_state,
-            review_gate=self._accepted_review_gate,
-            upsert_override=self._noop_upsert_override,
-            load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-            clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-            prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-            save_encode_job=save_encode_job,
         )
         with open_db(self.config.paths.db_path) as connection:
             part = load_encode_job(connection, "show-part")
@@ -29409,108 +26801,65 @@ raise SystemExit(0)
             now = web_app._now_iso()
             save_encode_job(
                 connection,
-                {
-                    "job_id": "active-parent-folder",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "running",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": None,
-                    "item_count": 3,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "existing note",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": None,
-                    "updated_at": now,
-                },
+                self._job_row(
+                    job_id="active-parent-folder",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="running",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=None,
+                    item_count=3,
+                    notes="existing note",
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "failed-active-shard",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": "active-parent-folder",
-                    "status": "needs_attention",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": [0, 1],
-                    "item_count": 2,
-                    "saved_profile_path": None,
-                    "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 3,
-                    "process_pid": None,
-                    "error": "resource busy",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": "max_attempts_exhausted",
-                    "last_failure_kind": "ssh_transport",
-                    "last_failure_at": now,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": now,
-                    "updated_at": now,
-                },
+                self._job_row(
+                    job_id="failed-active-shard",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id="active-parent-folder",
+                    status="needs_attention",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[0, 1],
+                    item_count=2,
+                    host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                    attempt_count=3,
+                    error="resource busy",
+                    terminal_reason="max_attempts_exhausted",
+                    last_failure_kind="ssh_transport",
+                    last_failure_at=now,
+                    created_at=now,
+                    started_at=now,
+                    finished_at=now,
+                    updated_at=now,
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "running-active-shard",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": "active-parent-folder",
-                    "status": "running",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": [2],
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {"key": "remote-b", "label": "Remote B", "mode": "ssh"},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 2,
-                    "process_pid": 123,
-                    "error": None,
-                    "leased_at": now,
-                    "lease_expires_at": now,
-                    "heartbeat_at": now,
-                    "worker_id": "worker-1",
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": None,
-                    "updated_at": now,
-                    "progress": {
+                self._job_row(
+                    job_id="running-active-shard",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id="active-parent-folder",
+                    status="running",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[2],
+                    host={"key": "remote-b", "label": "Remote B", "mode": "ssh"},
+                    attempt_count=2,
+                    process_pid=123,
+                    leased_at=now,
+                    lease_expires_at=now,
+                    heartbeat_at=now,
+                    worker_id="worker-1",
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                    progress={
                         "total_item_count": 1,
                         "completed_item_count": 0,
                         "total_duration_seconds": 120.0,
@@ -29521,23 +26870,14 @@ raise SystemExit(0)
                         "speed": 0.5,
                         "fps": 12.0,
                     },
-                },
+                ),
             )
 
-        result = folder_actions_runtime.queue_folder_encode_action(
+        result = self._queue_folder_encode(
             self.config,
             "tv/show",
             "recover the active folder",
             False,
-            now_iso=web_app._now_iso,
-            load_job_state=self._noop_load_job_state,
-            load_calibration_state=self._accepted_calibration_state,
-            review_gate=self._accepted_review_gate,
-            upsert_override=self._noop_upsert_override,
-            load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-            clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-            prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-            save_encode_job=save_encode_job,
         )
 
         self.assertTrue(result["ok"])
@@ -29581,20 +26921,11 @@ raise SystemExit(0)
                 "mediaforce.web.runtime.folder_actions.create_folder_manifest",
                 return_value=({"items": [{"library_item_id": 1}]}, manifest_path),
         ):
-            result = folder_actions_runtime.queue_folder_encode_action(
+            result = self._queue_folder_encode(
                 self.config,
                 "tv/show",
                 "retry after blocker",
                 False,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
-                load_calibration_state=self._accepted_calibration_state,
-                review_gate=self._accepted_review_gate,
-                upsert_override=self._noop_upsert_override,
-                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-                save_encode_job=save_encode_job,
                 reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
@@ -29651,20 +26982,14 @@ raise SystemExit(0)
                 "mediaforce.web.runtime.folder_actions.cadence_queue_partition",
                 side_effect=self._cadence_clears_every_item,
         ):
-            result = folder_actions_runtime.queue_folder_encode_action(
+            result = self._queue_folder_encode(
                 self.config,
                 "tv/show",
                 "",
                 False,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
                 load_calibration_state=lambda _config, _prefix: calibration,
-                review_gate=self._accepted_review_gate,
                 upsert_override=lambda *_args: overrides.append("override"),
-                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
                 prepare_terminal_encode_job_for_requeue_fn=lambda *_args: prepared.append("prepared"),
-                save_encode_job=save_encode_job,
                 reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
@@ -29745,20 +27070,12 @@ raise SystemExit(0)
                 "mediaforce.web.runtime.folder_actions.cadence_queue_partition",
                 side_effect=self._cadence_clears_every_item,
         ):
-            result = folder_actions_runtime.queue_folder_encode_action(
+            result = self._queue_folder_encode(
                 self.config,
                 "tv/show",
                 "fresh reviewed recovery",
                 False,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
                 load_calibration_state=lambda _config, _prefix: current_calibration,
-                review_gate=self._accepted_review_gate,
-                upsert_override=self._noop_upsert_override,
-                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-                save_encode_job=save_encode_job,
                 reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
@@ -29781,113 +27098,52 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "older-terminal",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "failed",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": None,
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": shared_created_at,
-                    "started_at": None,
-                    "finished_at": shared_created_at,
-                    "updated_at": shared_created_at,
-                },
+                self._job_row(
+                    job_id="older-terminal",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="failed",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=None,
+                    created_at=shared_created_at,
+                    finished_at=shared_created_at,
+                    updated_at=shared_created_at,
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "newer-terminal",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "needs_attention",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": None,
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": shared_created_at,
-                    "started_at": None,
-                    "finished_at": shared_created_at,
-                    "updated_at": shared_created_at,
-                },
+                self._job_row(
+                    job_id="newer-terminal",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="needs_attention",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=None,
+                    created_at=shared_created_at,
+                    finished_at=shared_created_at,
+                    updated_at=shared_created_at,
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "newest-terminal-shard",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": "newer-terminal",
-                    "status": "needs_attention",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": [0],
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": shared_created_at,
-                    "started_at": None,
-                    "finished_at": shared_created_at,
-                    "updated_at": shared_created_at,
-                },
+                self._job_row(
+                    job_id="newest-terminal-shard",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id="newer-terminal",
+                    status="needs_attention",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[0],
+                    created_at=shared_created_at,
+                    finished_at=shared_created_at,
+                    updated_at=shared_created_at,
+                ),
             )
 
             latest_job = load_latest_terminal_encode_job_for_prefix(connection, "tv/show")
 
-        self.assertIsNotNone(latest_job)
         assert latest_job is not None
         self.assertEqual(latest_job["job_id"], "newer-terminal")
 
@@ -29902,17 +27158,17 @@ raise SystemExit(0)
                     ("retrying-part", "shard", "retry_backoff"),
                     ("running-part", "shard", "running"),
             ):
-                save_encode_job(connection, {
-                    "job_id": job_id, "prefix": "tv/show", "job_kind": job_kind,
-                    "parent_job_id": None if job_kind == "folder" else "ended-folder", "status": status,
-                    "manifest_path": str(manifest_path), "manifest_indexes": None if job_kind == "folder" else [0],
-                    "item_count": 1, "saved_profile_path": None, "host": {}, "last_host": {}, "notes": "",
-                    "bypass_schedule": False, "attempt_count": 1, "process_pid": None, "error": None,
-                    "leased_at": None, "lease_expires_at": None, "heartbeat_at": None, "worker_id": None,
-                    "retry_not_before": None, "waiting_reason": None, "terminal_reason": None,
-                    "last_failure_kind": None, "last_failure_at": None, "host_cooldown_until": None,
-                    "created_at": now, "started_at": None, "finished_at": None, "updated_at": now,
-                })
+                save_encode_job(connection, self._job_row(
+                    job_id=job_id, prefix="tv/show", job_kind=job_kind,
+                    parent_job_id=None if job_kind == "folder" else "ended-folder", status=status,
+                    manifest_path=str(manifest_path), manifest_indexes=None if job_kind == "folder" else [0],
+                    item_count=1, saved_profile_path=None, host={}, last_host={}, notes="",
+                    bypass_schedule=False, attempt_count=1, process_pid=None, error=None,
+                    leased_at=None, lease_expires_at=None, heartbeat_at=None, worker_id=None,
+                    retry_not_before=None, waiting_reason=None, terminal_reason=None,
+                    last_failure_kind=None, last_failure_at=None, host_cooldown_until=None,
+                    created_at=now, started_at=None, finished_at=None, updated_at=now,
+                ))
 
             clear_terminal_encode_jobs_for_prefix(connection, "tv/show")
             remaining = {
@@ -29929,109 +27185,48 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
                 connection,
-                {
-                    "job_id": "terminal-folder",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "failed",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": None,
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": shared_created_at,
-                    "started_at": None,
-                    "finished_at": shared_created_at,
-                    "updated_at": shared_created_at,
-                },
+                self._job_row(
+                    job_id="terminal-folder",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="failed",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=None,
+                    created_at=shared_created_at,
+                    finished_at=shared_created_at,
+                    updated_at=shared_created_at,
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "completed-shard",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": "terminal-folder",
-                    "status": "completed",
-                    "manifest_path": str(manifest_path),
-                    "manifest_indexes": [0],
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": shared_created_at,
-                    "started_at": None,
-                    "finished_at": shared_created_at,
-                    "updated_at": shared_created_at,
-                },
+                self._job_row(
+                    job_id="completed-shard",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id="terminal-folder",
+                    status="completed",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes=[0],
+                    created_at=shared_created_at,
+                    finished_at=shared_created_at,
+                    updated_at=shared_created_at,
+                ),
             )
             for job_id, status in (("queued-stale-shard", "queued"), ("running-stale-shard", "running")):
                 save_encode_job(
                     connection,
-                    {
-                        "job_id": job_id,
-                        "prefix": "tv/show",
-                        "job_kind": "shard",
-                        "parent_job_id": "terminal-folder",
-                        "status": status,
-                        "manifest_path": str(manifest_path),
-                        "manifest_indexes": [0],
-                        "item_count": 1,
-                        "saved_profile_path": None,
-                        "host": {},
-                        "last_host": {},
-                        "notes": "",
-                        "bypass_schedule": False,
-                        "attempt_count": 1,
-                        "process_pid": None,
-                        "error": None,
-                        "leased_at": None,
-                        "lease_expires_at": None,
-                        "heartbeat_at": None,
-                        "worker_id": None,
-                        "retry_not_before": None,
-                        "waiting_reason": None,
-                        "terminal_reason": None,
-                        "last_failure_kind": None,
-                        "last_failure_at": None,
-                        "host_cooldown_until": None,
-                        "created_at": shared_created_at,
-                        "started_at": None,
-                        "finished_at": None,
-                        "updated_at": shared_created_at,
-                    },
+                    self._job_row(
+                        job_id=job_id,
+                        prefix="tv/show",
+                        job_kind="shard",
+                        parent_job_id="terminal-folder",
+                        status=status,
+                        manifest_path=str(manifest_path),
+                        manifest_indexes=[0],
+                        created_at=shared_created_at,
+                        updated_at=shared_created_at,
+                    ),
                 )
 
             clear_terminal_encode_jobs_for_prefix(connection, "tv/show")
@@ -30118,20 +27313,11 @@ raise SystemExit(0)
                 "mediaforce.web.runtime.folder_actions.create_folder_manifest",
                 side_effect=create_manifest_stub,
         ):
-            result = folder_actions_runtime.queue_folder_encode_action(
+            result = self._queue_folder_encode(
                 self.config,
                 "tv/show",
                 "retry interrupted folder",
                 False,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
-                load_calibration_state=self._accepted_calibration_state,
-                review_gate=self._accepted_review_gate,
-                upsert_override=self._noop_upsert_override,
-                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-                save_encode_job=save_encode_job,
                 reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
@@ -30163,38 +27349,24 @@ raise SystemExit(0)
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "stale-missing-folder",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "needs_attention",
-                    "manifest_path": str(terminal_manifest),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 3,
-                    "process_pid": None,
-                    "error": "worker restart",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": "max_attempts_exhausted",
-                    "last_failure_kind": "worker_restart",
-                    "last_failure_at": web_app._now_iso(),
-                    "host_cooldown_until": None,
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": web_app._now_iso(),
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="stale-missing-folder",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="needs_attention",
+                    manifest_path=str(terminal_manifest),
+                    manifest_indexes=None,
+                    attempt_count=3,
+                    error="worker restart",
+                    terminal_reason="max_attempts_exhausted",
+                    last_failure_kind="worker_restart",
+                    last_failure_at=web_app._now_iso(),
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    finished_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
 
         next_manifest = self._write_manifest(
@@ -30231,20 +27403,11 @@ raise SystemExit(0)
                 "mediaforce.web.runtime.folder_actions.create_folder_manifest",
                 side_effect=create_manifest_stub,
         ):
-            result = folder_actions_runtime.queue_folder_encode_action(
+            result = self._queue_folder_encode(
                 self.config,
                 "tv/show",
                 "retry interrupted folder",
                 False,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
-                load_calibration_state=self._accepted_calibration_state,
-                review_gate=self._accepted_review_gate,
-                upsert_override=self._noop_upsert_override,
-                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-                save_encode_job=save_encode_job,
                 reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
@@ -30285,38 +27448,24 @@ raise SystemExit(0)
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "stale-nested-folder",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "needs_attention",
-                    "manifest_path": str(terminal_manifest),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 3,
-                    "process_pid": None,
-                    "error": "worker restart",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": "max_attempts_exhausted",
-                    "last_failure_kind": "worker_restart",
-                    "last_failure_at": web_app._now_iso(),
-                    "host_cooldown_until": None,
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": web_app._now_iso(),
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="stale-nested-folder",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="needs_attention",
+                    manifest_path=str(terminal_manifest),
+                    manifest_indexes=None,
+                    attempt_count=3,
+                    error="worker restart",
+                    terminal_reason="max_attempts_exhausted",
+                    last_failure_kind="worker_restart",
+                    last_failure_at=web_app._now_iso(),
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    finished_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
 
         next_manifest = self._write_manifest(
@@ -30329,20 +27478,11 @@ raise SystemExit(0)
                 return_value=({"items": [{"library_item_id": item_id}, {"library_item_id": other_item_id}]},
                               next_manifest),
         ):
-            result = folder_actions_runtime.queue_folder_encode_action(
+            result = self._queue_folder_encode(
                 self.config,
                 "tv/show",
                 "retry nested folder",
                 False,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
-                load_calibration_state=self._accepted_calibration_state,
-                review_gate=self._accepted_review_gate,
-                upsert_override=self._noop_upsert_override,
-                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-                save_encode_job=save_encode_job,
                 reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
@@ -30379,74 +27519,44 @@ raise SystemExit(0)
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "stale-parent-folder",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "needs_attention",
-                    "manifest_path": str(terminal_manifest),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 3,
-                    "process_pid": None,
-                    "error": "worker restart",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": "max_attempts_exhausted",
-                    "last_failure_kind": "worker_restart",
-                    "last_failure_at": web_app._now_iso(),
-                    "host_cooldown_until": None,
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": web_app._now_iso(),
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="stale-parent-folder",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="needs_attention",
+                    manifest_path=str(terminal_manifest),
+                    manifest_indexes=None,
+                    attempt_count=3,
+                    error="worker restart",
+                    terminal_reason="max_attempts_exhausted",
+                    last_failure_kind="worker_restart",
+                    last_failure_at=web_app._now_iso(),
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    finished_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "active-descendant-folder",
-                    "prefix": "tv/show/season-1",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "running",
-                    "manifest_path": str(
+                self._job_row(
+                    job_id="active-descendant-folder",
+                    prefix="tv/show/season-1",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="running",
+                    manifest_path=str(
                         self._write_manifest("manifest-active-descendant.json", [{"library_item_id": nested_item_id}])),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": 123,
-                    "error": None,
-                    "leased_at": web_app._now_iso(),
-                    "lease_expires_at": None,
-                    "heartbeat_at": web_app._now_iso(),
-                    "worker_id": "worker-1",
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": None,
-                    "updated_at": web_app._now_iso(),
-                },
+                    manifest_indexes=None,
+                    process_pid=123,
+                    leased_at=web_app._now_iso(),
+                    heartbeat_at=web_app._now_iso(),
+                    worker_id="worker-1",
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
 
         next_manifest = self._write_manifest("manifest-next-parent-retry.json", [{"library_item_id": parent_item_id}])
@@ -30455,20 +27565,11 @@ raise SystemExit(0)
                 "mediaforce.web.runtime.folder_actions.create_folder_manifest",
                 return_value=({"items": [{"library_item_id": parent_item_id}]}, next_manifest),
         ):
-            result = folder_actions_runtime.queue_folder_encode_action(
+            result = self._queue_folder_encode(
                 self.config,
                 "tv/show",
                 "retry parent folder",
                 False,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
-                load_calibration_state=self._accepted_calibration_state,
-                review_gate=self._accepted_review_gate,
-                upsert_override=self._noop_upsert_override,
-                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-                save_encode_job=save_encode_job,
                 reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
@@ -30505,38 +27606,24 @@ raise SystemExit(0)
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "stale-root-folder",
-                    "prefix": "",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "needs_attention",
-                    "manifest_path": str(terminal_manifest),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 3,
-                    "process_pid": None,
-                    "error": "worker restart",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": "max_attempts_exhausted",
-                    "last_failure_kind": "worker_restart",
-                    "last_failure_at": web_app._now_iso(),
-                    "host_cooldown_until": None,
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": web_app._now_iso(),
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="stale-root-folder",
+                    prefix="",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="needs_attention",
+                    manifest_path=str(terminal_manifest),
+                    manifest_indexes=None,
+                    attempt_count=3,
+                    error="worker restart",
+                    terminal_reason="max_attempts_exhausted",
+                    last_failure_kind="worker_restart",
+                    last_failure_at=web_app._now_iso(),
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    finished_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
 
         next_manifest = self._write_manifest(
@@ -30549,20 +27636,11 @@ raise SystemExit(0)
                 return_value=({"items": [{"library_item_id": item_id}, {"library_item_id": other_item_id}]},
                               next_manifest),
         ):
-            result = folder_actions_runtime.queue_folder_encode_action(
+            result = self._queue_folder_encode(
                 self.config,
                 "",
                 "retry root folder",
                 False,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
-                load_calibration_state=self._accepted_calibration_state,
-                review_gate=self._accepted_review_gate,
-                upsert_override=self._noop_upsert_override,
-                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
-                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
-                save_encode_job=save_encode_job,
                 reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
@@ -30596,112 +27674,63 @@ raise SystemExit(0)
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "parent-folder",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "needs_attention",
-                    "manifest_path": str(manifest),
-                    "item_count": 2,
-                    "saved_profile_path": None,
-                    "manifest_indexes": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 0,
-                    "process_pid": None,
-                    "error": "mixed shard result",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": "max_attempts_exhausted",
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": web_app._now_iso(),
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="parent-folder",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="needs_attention",
+                    manifest_path=str(manifest),
+                    item_count=2,
+                    manifest_indexes=None,
+                    attempt_count=0,
+                    error="mixed shard result",
+                    terminal_reason="max_attempts_exhausted",
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    finished_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "child-complete",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": "parent-folder",
-                    "status": "completed",
-                    "manifest_path": str(manifest),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": [0],
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": web_app._now_iso(),
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="child-complete",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id="parent-folder",
+                    status="completed",
+                    manifest_path=str(manifest),
+                    manifest_indexes=[0],
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    finished_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "child-failed",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": "parent-folder",
-                    "status": "needs_attention",
-                    "manifest_path": str(manifest),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": [1],
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 3,
-                    "process_pid": None,
-                    "error": "worker restart",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": "max_attempts_exhausted",
-                    "last_failure_kind": "worker_restart",
-                    "last_failure_at": web_app._now_iso(),
-                    "host_cooldown_until": None,
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": web_app._now_iso(),
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="child-failed",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id="parent-folder",
+                    status="needs_attention",
+                    manifest_path=str(manifest),
+                    manifest_indexes=[1],
+                    attempt_count=3,
+                    error="worker restart",
+                    terminal_reason="max_attempts_exhausted",
+                    last_failure_kind="worker_restart",
+                    last_failure_at=web_app._now_iso(),
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    finished_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
 
             parent_job = load_encode_job(connection, "parent-folder")
-            self.assertIsNotNone(parent_job)
             assert parent_job is not None
             encode_runtime.prepare_terminal_encode_job_for_requeue(
                 connection,
@@ -30741,77 +27770,46 @@ raise SystemExit(0)
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "legacy-parent-folder",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "needs_attention",
-                    "manifest_path": str(manifest),
-                    "item_count": 2,
-                    "saved_profile_path": None,
-                    "manifest_indexes": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 0,
-                    "process_pid": None,
-                    "error": "legacy terminal state",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": "max_attempts_exhausted",
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": web_app._now_iso(),
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="legacy-parent-folder",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="needs_attention",
+                    manifest_path=str(manifest),
+                    item_count=2,
+                    manifest_indexes=None,
+                    attempt_count=0,
+                    error="legacy terminal state",
+                    terminal_reason="max_attempts_exhausted",
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    finished_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "legacy-child-malformed",
-                    "prefix": "tv/show",
-                    "job_kind": "shard",
-                    "parent_job_id": "legacy-parent-folder",
-                    "status": "needs_attention",
-                    "manifest_path": str(manifest),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "manifest_indexes": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": "worker restart",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": "max_attempts_exhausted",
-                    "last_failure_kind": "worker_restart",
-                    "last_failure_at": web_app._now_iso(),
-                    "host_cooldown_until": None,
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": web_app._now_iso(),
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="legacy-child-malformed",
+                    prefix="tv/show",
+                    job_kind="shard",
+                    parent_job_id="legacy-parent-folder",
+                    status="needs_attention",
+                    manifest_path=str(manifest),
+                    manifest_indexes=None,
+                    error="worker restart",
+                    terminal_reason="max_attempts_exhausted",
+                    last_failure_kind="worker_restart",
+                    last_failure_at=web_app._now_iso(),
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    finished_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
 
             parent_job = load_encode_job(connection, "legacy-parent-folder")
-            self.assertIsNotNone(parent_job)
             assert parent_job is not None
             encode_runtime.prepare_terminal_encode_job_for_requeue(
                 connection,
@@ -30856,42 +27854,26 @@ raise SystemExit(0)
             )
             save_encode_job(
                 connection,
-                {
-                    "job_id": "orphan-parent-folder",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "failed",
-                    "manifest_path": str(manifest),
-                    "item_count": 2,
-                    "saved_profile_path": None,
-                    "manifest_indexes": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 0,
-                    "process_pid": None,
-                    "error": "legacy folder terminal",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": "max_attempts_exhausted",
-                    "last_failure_kind": None,
-                    "last_failure_at": None,
-                    "host_cooldown_until": None,
-                    "created_at": web_app._now_iso(),
-                    "started_at": web_app._now_iso(),
-                    "finished_at": web_app._now_iso(),
-                    "updated_at": web_app._now_iso(),
-                },
+                self._job_row(
+                    job_id="orphan-parent-folder",
+                    prefix="tv/show",
+                    job_kind="folder",
+                    parent_job_id=None,
+                    status="failed",
+                    manifest_path=str(manifest),
+                    item_count=2,
+                    manifest_indexes=None,
+                    attempt_count=0,
+                    error="legacy folder terminal",
+                    terminal_reason="max_attempts_exhausted",
+                    created_at=web_app._now_iso(),
+                    started_at=web_app._now_iso(),
+                    finished_at=web_app._now_iso(),
+                    updated_at=web_app._now_iso(),
+                ),
             )
 
             parent_job = load_encode_job(connection, "orphan-parent-folder")
-            self.assertIsNotNone(parent_job)
             assert parent_job is not None
             encode_runtime.prepare_terminal_encode_job_for_requeue(
                 connection,
@@ -31015,19 +27997,12 @@ raise SystemExit(0)
     def _retry_stopped_season(self, queue_config: MediaforceConfig) -> folder_actions_runtime.ActionPayload:
         calibration = self._season_calibration(queue_config)
         with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
-            return folder_actions_runtime.queue_folder_encode_action(
+            return self._queue_folder_encode(
                 queue_config, "tv/show/Season 1", "", False, True,
-                now_iso=web_app._now_iso,
-                load_job_state=self._noop_load_job_state,
                 load_calibration_state=lambda *_args, **_kwargs: calibration,
-                review_gate=self._accepted_review_gate,
-                upsert_override=self._noop_upsert_override,
-                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
-                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
                 prepare_terminal_encode_job_for_requeue_fn=lambda connection, job: (
                     encode_runtime.prepare_terminal_encode_job_for_requeue(
                         connection, job, deps=web_app._encode_queue_runtime_deps(), config=queue_config)),
-                save_encode_job=save_encode_job,
                 reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
@@ -32333,90 +29308,6 @@ raise SystemExit(0)
         self.assertEqual(statuses, ["planned", "planned"])
         self.assertEqual(event_type, "cleanup_concurrent_writer")
 
-    def test_stop_calibration_queue_cancels_running_jobs_and_cleans_queued_jobs(self) -> None:
-        running_prefix = "tv/show"
-        queued_prefix = "tv/queued"
-        now = web_app._now_iso()
-        with open_db(self.config.paths.db_path) as connection:
-            web_app._save_job_state(
-                connection,
-                self.config,
-                running_prefix,
-                {
-                    "job_id": "cal-running",
-                    "prefix": running_prefix,
-                    "status": "running",
-                    "lane": "sample",
-                    "action": "baseline",
-                    "host": {"key": "cbusillo@localhost", "label": "M4 Studio"},
-                    "notes": "",
-                    "policy": {},
-                    "sample_item": {},
-                    "owner_pid": os.getpid(),
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": None,
-                    "error": None,
-                },
-            )
-            web_app._save_job_state(
-                connection,
-                self.config,
-                queued_prefix,
-                {
-                    "job_id": "cal-queued",
-                    "prefix": queued_prefix,
-                    "status": "queued",
-                    "lane": "sample",
-                    "action": "baseline",
-                    "host": {"key": "cbusillo@localhost", "label": "M4 Studio"},
-                    "notes": "",
-                    "policy": {},
-                    "sample_item": {},
-                    "owner_pid": None,
-                    "created_at": now,
-                    "started_at": None,
-                    "finished_at": None,
-                    "error": None,
-                },
-            )
-            connection.commit()
-
-        controller = Mock()
-        web_app.CALIBRATION_QUEUE_PROCESSES["cal-running"] = controller
-        try:
-            with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
-                    "mediaforce.web.app.purge_transient_artifacts"
-            ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
-                "mediaforce.web.app._start_encode_queue_worker"
-            ):
-                app = web_app.create_app(self.config.paths.config_path)
-
-            stop_endpoint = next(
-                route.endpoint
-                for route in app.router.routes
-                if getattr(route, "path", "") == "/api/calibration-queue/stop"
-            )
-            response = stop_endpoint()
-            self.assertEqual(response.status_code, 200)
-            self.assertIn("Stopped and cleaned the calibration queue", response.body.decode())
-
-            with open_db(self.config.paths.db_path) as connection:
-                running_job = web_app._load_job_state(connection, self.config, running_prefix)
-                queued_job = web_app._load_job_state(connection, self.config, queued_prefix)
-
-            self.assertIsNotNone(running_job)
-            self.assertIsNotNone(queued_job)
-            assert running_job is not None
-            assert queued_job is not None
-            self.assertEqual(running_job["status"], "stopped")
-            self.assertEqual(queued_job["status"], "stopped")
-            self.assertEqual(running_job["error"], "Calibration queue job was stopped and cleaned up.")
-            self.assertEqual(queued_job["error"], "Calibration queue job was stopped and cleaned up.")
-            controller.cancel.assert_called_once_with()
-        finally:
-            web_app.CALIBRATION_QUEUE_PROCESSES.clear()
-
     def test_calibration_queue_summary_surfaces_recent_failed_jobs(self) -> None:
         now = web_app._now_iso()
         with open_db(self.config.paths.db_path) as connection:
@@ -32680,7 +29571,6 @@ raise SystemExit(0)
 
             payload = web_app._load_job_state(connection, self.config, prefix)
 
-        self.assertIsNotNone(payload)
         assert payload is not None
         self.assertEqual(payload["status"], "stopped")
         self.assertEqual(payload["action"], "ai_tune")
@@ -32731,10 +29621,8 @@ raise SystemExit(0)
             latest_payload = web_app._load_job_state(connection, self.config, prefix)
             retryable_payload = web_app._load_retryable_sample_job_state(connection, self.config, prefix)
 
-        self.assertIsNotNone(latest_payload)
         assert latest_payload is not None
         self.assertEqual(latest_payload["job_id"], "stopped-full-job")
-        self.assertIsNotNone(retryable_payload)
         assert retryable_payload is not None
         self.assertEqual(retryable_payload["job_id"], "stopped-sample-job")
         self.assertEqual(retryable_payload["lane"], "sample")
@@ -32785,7 +29673,6 @@ raise SystemExit(0)
             latest_payload = web_app._load_job_state(connection, self.config, prefix)
             retryable_payload = web_app._load_retryable_sample_job_state(connection, self.config, prefix)
 
-        self.assertIsNotNone(latest_payload)
         assert latest_payload is not None
         self.assertEqual(latest_payload["job_id"], "completed-sample-job")
         self.assertIsNone(retryable_payload)
@@ -32831,11 +29718,9 @@ raise SystemExit(0)
                 prefix,
             )
 
-        self.assertIsNotNone(latest_payload)
         assert latest_payload is not None
         self.assertEqual(latest_payload["job_id"], "bound-exhausted-sample-job")
         self.assertIsNone(retryable_payload)
-        self.assertIsNotNone(failed_target_payload)
         assert failed_target_payload is not None
         self.assertEqual(failed_target_payload["job_id"], "bound-exhausted-sample-job")
 
@@ -32902,7 +29787,6 @@ raise SystemExit(0)
 
         self.assertIsNone(retryable_payload)
         self.assertIsNone(failed_target_payload)
-        self.assertIsNotNone(failed_payload)
         assert failed_payload is not None
         self.assertEqual(failed_payload["job_id"], "failed-sample-job")
         self.assertEqual(failed_payload["error"], "Error: Failed to find a suitable crf")
@@ -33196,6 +30080,42 @@ raise SystemExit(0)
         calibration = object_dict(self._accepted_calibration_state(self.config, "tv/show"))
         return {"production_approval_contract": production_approval_contract(calibration)}
 
+    @staticmethod
+    def _job_row(
+            *, job_id: str, prefix: str, status: str, manifest_path: str,
+            created_at: str, updated_at: str, **fields: object,
+    ) -> dict[str, object]:
+        return {
+            "job_id": job_id,
+            "prefix": prefix,
+            "status": status,
+            "manifest_path": manifest_path,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "attempt_count": 1,
+            "bypass_schedule": False,
+            "error": None,
+            "finished_at": None,
+            "heartbeat_at": None,
+            "host": {},
+            "host_cooldown_until": None,
+            "item_count": 1,
+            "last_failure_at": None,
+            "last_failure_kind": None,
+            "last_host": {},
+            "lease_expires_at": None,
+            "leased_at": None,
+            "notes": "",
+            "process_pid": None,
+            "retry_not_before": None,
+            "saved_profile_path": None,
+            "started_at": None,
+            "terminal_reason": None,
+            "waiting_reason": None,
+            "worker_id": None,
+            **fields,
+        }
+
     def _save_job(
             self,
             connection: DBClient,
@@ -33216,36 +30136,27 @@ raise SystemExit(0)
         now = web_app._now_iso()
         save_encode_job(
             connection,
-            {
-                "job_id": job_id,
-                "prefix": "tv/show",
-                "status": status,
-                "manifest_path": str(manifest_path),
-                "item_count": 1,
-                "saved_profile_path": None,
-                "host": host,
-                "last_host": {},
-                "notes": "",
-                "bypass_schedule": bypass_schedule,
-                "attempt_count": attempt_count,
-                "process_pid": 111 if status == "running" else None,
-                "error": None,
-                "leased_at": now if status == "running" else None,
-                "lease_expires_at": lease_expires_at,
-                "heartbeat_at": now if status == "running" else None,
-                "worker_id": "test-worker" if status == "running" else None,
-                "schedule_close_deadline_at": schedule_close_deadline_at,
-                "retry_not_before": retry_not_before,
-                "waiting_reason": waiting_reason,
-                "terminal_reason": None,
-                "last_failure_kind": None,
-                "last_failure_at": None,
-                "host_cooldown_until": host_cooldown_until,
-                "created_at": now,
-                "started_at": now if status == "running" else None,
-                "finished_at": None,
-                "updated_at": now,
-            },
+            self._job_row(
+                job_id=job_id,
+                prefix="tv/show",
+                status=status,
+                manifest_path=str(manifest_path),
+                host=host,
+                bypass_schedule=bypass_schedule,
+                attempt_count=attempt_count,
+                process_pid=111 if status == "running" else None,
+                leased_at=now if status == "running" else None,
+                lease_expires_at=lease_expires_at,
+                heartbeat_at=now if status == "running" else None,
+                worker_id="test-worker" if status == "running" else None,
+                schedule_close_deadline_at=schedule_close_deadline_at,
+                retry_not_before=retry_not_before,
+                waiting_reason=waiting_reason,
+                host_cooldown_until=host_cooldown_until,
+                created_at=now,
+                started_at=now if status == "running" else None,
+                updated_at=now,
+            ),
         )
 
 

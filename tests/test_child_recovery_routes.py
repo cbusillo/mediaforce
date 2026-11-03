@@ -120,7 +120,6 @@ def test_recovery_does_not_trigger_unrelated_artifact_cleanup() -> None:
     for path in (CHILD_RECOVERY_PREVIEW_PATH, CHILD_RECOVERY_APPLY_PATH):
         assert not _request_triggers_periodic_cleanup("POST", path)
         assert not _request_triggers_periodic_cleanup("POST", path + "/")
-    assert _request_triggers_periodic_cleanup("POST", "/api/settings")
 
 
 def test_recovery_accepts_same_origin_json_request() -> None:

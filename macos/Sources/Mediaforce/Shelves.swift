@@ -132,10 +132,10 @@ struct SampleShelf: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Samples")
+            Text("Approved samples")
                 .font(.headline)
             HStack(alignment: .top, spacing: 10) {
-                ForEach(Array((samples.waitingOnYou + samples.approvedNotStarted).prefix(6).enumerated()), id: \.element.id) { index, sample in
+                ForEach(Array(samples.approvedNotStarted.prefix(6).enumerated()), id: \.element.id) { index, sample in
                     VStack(alignment: .leading, spacing: 7) {
                         Button { openSample(sample.prefix) } label: {
                             PosterView(
@@ -190,11 +190,15 @@ struct SizeBar: View {
 struct BiggestTable: View {
     static let rowLimit = 9
     static let headerHeight: CGFloat = 28
-    static let rowHeight: CGFloat = 24
+    // Tall enough for the poster beside each name.
+    static let rowHeight: CGFloat = 29
     static let noteHeight: CGFloat = 16
+    // A poster that fits inside a row.
+    static let posterWidth: CGFloat = 14
 
     let shows: [MainWindowFacts.NotStartedShow]
     let samples: [MainWindowFacts.Sample]
+    let posters: PosterStore
     let open: (Place) -> Void
 
     var body: some View {
@@ -204,14 +208,20 @@ struct BiggestTable: View {
                 .font(.headline)
             Table(shows) {
                 TableColumn("Show") { (show: MainWindowFacts.NotStartedShow) in
-                    VStack(alignment: .leading, spacing: 1) {
-                        Button(show.show) { open(.item(show.showPrefix)) }
-                            .buttonStyle(QuietLinkStyle(primary: true))
-                        if let note = waitingNote(show), let prefix = show.waitingSamplePrefix {
-                            Button(note) { open(.sample(prefix)) }
-                                .buttonStyle(.plain)
+                    HStack(spacing: 8) {
+                        MediaPoster(titlePrefix: show.showPrefix, name: show.show, kind: .tv, posters: posters, width: Self.posterWidth)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Button(show.show) { open(.item(show.showPrefix)) }
+                                .buttonStyle(QuietLinkStyle(primary: true))
+                            if let note = waitingNote(show), let prefix = show.waitingSamplePrefix {
+                                HStack(spacing: 4) {
+                                    // The note beside it already says it waits.
+                                    WaitingMark().accessibilityHidden(true)
+                                    Button(note) { open(.sample(prefix)) }
+                                        .buttonStyle(QuietLinkStyle())
+                                }
                                 .font(.caption)
-                                .foregroundStyle(Color.accentColor)
+                            }
                         }
                     }
                     .padding(.vertical, waitingNote(show) == nil ? 0 : 2)
@@ -272,8 +282,11 @@ struct Computers: View {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(computer.name ?? computer.key)
                                     .foregroundStyle(.primary)
-                                Text(Words.computerState(computer.state))
-                                    .font(.caption)
+                                HStack(spacing: 4) {
+                                    if computer.needsYou { WaitingMark().accessibilityHidden(true) }
+                                    Text(Words.computerState(computer.state))
+                                }
+                                .font(.caption)
                             }
                         }
                         .buttonStyle(QuietLinkStyle())
@@ -289,6 +302,7 @@ struct Computers: View {
 
 struct Latest: View {
     let events: [MainWindowFacts.Event]
+    let posters: PosterStore
     let open: (Place) -> Void
 
     var body: some View {
@@ -302,13 +316,19 @@ struct Latest: View {
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                             .fixedSize()
-                        if let season = event.season {
-                            Button(Words.eventSentence(event)) { open(.item(season.prefix)) }
-                                .buttonStyle(QuietLinkStyle(primary: true))
-                                .fixedSize(horizontal: false, vertical: true)
-                        } else {
-                            Text(Words.eventSentence(event))
-                                .fixedSize(horizontal: false, vertical: true)
+                        // The poster sits centred beside the sentence; the row keeps the time on its first line.
+                        HStack(spacing: 8) {
+                            MediaPoster(titlePrefix: MediaPoster.titlePrefix(event.relPath), name: Words.eventSentence(event),
+                                        kind: MediaKind(rawValue: String(event.relPath.split(separator: "/").first ?? "")) ?? .other,
+                                        posters: posters, width: 16)
+                            if let season = event.season {
+                                Button(Words.eventSentence(event)) { open(.item(season.prefix)) }
+                                    .buttonStyle(QuietLinkStyle(primary: true))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } else {
+                                Text(Words.eventSentence(event))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                     }
                 }

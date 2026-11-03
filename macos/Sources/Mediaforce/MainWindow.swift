@@ -11,7 +11,8 @@ final class MainWindowModel {
     private(set) var facts: MainWindowFacts?
     // Each kind of content and how it is decided; nil until Mediaforce first answers.
     private(set) var kinds: KindsFacts?
-    private var kindsHeard: Date?
+    private var kindsAttempted: Date?
+    private var kindsRequest = 0
     // The player the full-screen window shows, while it is open.
     var theater: Theater?
     private(set) var connection: ServerState = .checking
@@ -19,8 +20,8 @@ final class MainWindowModel {
     // What went wrong at the last failed check, for the window's Details; nil once Mediaforce answers again.
     private(set) var problem: ServerProblem?
     var notice: ActionNotice?
-    // A page a notification asked to open; the window takes it and clears it.
-    var requestedPlace: Place?
+    // A persistent request, so the window and menu bar can each respond without consuming it.
+    var placeRequest: PlaceRequest?
     var onFacts: ((MainWindowFacts) -> Void)?
     // Whether work was asked to run or pause and the server hasn't confirmed it yet; nil when nothing is pending.
     private(set) var switching: Bool?
@@ -46,7 +47,7 @@ final class MainWindowModel {
             lastHeard = .now
             problem = nil
             onFacts?(facts)
-            if kindsHeard.map({ Date.now.timeIntervalSince($0) >= Self.kindsInterval }) ?? true { await refreshKinds() }
+            if kindsAttempted.map({ Date.now.timeIntervalSince($0) >= Self.kindsInterval }) ?? true { await refreshKinds() }
         } catch is DecodingError {
             connection = .failing
             problem = ServerProblem(kind: .unreadableReply, at: .now)
@@ -61,9 +62,11 @@ final class MainWindowModel {
 
     /// Reads the kinds again; a failed read keeps what was last heard, since the window's facts say if Mediaforce is down.
     func refreshKinds() async {
-        guard let kinds = try? await client.kinds() else { return }
+        kindsRequest += 1
+        let request = kindsRequest
+        kindsAttempted = .now
+        guard let kinds = try? await client.kinds(), request == kindsRequest else { return }
         self.kinds = kinds
-        kindsHeard = .now
     }
 
     func startWatching() {
@@ -143,8 +146,14 @@ struct ActionNotice: Identifiable, Equatable {
     static func == (lhs: ActionNotice, rhs: ActionNotice) -> Bool { lhs.id == rhs.id }
 }
 
+struct PlaceRequest: Equatable {
+    let id = UUID()
+    let place: Place
+}
+
 enum Place: Hashable {
-    case library, spaceSaved, media
+    case library, needsYou, activity, spaceSaved, media
+    case libraryKind(MediaKind), mediaKind(MediaKind, LibraryStateGroup? = nil)
     // Settings › Computers, on one computer when it names one.
     case computer(String?)
     case sample(String)
@@ -155,20 +164,15 @@ enum Place: Hashable {
 
     static let notificationKey = "opens"
 
-    var opensFromList: Bool {
-        switch self {
-        case .sample, .item: true
-        default: false
-        }
-    }
-
     var notificationValue: String {
         switch self {
+        case .kind(let kind): "kind:\(kind)"
         case .sample(let prefix): "sample:\(prefix)"
         case .item(let prefix): "item:\(prefix)"
         case .computer(let key?): "computer:\(key)"
         case .computer(nil): "computer"
         case .library: "library"
+        case .needsYou: "needsYou"
         default: "spaceSaved"
         }
     }
@@ -176,9 +180,11 @@ enum Place: Hashable {
     init?(notificationValue value: String) {
         let parts = value.split(separator: ":", maxSplits: 1).map(String.init)
         switch (parts.first, parts.count == 2 ? parts[1] : nil) {
+        case ("kind", let kind?): self = .kind(kind)
         case ("sample", let prefix?): self = .sample(prefix)
         case ("item", let prefix?): self = .item(prefix)
         case ("library", nil): self = .library
+        case ("needsYou", nil): self = .needsYou
         case ("spaceSaved", nil): self = .spaceSaved
         case ("computer", let key?): self = .computer(key)
         // "computers" is what notifications sent before Computers moved into Settings carry.
@@ -192,77 +198,43 @@ struct MainWindow: View {
     static let id = "main"
 
     let model: MainWindowModel
-    @State private var place: Place? = .library
+    @State private var navigation = PageNavigation()
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         Group {
             if let facts = model.facts {
                 NavigationSplitView {
-                    Sidebar(place: $place, facts: facts, model: model)
+                    Sidebar(place: Binding(get: { navigation.place }, set: { navigation.select($0) }), facts: facts, model: model)
                         .navigationSplitViewColumnWidth(214)
                 } detail: {
-                    Group {
-                        switch place {
-                        case .spaceSaved:
-                            SpaceSavedPage(facts: facts, model: model)
-                                // Deleting backups changes what the page shows, so it reads its facts again at once.
-                                .id(facts.originalBackups.count)
-                        // A new page for each prefix, so none shows the last one's name or facts while its own loads.
-                        case .sample(let prefix): SamplePage(prefix: prefix, model: model) { place = .item($0) }.id(prefix)
-                        case .item(let prefix):
-                            ItemPage(prefix: prefix, model: model, openSample: { place = .sample($0) }, openItem: { place = .item($0) })
-                                .id(prefix)
-                        case .media: MediaPage(model: model) { place = .item($0) }
-                        case .seasonsWithoutKind:
-                            MediaPage(model: model, onlySeasons: model.kinds?.leftOut, showEverything: { place = .media }) { place = .item($0) }
-                        case .kind(let code):
-                            if let kind = model.kinds?.kinds.first(where: { $0.kind == code }) {
-                                KindPage(kind: kind, leftOut: model.kinds?.leftOut.count ?? 0, model: model,
-                                         openItem: { place = .item($0) }, openSample: { place = .sample($0) },
-                                         openLeftOut: { place = .seasonsWithoutKind })
-                            }
-                        default: LibraryPage(facts: facts, posters: model.posters) { go($0) }
-                        }
-                    }
-                    .safeAreaInset(edge: .top, spacing: 0) {
-                        VStack(spacing: 0) {
-                            ForEach(TopNotice.shown(connection: model.connection, facts: facts), id: \.self) { notice in
-                                switch notice {
-                                case .stale: StaleNotice(connection: model.connection, lastHeard: model.lastHeard)
-                                case .paused: PausedBar(model: model)
-                                }
-                            }
-                        }
-                    }
+                    MainPage(place: navigation.place, facts: facts, model: model, open: go, namePage: { navigation.name($0, $1) })
                 }
                 .toolbar {
-                    if place?.opensFromList == true {
-                        ToolbarItem(placement: .navigation) {
-                            Button("Library", systemImage: "chevron.backward") { place = .library }
-                        }
-                    }
-                    // Beside the sidebar, before the page's title, so Pause never moves.
+                    // First beside the sidebar, so Pause never moves; a page opened from a list adds its back button after it.
                     ToolbarItem(placement: .navigation) {
                         PauseButton(facts: facts, model: model)
                     }
+                    if let title = navigation.backTitle {
+                        ToolbarItem(placement: .navigation) {
+                            Button(title, systemImage: "chevron.backward") { navigation.goBack() }
+                                .labelStyle(.titleAndIcon)
+                        }
+                    }
                 }
             } else {
-                ServerStatusView(state: model.connection, lastHeard: model.lastHeard, problem: model.problem) {
+                ServerStatusView(state: model.connection, lastHeard: model.lastHeard, problem: model.problem,
+                                 headlineInTitleBar: true) {
                     Task { await model.refresh() }
                 }
+                .navigationTitle(Words.serverHeadline(ServerSituation(model.connection, serviceInstalled: BackgroundService.isInstalled)))
             }
         }
         .frame(minWidth: 1100, minHeight: 700)
         // Initial too: the menu bar may ask for a page while it opens this window.
-        .onChange(of: model.requestedPlace, initial: true) { _, requested in
+        .onChange(of: model.placeRequest, initial: true) { _, requested in
             guard let requested else { return }
-            if case .computer(let key) = requested {
-                openComputer(key)
-            } else {
-                place = requested
-            }
-            model.requestedPlace = nil
+            go(requested.place)
         }
         .alert(item: Bindable(model).notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
@@ -271,7 +243,7 @@ struct MainWindow: View {
 
     /// Opens a place from a link on a page: a page of this window, or Settings › Computers for a computer.
     private func go(_ requested: Place) {
-        if case .computer(let key) = requested { openComputer(key) } else { place = requested }
+        if case .computer(let key) = requested { openComputer(key) } else { navigation.open(requested) }
     }
 
     /// Computers live in Settings › Computers; this opens it, on one computer when it names one.
@@ -287,7 +259,8 @@ enum TopNotice: Hashable {
     case stale, paused
 
     static func shown(connection: ServerState, facts: MainWindowFacts) -> [TopNotice] {
-        (connection == .reachable ? [] : [.stale]) + (facts.work.pausedByOwner ? [.paused] : [])
+        let canResume = facts.work.pausedByOwner || facts.work.checksPaused
+        return (connection == .reachable ? [] : [.stale]) + (canResume ? [.paused] : [])
     }
 }
 
@@ -299,7 +272,8 @@ struct PausedBar: View {
         HStack(spacing: 8) {
             Image(systemName: "pause.circle.fill")
                 .foregroundStyle(Color.accentColor)
-            Text(Words.pausedBar)
+            Text(model.facts?.work.checksPaused == true && model.facts?.work.pausedByOwner == false
+                 ? Words.checksPausedBar : Words.pausedBar)
             Spacer(minLength: 0)
             Button(Words.resume) { Task { await model.setRunning(true) } }
                 .controlSize(.small)
@@ -353,13 +327,25 @@ struct Sidebar: View {
     let facts: MainWindowFacts
     let model: MainWindowModel
     @AppStorage("kindsShown") private var kindsShown = true
+    @AppStorage("librariesShown") private var librariesShown = true
 
     var body: some View {
         VStack(spacing: 0) {
             List(selection: $place) {
-                Label("Library", systemImage: "books.vertical")
-                    .tag(Place.library)
-                SidebarRow(title: "Space saved", symbol: "arrow.down.right.and.arrow.up.left", trailing: Words.size(facts.spaceSaved.bytes))
+                SidebarRow(title: Words.needsYou, symbol: "hand.raised", trailing: "\(Attention.waitingOnYou(facts))")
+                    .tag(Place.needsYou)
+                Label("Activity", systemImage: "clock")
+                    .tag(Place.activity)
+                DisclosureGroup(isExpanded: $librariesShown) {
+                    ForEach(MediaKind.libraries(in: facts.library)) { kind in
+                        Label(Words.mediaKind(kind), systemImage: kind.symbol)
+                            .tag(Place.libraryKind(kind))
+                    }
+                } label: {
+                    Label(Words.library, systemImage: "books.vertical")
+                }
+                .tag(Place.library)
+                SidebarRow(title: Words.spaceSaved, symbol: "arrow.down.right.and.arrow.up.left", trailing: Words.size(facts.spaceSaved.bytes))
                     .tag(Place.spaceSaved)
                 // No count: the page counts shows, titles and folders, while the facts count other media by file.
                 Label(Words.media, systemImage: "film.stack")
@@ -375,7 +361,6 @@ struct Sidebar: View {
                 }
             }
             .listStyle(.sidebar)
-            BackupsRow(backups: facts.originalBackups) { place = .spaceSaved }
         }
     }
 }
@@ -413,30 +398,59 @@ struct SidebarRow: View {
     }
 }
 
-/// Original backups wait in the Cleanup folder until they are deleted on Space saved, the one place that deletes them.
-struct BackupsRow: View {
-    let backups: MainWindowFacts.OriginalBackups
-    let open: () -> Void
+struct MainPage: View {
+    let place: Place?
+    let facts: MainWindowFacts
+    let model: MainWindowModel
+    let open: (Place) -> Void
+    var namePage: (Place, String) -> Void = { _, _ in }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Divider()
-            Button(action: open) {
-                HStack(spacing: 8) {
-                    Image(systemName: backups.count > 0 ? "trash.fill" : "trash")
-                        .foregroundStyle(.secondary)
-                    Text(Words.originalBackups)
-                    Spacer()
-                    Text(backups.count > 0 ? Words.size(backups.bytes) : Words.none)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
+        Group {
+            switch place {
+            case .activity:
+                ActivityPage(facts: facts, model: model, open: open)
+            case .needsYou:
+                NeedsYouPage(facts: facts, posters: model.posters, open: open)
+            case .spaceSaved:
+                SpaceSavedPage(facts: facts, model: model) { open(.item($0)) }
+                    // Deleting backups changes what the page shows, so it reads its facts again at once.
+                    .id(facts.originalBackups.count)
+            // A new page for each prefix, so none shows the last one's name or facts while its own loads.
+            case .sample(let prefix):
+                SamplePage(prefix: prefix, model: model, openItem: { open(.item($0)) },
+                           namePage: { namePage(.sample(prefix), $0) }).id(prefix)
+            case .item(let prefix):
+                ItemPage(prefix: prefix, model: model, openSample: { open(.sample($0)) }, openItem: { open(.item($0)) },
+                         namePage: { namePage(.item(prefix), $0) })
+                    .id(prefix)
+            case .media: MediaPage(model: model) { open(.item($0)) }
+            case .mediaKind(let kind, let state):
+                MediaPage(model: model, kind: kind, stateGroup: state) { open(.item($0)) }.id(place)
+            case .libraryKind(let kind):
+                LibraryPage(model: model, kind: kind, open: open).id(kind)
+            case .seasonsWithoutKind:
+                MediaPage(model: model, onlySeasons: model.kinds?.leftOut, showEverything: { open(.media) }, kind: .tv) { open(.item($0)) }
+            case .kind(let code):
+                if let kind = model.kinds?.kinds.first(where: { $0.kind == code }) {
+                    KindPage(kind: kind, leftOut: model.kinds?.leftOut.count ?? 0, model: model,
+                             openItem: { open(.item($0)) }, openSample: { open(.sample($0)) },
+                             openLeftOut: { open(.seasonsWithoutKind) })
+                } else {
+                    LibraryPage(model: model, open: open)
                 }
-                .font(.callout)
-                .padding(14)
-                .contentShape(Rectangle())
+            default: LibraryPage(model: model, open: open)
             }
-            .buttonStyle(.plain)
-            .help(Words.originalBackupsHelp)
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            VStack(spacing: 0) {
+                ForEach(TopNotice.shown(connection: model.connection, facts: facts), id: \.self) { notice in
+                    switch notice {
+                    case .stale: StaleNotice(connection: model.connection, lastHeard: model.lastHeard)
+                    case .paused: PausedBar(model: model)
+                    }
+                }
+            }
         }
     }
 }

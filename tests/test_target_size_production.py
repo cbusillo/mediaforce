@@ -32,7 +32,11 @@ from mediaforce.encoding.quality import (
 )
 from mediaforce.tuning.quality_memory import quality_search_context_from_command, rounded_target_video_bitrate
 from mediaforce.tuning.quality_shadow import QualityShadowMetrics, QualityShadowRecommendation
-from mediaforce.tuning.quality_warm_start import QualityWarmStartBlockReason, QualityWarmStartPlan
+from mediaforce.tuning.quality_warm_start import (
+    QUALITY_WARM_START_EXPERIMENT_VERSION,
+    QualityWarmStartBlockReason,
+    QualityWarmStartPlan,
+)
 from mediaforce.tuning.target_size_search import FinalSizeMissError, FinalSizeVerification, TargetSizeSearchError
 
 
@@ -289,7 +293,7 @@ class TargetSizeProductionTests(unittest.TestCase):
             timing = json.loads(cast(str, observation["timing_json"]))
             self.assertEqual(observation["learning_eligible"], 1)
             self.assertEqual(outcome["quality_memory_arm"], "passive")
-            self.assertEqual(outcome["quality_memory_experiment_version"], "qwa1")
+            self.assertEqual(outcome["quality_memory_experiment_version"], QUALITY_WARM_START_EXPERIMENT_VERSION)
             self.assertEqual(outcome["exploration_kind"], "full_search")
             self.assertTrue(shadow["warm_start"]["eligible"])
             self.assertEqual(shadow["warm_start"]["experiment_arm"], "passive")
@@ -1106,7 +1110,7 @@ class TargetSizeProductionTests(unittest.TestCase):
                 if event["event_type"] == "encoding_failed"
             )
             details = json.loads(cast(str, failed_event["details_json"]))
-            self.assertEqual(details["quality_memory_plan"]["experiment_version"], "qwa1")
+            self.assertEqual(details["quality_memory_plan"]["experiment_version"], QUALITY_WARM_START_EXPERIMENT_VERSION)
             self.assertEqual(details["quality_memory_plan"]["experiment_arm"], "warm_start")
             self.assertEqual(details["quality_memory_policy_hash"], stable_json_hash(item["resolved_policy"]["video"]))
 

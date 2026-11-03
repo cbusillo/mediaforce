@@ -2,7 +2,9 @@ import json
 import os
 import subprocess
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from itertools import batched
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -12,16 +14,20 @@ from sqlalchemy import func
 from sqlalchemy import insert
 from sqlalchemy import not_
 from sqlalchemy import select
+from sqlalchemy import tuple_
 from sqlalchemy import update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import DBClient
+from mediaforce.core.db import DBClient, DBRow
 from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
+from mediaforce.core.db_tables import source_transitions
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.hosts.work_window import controller_work_schedule, require_controller_work_window
 from mediaforce.library.evidence_state import library_item_source_fingerprint, sync_library_item_evidence_states
 from mediaforce.library.motion_keep_state import reconcile_motion_keep_with_source
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT, library_item_is_missing
@@ -37,6 +43,7 @@ VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mp4", ".ts"}
 SCAN_PROGRESS_INTERVAL = 25
 MASS_DISAPPEARANCE_MIN_ITEMS = 25
 MASS_DISAPPEARANCE_MAX_REMAINING_PERCENT = 20
+MISSING_RECONCILE_BATCH_SIZE = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +80,17 @@ def scan_library(
         *,
         process_controller: ManagedProcessController | None = None,
         scan_id: str | None = None,
+        work_window_check: Callable[[], None] | None = None,
 ) -> ScanStats:
+    if work_window_check is None:
+        window = controller_work_schedule(config)
+
+        def check_work_window() -> None:
+            require_controller_work_window(config, window=window)
+    else:
+        check_work_window = work_window_check
+
+    check_work_window()
     _throw_if_scan_cancelled(process_controller)
     scan_id = scan_id or uuid.uuid4().hex
     started_at = timestamp()
@@ -111,6 +128,7 @@ def scan_library(
             limit=limit,
             stats=stats,
             process_controller=process_controller,
+            check_work_window=check_work_window,
         )
     except BaseException as exc:
         try:
@@ -134,11 +152,16 @@ def _execute_scan_library(
         limit: int | None,
         stats: ScanStats,
         process_controller: ManagedProcessController | None,
+        check_work_window: Callable[[], None],
 ) -> ScanStats:
     seen_paths_by_root: dict[str, set[str]] = {}
     reconcilable_roots: set[str] = set()
     files_since_progress = 0
     full_scan = not normalized_prefixes and limit is None
+    initial_sources = list(connection.execute(
+        select(library_items.c.id, library_items.c.source_revision, library_items.c.source_path, library_items.c.media_root)
+        .where(LIBRARY_ITEM_PRESENT)
+    ).mappings().all()) if full_scan else []
 
     for root_name, root_path in scan_source_roots.items():
         _throw_if_scan_cancelled(process_controller)
@@ -154,12 +177,23 @@ def _execute_scan_library(
                 seen=stats.total_seen,
                 enumeration=enumeration,
                 process_controller=process_controller,
+                work_window_check=check_work_window,
         ):
+            check_work_window()
             _throw_if_scan_cancelled(process_controller)
             source_path = str(file_path)
             logical_path = logical_library_rel_path(root_name, root_path, file_path)
             rel_path = logical_path.as_posix()
             parent_dir = logical_path.parent.as_posix()
+            root_seen_paths.add(source_path)
+            row = connection.execute(
+                select(library_items).where(library_items.c.source_path == source_path)
+            ).mappings().fetchone()
+            if ((row is not None and pending_source_operation(connection, int(row["id"])))
+                    or path_in_pending_move(connection, source_path)):
+                connection.commit()
+                continue
+            connection.commit()
             try:
                 stat_result = file_path.stat()
             except OSError:
@@ -172,15 +206,7 @@ def _execute_scan_library(
                 content_fingerprint = content_version_fingerprint(file_path, stat_result)
             except OSError:
                 content_fingerprint = None
-            row = connection.execute(
-                select(library_items).where(library_items.c.source_path == source_path)
-            ).mappings().fetchone()
             _throw_if_scan_cancelled(process_controller)
-
-            # A file mid-move belongs to the publishing or put-back moving it, which records it when the move finishes.
-            if ((row is not None and pending_source_operation(connection, int(row["id"])))
-                    or path_in_pending_move(connection, source_path)):
-                continue
             if (
                     row
                     and _source_content_unchanged(
@@ -190,9 +216,14 @@ def _execute_scan_library(
                         content_fingerprint=content_fingerprint,
                     )
             ):
-                connection.execute(
+                result = connection.execute(
                     update(library_items)
-                    .where(library_items.c.source_path == source_path)
+                    .where(
+                        library_items.c.id == row["id"],
+                        library_items.c.source_path == source_path,
+                        library_items.c.source_revision == row["source_revision"],
+                        _source_is_stable(),
+                    )
                     .values(
                         last_scan_id=scan_id,
                         last_seen_at=started_at,
@@ -213,6 +244,9 @@ def _execute_scan_library(
                         missing_since=None,
                     )
                 )
+                if result.rowcount != 1:
+                    connection.commit()
+                    continue
                 if not row.get("content_version_fingerprint") and content_fingerprint:
                     rebound_item = {
                         **dict(row),
@@ -320,8 +354,13 @@ def _execute_scan_library(
 
             if row is None:
                 insert_result = connection.execute(
-                    insert(library_items).values(**values)
+                    sqlite_insert(library_items).values(**values).on_conflict_do_nothing(
+                        index_elements=[library_items.c.source_path]
+                    )
                 )
+                if insert_result.rowcount != 1:
+                    connection.commit()
+                    continue
                 library_item_id = int(insert_result.inserted_primary_key[0])
                 stats.discovered += 1
             else:
@@ -338,15 +377,23 @@ def _execute_scan_library(
                 values["content_version_fingerprint"] = content_fingerprint or previous_content_fingerprint
                 # A file that comes back as different content starts over, as a new file does.
                 returned_as_new_content = content_changed and library_item_is_missing(row)
-                connection.execute(
+                update_result = connection.execute(
                     update(library_items)
-                    .where(library_items.c.source_path == source_path)
+                    .where(
+                        library_items.c.id == library_item_id,
+                        library_items.c.source_path == source_path,
+                        library_items.c.source_revision == row["source_revision"],
+                        _source_is_stable(),
+                    )
                     .values(
                         **{key: value for key, value in values.items() if key not in {"source_path", "discovered_at"}},
                         **({"status": "discovered"} if returned_as_new_content else {}),
                         missing_since=None,
                     )
                 )
+                if update_result.rowcount != 1:
+                    connection.commit()
+                    continue
                 stats.reprobed += 1
             item = connection.execute(
                 select(library_items).where(library_items.c.id == library_item_id)
@@ -405,12 +452,14 @@ def _execute_scan_library(
         _throw_if_scan_cancelled(process_controller)
 
     if full_scan:
+        check_work_window()
         _throw_if_scan_cancelled(process_controller)
         stats.missing = _reconcile_missing_items(
             connection,
             configured_roots=set(scan_source_roots),
             reconcilable_roots=reconcilable_roots,
             seen_paths_by_root=seen_paths_by_root,
+            initial_sources=initial_sources,
             updated_at=started_at,
             process_controller=process_controller,
         )
@@ -710,67 +759,42 @@ def _scan_warning(
     )
 
 
+def _source_is_stable() -> Any:
+    return not_(select(source_transitions.c.operation_id).where(
+        source_transitions.c.library_item_id == library_items.c.id,
+        source_transitions.c.outcome.in_(("prepared", "unresolved")),
+    ).exists())
+
+
 def _reconcile_missing_items(
         connection: DBClient,
         *,
         configured_roots: set[str],
         reconcilable_roots: set[str],
         seen_paths_by_root: dict[str, set[str]],
+        initial_sources: list[DBRow],
         updated_at: str,
         process_controller: ManagedProcessController | None = None,
 ) -> int:
-    _throw_if_scan_cancelled(process_controller)
+    missing = [
+        (row["id"], row["source_revision"], row["source_path"], row["media_root"])
+        for row in initial_sources
+        if row["media_root"] not in configured_roots
+        or (row["media_root"] in reconcilable_roots
+            and row["source_path"] not in seen_paths_by_root.get(row["media_root"], set()))
+    ]
     missing_count = 0
-    removed_root_filter = LIBRARY_ITEM_PRESENT
-    if configured_roots:
-        removed_root_filter = and_(
-            removed_root_filter,
-            not_(library_items.c.media_root.in_(tuple(sorted(configured_roots)))),
-        )
-    missing_count += _mark_items_missing(
-        connection,
-        removed_root_filter,
-        updated_at,
-        process_controller=process_controller,
-    )
-
-    for root_name in sorted(reconcilable_roots):
+    for batch in batched(missing, MISSING_RECONCILE_BATCH_SIZE):
         _throw_if_scan_cancelled(process_controller)
-        stale_filter = and_(
+        cursor = connection.execute(update(library_items).where(
             LIBRARY_ITEM_PRESENT,
-            library_items.c.media_root == root_name,
-        )
-        seen_paths = seen_paths_by_root.get(root_name, set())
-        if not seen_paths:
-            continue
-        stale_filter = and_(
-            stale_filter,
-            not_(library_items.c.source_path.in_(tuple(sorted(seen_paths)))),
-        )
-        missing_count += _mark_items_missing(
-            connection,
-            stale_filter,
-            updated_at,
-            process_controller=process_controller,
-        )
+            _source_is_stable(),
+            tuple_(library_items.c.id, library_items.c.source_revision,
+                   library_items.c.source_path, library_items.c.media_root).in_(batch),
+        ).values(missing_since=updated_at, updated_at=updated_at))
+        missing_count += int_value(cursor.rowcount) if cursor.rowcount != -1 else 0
+    _throw_if_scan_cancelled(process_controller)
     return missing_count
-
-
-def _mark_items_missing(
-        connection: DBClient,
-        stale_filter: Any,
-        updated_at: str,
-        *,
-        process_controller: ManagedProcessController | None = None,
-) -> int:
-    _throw_if_scan_cancelled(process_controller)
-    cursor = connection.execute(
-        update(library_items)
-        .where(stale_filter)
-        .values(missing_since=updated_at, updated_at=updated_at)
-    )
-    _throw_if_scan_cancelled(process_controller)
-    return int_value(cursor.rowcount) if cursor.rowcount != -1 else 0
 
 
 def _iter_media_files(
@@ -781,6 +805,7 @@ def _iter_media_files(
         seen: int,
         enumeration: _RootEnumeration | None = None,
         process_controller: ManagedProcessController | None = None,
+        work_window_check: Callable[[], None] | None = None,
 ) -> Iterator[Path]:
     _throw_if_scan_cancelled(process_controller)
     scan_state = enumeration or _RootEnumeration()
@@ -801,6 +826,8 @@ def _iter_media_files(
 
     try:
         for dirpath, _, filenames in os.walk(root_path, onerror=_record_error):
+            if work_window_check is not None:
+                work_window_check()
             _throw_if_scan_cancelled(process_controller)
             for name in sorted(filenames):
                 _throw_if_scan_cancelled(process_controller)

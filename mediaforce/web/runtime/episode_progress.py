@@ -1,6 +1,6 @@
 """Where each episode of a season has got, in the owner's words.
 
-Each episode gets one stage. Its run in the season's latest encode run says what is happening now;
+Each episode gets one stage. Its own current encode outcome says what is happening now;
 its library and staged state say what already happened or why nothing will.
 """
 
@@ -10,20 +10,15 @@ from typing import Any
 
 from sqlalchemy import select
 
+from mediaforce.core.db import DBClient
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import DBClient, open_readonly_db
-from mediaforce.core.db_tables import library_items, motion_keep_decisions, staged_artifacts
+from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.hosts.work_window import CONTROLLER_WORK_WINDOW_WAIT, controller_work_schedule
 from mediaforce.core.type_defs import float_value, int_value, object_dict
-from mediaforce.encoding.encode_queue import encode_run_rel_paths, list_child_encode_jobs_for_parents, \
-    list_encode_runs_for_prefix
-from mediaforce.encoding.put_back import PUT_BACK_REASON
-from mediaforce.library.candidate_selection import encode_candidate_decisions, workflow_eligibility
-from mediaforce.library.motion_holds import queue_motion_holds
-from mediaforce.library.motion_keep_state import library_item_source_sql
-from mediaforce.library.media_scopes import resolve_media_scope
-from mediaforce.library.staged_validation import not_remade_blockers, staged_validation_outcome
-from mediaforce.library.workflow_state import ItemWorkflowState, build_folder_workflow_state
-from mediaforce.web.runtime.encode_runtime import size_exception_question, unfinished_child_reason
+from mediaforce.library.staged_validation import AUTOMATIC_PUBLISH_ORIGINS, not_remade_blockers, staged_validation_outcome
+from mediaforce.library.workflow_state import ItemWorkflowState
+from mediaforce.web.runtime.encode_runtime import KEPT_ORIGINAL_TERMINAL_REASON, size_exception_question, unfinished_child_reason
+from mediaforce.web.runtime.file_encode_outcomes import file_encode_outcomes
 
 # Stages in the order the owner reads them: their part first, then work under way, then what is done.
 EPISODE_STAGES = (
@@ -38,10 +33,10 @@ EPISODE_STAGES = (
     "held",
     "not_started",
 )
-PUT_BACK_DETAIL = "Kept original: you put the original back."
 _RUNNING_PREPARATION_STATES = frozenset({"starting", "staging_source"})
 _OWNER_RUN_STATUSES = frozenset({"needs_attention", "failed", "stopped"})
 _OWNER_VALIDATIONS = frozenset({"size_held", "failed"})
+CONTROLLER_WORK_WINDOW_DISABLED = "controller_work_disabled"
 _VALIDATION_DETAILS = {
     "size_held": "much smaller than expected; keep it or make it again",
     "failed": "didn't pass its check",
@@ -49,71 +44,18 @@ _VALIDATION_DETAILS = {
 }
 
 
-def folder_episodes_payload(config: MediaforceConfig, prefix: str) -> dict[str, Any]:
-    """Every episode of one TV season with its stage; other scopes have no episode list."""
-    with open_readonly_db(config.paths.db_path) as connection:
-        scope = resolve_media_scope(connection, prefix, library_types=config.library_type_map)
-        if scope.kind != "tv_season":
-            return {"prefix": scope.prefix, "available": False, "episodes": []}
-        decisions = encode_candidate_decisions(connection, config, prefixes=[scope.prefix])
-        workflow = build_folder_workflow_state(
-            connection,
-            scope.prefix,
-            # An episode the queue leaves out for its motion pattern is listed as staying as it is.
-            candidate_eligibility=workflow_eligibility(decisions, queue_motion_holds(connection, decisions)),
-            library_types=config.library_type_map,
-        )
-        episodes = load_season_episode_progress(
-            connection,
-            workflow.items,
-            list_encode_runs_for_prefix(connection, scope.prefix),
-        )
-        put_back = put_back_rel_paths(connection, [episode["rel_path"] for episode in episodes])
-    for episode in episodes:
-        if episode["stage"] == "kept_original" and episode["rel_path"] in put_back:
-            episode["detail"] = PUT_BACK_DETAIL
-    return {"prefix": scope.prefix, "available": True, "episodes": episodes}
-
-
-def put_back_rel_paths(connection: DBClient, rel_paths: list[str]) -> set[str]:
-    """The episodes kept original because the owner put their original back."""
-    if not rel_paths:
-        return set()
-    return set(connection.execute(select(library_items.c.rel_path).join(
-        motion_keep_decisions, motion_keep_decisions.c.library_item_id == library_items.c.id,
-    ).where(
-        library_items.c.rel_path.in_(rel_paths),
-        motion_keep_decisions.c.reason_code == PUT_BACK_REASON,
-        motion_keep_decisions.c.source_fingerprint == library_item_source_sql(),
-    )).scalars())
-
-
 def load_season_episode_progress(
         connection: DBClient,
         item_states: Iterable[ItemWorkflowState],
-        runs_newest_first: Iterable[Mapping[str, Any]],
+        *, config: MediaforceConfig | None = None,
 ) -> list[dict[str, Any]]:
-    """Each episode takes its own newest run, so re-running one file never hides another's question."""
+    """Show current work and every unresolved hold without replacing one with the other."""
     items = [item for item in item_states if item.state != "missing"]
     if not items:
         return []
-    # A published episode reads as published whatever its runs say.
-    wanted = {item.rel_path for item in items if item.state != "complete"}
-    run_by_rel_path: dict[str, dict[str, Any]] = {}
-    parents = list(runs_newest_first)
-    children = list_child_encode_jobs_for_parents(
-        connection,
-        [str(parent["job_id"]) for parent in parents if str(parent.get("job_kind") or "") == "folder"],
-    )
-    for parent in parents:
-        if len(run_by_rel_path) == len(wanted):
-            break
-        parent_runs = children.get(str(parent["job_id"])) or [dict(parent)]
-        # Within one run, a file's later part (a retry) replaces its earlier one.
-        for run in reversed(parent_runs):
-            for rel_path in encode_run_rel_paths(run):
-                if rel_path in wanted and rel_path not in run_by_rel_path:
-                    run_by_rel_path[rel_path] = run
+    outcomes = file_encode_outcomes(connection, {item.item_id: item.rel_path for item in items
+                                               if item.state != "complete"}, config=config, display_progress_fallback=True)
+    run_by_rel_path = {item.rel_path: outcomes[item.item_id].job for item in items if item.item_id in outcomes}
     staged = _staged_rows(
         connection,
         [item.item_id for item in items if item.has_staged_output or item.state == "complete"],
@@ -134,7 +76,39 @@ def load_season_episode_progress(
         for item_id, row in staged.items()
         if (state := _stopped_publish_state(row["validation_json"])) is not None
     }
-    return season_episode_progress(items, run_by_rel_path, bytes_saved, validation, not_remade, publish_stopped)
+    episodes = season_episode_progress(items, run_by_rel_path, bytes_saved, validation, not_remade, publish_stopped)
+    waiting_to_publish = {item.rel_path for item in items if item.status in {"encoded", "validated"}
+                          and item.has_staged_output and (stage := staged.get(item.item_id)) is not None
+                          and stage["encode_origin"] in AUTOMATIC_PUBLISH_ORIGINS and stage["promoted_at"] is None}
+    window = controller_work_schedule(config) if config is not None and waiting_to_publish else None
+    if window is not None and not window.is_open:
+        for episode in episodes:
+            if episode["rel_path"] in waiting_to_publish and episode["stage"] == "checking":
+                episode["stage"] = "waiting"
+                code = CONTROLLER_WORK_WINDOW_WAIT if window.next_opens_at is not None else CONTROLLER_WORK_WINDOW_DISABLED
+                if code == CONTROLLER_WORK_WINDOW_WAIT:
+                    episode["wait_reason"] = {"code": code}
+                else:
+                    episode["additional_wait_reasons"].append({"code": code})
+    outcomes_by_path = {item.rel_path: outcomes[item.item_id] for item in items if item.item_id in outcomes}
+    for episode in episodes:
+        outcome = outcomes_by_path.get(episode["rel_path"])
+        if outcome is None:
+            continue
+        reasons = episode["additional_wait_reasons"]
+        for job in outcome.hold_jobs:
+            # The episode already weighed its current run against its checked copy or settled choice.
+            # Writer custody is independent of that outcome and must still be visible.
+            if not job["writer_cleanup_pending"] and (
+                    job["job_id"] == outcome.job["job_id"] or episode["stage"] == "kept_original"):
+                continue
+            reason, _label, needs_owner = unfinished_child_reason(job)
+            if not needs_owner:
+                continue
+            wait_reason = _run_wait_reason(reason, job)
+            if wait_reason != episode["wait_reason"] and wait_reason not in reasons:
+                reasons.append(wait_reason)
+    return episodes
 
 
 def season_episode_progress(
@@ -187,6 +161,7 @@ def _episode(
         "owner_action": None,
         "validation": None,
         "wait_reason": None,
+        "additional_wait_reasons": [],
     }
     if item.state == "complete":
         episode["stage"] = "published"
@@ -214,7 +189,8 @@ def _episode(
         episode["stage"] = "needs_you"
         episode["wait_reason"] = {"code": f"publish_{publish_stopped}"}
         return episode
-    if run is not None and run_status in _OWNER_RUN_STATUSES | {"queued", "retry_backoff"}:
+    if (run is not None and run_status in _OWNER_RUN_STATUSES | {"queued", "retry_backoff"}
+            and run.get("terminal_reason") != KEPT_ORIGINAL_TERMINAL_REASON):
         reason, label, needs_owner = unfinished_child_reason(run)
         owner_run = reason != "size_exception_declined" and (needs_owner or run_status in _OWNER_RUN_STATUSES)
         # A run that waits on the owner says less than the copy it left, once that copy has been checked.
@@ -277,6 +253,8 @@ def _staged_rows(connection: DBClient, item_ids: list[int]) -> dict[int, Mapping
             staged_artifacts.c.library_item_id,
             staged_artifacts.c.bytes_saved,
             staged_artifacts.c.validation_json,
+            staged_artifacts.c.encode_origin,
+            staged_artifacts.c.promoted_at,
         )
         .where(staged_artifacts.c.library_item_id.in_(item_ids))
     ).mappings().fetchall()

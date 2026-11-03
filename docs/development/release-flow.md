@@ -79,11 +79,31 @@ They are not part of source implementation or PR review.
    remain present. Keep the legacy runtime and its worktree lock as rollback;
    this deploy never removes or changes its source/environment.
 
+### A controller intentionally stopped for repair
+
+Use the same script with `--stopped` when the controller must stay stopped until
+its replacement is installed. Keep the same `--config` as its saved launch item.
+The script takes the normal deploy lock and the controller's exclusive runtime
+lease, verifies that port 8777 is closed and that no encode, sample, scan or
+evidence record is running, and prepares the candidate without starting old
+code. Missing or running work records require reconciliation; this mode never
+clears them.
+
+The rollback copy retains the work records with its encode queue paused, as in
+the online flow. The source database is unchanged until the backup passes its
+integrity check.
+After that verified backup, the script pauses the encode queue through
+the database's custody guards, then releases its runtime lease before starting
+the candidate. The ordinary health check and app installation follow. The queue resumes only
+if it was running before the stopped deployment; an existing pause is preserved.
+A failure leaves the service stopped. The saved plist and backup remain
+available for the rollback procedure below.
+
 ### Rollback and cleanup ownership
 
 Before changing the plist, deploy records both old and new runtime paths in
 `runtime/protected-roots.json` beside the configured database. Registration is cumulative: active and rollback
-roots remain protected across later deploys. The hourly cleanup refuses an
+roots remain protected from hourly cleanup across later deploys. The hourly cleanup refuses an
 entire sweep when any configured cleanup tree overlaps the runtime install
 root, a registered runtime/rollback path, or the executing source tree. An
 unreadable registry also refuses cleanup. It never prunes `runtime/` releases.
@@ -113,9 +133,30 @@ The hourly cleanup keeps the newest `state.cleanup.kept_deploy_backups` stage
 folders (two by default), plus the running release's rollback stage named in
 `runtime/rollback-stage.txt`. Failed preparation does not consume a retention
 slot. Retain a stage outside that cleanup tree when its backup is needed after
-a later successful release replaces that pointer. Removing old releases or
-releasing legacy protection requires a separate, verified retirement after no
-service, job or rollback depends on them.
+a later successful release replaces that pointer.
+
+After app installation and queue resume succeed, the deploy trims independent
+clones under `runtime/releases/` to three. It keeps the installed running
+release and the rollback named by the retained stage's saved launch item,
+then fills the remaining slots with the newest directories by modification
+time. The recorded rollback takes precedence over age. A legacy rollback
+outside `runtime/releases/` stays untouched and does not consume a slot.
+Missing or inconsistent running/rollback evidence, symlinks or non-clone
+directories refuse the trim before deletion. Plain files such as Finder's
+`.DS_Store` are left alone. A trim failure leaves the healthy release running
+and reports that deployment succeeded but trimming failed. Failed deploys do
+not trim. A spare slot can contain an unsuccessful preparation attempt; only
+the currently recorded rollback is guaranteed to retain its release code.
+The deployment stage, database backup, protection registry, legacy worktrees
+and media originals are outside this trim. Releasing legacy protection still
+requires a separate, verified retirement.
+
+If trimming refuses, leave the healthy controller running. Compare the named
+entry with the installed launch item and retained stage's saved launch item.
+Move only material confirmed unrelated to the running release or rollback out
+of `runtime/releases/` before the next authorized deploy; preserve ambiguous
+material and reconcile its ownership first. Do not replay the deploy just to
+retry cleanup.
 
 ### Mac app
 
@@ -184,3 +225,37 @@ release, quiesce all work producers, recheck work and process custody before
 stopping the service, then follow the authoritative release path. Candidate,
 backup, runtime and post-check evidence must stay bound to that exact release;
 uncertain effects require reconciliation rather than replay.
+
+## M4 night window (Q1015)
+
+The Director chose 12:00 AM–5:00 AM local time for this Mac's encoding
+starts. Deliver the reviewed scheduling change through the staged deploy
+above before applying its new setting. Then use the existing Computers
+settings API (`GET` and `POST /api/app/settings/computers`, preserving the
+returned revision and all other computers and schedules), or the Mac app's
+Settings → Computers:
+
+- Add a separate work window named `Night window`, every day, From
+  `12 AM`, Until `5 AM`, with no all-day exception days.
+- Allow the current file to finish when the window closes. Its API field is
+  `finish_current_file: true`; the hours are `start_hour: 0`, `end_hour: 5`.
+- Assign it only to the existing M4 Mac Studio computer. Do not identify it
+  by a guessed address or replace a schedule other computers still use.
+- Read the saved settings back. Check Activity's Computers row outside the
+  window: it waits, or says it is finishing the current file first. No new ordinary queued file or
+  sample starts on that computer until midnight in its own timezone.
+
+At 5:00 AM, a file already running finishes normally, including quality
+checks and publication, even if this takes it past 5:00 AM. There is no
+checkpoint to resume a partial encode safely. Finishing the file preserves
+that work at the window boundary; the next file waits for midnight. Duration
+estimates still hold back files unlikely to finish before 5:00 AM. A service
+restart can interrupt a file under the existing recovery rules; do not deploy
+until the documented idle gate passes. Legacy multi-file jobs retain their
+hard stop; normal queue work is already one file per job. Originals and rollback copies
+stay under the existing publication and cleanup rules. A deliberate bypass
+request still overrides the schedule and must not be used for ordinary
+night-window work. No launchd, energy, sleep or other system setting changes
+are needed. The schedule is runtime configuration, shared by server releases,
+so reverting source does not restore an older setting: record the previous
+computer assignment and restore it through the same settings endpoint if needed.

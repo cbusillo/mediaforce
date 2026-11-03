@@ -24,12 +24,12 @@ from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, reclassify_cadence_summary
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, fingerprint_video_decode_timed_out, reclassify_media_fingerprint_summary
 from mediaforce.encoding.remote_media import RemoteMediaCommands, RemoteMediaConnections, RemoteMediaHostUnavailableError
-from mediaforce.library.evidence_hosts import EVIDENCE_HOST_WAIT_REASON, collect_evidence_host_rows, \
+from mediaforce.library.evidence_hosts import ControllerDigestWindowClosed, EVIDENCE_HOST_WAIT_REASON, collect_evidence_host_rows, controller_digest_window, \
     evidence_source_path_on_host, remote_evidence_hosts, select_evidence_host, unmeasurable_evidence_roots
-from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, MAX_CONCURRENT_EVIDENCE_FILES, SOURCE_ROOT_WAIT_REASON, EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, EvidenceWorkClaim, claim_next_evidence_work, \
+from mediaforce.library.evidence_queue import EVIDENCE_BACKGROUND_RETRY_SECONDS, DEFAULT_EVIDENCE_BATCH_LIMIT, MAX_CONCURRENT_EVIDENCE_FILES, SOURCE_ROOT_WAIT_REASON, EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, EvidenceWorkClaim, claim_next_evidence_work, \
     current_library_item_source_fingerprint, evidence_queue_summary, extend_evidence_claim, heartbeat_evidence_work, \
     load_evidence_queue_state, load_evidence_work_claim, mark_evidence_attempt_started, original_intake_hold, recover_evidence_queue, \
-    transition_evidence_work, waiting_evidence_host_roots
+    refresh_controller_digest_waits, transition_evidence_work, waiting_evidence_host_roots
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANALYSIS_REQUIRED, \
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, parse_evidence_summary, \
     sync_library_item_evidence_state
@@ -123,9 +123,11 @@ def process_evidence_queue_once(
     runtime_deps = deps or default_evidence_worker_deps()
     current_config = config or runtime_deps.load_config(config_path)
     roots = excluded_media_roots if excluded_media_roots is not None else _unmeasurable_roots(current_config, runtime_deps)
+    digest_window = controller_digest_window(current_config, runtime_deps.evidence_host_rows)
     worker_id = _evidence_worker_id()
     with open_db(current_config.paths.db_path) as connection:
         recover_evidence_queue(connection, reclaim_all_running=False)
+        refresh_controller_digest_waits(connection, digest_window)
         claim = claim_next_evidence_work(
             connection,
             worker_id=worker_id,
@@ -230,7 +232,7 @@ def _run_evidence_queue_unit(
     stop_reason = "blocked"
     stop_requested = stop_event.is_set if stop_event is not None else lambda: False
     with RemoteMediaConnections() as connections, SourceAdmissionPrefetcher(stop_event=stop_event, logger=runtime_deps.logger,
-                                 deadline=deadline) as prefetch:
+                                 deadline=deadline, evidence_host_rows=runtime_deps.evidence_host_rows) as prefetch:
         while max_work_items is None or processed < max_work_items:
             if stop_requested():
                 stop_reason = "shutdown"
@@ -293,11 +295,14 @@ def _discover_originals(config: MediaforceConfig, deps: EvidenceWorkerDeps) -> i
     from mediaforce.library.source_intake import queue_original_intake
 
     try:
+        window = controller_digest_window(config, deps.evidence_host_rows)
         with open_db(config.paths.db_path) as connection:
             state = load_evidence_queue_state(connection)
             if state["is_paused"] or state["cancel_requested"] or state["status"] in {"cancelled", "cancel_requested"}:
                 return 0
-            return queue_original_intake(connection, config)
+            discovered = queue_original_intake(connection, config)
+            refresh_controller_digest_waits(connection, window)
+            return discovered
     except (OSError, RuntimeError, ValueError, SQLAlchemyError):
         deps.logger.exception("Original discovery failed; queued analysis can still continue")
         return 0
@@ -397,7 +402,8 @@ def _run_evidence_claim(
                     raise EvidenceWorkDeferred("Waiting for a file that needs a check sooner")
 
             with process_controller.activity_guard(guard_intake):
-                assess_source_input(config, claim.library_item_id, process_controller, process_controller.throw_if_cancelled)
+                assess_source_input(config, claim.library_item_id, process_controller, process_controller.throw_if_cancelled,
+                    digest_guard=lambda: controller_digest_window(config, deps.evidence_host_rows).guard(process_controller))
             with open_db(config.paths.db_path) as connection:
                 evidence = load_source_evidence(connection, claim.library_item_id)
                 item = connection.execute(select(library_items).where(library_items.c.id == claim.library_item_id)).mappings().one()
@@ -507,10 +513,12 @@ def _run_evidence_claim(
                         if analysis_target.command_runner else None)
         if measurement_before != measurement_after:
             raise RuntimeError("Source changed during evidence measurement")
-    except EvidenceWorkDeferred as exc:
+    except (EvidenceWorkDeferred, ControllerDigestWindowClosed) as exc:
         stop_heartbeats()
         for owned in claims:
-            _defer_claim(config, owned, deps, work_status="retry_wait", reason=str(exc), restore_attempt=owned.evidence_kind in started)
+            _defer_claim(config, owned, deps, work_status="retry_wait", reason=str(exc), restore_attempt=owned.evidence_kind in started,
+                         retry_at=(exc.next_opens_at or datetime.now(UTC) + timedelta(seconds=EVIDENCE_BACKGROUND_RETRY_SECONDS))
+                         if isinstance(exc, ControllerDigestWindowClosed) else None)
         return len(claims)
     except ProcessCancelledError:
         stop_heartbeats()
@@ -900,10 +908,11 @@ def _defer_claim(
         work_status: str,
         reason: str,
         restore_attempt: bool,
+        retry_at: datetime | None = None,
 ) -> None:
     """Wait for something outside this file to come back, without using up one of its attempts."""
     retry_not_before = (
-        datetime.now(UTC) + timedelta(seconds=deps.source_retry_delay_seconds)
+        retry_at or datetime.now(UTC) + timedelta(seconds=deps.source_retry_delay_seconds)
     ).isoformat(timespec="seconds")
     _finish_claim(
         config,

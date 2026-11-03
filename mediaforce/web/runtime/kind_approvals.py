@@ -4,8 +4,8 @@ The Director decided on 2026-10-22 (#517) that one approval may cover every show
 starting with darker and bright live action. Cartoons and 4K stay one-time choices made show by show.
 
 A kind approval is a copy of a current folder approval the Director chose to extend, kept in the web state
-directory's `kinds` folder, one file per kind. It governs a season only when no folder on the season's path
-holds any saved sample (see production_approval), and the season's kind comes from its originals' traits
+directory's `kinds` folder, one file per kind. Production approval precedence lives in production_approval;
+the season's kind comes from its originals' traits
 (library/content_kinds). Every file it covers still meets the per-file quality floor and size hold.
 """
 
@@ -13,8 +13,10 @@ import json
 import os
 import tempfile
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -25,18 +27,22 @@ from mediaforce.core.db import DBClient, open_readonly_db
 from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifacts
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, RUNNABLE_ENCODE_JOB_KINDS, load_queue_state
 from mediaforce.core.type_defs import object_dict
-from mediaforce.library.candidate_selection import season_identity
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
+from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES, derive_item_workflow_state
 from mediaforce.library.content_kinds import evidence_stamp, season_evidence, season_grouping, season_kind_report, \
     season_stamp
 from mediaforce.library.source_evidence import SourceEvidenceContext
-from mediaforce.tuning.calibration_jobs import load_latest_jobs_for_prefixes
+from mediaforce.tuning.calibration_jobs import load_latest_job, load_latest_jobs_for_prefixes
+from mediaforce.web.runtime.app_samples import sample_moments
+from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
-    effective_production_approval, holds_approval, production_approval_contract
+    SampleWait, approval_prefixes, cached_calibration_loader, effective_production_approval, holds_approval, production_approval_contract, \
+    production_calibration, sample_allows_kind, season_prefix_of
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
 from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES
 from mediaforce.web.runtime.production_holds import approval_identity
+from mediaforce.web.runtime.file_encode_outcomes import file_encode_outcomes
 
 APPROVABLE_KINDS = ("darker_live_action", "bright_live_action")
 KIND_IS_ONE_TIME_CODE = "kind_is_one_time"
@@ -91,7 +97,11 @@ def _extension_refusal(approval: EffectiveApproval) -> str | None:
     """Why this folder approval cannot cover a kind, or None when it can."""
     if not holds_approval(approval.calibration) or not approval.current or approval.contract is None:
         return APPROVAL_NOT_CURRENT_CODE
-    size_goal = object_dict(object_dict(approval.contract.get("operator_intent")).get("size_goal"))
+    return _size_extension_refusal(approval.contract)
+
+
+def _size_extension_refusal(contract: Mapping[str, Any]) -> str | None:
+    size_goal = object_dict(object_dict(contract.get("operator_intent")).get("size_goal"))
     # A size per episode fits only that show's runtime; a size per 45 minutes carries to other shows.
     if size_goal.get("mode") != "normalized":
         return SIZE_GOAL_NOT_SCALABLE_CODE
@@ -108,15 +118,6 @@ def stop_kind_approval(config: MediaforceConfig, kind: str) -> bool:
     return True
 
 
-def season_prefix_of(config: MediaforceConfig, rel_path: str) -> str | None:
-    """The TV season a file or season folder belongs to; None for a show, a movie or a file in a show folder."""
-    path = PurePosixPath(str(rel_path or "").strip().strip("/"))
-    if len(path.parts) < 3 or (len(path.parts) == 3 and path.suffix):
-        return None
-    identity = season_identity({"rel_path": path.as_posix()}, library_types=config.library_type_map)
-    return identity.season_prefix if identity is not None else None
-
-
 class SeasonKinds:
     """Each season's kind from the live database, read again only when its evidence changes.
 
@@ -130,6 +131,11 @@ class SeasonKinds:
         self._evidence: tuple[tuple[Any, ...], tuple[set[int], SourceEvidenceContext]] | None = None
 
     def __call__(self, config: MediaforceConfig, season_prefix: str) -> str | None:
+        snapshot = _request_kind_contents.get()
+        if snapshot is not None and snapshot[0] is config:
+            kind = snapshot[1].kinds_by_season.get(season_prefix)
+            if kind is not None:
+                return kind
         if not config.paths.db_path.exists():
             return None
         with self._lock, open_readonly_db(config.paths.db_path) as connection:
@@ -160,6 +166,35 @@ class KindAwareLoader:
     def __call__(self, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
         return self._load(config, prefix)
 
+    def sample_waits(self, config: MediaforceConfig) -> dict[str, SampleWait]:
+        if not config.paths.db_path.exists():
+            return {}
+        pending = [kind for kind in APPROVABLE_KINDS if not holds_approval(load_kind_approval(config, kind))]
+        load = cached_calibration_loader(self._load)
+        with open_readonly_db(config.paths.db_path) as connection:
+            contents = _kind_contents(connection, config, load)
+            rows = contents.report["seasons"]
+            waits = {row["season"]: SampleWait(measurement_reasons=tuple(row.get("measurement_reasons", ())))
+                     for row in rows if row.get("reason") == "no_measured_original"}
+            boundaries = {}
+            for kind in pending:
+                settings = _lent_settings(kind, contents.approvals, contents.episodes,
+                                          object_dict(contents.report.get("kinds_by_season")))
+                if settings:
+                    boundaries[kind] = object_dict(load(config, settings[0]["from_prefix"])).get("accepted_at")
+                else:
+                    representative = contents.samples.get(kind)
+                    prefix = str(object_dict(representative).get("prefix") or "")
+                    finished = object_dict(representative).get("status") in {"pending_review", "completed"}
+                    boundaries[kind] = (object_dict(representative).get("created_at")
+                                        if not finished or _sample_covers_kind(config, kind, load(config, prefix), self._kind_of) else None)
+            jobs = load_latest_jobs_for_prefixes(connection, [row["season"] for row in rows])
+        waits.update({row["season"]: SampleWait(kind=row["kind"]) for row in rows
+                      if row["kind"] in boundaries
+                      and sample_allows_kind(config, row["season"], load, jobs.get(row["season"]), boundaries[row["kind"]])
+                      and effective_production_approval(config, row["season"], load) is None})
+        return waits
+
     def kind_approval(self, config: MediaforceConfig, rel_path: str) -> EffectiveApproval | None:
         # No season's kind is read until the Director has approved a kind.
         approved = approved_kinds(config)
@@ -172,23 +207,35 @@ class KindAwareLoader:
         calibration = load_kind_approval(config, str(kind))
         if calibration is None:
             return None
-        return EffectiveApproval(season, calibration, production_approval_contract(calibration), kind=kind)
+        approval = EffectiveApproval(season, calibration, production_approval_contract(calibration), kind=kind)
+        if any(self._load(config, prefix) is not None for prefix in approval_prefixes(rel_path)):
+            if not approval.current or not config.paths.db_path.exists():
+                return None
+            with open_readonly_db(config.paths.db_path) as connection:
+                job = load_latest_job(connection, season)
+            if not sample_allows_kind(config, rel_path, self._load, job, calibration.get("kind_approved_at")):
+                return None
+        return approval
 
 
-# A run that ended badly leaves its season for the Director; the background queue never retries it.
-_UNSETTLED_RUN_STATUSES = ("failed", "stopped", "needs_attention")
 KIND_QUEUE_WAITS_CODE = "kind_queue_waits"
 # A refused season is tried again after this long, in case what refused it (such as free space) has cleared.
 KIND_RETRY_SECONDS = 6 * 3600.0
 
 
-def background_queue_blocker(connection: DBClient) -> dict[str, Any] | None:
+def background_queue_blocker(
+        connection: DBClient, *, library_item_ids: Collection[int] | None = None, config: MediaforceConfig | None = None,
+) -> dict[str, Any] | None:
     """Why the background queue waits: the owner paused work, or a production run is queued or running."""
     active = connection.execute(select(encode_jobs.c.job_id).where(
         encode_jobs.c.status.in_(ACTIVE_ENCODE_JOB_STATUSES), encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS),
     ).limit(1)).first()
     if load_queue_state(connection).get("is_paused") or active is not None:
         return {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
+    if library_item_ids is not None:
+        files = _waiting_files(connection, library_item_ids=library_item_ids)
+        if set(library_item_ids) != {int(item["id"]) for item in files} or _files_waiting_for_owner(connection, files, config=config):
+            return {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
     return None
 
 
@@ -197,15 +244,12 @@ def _waiting_seasons(connection: DBClient, config: MediaforceConfig) -> list[tup
 
     Files the owner chose to keep original are finished, so they never bring a season back.
     """
-    rows = [item for item in connection.execute(select(
-        library_items.c.id, library_items.c.rel_path, library_items.c.video_codec, library_items.c.size_bytes,
-    ).where(LIBRARY_ITEM_PRESENT, library_items.c.status != "promoted")).mappings()
-        if str(item["video_codec"] or "").casefold() != "av1"]
-    kept = library_item_ids_kept_original(connection, [int(item["id"]) for item in rows])
+    rows = _waiting_files(connection)
+    blocked = _files_waiting_for_owner(connection, rows, config=config)
     waiting: dict[str, tuple[int, list[int]]] = {}
     for item in rows:
         season = season_prefix_of(config, str(item["rel_path"]))
-        if season is None or int(item["id"]) in kept or not str(item["rel_path"]).startswith(f"{season}/"):
+        if season is None or int(item["id"]) in blocked or not str(item["rel_path"]).startswith(f"{season}/"):
             continue
         size, ids = waiting.get(season, (0, []))
         waiting[season] = (size + int(item["size_bytes"] or 0), [*ids, int(item["id"])])
@@ -213,11 +257,30 @@ def _waiting_seasons(connection: DBClient, config: MediaforceConfig) -> list[tup
                   key=lambda entry: (-entry[1], entry[0]))
 
 
-def _latest_run_unsettled(connection: DBClient, season: str) -> bool:
-    status = connection.execute(
-        select(encode_jobs.c.status).where(encode_jobs.c.prefix == season).order_by(encode_jobs.c.created_at.desc()).limit(1)
-    ).scalar_one_or_none()
-    return status in _UNSETTLED_RUN_STATUSES
+def _waiting_files(connection: DBClient, *, library_item_ids: Collection[int] | None = None) -> list[dict[str, Any]]:
+    query = select(
+        library_items.c.id, library_items.c.id.label("item_id"), library_items.c.rel_path, library_items.c.video_codec, library_items.c.size_bytes,
+        library_items.c.status, staged_artifacts.c.library_item_id.label("staged_library_item_id"),
+        staged_artifacts.c.staging_path, staged_artifacts.c.promoted_at, staged_artifacts.c.validation_json,
+    ).select_from(library_items.outerjoin(staged_artifacts, staged_artifacts.c.library_item_id == library_items.c.id)).where(
+        LIBRARY_ITEM_PRESENT, library_items.c.status.in_(ENCODE_CANDIDATE_STATUSES),
+    )
+    if library_item_ids is not None:
+        query = query.where(library_items.c.id.in_(library_item_ids))
+    rows: list[dict[str, Any]] = []
+    for row in connection.execute(query).mappings():
+        item = {str(key): value for key, value in row.items()}
+        if str(item["video_codec"] or "").casefold() != "av1" and derive_item_workflow_state(item).lane == "encode":
+            rows.append(item)
+    kept = library_item_ids_kept_original(connection, [int(item["id"]) for item in rows])
+    return [item for item in rows if int(item["id"]) not in kept]
+
+
+def _files_waiting_for_owner(
+        connection: DBClient, files: list[dict[str, Any]], *, config: MediaforceConfig | None = None,
+) -> frozenset[int]:
+    outcomes = file_encode_outcomes(connection, {int(item["id"]): str(item["rel_path"]) for item in files}, config=config)
+    return frozenset(item_id for item_id, outcome in outcomes.items() if outcome.holds_file)
 
 
 def _attempts_file(config: MediaforceConfig) -> Path:
@@ -235,7 +298,7 @@ def _load_attempts(config: MediaforceConfig) -> dict[str, Any]:
 @dataclass(frozen=True, slots=True)
 class KindSeason:
     season: str
-    kind: str
+    kind: str | None
     waiting_bytes: int
     approval: str
     files: tuple[int, ...]
@@ -269,21 +332,29 @@ def next_kind_season(
         load_calibration_state: LoadCalibrationState,
         now: float,
 ) -> KindSeason | None:
-    """The next waiting season a current kind approval covers, to queue on its own, largest first.
-
-    None while the background queue waits (see background_queue_blocker), so seasons go one at a time. A season
-    already tried under the same approval with the same waiting files is skipped, a refused one until it is retried
-    after KIND_RETRY_SECONDS, and a season whose last run ended badly waits for the Director.
-    """
-    if not approved_kinds(config) or background_queue_blocker(connection) is not None:
+    if background_queue_blocker(connection) is not None:
         return None
+    return next_approved_season(connection, config, load_calibration_state=load_calibration_state, now=now)
+
+
+def next_approved_season(
+        connection: DBClient, config: MediaforceConfig, *, load_calibration_state: LoadCalibrationState, now: float,
+) -> KindSeason | None:
     attempts = _load_attempts(config)
+    active_prefixes = connection.execute(select(encode_jobs.c.prefix).where(
+        encode_jobs.c.status.in_(ACTIVE_ENCODE_JOB_STATUSES), encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS),
+    )).scalars().all()
     for season, waiting_bytes, files in _waiting_seasons(connection, config):
+        if any(season == prefix or season.startswith(f"{prefix}/") or prefix.startswith(f"{season}/") for prefix in active_prefixes):
+            continue
         approval = effective_production_approval(config, season, load_calibration_state)
-        if approval is None or approval.kind is None or not approval.current:
+        if approval is None or not approval.current:
+            continue
+        sample_prefix, _sample = production_calibration(config, season, load_calibration_state)
+        if sample_prefix != approval.prefix:
             continue
         chosen = KindSeason(season, approval.kind, waiting_bytes, approval_identity(approval.calibration, approval.contract), files)
-        if _attempted(attempts.get(season), chosen, now) or _latest_run_unsettled(connection, season):
+        if _attempted(attempts.get(season), chosen, now):
             continue
         return chosen
     return None
@@ -294,14 +365,15 @@ NO_FOLDER_APPROVAL_CODE = "no_folder_approval"
 SOURCE_KIND_DIFFERS_CODE = "source_kind_differs"
 
 
-def _approval_facts(calibration: Mapping[str, Any] | None) -> dict[str, Any] | None:
+def _approval_facts(config: MediaforceConfig, calibration: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if not holds_approval(calibration):
         return None
     payload = object_dict(calibration)
     contract = object_dict(production_approval_contract(payload))
     size_goal = object_dict(object_dict(contract.get("operator_intent")).get("size_goal"))
     return {"from_prefix": payload.get("from_prefix"), "approved_at": payload.get("kind_approved_at"),
-            "size_goal_mode": size_goal.get("mode"), "size_goal_mb": size_goal.get("value_mb")}
+            "size_goal_mode": size_goal.get("mode"), "size_goal_mb": size_goal.get("value_mb"),
+            "sample_moments": sample_moments(payload, review_dir=config.paths.review_dir)}
 
 
 LEFT_OUT_KINDS = ("mixed", "unmeasured")
@@ -375,11 +447,10 @@ def _episode_made_under(episodes: list[tuple[str, int]], seasons: tuple[str, ...
 
 
 def _lent_settings(
-        config: MediaforceConfig,
         kind: str,
         approvals: Mapping[str, list[_ShowApproval]],
         episodes: Mapping[str, list[tuple[str, int]]],
-        kind_of: KindOf,
+        kinds_by_season: Mapping[str, str],
 ) -> list[dict[str, Any]]:
     """Each show approved on a season of this kind, once, with an episode made under its approval to watch when one
     is kept; shows with an episode come first. A kind one approval covers lists only approvals that can extend to it."""
@@ -389,7 +460,7 @@ def _lent_settings(
             {"show": show, "from_prefix": entry.approval.prefix, **_size_goal_facts(entry.approval),
              "library_item_id": _episode_made_under(episodes[show], entry.seasons)}
             for entry in found
-            if kind_of(config, entry.sample_season) == kind
+            if kinds_by_season.get(entry.sample_season) == kind
             and (kind not in APPROVABLE_KINDS or _extension_refusal(entry.approval) is None)
         ]
         if candidates:
@@ -397,18 +468,82 @@ def _lent_settings(
     return sorted(settings, key=lambda setting: (setting["library_item_id"] is None, setting["show"]))
 
 
-SAMPLE_IN_HAND_STATUSES = SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES | SAMPLE_FAILED_STATUSES | {"pending_review"}
+SAMPLE_IN_HAND_STATUSES = SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES | SAMPLE_FAILED_STATUSES | {"pending_review", "completed"}
 
 
-def _season_with_sample(connection: DBClient, seasons: list[str]) -> str | None:
-    """The season of a kind whose sample is being made, waits to be watched, or stopped and needs making again, the
-    newest when there are several. A season's newest sample decides, as on its own page.
-
-    Approving a sample gives its show a folder approval, so that season leaves the kind and the page offers its setting.
-    """
-    jobs = [job for job in load_latest_jobs_for_prefixes(connection, seasons).values()
+def _samples_in_hand(connection: DBClient, seasons: Collection[str]) -> list[dict[str, Any]]:
+    return [job for job in load_latest_jobs_for_prefixes(connection, list(seasons)).values()
             if job.get("lane") == "sample" and job.get("status") in SAMPLE_IN_HAND_STATUSES]
-    return str(max(jobs, key=lambda job: str(job.get("created_at") or ""))["prefix"]) if jobs else None
+
+
+def _kind_report(
+        connection: DBClient, config: MediaforceConfig, load: LoadCalibrationState, *, sample_seasons: Collection[str] = (),
+) -> dict[str, Any]:
+    def folder_approved(prefix: str) -> bool:
+        approval = effective_production_approval(config, prefix, load)
+        return approval is not None and approval.current
+
+    return season_kind_report(connection, library_types=config.library_type_map, folder_approved=folder_approved,
+                              measurement_roots=config.source_root_map,
+                              sample_seasons=sample_seasons)
+
+
+@dataclass(frozen=True, slots=True)
+class _KindContents:
+    episodes: dict[str, list[tuple[str, int]]]
+    approvals: dict[str, list[_ShowApproval]]
+    report: dict[str, Any]
+    samples: dict[str, dict[str, Any]]
+    kinds_by_season: dict[str, str]
+
+
+_request_kind_contents: ContextVar[tuple[MediaforceConfig, _KindContents] | None] = ContextVar("kind_contents", default=None)
+
+
+@contextmanager
+def kind_snapshot(connection: DBClient, config: MediaforceConfig, load: LoadCalibrationState) -> Iterator[None]:
+    token = _request_kind_contents.set((config, _kind_contents(connection, config, load)))
+    try:
+        yield
+    finally:
+        _request_kind_contents.reset(token)
+
+
+def _kind_contents(connection: DBClient, config: MediaforceConfig, load_calibration_state: LoadCalibrationState) -> _KindContents:
+    snapshot = _request_kind_contents.get()
+    if snapshot is not None and snapshot[0] is config:
+        return snapshot[1]
+
+    def folders_only(loader_config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+        return load_calibration_state(loader_config, prefix)
+
+    episodes = _tv_episodes(connection, config)
+    approvals_by_show = {show: found for show, files in episodes.items()
+                         if (found := _show_approvals(config, show, files, folders_only))}
+    samples = _samples_in_hand(connection, {str(season) for files in episodes.values() for path, _ in files
+                                                if (season := season_prefix_of(config, path))})
+    report = _kind_report(
+        connection, config, folders_only,
+        sample_seasons={entry.sample_season for found in approvals_by_show.values() for entry in found}
+                       | {str(job["prefix"]) for job in samples},
+    )
+    kinds_by_season = object_dict(report.get("kinds_by_season"))
+    newest: dict[str, dict[str, Any]] = {}
+    fallback: dict[str, dict[str, Any]] = {}
+    for job in sorted(samples, key=lambda sample: str(sample.get("created_at") or "")):
+        kind = kinds_by_season.get(job["prefix"])
+        if kind is None:
+            continue
+        if kind not in APPROVABLE_KINDS and effective_production_approval(config, str(job["prefix"]), folders_only) is not None:
+            continue
+        fallback[str(kind)] = job
+        if kind not in APPROVABLE_KINDS or job.get("status") not in {"pending_review", "completed"} or _sample_covers_kind(
+                config, str(kind), load_calibration_state(config, str(job["prefix"])),
+                lambda _config, prefix: kinds_by_season.get(prefix)):
+            newest[str(kind)] = job
+    measured_kinds = {row["season"]: row["kind"] for row in report["seasons"]}
+    measured_kinds.update(kinds_by_season)
+    return _KindContents(episodes, approvals_by_show, report, {**fallback, **newest}, measured_kinds)
 
 
 def kinds_payload(
@@ -416,7 +551,6 @@ def kinds_payload(
         config: MediaforceConfig,
         *,
         load_calibration_state: LoadCalibrationState,
-        kind_of: KindOf,
 ) -> dict[str, Any]:
     """Facts for the page where each kind of content's approval is decided; the app words every one.
 
@@ -425,15 +559,9 @@ def kinds_payload(
     Such a show's own seasons follow its approval, so it is never among the shows the kind covers.
     """
 
-    def folders_only(loader_config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
-        return load_calibration_state(loader_config, prefix)
-
-    def folder_approved(prefix: str) -> bool:
-        # Folders alone: a kind's approval is what this page decides, so it never counts here.
-        approval = effective_production_approval(config, prefix, folders_only)
-        return approval is not None and approval.current
-
-    report = season_kind_report(connection, library_types=config.library_type_map, folder_approved=folder_approved)
+    contents = _kind_contents(connection, config, load_calibration_state)
+    episodes, approvals_by_show, report = contents.episodes, contents.approvals, contents.report
+    kinds_by_season = object_dict(report.get("kinds_by_season"))
     seasons: dict[str, dict[str, list[tuple[int, str]]]] = {kind: {} for kind in KINDS_IN_ORDER}
     for row in report["seasons"]:
         if row["kind"] in seasons:
@@ -445,17 +573,14 @@ def kinds_payload(
                     for show, found in by_show.items()}
              for kind, by_show in seasons.items()}
     totals = report["totals"]
-    approvals = {kind: _approval_facts(load_kind_approval(config, kind)) if kind in APPROVABLE_KINDS else None
+    approvals = {kind: _approval_facts(config, load_kind_approval(config, kind)) if kind in APPROVABLE_KINDS else None
                  for kind in KINDS_IN_ORDER}
-    episodes = _tv_episodes(connection, config)
-    approvals_by_show = {show: found for show, files in episodes.items()
-                         if (found := _show_approvals(config, show, files, folders_only))}
     for approval in approvals.values():
         if approval:
             show = "/".join(str(approval["from_prefix"]).split("/")[:2])
             lent = next((entry for entry in approvals_by_show.get(show, []) if entry.approval.prefix == approval["from_prefix"]), None)
             approval["library_item_id"] = _episode_made_under(episodes.get(show, []), lent.seasons) if lent else None
-    return {
+    payload: dict[str, Any] = {
         "kinds": [{
             "kind": kind,
             "one_time": kind not in APPROVABLE_KINDS,
@@ -463,9 +588,11 @@ def kinds_payload(
             "waiting_bytes": int(object_dict(totals.get(kind)).get("waiting_bytes") or 0),
             "shows": [{"prefix": prefix, **values} for prefix, values in
                       sorted(shows[kind].items(), key=lambda entry: (-entry[1]["waiting_bytes"], entry[0]))],
-            "settings": _lent_settings(config, kind, approvals_by_show, episodes, kind_of),
+            "settings": _lent_settings(kind, approvals_by_show, episodes, kinds_by_season),
             "approval": approvals[kind],
-            "sample_season": _season_with_sample(connection, [season for found in seasons[kind].values() for _, season in found]),
+            "sample_season": _approved_sample_season(config, kind) or object_dict(contents.samples.get(kind)).get("prefix"),
+            "sample_status": object_dict(contents.samples.get(kind)).get("status") or "not_started",
+            "needs_you": approvals[kind] is None and bool(shows[kind]),
         } for kind in KINDS_IN_ORDER],
         "left_out": [{"season": row["season"], "kind": row["kind"], "waiting_bytes": int(row["waiting_bytes"])}
                      for row in report["seasons"] if row["kind"] in LEFT_OUT_KINDS],
@@ -473,6 +600,52 @@ def kinds_payload(
         "unmeasured_seasons": int(object_dict(totals.get("unmeasured")).get("seasons") or 0),
         "folder_approved_seasons": int(object_dict(totals.get("folder_approved")).get("seasons") or 0),
     }
+    for entry in payload["kinds"]:
+        season = entry["sample_season"]
+        entry["sample_ready"] = (entry["sample_status"] in {"pending_review", "completed"}
+                                 and (entry["one_time"] or sample_approval_kind(
+                                     config, payload, str(season), load_calibration_state(config, str(season)),
+                                     kind_of=lambda _config, prefix: kinds_by_season.get(prefix),
+                                 ) == entry["kind"]))
+        entry["needs_you"] = entry["needs_you"] or (approvals[entry["kind"]] is None and entry["sample_ready"])
+    return payload
+
+
+def _approved_sample_season(config: MediaforceConfig, kind: str) -> str | None:
+    calibration = load_kind_approval(config, kind)
+    if calibration is None or not EffectiveApproval("", calibration, production_approval_contract(calibration)).current:
+        return None
+    return season_prefix_of(config, str(object_dict(calibration.get("sample_item")).get("rel_path") or ""))
+
+
+def sample_approval_kind(
+        config: MediaforceConfig, kinds: Mapping[str, Any], prefix: str, calibration: Mapping[str, Any] | None,
+        *, kind_of: KindOf,
+) -> str | None:
+    kind = next((str(entry["kind"]) for entry in kinds.get("kinds", [])
+                 if entry["kind"] in APPROVABLE_KINDS and entry.get("sample_season") == prefix
+                 and _approved_sample_season(config, str(entry["kind"])) is None), None)
+    return kind if kind is not None and _sample_covers_kind(config, kind, calibration, kind_of) else None
+
+
+def _sample_covers_kind(config: MediaforceConfig, kind: str, calibration: Mapping[str, Any] | None, kind_of: KindOf) -> bool:
+    return _scalable_sample(calibration) and _sample_kind_refusal(config, kind, object_dict(calibration), kind_of) is None
+
+
+def _scalable_sample(calibration: Mapping[str, Any] | None) -> bool:
+    payload = object_dict(calibration)
+    if not payload.get("job_id") or str(payload.get("mode") or "sample") != "sample":
+        return False
+    contract = production_approval_contract({
+        **payload, "accepted_sample_job_id": payload["job_id"], "accepted_policy_hash": calibration_policy_hash(payload),
+    })
+    return contract is not None and _size_extension_refusal(contract) is None
+
+
+def _sample_kind_refusal(config: MediaforceConfig, kind: str, calibration: Mapping[str, Any], kind_of: KindOf) -> str | None:
+    sample_path = str(object_dict(calibration.get("sample_item")).get("rel_path") or "")
+    sample_season = season_prefix_of(config, sample_path) if sample_path else None
+    return None if sample_season is not None and kind_of(config, sample_season) == kind else SOURCE_KIND_DIFFERS_CODE
 
 
 def approve_kind_action(
@@ -483,6 +656,7 @@ def approve_kind_action(
         load_calibration_state: LoadCalibrationState,
         kind_of: KindOf,
         approved_at: str,
+        reviewed_draft_hash: str | None = None,
 ) -> dict[str, Any]:
     """Use the approval governing a folder for every season of this kind.
 
@@ -495,8 +669,8 @@ def approve_kind_action(
     approval = effective_production_approval(config, from_prefix, load_calibration_state)
     if approval is None or approval.kind is not None:
         return {"ok": False, "code": NO_FOLDER_APPROVAL_CODE}
-    sample_path = str(object_dict(approval.calibration.get("sample_item")).get("rel_path") or "")
-    sample_season = season_prefix_of(config, sample_path) if sample_path else None
-    if sample_season is None or kind_of(config, sample_season) != kind:
-        return {"ok": False, "code": SOURCE_KIND_DIFFERS_CODE}
+    if reviewed_draft_hash is not None and approval.calibration.get("accepted_draft_hash") != reviewed_draft_hash:
+        return {"ok": False, "code": "sample_changed"}
+    if refusal := _sample_kind_refusal(config, kind, approval.calibration, kind_of):
+        return {"ok": False, "code": refusal}
     return approve_kind(config, kind, approval.prefix, approval.calibration, approved_at=approved_at)

@@ -224,9 +224,10 @@ class QualityObservationTests(unittest.TestCase):
         self.assertEqual(json.loads(row["candidate_trace_json"])["warm_start"]["status"], "accepted")
 
     def test_holdout_result_remains_learning_evidence_with_explicit_arm(self) -> None:
+        experiment_version = "fixture-experiment"
         observation = self._selected_observation(
             quality_memory_arm="baseline_holdout",
-            quality_memory_experiment_version="qwa1",
+            quality_memory_experiment_version=experiment_version,
             quality_memory_scope="season",
             quality_memory_scope_prefix="tv/Example/Season 01",
             workflow_duration_seconds=3_660.0,
@@ -239,7 +240,7 @@ class QualityObservationTests(unittest.TestCase):
 
         self.assertEqual(row["learning_eligible"], 1)
         self.assertEqual(outcome["quality_memory_arm"], "baseline_holdout")
-        self.assertEqual(outcome["quality_memory_experiment_version"], "qwa1")
+        self.assertEqual(outcome["quality_memory_experiment_version"], experiment_version)
         self.assertEqual(outcome["quality_memory_scope"], "season")
         self.assertEqual(outcome["quality_memory_scope_prefix"], "tv/Example/Season 01")
         self.assertEqual(outcome["exploration_kind"], "quality_memory_holdout")
@@ -314,11 +315,12 @@ class QualityObservationTests(unittest.TestCase):
         self.connection.rollback()
 
     def test_shadow_payload_is_immutable_and_part_of_observation_identity(self) -> None:
+        algorithm_version = "fixture-shadow"
         plain = self._selected_observation()
         shadowed = self._selected_observation(
             shadow_payload={
                 "schema_version": 1,
-                "algorithm_version": "qsh2",
+                "algorithm_version": algorithm_version,
                 "production_search_changed": False,
             }
         )
@@ -327,7 +329,7 @@ class QualityObservationTests(unittest.TestCase):
         self.assertNotEqual(plain.payload_sha256, shadowed.payload_sha256)
         self.assertTrue(append_quality_search_observation(self.connection, shadowed))
         row = self.connection.execute(select(quality_search_observations)).mappings().one()
-        self.assertEqual(json.loads(row["shadow_json"])["algorithm_version"], "qsh2")
+        self.assertEqual(json.loads(row["shadow_json"])["algorithm_version"], algorithm_version)
 
     def test_promoted_staged_success_backfill_is_lower_authority_and_idempotent(self) -> None:
         self._add_promoted_outcome()

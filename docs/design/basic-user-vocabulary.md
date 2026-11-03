@@ -179,8 +179,10 @@ Keyboard refresh returns focus to the workspace heading.
   unavailable, retain one non-actionable completed row for diagnosis without a
   review link.
 - Computer available: `Ready`. This computer can accept work now.
-- Computer schedule closed: `Off schedule`. This is normal and not a failure if
-  other computers are ready.
+- Computer schedule closed: `Waiting for its work window`. This is normal and not a failure if
+  other computers are ready. A computer set to Never says `Work is turned off for this computer`.
+- A computer finishing after its window closes says `Finishing this file, then waiting for its work window`.
+  The duration estimate allowed it to start; finishing protects the current file if that estimate was too short.
 - Activity waiting for computer windows: `Waiting for a work window`, with
   `Files waiting` counting files rather than queued show rows. This wording
   applies both to ordinary queued shows and the summary fallback.

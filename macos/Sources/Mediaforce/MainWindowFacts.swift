@@ -17,25 +17,43 @@ struct MainWindowFacts: Decodable, Sendable {
     struct Work: Decodable, Sendable {
         let state: String
         let pausedByOwner: Bool
+        let checksPaused: Bool
         let stopReasons: [String]
         let runningCount: Int
         // The seasons or titles being compressed now, each named once.
         var runningSeasons: [Season] = []
         let waitingCount: Int
+        var originalCheckWaitReasons: [String] = []
+        var kindsNeedingYou: [PendingKind] = []
+        var seasonsNeedingYou: [TVShowsFacts.Season] = []
 
         private enum CodingKeys: String, CodingKey {
-            case state, pausedByOwner, stopReasons, runningCount, runningSeasons, waitingCount
+            case state, pausedByOwner, checksPaused, stopReasons, runningCount, runningSeasons, waitingCount, originalCheckWaitReasons, seasonsNeedingYou, kindsNeedingYou
         }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             state = try container.decode(String.self, forKey: .state)
             pausedByOwner = try container.decode(Bool.self, forKey: .pausedByOwner)
+            checksPaused = try container.decodeIfPresent(Bool.self, forKey: .checksPaused) ?? false
             stopReasons = try container.decode([String].self, forKey: .stopReasons)
             runningCount = try container.decode(Int.self, forKey: .runningCount)
             runningSeasons = try container.decodeIfPresent([Season].self, forKey: .runningSeasons) ?? []
             waitingCount = try container.decode(Int.self, forKey: .waitingCount)
+            originalCheckWaitReasons = try container.decodeIfPresent([String].self, forKey: .originalCheckWaitReasons) ?? []
+            kindsNeedingYou = try container.decodeIfPresent([PendingKind].self, forKey: .kindsNeedingYou) ?? []
+            seasonsNeedingYou = try container.decodeIfPresent([TVShowsFacts.Season].self, forKey: .seasonsNeedingYou) ?? []
         }
+    }
+
+    struct PendingKind: Decodable, Sendable {
+        let kind: String
+        let sampleSeason: String?
+        let sampleStatus: String?
+        let sampleReady: Bool?
+        let oneTime: Bool?
+        let settingsAvailable: Bool?
+        let sampleStartPrefix: String?
     }
 
     struct Library: Decodable, Sendable {
@@ -127,7 +145,25 @@ struct MainWindowFacts: Decodable, Sendable {
         let scheduleOpensAt: String?
         let attentionReason: String?
         let attentionSince: String?
+        let needsYou: Bool
         var id: String { key }
+
+        private enum CodingKeys: CodingKey {
+            case key, name, platform, state, runningCount, scheduleOpensAt, attentionReason, attentionSince, needsYou
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            key = try container.decode(String.self, forKey: .key)
+            name = try container.decodeIfPresent(String.self, forKey: .name)
+            platform = try container.decodeIfPresent(String.self, forKey: .platform)
+            state = try container.decode(String.self, forKey: .state)
+            runningCount = try container.decode(Int.self, forKey: .runningCount)
+            scheduleOpensAt = try container.decodeIfPresent(String.self, forKey: .scheduleOpensAt)
+            attentionReason = try container.decodeIfPresent(String.self, forKey: .attentionReason)
+            attentionSince = try container.decodeIfPresent(String.self, forKey: .attentionSince)
+            needsYou = try container.decodeIfPresent(Bool.self, forKey: .needsYou) ?? false
+        }
     }
 
     struct Event: Decodable, Sendable, Identifiable {

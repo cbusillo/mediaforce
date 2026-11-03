@@ -414,3 +414,36 @@ def test_a_library_without_its_own_name_is_named_for_its_type() -> None:
     assert normalize_library_definition({"path": "/media/tv"}, key="tv")["label"] == "TV"
     assert normalize_library_definition({"path": "/media/kids"}, key="kids_shows")["label"] == "Kids Shows"
     assert normalize_library_definition({"path": "/media/tv", "label": "Shows"}, key="tv")["label"] == "Shows"
+
+
+def test_saved_roots_defer_durably_instead_of_failing_when_the_controller_window_is_closed(
+        library_app: tuple[FastAPI, Path], tmp_path: Path,
+) -> None:
+    from functools import partial
+
+    from mediaforce.web.runtime.job_runtime import maybe_schedule_scan
+
+    app, settings_path = library_app
+    settings = json.loads(settings_path.read_text())
+    settings["remote_hosts"][0]["schedule_profile"] = "never"
+    settings["media"]["catalog_refresh_hours"] = 0
+    settings_path.write_text(json.dumps(settings))
+    body = _facts_body(app)
+    changed_root = str(tmp_path / "changed-tv")
+    body["libraries"][0]["folder"] = changed_root
+    with patch("mediaforce.library.evidence_hosts._controller_target_matches", return_value=True), patch(
+        "mediaforce.web.app._start_scan_job_thread"
+    ) as start, patch("mediaforce.web.app._refresh_host_status_cache") as refresh, patch(
+        "mediaforce.web.app._maybe_schedule_scan",
+        side_effect=partial(maybe_schedule_scan, deps=web_app._job_runtime_deps()),
+    ):
+        status, result = _save(app, body)
+    assert status == 200 and result["ok"]
+    assert app.state.config.catalog_refresh_interval is None
+    assert app.state.config.scan_source_root_map["tv"] == Path(changed_root)
+    refresh.assert_called_once()
+    start.assert_called_once()
+    pending = json.loads((app.state.config.paths.web_state_dir / "scan-full-catalog.job.json").read_text())
+    assert pending["status"] == "queued"
+    assert pending["resume_after_interruption"]
+    assert pending["waiting_for_window"]

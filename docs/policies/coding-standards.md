@@ -25,17 +25,17 @@
   constraints, and decision context
 - Extract repeated logic into helpers instead of duplicating code or branching
   the same behavior in parallel places
-- Keep touched files warning-clean in Ruff and PyCharm when the warning is
-  actionable and the fix is local to the work
+- Keep touched files warning-clean in Ruff when the warning is actionable
+  and the fix is local to the work
 
 ## Repo guidance
 
 - Keep `AGENTS.md` thin; put deeper guidance in `docs/`
 - Treat machine-local paths and runtime values as config, not code invariants
 - Preserve compatibility only when it still buys something concrete
-- Use `uv run` for Python tooling and tests instead of invoking Python directly
-- Use repo-native validation tools when available: PyCharm inspection for code
-  cleanup and the repo's own pytest and Mac app entry points for automated checks
+- Follow the shared [Python uv workflow](https://github.com/cbusillo/codex-skills/blob/main/skills/python-uv-workflow/SKILL.md).
+- Follow [inspection authority](acceptance-gate.md#inspection-authority) for IDE validation.
+- Use the repo's own pytest and Mac app entry points for automated checks
 - Prefer fixing the root cause over adding broad suppressions or workaround
   layers
 
