@@ -54,7 +54,8 @@ def reconcile_unfinished_put_backs(connection: DBClient, library_item_id: int | 
                for operation in connection.execute(statement).scalars().all())
 
 
-def _original_version(connection: DBClient, item_id: int, active: str, archive_identity: dict[str, Any]) -> str:
+def _original_version(connection: DBClient, item_id: int, active: str, archive_identity: dict[str, Any],
+                      archive_path: Path, check_cancelled: Callable[[], None]) -> str:
     """The original version publishing replaced; files published before the journal existed get a new version.
 
     A recorded original that differs from the backup on disk is refused: that backup is not this file's original.
@@ -67,6 +68,11 @@ def _original_version(connection: DBClient, item_id: int, active: str, archive_i
     ).order_by(source_transitions.c.recorded_at.desc())).scalars().first()
     if replaced:
         version = connection.execute(select(source_versions).where(source_versions.c.version_id == replaced)).mappings().one()
+        if version["sha256"]:
+            checked = observe_file(archive_path, full_digest=True, check_cancelled=check_cancelled)
+            if any(checked[key] != archive_identity[key] for key in ("stat", "size_bytes", "sample_fingerprint")):
+                raise PutBackRefused("backup_changed", "Its original backup changed while being checked.")
+            archive_identity.update(checked)
         if (version["size_bytes"] != archive_identity["size_bytes"]
                 or version["sample_fingerprint"] != archive_identity["sample_fingerprint"]
                 or (version["sha256"] and version["sha256"] != archive_identity["sha256"])):
@@ -80,7 +86,7 @@ def _original_version(connection: DBClient, item_id: int, active: str, archive_i
 
 
 def _prepare(connection: DBClient, item: Mapping[str, Any] | RowMapping, *, library_path: Path, out_path: Path,
-             archive_path: Path, original_path: Path, now: str) -> str:
+             archive_path: Path, original_path: Path, now: str, check_cancelled: Callable[[], None]) -> str:
     """Persist both intended moves before touching media, as publishing does."""
     connection.commit()
     item_id = int(item["id"])
@@ -91,10 +97,12 @@ def _prepare(connection: DBClient, item: Mapping[str, Any] | RowMapping, *, libr
             or (item["content_version_fingerprint"]
                 and library_identity["sample_fingerprint"] != item["content_version_fingerprint"])):
         raise PutBackRefused("file_changed", "The file in the library changed since Mediaforce last looked at it.")
-    archive_identity = observe_file(archive_path, full_digest=True)
+    archive_identity = observe_file(archive_path)
     active = ensure_active_source_version(connection, item)
     current = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
-    original = _original_version(connection, item_id, active, {**archive_identity, "observed_at": now})
+    archive_identity["observed_at"] = now
+    original = _original_version(connection, item_id, active, archive_identity, archive_path, check_cancelled)
+    check_cancelled()
     operation = uuid4().hex
     connection.execute(source_transitions.insert().values(
         operation_id=operation, library_item_id=item_id, before_version_id=active, after_version_id=original,
@@ -116,6 +124,7 @@ def put_original_back(
         content_fingerprint: Callable[[Path, Any], str],
         timestamp: Callable[[], str],
         record_event: Callable[[DBClient, int, str, dict[str, Any]], None],
+        check_cancelled: Callable[[], None] = lambda: None,
 ) -> Path:
     """Return the original to the library and keep it original; refuse plainly when that cannot be done safely.
 
@@ -148,7 +157,7 @@ def put_original_back(
     now = timestamp()
     try:
         operation = _prepare(connection, item, library_path=library_path, out_path=out_path,
-                             archive_path=archive_path, original_path=original_path, now=now)
+                             archive_path=archive_path, original_path=original_path, now=now, check_cancelled=check_cancelled)
     except PutBackRefused:
         connection.rollback()
         raise

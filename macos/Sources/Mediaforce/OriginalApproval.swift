@@ -37,7 +37,6 @@ struct OriginalFileList: Decodable, Sendable {
         let relPath: String
         let identity: Identity
         let checks: Checks
-        let attached: Bool
         let supersedesId: String?
         var id: Int { itemId }
     }
@@ -132,12 +131,13 @@ struct OriginalApprovalView: View {
                         Text(file.identity.path).textSelection(.enabled)
                         Text(Words.size(file.identity.sizeBytes)).foregroundStyle(.secondary)
                         if let reason = file.checks.exceptionReason {
-                            Text("Separate exception: \(file.checks.exceptionMatches?.joined(separator: ", ") ?? "")")
+                            Text("Separate exception: this file has a format or encoding-software name that Mediaforce also uses.")
                             Text(reason)
                         }
-                        if !file.attached { Text("Saved separately. This file's connection to the library is unconfirmed.") }
                         if file.supersedesId != nil { Text("Replaces the earlier original-file decision.") }
-                        Text(file.identity.sha256).font(.caption.monospaced()).textSelection(.enabled)
+                        DisclosureGroup("Content check") {
+                            Text(file.identity.sha256).font(.caption.monospaced()).textSelection(.enabled)
+                        }
                     }
                     Divider()
                 }

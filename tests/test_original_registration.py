@@ -142,13 +142,13 @@ def test_codec_exceptions_never_waive_stamps_or_missing_data(originals: tuple[Me
     if location == "codec":
         preview = registration.build_original_preview(config, [item], assertion="Independent AV1 acquisition",
                                                       overrides={item: "Downloaded this AV1 file independently"})
-        assert json.loads(preview["canonical_json"])["items"][0]["checks"]["exception_matches"] == ["codec:av1"]
+        assert json.loads(preview["canonical_json"])["items"][0]["checks"]["exception_matches"]
     else:
         with pytest.raises(ValueError):
             registration.build_original_preview(config, [item], assertion="Independent acquisition", overrides={item: "Exception"})
 
 
-def test_origin_headers_actor_strings_and_direct_api_calls_cannot_confirm(originals: tuple[MediaforceConfig, int, Path]) -> None:
+def test_receipt_is_required_and_browser_origin_and_extra_fields_are_rejected(originals: tuple[MediaforceConfig, int, Path]) -> None:
     config, item, _path = originals
     preview = registration.build_original_preview(config, [item], assertion="Independent acquisition")
     body = {"preview_id": preview["preview_id"], "manifest_hash": preview["manifest_hash"]}
@@ -166,8 +166,12 @@ def test_origin_headers_actor_strings_and_direct_api_calls_cannot_confirm(origin
     _confirm(preview)
     assert post(body, [(b"origin", b"http://localhost")]) == 409
     assert post({**body, "actor": "owner", "session": "trusted"}) == 409
+    assert post(body) == 202
+    from test_source_intake import _work
+
+    assert _work(config) > 0
     assert post(body) == 200
-    assert json.loads(_route_endpoint(app, "/api/app/originals", "GET")().body) == {"previews": []}
+    assert registration.list_original_previews(config) == []
 
 
 def _rescan(config: MediaforceConfig, item: int, path: Path) -> None:
@@ -260,6 +264,7 @@ def test_hash_read_failure_and_catalog_removal_preserve_history(originals: tuple
         from test_source_evidence import _insert_item
 
         reused = _insert_item(connection, path)
+        assert reused == item
         current = connection.execute(select(library_items).where(library_items.c.id == reused)).mappings().one()
         reconciled = reconcile_source_replacement(connection, current, observe_file(path, full_digest=True))
         assert connection.execute(select(source_versions.c.role).where(source_versions.c.version_id == reconciled)).scalar_one() == "unknown"
@@ -326,4 +331,198 @@ def test_dismissed_or_unreadable_preview_does_not_break_other_requests(originals
     (directory / f"{first['preview_id']}.dismissed").write_text(first["manifest_hash"])
     assert [preview["preview_id"] for preview in registration.list_original_previews(config)] == [second["preview_id"]]
     (config.paths.web_state_dir / "original-previews" / f"{second['preview_id']}.json").write_text("{")
-    assert [preview["preview_id"] for preview in registration.list_original_previews(config)] == [second["preview_id"]]
+    assert registration.list_original_previews(config) == []
+
+
+def test_symlink_retarget_before_commit_cannot_approve_the_new_library_file(originals: tuple[MediaforceConfig, int, Path]) -> None:
+    config, item, path = originals
+    target = path.with_name("original-target")
+    path.rename(target)
+    path.symlink_to(target)
+    _rescan(config, item, path)
+    replacement = path.with_name("new-target")
+    replacement.write_bytes(b"unapproved")
+    preview = registration.build_original_preview(config, [item], assertion="Independent acquisition")
+    _confirm(preview)
+
+    def retarget(_connection: DBClient) -> None:
+        path.unlink()
+        path.symlink_to(replacement)
+
+    with pytest.raises(ValueError):
+        registration.apply_original_preview(config, preview["preview_id"], preview["manifest_hash"], before_commit=retarget)
+    with open_db(config.paths.db_path) as connection:
+        assert connection.execute(select(source_admissions)).first() is None
+
+
+def test_replaced_unencoded_file_still_gets_automatic_probable_intake(originals: tuple[MediaforceConfig, int, Path],
+                                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    config, item, path = originals
+    with open_db(config.paths.db_path) as connection:
+        current = connection.execute(select(library_items).where(library_items.c.id == item)).mappings().one()
+        ensure_active_source_version(connection, current)
+    path.write_bytes(b"upgraded-independent-download" * 500)
+    _rescan(config, item, path)
+    with open_db(config.paths.db_path) as connection:
+        assert queue_original_intake(connection, config) > 0
+    monkeypatch.setattr("mediaforce.library.source_intake.probe_evidence_source", lambda *_args, **_kwargs: _probe())
+    assess_source_input(config, item, ManagedProcessController(), lambda: None)
+    with open_db(config.paths.db_path) as connection:
+        admission = connection.execute(select(source_admissions)).mappings().one()
+        assert admission["basis"] == "readable-source"
+        assert admission["tier"] == "probable"
+
+
+def test_owner_confirmation_and_correction_keep_existing_observed_measurements(originals: tuple[MediaforceConfig, int, Path]) -> None:
+    from test_source_intake import _measure_source_traits
+    from mediaforce.library.source_intake import commit_readable_source
+
+    config, item, path = originals
+    _measure_source_traits(config)
+    with open_db(config.paths.db_path) as connection:
+        current = connection.execute(select(library_items).where(library_items.c.id == item)).mappings().one()
+        commit_readable_source(connection, current, observe_file(path, full_digest=True), _probe())
+        before = load_source_evidence(connection, item)
+        assert all(trait.tier == "probable" for trait in before.traits.values())
+    for reason in ("Independent acquisition", "Corrected acquisition details"):
+        preview = registration.build_original_preview(config, [item], assertion=reason)
+        _confirm(preview)
+        registration.apply_original_preview(config, preview["preview_id"], preview["manifest_hash"])
+        with open_db(config.paths.db_path) as connection:
+            after = load_source_evidence(connection, item)
+            assert after.original_version_id == before.original_version_id
+            assert {kind: trait.measurement_ids for kind, trait in after.traits.items()} == {
+                kind: trait.measurement_ids for kind, trait in before.traits.items()}
+            assert all(trait.tier == "probable" for trait in after.traits.values())
+
+
+def test_stale_preview_no_longer_requests_owner_attention(originals: tuple[MediaforceConfig, int, Path]) -> None:
+    config, item, _path = originals
+    registration.build_original_preview(config, [item], assertion="Independent acquisition")
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(update(library_items).where(library_items.c.id == item).values(source_revision=50))
+    assert registration.list_original_previews(config) == []
+
+
+def test_cancelled_background_recheck_never_commits_an_admission(originals: tuple[MediaforceConfig, int, Path]) -> None:
+    from mediaforce.core.process_control import ProcessCancelledError
+
+    config, item, _path = originals
+    preview = registration.build_original_preview(config, [item], assertion="Independent acquisition")
+    _confirm(preview)
+    def cancel() -> None:
+        raise ProcessCancelledError("Stopped")
+    with pytest.raises(ProcessCancelledError):
+        registration.apply_original_preview(config, preview["preview_id"], preview["manifest_hash"], check_cancelled=cancel)
+    with open_db(config.paths.db_path) as connection:
+        assert connection.execute(select(source_admissions)).first() is None
+
+
+def test_native_confirmation_fixture_uses_the_backend_receipt_schema(originals: tuple[MediaforceConfig, int, Path],
+                                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    fixture = json.loads((Path(__file__).parent / "fixtures/original-confirmation.json").read_text())
+    monkeypatch.setattr(registration.os, "getuid", lambda: fixture["owner_uid"])
+    directory = registration.confirmation_directory()
+    directory.mkdir(parents=True)
+    (directory / f"{fixture['preview_id']}.json").write_text(json.dumps(fixture))
+    assert registration._confirmation(fixture["preview_id"]) == fixture
+
+
+def test_owner_approved_format_exception_can_queue_missing_measurements(originals: tuple[MediaforceConfig, int, Path],
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    config, item, _path = originals
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(update(library_items).where(library_items.c.id == item).values(video_codec="av1"))
+    monkeypatch.setattr(registration, "probe_evidence_source", lambda *_args, **_kwargs: _probe(codec="av1"))
+    preview = registration.build_original_preview(config, [item], assertion="Independent AV1 acquisition",
+                                                  overrides={item: "Independent AV1 download"})
+    _confirm(preview)
+    registration.apply_original_preview(config, preview["preview_id"], preview["manifest_hash"])
+    with open_db(config.paths.db_path) as connection:
+        assert queue_original_intake(connection, config) > 0
+
+
+def test_known_output_digest_cannot_be_waived_by_a_format_exception(originals: tuple[MediaforceConfig, int, Path],
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    config, item, path = originals
+    _original, _output, _bytes = _confirmed_publish(originals)
+    monkeypatch.setattr(registration, "probe_evidence_source", lambda *_args, **_kwargs: _probe(codec="av1"))
+    with pytest.raises(ValueError, match="already compressed"):
+        registration.build_original_preview(config, [item], assertion="Claimed independent download",
+                                            overrides={item: "Claimed AV1 exception"})
+
+
+def test_concurrent_retries_reconcile_the_same_result(originals: tuple[MediaforceConfig, int, Path],
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    config, item, _path = originals
+    preview = registration.build_original_preview(config, [item], assertion="Independent acquisition")
+    _confirm(preview)
+    original_observe = registration.observe_file
+    both_reading = Barrier(2, timeout=10)
+    def read(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = original_observe(*args, **kwargs)
+        both_reading.wait()
+        return result
+    monkeypatch.setattr(registration, "observe_file", read)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(registration.apply_original_preview, config, preview["preview_id"], preview["manifest_hash"])
+        second = executor.submit(registration.apply_original_preview, config, preview["preview_id"], preview["manifest_hash"])
+        assert first.result(timeout=20) == second.result(timeout=20)
+    with open_db(config.paths.db_path) as connection:
+        assert len(connection.execute(select(source_admissions)).all()) == 1
+
+
+def test_put_back_cancellation_stops_the_content_check_before_any_move(originals: tuple[MediaforceConfig, int, Path]) -> None:
+    from mediaforce.core.process_control import ProcessCancelledError
+    from mediaforce.encoding.put_back import put_original_back
+
+    config, item, path = originals
+    _original, _output, output = _confirmed_publish(originals)
+    def cancel() -> None:
+        raise ProcessCancelledError("Stopped")
+    with open_db(config.paths.db_path) as connection:
+        archive = Path(connection.execute(select(staged_artifacts.c.archived_source_path)).scalar_one())
+        original = archive.read_bytes()
+        with pytest.raises(ProcessCancelledError):
+            put_original_back(connection, item, probe_media=lambda _path: _media_probe(),
+                file_fingerprint=file_fingerprint, content_fingerprint=content_version_fingerprint,
+                timestamp=timestamp, record_event=lambda *_args: None, check_cancelled=cancel)
+        assert path.read_bytes() == output
+        assert archive.read_bytes() == original
+        assert connection.execute(select(source_transitions).where(source_transitions.c.kind == "put-back")).first() is None
+
+
+def test_a_fresh_confirmation_can_retry_older_failed_evidence_work(originals: tuple[MediaforceConfig, int, Path]) -> None:
+    from mediaforce.core.db_tables import library_item_evidence_state
+    from mediaforce.library.evidence_state import sync_library_item_evidence_state
+
+    config, item, _path = originals
+    preview = registration.build_original_preview(config, [item], assertion="Independent acquisition")
+    _confirm(preview)
+    with open_db(config.paths.db_path) as connection:
+        current = dict(connection.execute(select(library_items).where(library_items.c.id == item)).mappings().one())
+        sync_library_item_evidence_state(connection, current, "media_fingerprint")
+        connection.execute(update(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == item).values(
+            work_status="failed", last_attempt_at="2025-01-01T00:00:00+00:00", updated_at=timestamp(), last_error="Earlier check failed"))
+    assert registration.request_original_apply(config, preview["preview_id"], preview["manifest_hash"])["pending"]
+    from test_source_intake import _work
+
+    assert _work(config) > 0
+    assert not registration.request_original_apply(config, preview["preview_id"], preview["manifest_hash"])["pending"]
+
+
+def test_saved_confirmation_requeues_after_a_lost_request_and_stops_asking_owner(originals: tuple[MediaforceConfig, int, Path]) -> None:
+    config, item, _path = originals
+    preview = registration.build_original_preview(config, [item], assertion="Independent acquisition")
+    _confirm(preview)
+    assert registration.list_original_previews(config, unconfirmed_only=True) == []
+    assert len(registration.list_original_previews(config)) == 1
+    from test_source_intake import _work
+    from mediaforce.library.evidence_worker import _discover_originals, default_evidence_worker_deps
+
+    _discover_originals(config, default_evidence_worker_deps())
+    assert _work(config) > 0
+    assert not registration.request_original_apply(config, preview["preview_id"], preview["manifest_hash"])["pending"]

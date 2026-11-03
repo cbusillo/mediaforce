@@ -123,7 +123,6 @@ def build_parser() -> argparse.ArgumentParser:
     original_parser = evidence_actions.add_parser("register-original", help="Prepare an exact file list for approval in the Mac app")
     original_parser.add_argument("items", type=int, nargs="+", help="Library item IDs, each named explicitly")
     original_parser.add_argument("--assertion", required=True, help="Why these are independently acquired originals")
-    original_parser.add_argument("--from", type=Path, dest="original", help="Separate original file, for a single item")
     original_parser.add_argument("--codec-override", action="append", default=[], metavar="ITEM=REASON",
                                  help="A separate named exception for one item's codec or encoder match")
     evidence_run_parser.add_argument(
@@ -646,8 +645,6 @@ def _run_evidence_command(config: MediaforceConfig, args: argparse.Namespace) ->
         if action == "register-original":
             from mediaforce.library.original_registration import build_original_preview
 
-            if args.original is not None and len(args.items) != 1:
-                raise ValueError("--from names an original for exactly one item")
             overrides = {}
             for value in args.codec_override:
                 item, reason = value.split("=", 1)
@@ -655,7 +652,7 @@ def _run_evidence_command(config: MediaforceConfig, args: argparse.Namespace) ->
                     raise ValueError("Name each item's exception once")
                 overrides[int(item)] = reason
             summary = build_original_preview(config, args.items, assertion=args.assertion,
-                originals={args.items[0]: args.original} if args.original is not None else None, overrides=overrides)
+                overrides=overrides)
         elif action == "restore-source":
             with open_db(config.paths.db_path) as connection:
                 stats = restore_published_source_evidence(connection, apply=True)

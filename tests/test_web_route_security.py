@@ -102,7 +102,7 @@ class WebRouteSecurityTests(unittest.TestCase):
             queue_folder_encode_action=lambda *_args: {},
             validate_folder_outputs_action=lambda *_args: {},
             promote_folder_outputs_action=lambda *_args: {},
-            put_original_back_action=lambda prefix, item_id: calls.append((prefix, item_id)) or {"ok": item_id == 7},
+            put_original_back_action=lambda prefix, item_id, _check_cancelled: calls.append((prefix, item_id)) or {"ok": item_id == 7},
         )
         put_back = _route_endpoint(app, "/api/folders/{prefix:path}/put-original-back", "POST")
         self.assertEqual(asyncio.run(put_back("/tv/Show/", _json_request({"library_item_ids": [7]}))).status_code, 200)

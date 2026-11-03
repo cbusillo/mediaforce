@@ -138,13 +138,14 @@ This prepares a saved preview, including each file's full content check. It
 never confirms an original. Open **Needs you** in the Mac app, review every
 file and any separate format exception, then confirm with macOS
 LocalAuthentication. The app saves that exact approval in its own store and
-the server rechecks files and source revisions before recording it. Cancelled
+the existing background evidence worker rechecks files and source revisions
+before recording it. The confirmation sheet closes when that work is queued;
+Activity shows its ordinary progress and work-window waits. The saved approval
+is retried by background discovery if the app loses its response. Cancelled
 or unsuccessful authentication records no approval. Retrying a saved approval
 returns its existing result. Dismissing a request changes no file or approval.
 
-For one item, `--from /path/to/original.mkv` supplies another original copy.
-An unverified connection to the library leaves it saved separately. A format
-exception must name its item, for example `--codec-override '123=Independently acquired AV1 download'`.
+A format exception must name its item, for example `--codec-override '123=Independently acquired AV1 download'`.
 It never permits a Mediaforce stamp, a known compressed output or unavailable
 checks. Approving an original does not upgrade old measurements: SMB and
 remote measurements still have only observed strength.
@@ -153,7 +154,8 @@ The Mac app's approval files live under its Application Support directory at
 `mediaforce/mac-app/original-approvals`. This is the in-app boundary chosen by
 the Director: agents do not write confirmations or invoke original deletion.
 It is not an isolated service or protection against direct writes by the same
-macOS account. Original registration neither deletes nor restores media.
+macOS account. Keep these approval files with the database when backing up;
+a missing approval leaves its original unconfirmed. Original registration neither deletes nor restores media.
 When a replacement is identified by the background checks, only a full content
 match to one retained version for that library item reconnects its history.
 Missing files, ambiguous matches and unreadable content checks do not transfer

@@ -155,15 +155,18 @@ def ensure_active_source_version(connection: DBClient, item: Mapping[str, Any] |
     return version_id
 
 
+def retained_source_query(item_id: Any, size: Any, sample: Any) -> Select:
+    return select(source_versions).where(
+        source_versions.c.role.in_(("input", "output")), source_versions.c.sha256.is_not(None),
+        source_versions.c.size_bytes == size, source_versions.c.sample_fingerprint == sample,
+        exists().where(source_transitions.c.library_item_id == item_id,
+            (source_transitions.c.before_version_id == source_versions.c.version_id)
+            | (source_transitions.c.after_version_id == source_versions.c.version_id)).correlate(library_items, source_versions),
+    ).correlate(library_items)
+
+
 def retained_source_candidates(connection: DBClient, item: Mapping[str, Any]) -> list[DBRow]:
-    versions = select(source_transitions.c.before_version_id).where(source_transitions.c.library_item_id == item["id"]).union(
-        select(source_transitions.c.after_version_id).where(source_transitions.c.library_item_id == item["id"]),
-    )
-    return list(connection.execute(select(source_versions).where(
-        source_versions.c.version_id.in_(versions), source_versions.c.role.in_(("input", "output")),
-        source_versions.c.sha256.is_not(None), source_versions.c.size_bytes == item["size_bytes"],
-        source_versions.c.sample_fingerprint == item["content_version_fingerprint"],
-    )).mappings())
+    return list(connection.execute(retained_source_query(item["id"], item["size_bytes"], item["content_version_fingerprint"])).mappings())
 
 
 def reconcile_source_replacement(connection: DBClient, item: Mapping[str, Any], identity: Mapping[str, Any]) -> str:
@@ -458,7 +461,7 @@ def load_source_evidence_bulk(
     readable_measurement_ids = {
         str(measurement_id)
         for rows in admissions_by_generation.values() for row in rows
-        if len(rows) == 1 and row["basis"] == "readable-source"
+        if len(rows) == 1 and row["basis"] in {"readable-source", "owner"}
         for measurement_id in json.loads(row["checks_json"]).get("measurement_ids", [])
     }
     measurement_query = select(source_measurements, literal_column("source_measurements.rowid").label("_rowid"))
@@ -543,7 +546,7 @@ def _classify_source_evidence(
     owner = (admission["tier"] == "proven" and admission["basis"] == "owner" and original["role"] == "input"
              and owner_confirmation_matches(admission, original))
     if owner:
-        checks = checks["source_checks"]
+        checks = {**checks["source_checks"], "measurement_ids": checks.get("measurement_ids", [])}
     if readable or owner:
         from mediaforce.library.source_intake import assess_readable_source
 
@@ -560,7 +563,7 @@ def _classify_source_evidence(
         if output_check in {"match", "unresolved"}:
             reason = "known_output_match" if output_check == "match" else "possible_output_match"
     for kind in EVIDENCE_KINDS:
-        allowed_ids = set(checks.get("measurement_ids", []) if readable else [])
+        allowed_ids = set(checks.get("measurement_ids", []) if readable or owner else [])
         rows = measurements.for_original(str(original["version_id"]), kind, allowed_ids)
         eligible = [row for row in rows if not reason and row["binding"] == "historical-plan-sampled"
                     and _historical_measurement_matches(row, checks)]

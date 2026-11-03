@@ -1,0 +1,9 @@
+{
+  "preview_id": "12345678123456781234567812345678",
+  "manifest_hash": "0b1357eb3b7f2e20bd5cecdb92f5fbc0a9688b52481a8599257ccafb69734cd6",
+  "canonical_json": "{\"assertion\":\"Independent acquisition\",\"challenge\":\"fixture-challenge\",\"items\":[{\"checks\":{},\"identity\":{\"path\":\"/fixture/episode.mkv\",\"sha256\":\"fixture-content-check\",\"size_bytes\":400000000},\"item_id\":42,\"rel_path\":\"tv/Show/episode.mkv\"}],\"owner_uid\":501,\"preview_id\":\"12345678123456781234567812345678\"}",
+  "challenge": "fixture-challenge",
+  "owner_uid": 501,
+  "authentication": "deviceOwnerAuthentication",
+  "confirmed_at": "2026-11-03T12:00:00Z"
+}

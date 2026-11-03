@@ -293,8 +293,10 @@ def _unmeasurable_roots(config: MediaforceConfig, deps: EvidenceWorkerDeps) -> f
 
 def _discover_originals(config: MediaforceConfig, deps: EvidenceWorkerDeps) -> int:
     from mediaforce.library.source_intake import queue_original_intake
+    from mediaforce.library.original_registration import queue_confirmed_originals
 
     try:
+        queue_confirmed_originals(config)
         window = controller_digest_window(config, deps.evidence_host_rows)
         with open_db(config.paths.db_path) as connection:
             state = load_evidence_queue_state(connection)

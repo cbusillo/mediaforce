@@ -56,7 +56,9 @@ final class OriginalApprovalTests: XCTestCase {
             await withCheckedContinuation { grant = $0 }
         })
         let operation = Task { try await store.confirm(original) }
-        while grant == nil { await Task.yield() }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while grant == nil && ContinuousClock.now < deadline { await Task.yield() }
+        guard grant != nil else { operation.cancel(); XCTFail("Authentication did not start"); return }
         operation.cancel()
         grant?.resume(returning: true)
         do {
@@ -85,4 +87,67 @@ final class OriginalApprovalTests: XCTestCase {
         XCTAssertEqual(count, 1)
         XCTAssertEqual(try Data(contentsOf: path), bytes)
     }
+    func testNativeReceiptEncodingMatchesTheBackendFixture() throws {
+        let resource = try XCTUnwrap(Bundle(for: OriginalApprovalTests.self).url(forResource: "original-confirmation", withExtension: "json"))
+        let bytes = try Data(contentsOf: resource)
+        let saved = try JSONDecoder.mediaforce.decode(OriginalConfirmation.self, from: bytes)
+        let emitted = OriginalConfirmation(previewId: saved.previewId, manifestHash: saved.manifestHash,
+            canonicalJson: saved.canonicalJson, challenge: saved.challenge, ownerUid: saved.ownerUid,
+            authentication: saved.authentication, confirmedAt: saved.confirmedAt)
+        let encoded = try JSONEncoder.mediaforce.encode(emitted)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: encoded) as? NSDictionary,
+                       try JSONSerialization.jsonObject(with: bytes) as? NSDictionary)
+    }
+
+    func testApplyReturnsWhenBackgroundChecksAreQueuedAndKeepsTheExactReference() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OriginalApplyServer.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let preview = try originalApprovalFixture()
+        let client = MediaforceClient(baseURL: URL(string: "http://mediaforce.invalid")!, session: session)
+        OriginalApplyServer.configure(preview)
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await client.applyOriginalPreview(preview) }
+            group.addTask { try await Task.sleep(for: .seconds(2)); throw URLError(.timedOut) }
+            defer { group.cancelAll() }
+            _ = try await group.next()
+        }
+    }
+
+}
+
+private final class OriginalApplyServer: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var expected: [String: String] = [:]
+    static func configure(_ preview: OriginalPreview) {
+        lock.lock()
+        defer { lock.unlock() }
+        expected = ["preview_id": preview.previewId, "manifest_hash": preview.manifestHash]
+    }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let body = request.httpBody ?? request.httpBodyStream.flatMap { stream -> Data? in
+            stream.open()
+            defer { stream.close() }
+            var bytes = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let size = stream.read(&buffer, maxLength: buffer.count)
+                if size <= 0 { break }
+                bytes.append(contentsOf: buffer.prefix(size))
+            }
+            return bytes
+        }
+        let fields = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: String] }
+        Self.lock.lock()
+        XCTAssertEqual(fields, Self.expected)
+        Self.lock.unlock()
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 202,
+            httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data("{}".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
 }

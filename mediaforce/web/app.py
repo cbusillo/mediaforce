@@ -1206,7 +1206,7 @@ def create_app(
                 observed_at=datetime.now(UTC),
                 kinds=_sample_start_status(kinds_payload(connection, config, load_calibration_state=_load_calibration_state)["kinds"]),
             )
-            payload["original_previews"] = list_original_previews(config)
+            payload["original_previews"] = list_original_previews(config, unconfirmed_only=True)
             return payload
 
     def _activity_payload() -> dict[str, Any]:
@@ -1961,11 +1961,11 @@ def create_app(
         _reset_folder_card_cache()
         return result
 
-    def _put_original_back_action(normalized_prefix: str, library_item_id: int) -> ActionPayload:
+    def _put_original_back_action(normalized_prefix: str, library_item_id: int, check_cancelled: Callable[[], None]) -> ActionPayload:
         blocker = production_action_blocker(config, normalized_prefix)
         if blocker is not None:
             return blocker
-        result = put_original_back_action(config, normalized_prefix, library_item_id)
+        result = put_original_back_action(config, normalized_prefix, library_item_id, check_cancelled)
         # Library cards and space saved count this file again as an original.
         _reset_folder_card_cache()
         return result

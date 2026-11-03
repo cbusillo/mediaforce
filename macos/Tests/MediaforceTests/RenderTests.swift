@@ -4,7 +4,7 @@ import XCTest
 
 @MainActor
 final class RenderTests: XCTestCase {
-    func testOriginalReviewAndItsWaitingNoticeRenderWithoutAuthenticating() async throws {
+    func testOriginalReviewAndItsWaitingNoticeRender() async throws {
         let retained = ProcessInfo.processInfo.environment["MEDIAFORCE_ORIGINAL_RENDER_OUTPUT"]
         let directory = retained ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
         defer { if retained == nil { try? FileManager.default.removeItem(atPath: directory) } }

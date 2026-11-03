@@ -118,10 +118,9 @@ struct MediaforceClient: Sendable {
             "preview_id": preview.previewId, "manifest_hash": preview.manifestHash,
         ])
         let (data, response) = try await session.data(for: request)
-        if (response as? HTTPURLResponse)?.statusCode != 200 {
-            let result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            throw OriginalApprovalError(result?["reason"] as? String ?? "The approval could not be saved. Try again.")
-        }
+        if [200, 202].contains((response as? HTTPURLResponse)?.statusCode) { return }
+        let result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        throw OriginalApprovalError(result?["reason"] as? String ?? "The approval could not be queued. Try again.")
     }
 
     func pause() async throws {

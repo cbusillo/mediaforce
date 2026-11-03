@@ -43,6 +43,7 @@ from mediaforce.library.source_evidence import (
     pending_source_operation,
     reconcile_source_replacement,
     retained_source_candidates,
+    retained_source_query,
 )
 
 
@@ -66,7 +67,9 @@ def matches_historical_encoder(value: str) -> bool:
 def _history_conditions(item_id: Any) -> list[Any]:
     return [
         (staged_artifacts.c.library_item_id == item_id) & staged_artifacts.c.encode_completed_at.is_not(None),
-        source_transitions.c.library_item_id == item_id,
+        (source_transitions.c.library_item_id == item_id)
+        & ~((source_transitions.c.kind == "replacement")
+            & (func.coalesce(func.json_extract(source_transitions.c.evidence_json, "$.strength"), "") == "catalog-observed")),
         (item_events.c.library_item_id == item_id)
         & item_events.c.event_type.in_(
             ("encoding_completed", "promotion_completed", "published_copy_replaced", "originals_removed_confirmed")
@@ -238,6 +241,9 @@ def assess_source_input(
     *, before_commit: Callable[[DBClient], None] | None = None,
     digest_guard: Callable[[], AbstractContextManager[None]] = nullcontext,
 ) -> None:
+    from mediaforce.library.original_registration import apply_confirmed_originals
+
+    apply_confirmed_originals(config, item_id, controller, check_cancelled, digest_guard)
     with open_db(config.paths.db_path) as connection:
         item = cast(
             dict[str, Any], dict(connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one())
@@ -379,18 +385,14 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
                 LIBRARY_ITEM_PRESENT,
                 library_items.c.media_root.in_(tuple(config.source_root_map)),
                 or_(
-                    library_items.c.video_codec.in_(HISTORICAL_OUTPUT_PROFILES["known_input_codecs"])
+                    (library_items.c.video_codec.in_(HISTORICAL_OUTPUT_PROFILES["known_input_codecs"])
+                     | exists().where(source_admissions.c.version_id == library_items.c.active_source_version_id,
+                                      source_admissions.c.basis == "owner", source_admissions.c.tier == "proven"))
                     & ~or_(*(exists().where(condition) for condition in _history_conditions(library_items.c.id))),
                     library_items.c.active_source_version_id.in_(select(source_versions.c.version_id).where(
                         source_versions.c.role == "unknown", source_versions.c.sha256.is_(None),
-                    )) & exists().where(
-                        source_versions.c.sha256.is_not(None), source_versions.c.role.in_(("input", "output")),
-                        source_versions.c.size_bytes == library_items.c.size_bytes,
-                        source_versions.c.sample_fingerprint == library_items.c.content_version_fingerprint,
-                        exists().where(source_transitions.c.library_item_id == library_items.c.id,
-                            or_(source_transitions.c.before_version_id == source_versions.c.version_id,
-                                source_transitions.c.after_version_id == source_versions.c.version_id)).correlate(library_items, source_versions),
-                    ).correlate(library_items),
+                    )) & retained_source_query(library_items.c.id, library_items.c.size_bytes,
+                                               library_items.c.content_version_fingerprint).exists(),
                 ),
                 or_((~assessed) & (~already_queued), due_terminal),
             )

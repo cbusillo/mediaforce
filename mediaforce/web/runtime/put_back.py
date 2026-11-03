@@ -1,11 +1,13 @@
 """The owner's request to put one replaced file's original back, checked against its page and running work."""
 
+from collections.abc import Callable
 from typing import Any
 
 from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import open_db
+from mediaforce.core.process_control import ProcessCancelledError
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint, timestamp
 from mediaforce.encoding.delivery_lock import archive_activity, delivery_lock
@@ -16,7 +18,7 @@ from mediaforce.library.probe import probe_media
 from mediaforce.web.runtime.folder_actions import active_encode_library_item_ids
 
 
-def put_original_back_action(config: MediaforceConfig, prefix: str, library_item_id: int) -> dict[str, Any]:
+def put_original_back_action(config: MediaforceConfig, prefix: str, library_item_id: int, check_cancelled: Callable[[], None] = lambda: None) -> dict[str, Any]:
     """Put the named file's original back; a refusal changes nothing and says why."""
     try:
         with open_db(config.paths.db_path) as connection:
@@ -42,7 +44,10 @@ def put_original_back_action(config: MediaforceConfig, prefix: str, library_item
                     content_fingerprint=content_version_fingerprint,
                     timestamp=timestamp,
                     record_event=_record_event,
+                    check_cancelled=check_cancelled,
                 )
+    except ProcessCancelledError:
+        return {"ok": False, "code": "cancelled", "message": "The original-file check was cancelled. No file was moved."}
     except PutBackRefused as refused:
         return {"ok": False, "code": refused.code, "message": str(refused)}
     except PutBackRestoreError:
