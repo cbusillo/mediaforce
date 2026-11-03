@@ -131,6 +131,11 @@ class SeasonKinds:
         self._evidence: tuple[tuple[Any, ...], tuple[set[int], SourceEvidenceContext]] | None = None
 
     def __call__(self, config: MediaforceConfig, season_prefix: str) -> str | None:
+        snapshot = _request_kind_contents.get()
+        if snapshot is not None and snapshot[0] is config:
+            kind = snapshot[1].kinds_by_season.get(season_prefix)
+            if kind is not None:
+                return kind
         if not config.paths.db_path.exists():
             return None
         with self._lock, open_readonly_db(config.paths.db_path) as connection:
@@ -489,6 +494,7 @@ class _KindContents:
     approvals: dict[str, list[_ShowApproval]]
     report: dict[str, Any]
     samples: dict[str, dict[str, Any]]
+    kinds_by_season: dict[str, str]
 
 
 _request_kind_contents: ContextVar[tuple[MediaforceConfig, _KindContents] | None] = ContextVar("kind_contents", default=None)
@@ -535,7 +541,9 @@ def _kind_contents(connection: DBClient, config: MediaforceConfig, load_calibrat
                 config, str(kind), load_calibration_state(config, str(job["prefix"])),
                 lambda _config, prefix: kinds_by_season.get(prefix)):
             newest[str(kind)] = job
-    return _KindContents(episodes, approvals_by_show, report, {**fallback, **newest})
+    measured_kinds = {row["season"]: row["kind"] for row in report["seasons"]}
+    measured_kinds.update(kinds_by_season)
+    return _KindContents(episodes, approvals_by_show, report, {**fallback, **newest}, measured_kinds)
 
 
 def kinds_payload(
