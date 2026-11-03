@@ -30,6 +30,7 @@ from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import MediaScopeConflict
 from mediaforce.library.probe import probe_evidence_source
 from mediaforce.library.source_evidence import (
+    current_admission_filter,
     HISTORICAL_OUTPUT_PROFILES,
     SourceEvidenceContext,
     append_version,
@@ -188,9 +189,7 @@ def commit_readable_source(
         connection.execute(
             select(source_admissions).where(
                 source_admissions.c.generation_id == previous["generation_id"],
-                source_admissions.c.admission_id.not_in(
-                    select(source_admissions.c.supersedes_id).where(source_admissions.c.supersedes_id.is_not(None))
-                ),
+                current_admission_filter(),
             )
         )
         .mappings()
@@ -268,9 +267,7 @@ def assess_source_input(
             connection.execute(
                 select(source_admissions).where(
                     source_admissions.c.version_id == item["active_source_version_id"],
-                    source_admissions.c.admission_id.not_in(
-                        select(source_admissions.c.supersedes_id).where(source_admissions.c.supersedes_id.is_not(None))
-                    ),
+                    current_admission_filter(),
                 )
             )
             .mappings()
@@ -369,7 +366,7 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
         return 0
     assessed = exists().where(
         source_admissions.c.version_id == library_items.c.active_source_version_id,
-        source_admissions.c.admission_id.not_in(select(source_admissions.c.supersedes_id).where(source_admissions.c.supersedes_id.is_not(None))),
+        current_admission_filter(),
         func.coalesce(func.json_extract(source_admissions.c.checks_json, "$.codec_rule_hash"),
                       func.json_extract(source_admissions.c.checks_json, "$.source_checks.codec_rule_hash")) == stable_json_hash(HISTORICAL_OUTPUT_PROFILES),
         func.coalesce(func.json_extract(source_admissions.c.checks_json, "$.encoder_rule_hash"),

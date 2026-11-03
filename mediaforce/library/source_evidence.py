@@ -106,6 +106,12 @@ def pending_source_operation(connection: DBClient, item_id: int) -> bool:
     ))).scalar())
 
 
+def current_admission_filter() -> ColumnElement[bool]:
+    return source_admissions.c.admission_id.not_in(
+        select(source_admissions.c.supersedes_id).where(source_admissions.c.supersedes_id.is_not(None))
+    )
+
+
 def append_version(connection: DBClient, *, generation_id: str, role: str, identity: Mapping[str, Any],
                    profile: Mapping[str, Any], recorded_at: str, version_id: str | None = None) -> str:
     version = version_id or uuid4().hex
@@ -185,7 +191,7 @@ def reconcile_source_replacement(connection: DBClient, item: Mapping[str, Any] |
     matches = [row for row in retained_source_candidates(connection, current) if row["sha256"] == identity["sha256"]]
     latest = set(connection.execute(select(source_admissions.c.version_id).where(
         source_admissions.c.version_id.in_([row["version_id"] for row in matches]),
-        source_admissions.c.admission_id.not_in(select(source_admissions.c.supersedes_id).where(source_admissions.c.supersedes_id.is_not(None))),
+        current_admission_filter(),
     )).scalars())
     admitted = [row for row in matches if row["version_id"] in latest]
     if len(admitted) == 1 and all(row["generation_id"] == admitted[0]["generation_id"]
@@ -442,8 +448,7 @@ def load_source_evidence_bulk(
     current_versions = {str(row["version_id"]): row
                         for row in _evidence_rows(connection, select(source_versions), source_versions.c.version_id, active_ids)}
     generations = {str(row["generation_id"]) for row in current_versions.values()}
-    superseded = select(source_admissions.c.supersedes_id).where(source_admissions.c.supersedes_id.is_not(None))
-    admission_rows = _evidence_rows(connection, select(source_admissions).where(source_admissions.c.admission_id.not_in(superseded)),
+    admission_rows = _evidence_rows(connection, select(source_admissions).where(current_admission_filter()),
                                     source_admissions.c.generation_id, generations) if generations else ()
     admissions_by_generation: dict[str, list[DBRow]] = defaultdict(list)
     for row in admission_rows:

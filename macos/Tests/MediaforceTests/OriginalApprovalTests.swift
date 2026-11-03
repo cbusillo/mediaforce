@@ -118,7 +118,7 @@ final class OriginalApprovalTests: XCTestCase {
         XCTAssertEqual(try failed.fileList().items.map(\.itemId), try original.fileList().items.map(\.itemId))
     }
 
-    func testApplyReturnsWhenBackgroundChecksAreQueuedAndKeepsTheExactReference() async throws {
+    func testApplySendsExactApprovalReferenceAndAcceptsQueuedResponse() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [OriginalApplyServer.self]
         let session = URLSession(configuration: configuration)

@@ -1206,7 +1206,7 @@ def create_app(
                 observed_at=datetime.now(UTC),
                 kinds=_sample_start_status(kinds_payload(connection, config, load_calibration_state=_load_calibration_state)["kinds"]),
             )
-            payload["original_previews"] = list_original_previews(config, unconfirmed_only=True)
+            payload["original_previews"] = list_original_previews(config)
             return payload
 
     def _activity_payload() -> dict[str, Any]:

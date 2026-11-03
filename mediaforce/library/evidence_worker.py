@@ -34,7 +34,7 @@ from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANA
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, parse_evidence_summary, \
     sync_library_item_evidence_state
 from mediaforce.library.probe import probe_evidence, probe_evidence_source
-from mediaforce.library.source_evidence import load_source_evidence, observe_file, pending_source_operation, record_current_measurement
+from mediaforce.library.source_evidence import current_admission_filter, load_source_evidence, observe_file, pending_source_operation, record_current_measurement
 from mediaforce.library.source_prefetch import SourceAdmissionPrefetcher, StopSignal
 
 EVIDENCE_JOB_LEASE_SECONDS = 45
@@ -425,7 +425,7 @@ def _run_evidence_claim(
 
                 owner = connection.execute(select(source_admissions.c.admission_id).where(
                     source_admissions.c.version_id == item["active_source_version_id"], source_admissions.c.basis == "owner",
-                    source_admissions.c.admission_id.not_in(select(source_admissions.c.supersedes_id).where(source_admissions.c.supersedes_id.is_not(None))),
+                    current_admission_filter(),
                 )).first()
             if owner and evidence.availability != "available":
                 _finish_claim(config, claim, work_status="failed", last_error="The original-file approval needs an updated file list or its saved Mac approval record.")
