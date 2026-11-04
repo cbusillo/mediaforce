@@ -64,7 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     service_parser = subparsers.add_parser("service", help="Manage the local macOS mediaforce-web login item")
-    service_parser.add_argument("--credentials", type=Path, help="Read credentials from this existing file")
+    if bundled_app_path() is not None:
+        service_parser.add_argument("--credentials", type=Path, help="Read credentials from this existing file")
     service_actions = service_parser.add_subparsers(dest="service_action", required=True)
     for action in ("install", "enable", "disable", "restart", "status", "uninstall"):
         service_actions.add_parser(action)

@@ -137,8 +137,9 @@ def stage_server(app: Path, cache: Path, identity: str) -> None:
     for directory in (target / "bin" for target in server.iterdir()):
         if directory.is_dir():
             shutil.rmtree(directory)
-    for path in server.rglob("direct_url.json"):
-        path.unlink()
+    for target in server.iterdir():
+        for path in target.glob("*.dist-info/direct_url.json"):
+            path.unlink()
     launcher = contents / "MacOS/mediaforce-server"
     run("xcrun", "clang", *[arg for arch in sorted(architectures) for arg in ("-arch", arch)],
         f"-mmacosx-version-min={minimum_os}", f'-DPYTHON_ABI="{abi}"', "-F", contents / "Frameworks", "-framework", "Python",

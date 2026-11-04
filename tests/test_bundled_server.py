@@ -163,15 +163,17 @@ def test_moved_bundle_can_repair_only_the_same_saved_app(bundle_paths: LoginItem
 
 
 def test_conflicting_config_is_refused_and_missing_config_does_not_block_disable(bundle_paths: LoginItemPaths) -> None:
+    config_path = bundle_paths.config_path
+    assert config_path is not None
     with patch("mediaforce.ops.login_item._require_supported_platform"), patch(
         "mediaforce.ops.login_item._run_command", return_value=subprocess.CompletedProcess([], 0)
     ), patch("mediaforce.ops.login_item.disable_login_item") as disable:
         install_login_item(bundle_paths)
         saved = bundle_paths.plist.read_bytes()
         assert run_login_item_command("install", project_root=bundle_paths.project_root, home=bundle_paths.home,
-                                      config_path=bundle_paths.config_path.with_name("other.toml")) == 1
+                                      config_path=config_path.with_name("other.toml")) == 1
         assert bundle_paths.plist.read_bytes() == saved
-        bundle_paths.config_path.unlink()
+        config_path.unlink()
         assert run_login_item_command("disable", project_root=bundle_paths.project_root, home=bundle_paths.home) == 0
         disable.assert_called_once()
 

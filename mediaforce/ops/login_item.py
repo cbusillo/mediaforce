@@ -473,6 +473,7 @@ def _show_logs(path: Path, *, follow: bool, lines: int) -> int:
 
 
 __all__ = [
+    "MACOS_SIGNING_TEAM",
     "BOOTOUT_ACCEPTED_EXIT_CODES",
     "LOGIN_ITEM_LABEL",
     "LoginItemError",
@@ -485,4 +486,5 @@ __all__ = [
     "rotate_login_item_logs",
     "run_login_item_command",
     "uninstall_login_item",
+    "verify_bundled_startup",
 ]

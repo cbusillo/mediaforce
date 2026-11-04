@@ -69,7 +69,8 @@ packaging and service installation never copy it. Shell environment values
 continue to take precedence.
 
 For an isolated installation with no existing service, the same executable
-accepts the existing `service install|enable|restart|disable|uninstall|status|logs` commands and uses
+accepts the existing `service install|enable|restart|disable|uninstall|status|logs`
+commands and uses
 the existing `com.mediaforce.web` LaunchAgent and log paths. Its working
 directory is the configured database's parent. Service setup verifies the
 signed bundle and refuses to replace another runtime, build or config. A moved
@@ -79,11 +80,14 @@ safe update transaction for that transition; this build command does not
 perform a deployment. Closing the UI leaves the background service running.
 The existing runtime lock prevents another app copy from opening the same
 runtime or database, even on a different port.
+For service commands, put `--config` before `service` and the bundled
+`--credentials` option after `service`, before the action.
 
 The application uses macOS certificate trust through `truststore`, preserving
 HTTPS verification without a checkout-specific OpenSSL certificate path.
 The verifier checks private/runtime names and the current build user's home
-path throughout the app, including binaries and property lists. Its generic machine-path heuristics apply to
+path throughout the app, including binaries and property lists. Its generic
+machine-path heuristics apply to
 Mediaforce's own files; Python and third-party packages contain public path
 examples and are assembled from the digest-pinned runtime and hashed lockfile.
 Upstream Python tests, development objects and local wheel-origin records are
