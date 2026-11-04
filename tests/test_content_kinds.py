@@ -28,7 +28,7 @@ def connection() -> Iterator[DBClient]:
         database.exec_driver_sql("PRAGMA foreign_keys=ON")
         metadata.create_all(database)
         database.commit()
-        with LibraryCalculations().request():
+        with LibraryCalculations().request(database):
             yield database
     engine.dispose()
 
@@ -155,15 +155,19 @@ def test_bulk_evidence_matches_individual_reads_and_report_queries_stay_bounded(
         nonlocal query_count
         query_count += 1
 
+    def report() -> dict[str, Any]:
+        with LibraryCalculations().request(connection):
+            return season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False)
+
     event.listen(connection.engine, "before_cursor_execute", count_query)
     try:
-        season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False)
+        report()
         first_queries = query_count
         for episode in range(3, 30):
             item_id = _item(connection, f"tv/Drama/Season 1/e{episode:02}.mkv", status="promoted", codec="av1", current_dark=0.0)
             _admit_historical_original(connection, item_id, dark=0.5)
         query_count = 0
-        first = season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False)
+        first = report()
         assert query_count == first_queries
         original = expected[item_ids[0]]
         assert original.original_version_id is not None
@@ -174,7 +178,7 @@ def test_bulk_evidence_matches_individual_reads_and_report_queries_stay_bounded(
                         "plan_sha256": f"plan-{item_ids[0]}"}, measured_at=None, recorded_at=timestamp(),
         )
         query_count = 0
-        refreshed = season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False)
+        refreshed = report()
         refreshed_queries = query_count
     finally:
         event.remove(connection.engine, "before_cursor_execute", count_query)
@@ -320,7 +324,7 @@ def test_reused_classifications_follow_changed_saved_inputs(connection: DBClient
             approved = True
         changed = report()
         assert load.call_count == 2
-    with LibraryCalculations().request():
+    with LibraryCalculations().request(connection):
         assert report() == changed
     if change != "measurement_root":
         assert changed != initial

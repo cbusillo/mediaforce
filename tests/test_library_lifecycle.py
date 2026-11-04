@@ -53,7 +53,7 @@ class LibraryLifecycleTests(unittest.TestCase):
             connection.commit()
             with patch.object(candidate_selection, "_prepare_candidates", wraps=candidate_selection._prepare_candidates) as prepare:
                 def read(at: datetime = NOW) -> list[candidate_selection.CandidateDecision]:
-                    with calculations.request():
+                    with calculations.request(connection):
                         return project_candidates(connection, config, prefixes=["tv/Show"], now=at)
 
                 first = read()
@@ -84,7 +84,7 @@ class LibraryLifecycleTests(unittest.TestCase):
             decisions = project_candidates(connection, config, now=NOW)
 
             def read() -> motion_holds.MotionHolds:
-                with calculations.request():
+                with calculations.request(connection):
                     return motion_holds.queue_motion_holds(connection, decisions)
 
             with patch.object(motion_holds, "_queue_motion_holds", wraps=motion_holds._queue_motion_holds) as partition:
@@ -110,7 +110,7 @@ class LibraryLifecycleTests(unittest.TestCase):
             conflicting = self._insert_item(connection, "tv/Show/Season 1/Episode 02.mkv", age_days=100)
             self._insert_series_metadata(connection, "tv/Show", status="Ended", in_production=False)
             self._insert_plex_metadata(connection, conflicting, season_index=2, added_at=NOW - timedelta(days=100))
-            with LibraryCalculations().request():
+            with LibraryCalculations().request(connection):
                 decisions = {decision.item_id: decision for decision in project_candidates(connection, config, now=NOW)}
             assert decisions[first].eligible
             assert not decisions[conflicting].eligible

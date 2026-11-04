@@ -4,7 +4,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from sqlalchemy import func, literal_column, select
+from sqlalchemy import func, select
 
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_item_evidence_state, library_items, series_metadata, source_admissions, source_measurements, \
@@ -13,7 +13,7 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict, objec
 from mediaforce.library.candidate_selection import season_identity
 from mediaforce.library.calculation_reuse import reuse_library_calculation
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
-from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, SourceEvidence, SourceEvidenceContext, load_source_evidence_bulk, load_source_evidence_context
+from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, SourceEvidence, load_source_evidence_bulk, load_source_evidence_context
 
 # Kinds of content group seasons by number ranges of their originals' measured traits, so that one
 # approval can cover every season that measures the same (Director decision, #517, 2026-10-22).
@@ -130,14 +130,19 @@ def _waiting(item: Mapping[str, Any]) -> bool:
     return str(item.get("status") or "") != "promoted" and str(item.get("video_codec") or "").casefold() != "av1"
 
 
-def _admitted_item_ids(connection: DBClient) -> set[int]:
+def _admitted_item_ids(connection: DBClient, *, item_ids: Collection[int] | None = None) -> set[int]:
     """Items whose active source has an admitted original; the reader gives every other item no traits."""
-    rows = connection.execute(
-        select(library_items.c.id)
-        .join(source_versions, source_versions.c.version_id == library_items.c.active_source_version_id)
-        .join(source_admissions, source_admissions.c.generation_id == source_versions.c.generation_id)
-    )
-    return {int(row.id) for row in rows}
+    query = (select(library_items.c.id, source_versions.c.generation_id)
+             .join(source_versions, source_versions.c.version_id == library_items.c.active_source_version_id))
+    if item_ids is not None:
+        query = query.where(library_items.c.id.in_(item_ids))
+    active_sources = list(connection.execute(query))
+    generations = {row.generation_id for row in active_sources}
+    if not generations:
+        return set()
+    admitted = set(connection.execute(select(source_admissions.c.generation_id).where(
+        source_admissions.c.generation_id.in_(generations))).scalars())
+    return {int(row.id) for row in active_sources if row.generation_id in admitted}
 
 
 def _original_traits(
@@ -196,56 +201,20 @@ def season_grouping(
         season_prefix: str,
         *,
         library_types: Mapping[str, str],
-        evidence: tuple[set[int], SourceEvidenceContext] | None = None,
 ) -> SeasonGrouping:
-    """One season's kind, read the same way as the report; pass `evidence` to share one snapshot across seasons."""
     seasons, series_of = _seasons(_present_items(connection, season_prefix), library_types)
-    admitted, context = evidence or season_evidence(connection)
     episodes = seasons.get(season_prefix, [])
+    admitted = _admitted_item_ids(connection, item_ids=[int(item["id"]) for item in episodes])
+    if not admitted:
+        return season_kind([None] * len(episodes), animated=None)
     evidence_by_item = load_source_evidence_bulk(
-        connection, (int(item["id"]) for item in episodes if int(item["id"]) in admitted), context=context,
+        connection, (int(item["id"]) for item in episodes if int(item["id"]) in admitted),
+        context=load_source_evidence_context(connection),
     )
     traits = _original_traits(episodes, admitted, evidence_by_item)
     series = series_of.get(season_prefix)
     animated = _series_animation(connection, series).get(series) if series else None
     return season_kind(traits, animated=animated)
-
-
-def season_evidence(connection: DBClient) -> tuple[set[int], SourceEvidenceContext]:
-    """The library-wide evidence every season's kind reads: admitted originals and known outputs."""
-    return _admitted_item_ids(connection), load_source_evidence_context(connection)
-
-
-def evidence_stamp(connection: DBClient) -> tuple[Any, ...]:
-    """Changes whenever an admission, a measurement, a publish or a finished encode could change a season's kind.
-
-    Admissions, measurements, versions and production receipts only ever gain rows, corrections included, so
-    their newest row stands for them. A publish settles its transition in place, so transitions count by outcome.
-    """
-    stamp: list[Any] = [
-        connection.execute(select(func.max(literal_column("rowid"))).select_from(table)).scalar()
-        for table in (source_admissions, source_measurements, source_versions, target_production_outcomes)
-    ]
-    stamp.append(tuple(tuple(row) for row in connection.execute(
-        select(source_transitions.c.outcome, func.count(), func.max(literal_column("rowid")))
-        .group_by(source_transitions.c.outcome).order_by(source_transitions.c.outcome)
-    )))
-    stamp.append(connection.execute(select(func.max(staged_artifacts.c.encode_completed_at))).scalar())
-    return tuple(stamp)
-
-
-def season_stamp(connection: DBClient, season_prefix: str) -> tuple[Any, ...]:
-    """Changes whenever the season's files, their current versions or its show's genres change."""
-    files = tuple(tuple(row) for row in connection.execute(
-        select(library_items.c.id, library_items.c.active_source_version_id)
-        .where(library_items.c.missing_since.is_(None), *_in_folder(season_prefix))
-        .order_by(library_items.c.id)
-    ))
-    series = "/".join(season_prefix.split("/")[:2])
-    genres = connection.execute(
-        select(series_metadata.c.tmdb_genres_json).where(series_metadata.c.series_prefix == series)
-    ).scalar_one_or_none()
-    return files, genres
 
 
 def _series_animation(connection: DBClient, series_prefix: str | None = None) -> dict[str, bool | None]:

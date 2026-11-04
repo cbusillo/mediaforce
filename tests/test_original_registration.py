@@ -1587,21 +1587,32 @@ def test_library_reuse_observes_native_confirmation_and_original_move(originals:
     from mediaforce.library.calculation_reuse import LibraryCalculations
     from mediaforce.library.content_kinds import season_kind_report
 
-    config, item, _path = originals
+    from mediaforce.library.source_evidence import record_current_measurement
+    from mediaforce.web.runtime.kind_approvals import SeasonKinds
+    from test_content_kinds import _fingerprint
+
+    config, item, path = originals
     with open_db(config.paths.db_path) as connection:
         connection.execute(library_items.update().where(library_items.c.id == item).values(rel_path="tv/Show/Season 1/episode.mkv"))
         connection.execute(series_metadata.insert().values(series_prefix="tv/Show", tmdb_genres_json='["Drama"]', updated_at="now"))
+        if change == "confirmation":
+            identity = observe_file(path, full_digest=True)
+            current = connection.execute(select(library_items).where(library_items.c.id == item)).mappings().one()
+            record_current_measurement(connection, current, kind="media_fingerprint", summary=_fingerprint(0.5),
+                                       provenance={"before": identity, "after": identity}, binding="observed")
     preview = registration.build_original_preview(config, [item], assertion="Independent originals")
     _confirm(preview)
     _apply_preview(config, preview["preview_id"], preview["manifest_hash"])
     calculations = LibraryCalculations()
+    kinds = SeasonKinds()
     with open_db(config.paths.db_path) as connection:
         def report() -> dict[str, Any]:
-            with calculations.request():
+            with calculations.request(connection):
                 return season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _: False)
 
         initial = report()
         assert report() == initial
+        assert kinds(config, "tv/Show/Season 1") == initial["seasons"][0]["kind"]
         if change == "confirmation":
             receipt = registration.confirmation_directory() / f"{preview['preview_id']}.json"
             saved = receipt.read_bytes()
@@ -1614,7 +1625,8 @@ def test_library_reuse_observes_native_confirmation_and_original_move(originals:
                 from_path="before.mkv", to_path="after.mkv", phase="move", checks_json="{}"))
         changed = report()
         assert changed != initial
-        with LibraryCalculations().request():
+        assert kinds(config, "tv/Show/Season 1") == changed["seasons"][0]["kind"]
+        with LibraryCalculations().request(connection):
             assert season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _: False) == changed
         if change == "confirmation":
             receipt.write_bytes(saved)

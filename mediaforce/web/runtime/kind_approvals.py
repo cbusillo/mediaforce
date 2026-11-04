@@ -12,7 +12,6 @@ the season's kind comes from its originals' traits
 import json
 import os
 import tempfile
-import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -25,15 +24,13 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_readonly_db
 from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifacts, item_events
-from mediaforce.library.calculation_reuse import reuse_library_calculation
+from mediaforce.library.calculation_reuse import LibraryCalculations, reuse_library_calculation
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, RUNNABLE_ENCODE_JOB_KINDS, load_queue_state
 from mediaforce.core.type_defs import object_dict
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES, derive_item_workflow_state
-from mediaforce.library.content_kinds import evidence_stamp, season_evidence, season_grouping, season_kind_report, \
-    season_stamp
-from mediaforce.library.source_evidence import SourceEvidenceContext
+from mediaforce.library.content_kinds import season_grouping, season_kind_report
 from mediaforce.tuning.calibration_jobs import load_latest_job, load_latest_jobs_for_prefixes
 from mediaforce.web.runtime.app_samples import sample_moments
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
@@ -120,16 +117,8 @@ def stop_kind_approval(config: MediaforceConfig, kind: str) -> bool:
 
 
 class SeasonKinds:
-    """Each season's kind from the live database, read again only when its evidence changes.
-
-    Pages ask for many seasons at once, so one library-wide evidence snapshot is shared until anything it
-    reads changes, and one season is worked out at a time so concurrent requests never repeat the work.
-    """
-
     def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._kinds: dict[str, tuple[tuple[Any, ...], str]] = {}
-        self._evidence: tuple[tuple[Any, ...], tuple[set[int], SourceEvidenceContext]] | None = None
+        self._calculations = LibraryCalculations()
 
     def __call__(self, config: MediaforceConfig, season_prefix: str) -> str | None:
         snapshot = _request_kind_contents.get()
@@ -139,18 +128,9 @@ class SeasonKinds:
                 return kind
         if not config.paths.db_path.exists():
             return None
-        with self._lock, open_readonly_db(config.paths.db_path) as connection:
-            shared = evidence_stamp(connection)
-            stamp = (shared, season_stamp(connection, season_prefix))
-            cached = self._kinds.get(season_prefix)
-            if cached is not None and cached[0] == stamp:
-                return cached[1]
-            if self._evidence is None or self._evidence[0] != shared:
-                self._evidence = (shared, season_evidence(connection))
-            kind = season_grouping(connection, season_prefix, library_types=config.library_type_map,
-                                   evidence=self._evidence[1]).kind
-            self._kinds[season_prefix] = (stamp, kind)
-            return kind
+        with open_readonly_db(config.paths.db_path) as connection, self._calculations.request(connection):
+            return season_grouping(connection, season_prefix, library_types=config.library_type_map).kind
+
 
 
 class KindAwareLoader:
