@@ -21,10 +21,11 @@ and written in plain words. A term the Director has to look up is a defect.
 Mediaforce is a native Mac app. An iOS and iPadOS companion app comes only
 after the Mac app is stable and the Director is happy with it. When something
 needs the Director, Mediaforce sends a notification and a badge, and the item
-itself says it is waiting. A piece moves to Swift when it is being rewritten
-anyway, has a clean boundary, and the move removes the Python rather than
-wrapping it; the encode and measurement pipeline stays where ffmpeg and the
-quality tools already are.
+itself says it is waiting.
+
+A piece moves to Swift when it is being rewritten anyway, has a clean
+boundary, and the move removes the Python rather than wrapping it; the encode
+and measurement pipeline stays where ffmpeg and the quality tools already are.
 
 Judge every change by one question: does this reclaim more of the library
 safely, with less of the Director's attention and less to decode?
