@@ -2377,7 +2377,16 @@ class WebStartupSettings:
 
 def main(argv: list[str] | None = None) -> None:
     args = _parse_web_startup_args(argv)
-    _load_project_env_file()
+    from mediaforce.ops.runtime_install import bundled_app_path
+
+    env_path = args.credentials
+    if bundled_app_path() is not None:
+        config = load_config(Path(args.config))
+        env_path = env_path or config.paths.db_path.parent / ".env"
+    if args.credentials is not None:
+        with args.credentials.open("rb"):
+            pass
+    _load_project_env_file(env_path)
     settings = _web_startup_settings(args)
     config = load_config(settings.config_path)
     if settings.reload_enabled:
@@ -2407,7 +2416,10 @@ def main(argv: list[str] | None = None) -> None:
 
 def _parse_web_startup_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="mediaforce-web", description="Run the Mediaforce server the Mac app talks to.")
-    parser.add_argument("--config", help="Path to the TOML config file")
+    from mediaforce.ops.runtime_install import bundled_app_path
+
+    parser.add_argument("--config", required=bundled_app_path() is not None, help="Path to the TOML config file")
+    parser.add_argument("--credentials", type=Path, help="Read credentials from this existing file")
     parser.add_argument("--host", help="Bind host for the FastAPI app")
     parser.add_argument("--port", type=int, help="Bind port for the FastAPI app")
     reload_group = parser.add_mutually_exclusive_group()
@@ -2472,9 +2484,8 @@ def create_reloadable_app() -> FastAPI:
     return create_app(config_path)
 
 
-def _load_project_env_file() -> None:
-    explicit_path = os.environ.get("MEDIAFORCE_ENV_FILE")
-    env_path = Path(explicit_path) if explicit_path else DEFAULT_CONFIG_PATH.parents[1] / ".env"
+def _load_project_env_file(env_path: Path | None = None) -> None:
+    env_path = env_path or DEFAULT_CONFIG_PATH.parents[1] / ".env"
     if not env_path.exists():
         return
     for line in env_path.read_text().splitlines():

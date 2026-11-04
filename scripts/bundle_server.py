@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import plistlib
 import re
@@ -14,6 +15,7 @@ import tomllib
 import urllib.request
 
 from scripts.verify_package_contents import verify_package_archives
+from mediaforce.ops.login_item import MACOS_SIGNING_TEAM
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +23,10 @@ MACHO_MAGICS = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe", b
 
 
 def run(*arguments: str | Path) -> str:
-    return subprocess.run([str(arg) for arg in arguments], check=True, text=True, capture_output=True, cwd=ROOT).stdout
+    try:
+        return subprocess.run([str(arg) for arg in arguments], check=True, text=True, capture_output=True, cwd=ROOT).stdout
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"{arguments[0]} failed: {exc.stderr or exc.stdout}") from exc
 
 
 def native_files(root: Path) -> list[Path]:
@@ -47,13 +52,34 @@ def verify_native_target(path: Path, architectures: set[str], minimum_os: str) -
 
     if not targets or any(version(target) > version(minimum_os) for target in targets):
         raise ValueError(f"Native code requires a newer macOS than {minimum_os}: {path}: {targets}")
-    linked = run("otool", "-L", path)
-    libraries = [line.strip().split(" (", 1)[0] for line in linked.splitlines() if line.startswith("\t")]
-    if any(not library.startswith(("/System/Library/", "/usr/lib/", "@rpath/", "@loader_path/", "@executable_path/")) for library in libraries):
+    libraries = re.findall(r"cmd LC_(?:LOAD_DYLIB|LOAD_WEAK_DYLIB|REEXPORT_DYLIB|LOAD_UPWARD_DYLIB)\s+cmdsize \d+\s+name (.*?) \(offset", commands)
+    if any(not relocatable_reference(library, path) for library in libraries):
         raise ValueError(f"Native dependency is not relocatable: {path}: {libraries}")
     rpaths = re.findall(r"cmd LC_RPATH\s+cmdsize \d+\s+path (.*?) \(offset", commands)
-    if any(not value.startswith(("@loader_path/", "@executable_path/")) for value in rpaths):
+    if any(not relocatable_reference(value, path) for value in rpaths):
         raise ValueError(f"Native search path is not relocatable: {path}: {rpaths}")
+
+
+def relocatable_reference(value: str, image: Path) -> bool:
+    if value.startswith("/"):
+        return os.path.normpath(value).startswith(("/System/Library/", "/usr/lib/"))
+    if value.startswith("@rpath/"):
+        return ".." not in Path(value).parts
+    bundle = next((parent for parent in image.parents if parent.suffix == ".app"), None)
+    if bundle is None:
+        return False
+    for prefix, base in (("@loader_path/", image.parent), ("@executable_path/", bundle / "Contents/MacOS")):
+        if value.startswith(prefix):
+            return (base / value[len(prefix):]).resolve().is_relative_to(bundle.resolve())
+    return False
+
+
+def signing_identity() -> str:
+    identities = re.findall(r'\b([0-9A-F]{40}) "Developer ID Application: [^"\n]+ \(' + MACOS_SIGNING_TEAM + r'\)"',
+                            run("security", "find-identity", "-v", "-p", "codesigning"))
+    if len(identities) != 1:
+        raise ValueError("Choose one Developer ID Application identity for Mediaforce's team with --identity")
+    return identities[0]
 
 
 def prepare_framework(destination: Path, cache: Path) -> None:
@@ -61,9 +87,15 @@ def prepare_framework(destination: Path, cache: Path) -> None:
     cache.mkdir(parents=True, exist_ok=True)
     archive = cache / f"{manifest['sha256']}.tar.gz"
     if not archive.exists():
-        with urllib.request.urlopen(manifest["url"], timeout=60) as response, archive.open("xb") as output:
-            while chunk := response.read(1024 * 1024):
-                output.write(chunk)
+        with tempfile.TemporaryDirectory(dir=cache) as scratch:
+            download = Path(scratch) / "download.tar.gz"
+            with urllib.request.urlopen(manifest["url"], timeout=60) as response, download.open("xb") as output:
+                while chunk := response.read(1024 * 1024):
+                    output.write(chunk)
+            with download.open("rb") as stream:
+                if hashlib.file_digest(stream, "sha256").hexdigest() != manifest["sha256"]:
+                    raise ValueError("Embedded Python download digest mismatch")
+            download.replace(archive)
     with archive.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     if digest != manifest["sha256"]:
@@ -102,7 +134,7 @@ def stage_server(app: Path, cache: Path, identity: str) -> None:
             run("uv", "pip", "install", "--target", server / architecture, "--requirements", requirements,
                 "--require-hashes", "--only-binary", ":all:", "--python-version", abi, "--python-platform", platform,
                 "--no-compile-bytecode", "--link-mode", "copy")
-    for directory in server.rglob("bin"):
+    for directory in (target / "bin" for target in server.iterdir()):
         if directory.is_dir():
             shutil.rmtree(directory)
     launcher = contents / "MacOS/mediaforce-server"
@@ -127,9 +159,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Stage and sign the embedded server in a built Mediaforce app.")
     parser.add_argument("app", type=Path)
     parser.add_argument("--cache", required=True, type=Path)
-    parser.add_argument("--identity", default="Developer ID Application")
+    parser.add_argument("--identity")
     args = parser.parse_args()
-    stage_server(args.app.resolve(strict=True), args.cache, args.identity)
+    stage_server(args.app.resolve(strict=True), args.cache, args.identity or signing_identity())
     return 0
 
 

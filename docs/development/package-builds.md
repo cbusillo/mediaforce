@@ -69,11 +69,16 @@ packaging and service installation never copy it. Shell environment values
 continue to take precedence.
 
 For an isolated installation with no existing service, the same executable
-accepts `--service install|enable|restart|disable|uninstall|status|logs` and uses
+accepts the existing `service install|enable|restart|disable|uninstall|status|logs` commands and uses
 the existing `com.mediaforce.web` LaunchAgent and log paths. Its working
 directory is the configured database's parent. Service setup verifies the
-signed bundle and refuses to replace another runtime or config. Use the later
+signed bundle and refuses to replace another runtime, build or config. A moved
+copy of the same signed app can repair its saved path once the old copy is
+absent; status and stop commands still address the saved service. Use the later
 safe update transaction for that transition; this build command does not
 perform a deployment. Closing the UI leaves the background service running.
 The existing runtime lock prevents another app copy from opening the same
 runtime or database, even on a different port.
+
+The application uses macOS certificate trust through `truststore`, preserving
+HTTPS verification without a checkout-specific OpenSSL certificate path.

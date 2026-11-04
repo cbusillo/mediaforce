@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import plistlib
 import subprocess
 import tempfile
@@ -13,6 +14,7 @@ from mediaforce.ops.runtime_install import RuntimeProtectionError, require_relea
 
 
 LOGIN_ITEM_LABEL = "com.mediaforce.web"
+MACOS_SIGNING_TEAM = "MM5YXC7T6E"
 BOOTOUT_ACCEPTED_EXIT_CODES = frozenset({0, 3, 36, 113})
 LOGIN_ITEM_LOG_ROTATION_BYTES = 16 * 1024 * 1024
 LOGIN_ITEM_PATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -86,6 +88,8 @@ def render_login_item_plist(paths: LoginItemPaths) -> bytes:
         "StandardOutPath": str(paths.stdout_log),
         "StandardErrorPath": str(paths.stderr_log),
     }
+    if paths.bundled:
+        payload["MediaforceAppCodeHash"] = _bundle_code_hash(paths.project_root)
     return plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=True)
 
 
@@ -145,12 +149,18 @@ def login_item_status(paths: LoginItemPaths, *, runner: CommandRunner | None = N
     _require_supported_platform()
     if not paths.plist.exists():
         return 4, [f"login item: not installed ({paths.plist})"]
-    rendered = render_login_item_plist(paths)
+    if paths.bundled and not paths.program.is_file():
+        return 3, ["login item: the saved app was moved or removed", f"  app      {paths.project_root}",
+                   "  next     run service enable from the moved copy of the same app, or restore it to the saved location"]
+    try:
+        rendered = render_login_item_plist(paths)
+    except (OSError, ValueError, KeyError, LoginItemError) as exc:
+        return 3, [f"login item: saved configuration is unavailable: {exc}"]
     if paths.plist.read_bytes() != rendered:
         return 3, [
             "login item: installed plist is stale",
             f"  plist    {paths.plist}",
-            "  next     run `uv run mediaforce service enable`",
+            "  next     run service enable from this app" if paths.bundled else "  next     run `uv run mediaforce service enable`",
         ]
     if not paths.program.is_file() or not os.access(paths.program, os.X_OK):
         return 3, [
@@ -213,22 +223,32 @@ def run_login_item_command(
             installed = plistlib.loads(plist.read_bytes())
             arguments = installed.get("ProgramArguments", [])
             installed_program = Path(arguments[0])
-            if requested_bundle and installed_program != LoginItemPaths(root, home).program:
-                raise ValueError("another app or legacy runtime owns the service; use the safe update transaction")
-            root = (
+            installed_root = (
                 installed_program.parents[2]
                 if installed_program.name == "mediaforce-server"
                 else Path(installed["WorkingDirectory"])
             )
+            if requested_bundle and action in {"install", "enable", "restart"}:
+                _require_same_bundle_install(LoginItemPaths(root, home), installed)
+            else:
+                root = installed_root
             if not root.is_absolute():
                 raise ValueError("working directory is not absolute")
             if "--config" in arguments:
-                config_path = Path(arguments[arguments.index("--config") + 1])
+                saved_config = Path(arguments[arguments.index("--config") + 1])
+                if action in {"install", "enable", "restart"} and config_path is not None and config_path != saved_config:
+                    raise ValueError("the requested config differs from the saved service config; use the safe update transaction")
+                config_path = saved_config
                 if not config_path.is_absolute():
                     raise ValueError("configuration path is not absolute")
             if "--credentials" in arguments:
-                credentials_path = Path(arguments[arguments.index("--credentials") + 1])
-        except (OSError, ValueError, KeyError, IndexError, TypeError, plistlib.InvalidFileException) as exc:
+                saved_credentials = Path(arguments[arguments.index("--credentials") + 1])
+            else:
+                saved_credentials = None
+            if action in {"install", "enable", "restart"} and credentials_path is not None and credentials_path != saved_credentials:
+                raise ValueError("the requested credential source differs from the saved service; use the safe update transaction")
+            credentials_path = saved_credentials
+        except (OSError, ValueError, KeyError, IndexError, TypeError, plistlib.InvalidFileException, LoginItemError) as exc:
             print(f"login item: cannot identify installed runtime: {exc}")
             return 1
     paths = LoginItemPaths(project_root=root.resolve(), home=home, config_path=config_path, credentials_path=credentials_path)
@@ -259,7 +279,7 @@ def run_login_item_command(
             return status
         if action == "logs":
             return _show_logs(paths.stderr_log if stderr else paths.stdout_log, follow=follow, lines=lines)
-    except LoginItemError as exc:
+    except (LoginItemError, OSError, ValueError, KeyError) as exc:
         print(f"login item: {exc}")
         return 1
     raise ValueError(f"Unsupported login item action: {action}")
@@ -281,8 +301,11 @@ def _atomic_write(path: Path, payload: bytes, *, mode: int = 0o644) -> None:
 
 
 def _require_bundled_install(paths: LoginItemPaths) -> None:
+    if "AppTranslocation" in paths.project_root.parts:
+        raise LoginItemError("move Mediaforce to its permanent location before setting up the background service")
     _require_success(
-        _run_command(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R", "anchor apple generic", str(paths.project_root)]),
+        _run_command(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R",
+                      f'anchor apple generic and certificate leaf[subject.OU] = "{MACOS_SIGNING_TEAM}"', str(paths.project_root)]),
         "verify the signed app bundle",
     )
     working = paths.working_directory.resolve()
@@ -298,8 +321,25 @@ def _require_bundled_install(paths: LoginItemPaths) -> None:
             raise LoginItemError("the saved credential source is unreadable") from exc
     if paths.plist.exists():
         installed = plistlib.loads(paths.plist.read_bytes())
-        if installed.get("ProgramArguments") != plistlib.loads(render_login_item_plist(paths))["ProgramArguments"]:
+        _require_same_bundle_install(paths, installed)
+        if installed.get("ProgramArguments", [])[1:] != plistlib.loads(render_login_item_plist(paths))["ProgramArguments"][1:]:
             raise LoginItemError("another app or configuration owns the service; use the safe update transaction")
+
+
+def _bundle_code_hash(bundle: Path) -> str:
+    with (bundle / "Contents/MacOS/Mediaforce").open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def _require_same_bundle_install(paths: LoginItemPaths, installed: dict[str, object]) -> None:
+    arguments = installed.get("ProgramArguments")
+    if not isinstance(arguments, list) or not arguments or not isinstance(arguments[0], str):
+        raise LoginItemError("the saved service has no executable")
+    saved_program = Path(arguments[0])
+    if installed.get("MediaforceAppCodeHash") != _bundle_code_hash(paths.project_root):
+        raise LoginItemError("another app or legacy runtime owns the service; use the safe update transaction")
+    if saved_program != paths.program and saved_program.exists():
+        raise LoginItemError("another copy of this app still owns the service; use that copy")
 
 
 def _carry_forward_runtime_env(paths: LoginItemPaths) -> None:

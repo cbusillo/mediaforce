@@ -38,10 +38,7 @@ int main(int argc, char **argv) {
         if (slash == NULL) return 1;
         *slash = '\0';
     }
-    int python_mode = argc > 1 && (
-        strcmp(argv[1], "-I") == 0 || strcmp(argv[1], "-S") == 0 ||
-        strcmp(argv[1], "-c") == 0 || strcmp(argv[1], "-m") == 0
-    );
+    int python_mode = argc > 1 && argv[1][0] == '-' && argv[1][1] != '-';
     char **arguments = calloc((size_t)argc + 3, sizeof(char *));
     if (arguments == NULL) return 1;
     arguments[0] = resolved;
@@ -53,6 +50,8 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) arguments[i + offset] = argv[i];
     PyConfig config;
     PyConfig_InitIsolatedConfig(&config);
+    config.parse_argv = 1;
+    config.install_signal_handlers = 1;
     config.write_bytecode = 0;
     config.user_site_directory = 0;
     config.site_import = 0;

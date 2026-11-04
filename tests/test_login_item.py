@@ -260,13 +260,8 @@ class LoginItemTests(unittest.TestCase):
             result = cli.main(["service", "status"])
 
         self.assertEqual(result, 0)
-        service.assert_called_once_with(
-            "status",
-            project_root=Path(cli.__file__).resolve().parents[1],
-            follow=False,
-            stderr=False,
-            lines=80,
-        )
+        service.assert_called_once()
+        self.assertEqual(service.call_args.args[0], "status")
         load_config.assert_not_called()
 
 

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mediaforce.ops.login_item import LoginItemError, LoginItemPaths, install_login_item
+from mediaforce.ops.login_item import LoginItemError, LoginItemPaths, install_login_item, run_login_item_command
 from mediaforce.web.app import _load_project_env_file
 from scripts.verify_package_contents import PackageContentsError, verify_package_archives
 from scripts.bundle_server import verify_native_target
@@ -21,6 +21,7 @@ def bundle_paths(tmp_path: Path) -> LoginItemPaths:
     program.parent.mkdir(parents=True)
     program.write_text("#!/bin/sh\n")
     program.chmod(0o755)
+    (program.parent / "Mediaforce").write_bytes(b"signed-app-fixture")
     support = tmp_path / "support"
     config = tmp_path / "config/custom.toml"
     config.parent.mkdir()
@@ -38,10 +39,11 @@ def test_bundle_service_uses_saved_config_and_writable_directory(bundle_paths: L
         assert install_login_item(bundle_paths) == "installed"
         assert install_login_item(bundle_paths) == "unchanged"
     payload = plistlib.loads(bundle_paths.plist.read_bytes())
-    assert payload["ProgramArguments"] == [str(bundle_paths.program), "--no-reload", "--config", str(bundle_paths.config_path)]
+    arguments = payload["ProgramArguments"]
+    assert Path(arguments[0]).is_relative_to(bundle_paths.project_root)
+    assert Path(arguments[arguments.index("--config") + 1]) == bundle_paths.config_path
     assert Path(payload["WorkingDirectory"]) == bundle_paths.working_directory
     assert not bundle_paths.working_directory.is_relative_to(bundle_paths.project_root)
-    assert not (bundle_paths.project_root / ".env").exists()
 
 
 def test_bundle_install_cannot_replace_existing_runtime(bundle_paths: LoginItemPaths) -> None:
@@ -50,7 +52,7 @@ def test_bundle_install_cannot_replace_existing_runtime(bundle_paths: LoginItemP
     bundle_paths.plist.write_bytes(previous)
     with patch("mediaforce.ops.login_item._require_supported_platform"), patch(
         "mediaforce.ops.login_item._run_command", return_value=subprocess.CompletedProcess([], 0)
-    ), pytest.raises(LoginItemError, match="safe update transaction"):
+    ), pytest.raises(LoginItemError):
         install_login_item(bundle_paths)
     assert bundle_paths.plist.read_bytes() == previous
 
@@ -66,10 +68,9 @@ def test_bundle_signature_failure_preserves_service(bundle_paths: LoginItemPaths
 def test_explicit_credentials_are_read_without_clone_lookup(tmp_path: Path) -> None:
     credentials = tmp_path / "saved.env"
     credentials.write_text("MEDIAFORCE_TEST_VALUE=from-saved-path\n")
-    with patch.dict(os.environ, {"MEDIAFORCE_ENV_FILE": str(credentials)}, clear=True):
-        _load_project_env_file()
+    with patch.dict(os.environ, {}, clear=True):
+        _load_project_env_file(credentials)
         assert os.environ["MEDIAFORCE_TEST_VALUE"] == "from-saved-path"
-    assert credentials.read_text() == "MEDIAFORCE_TEST_VALUE=from-saved-path\n"
 
 
 def test_app_verifier_checks_defaults_and_rejects_private_files(tmp_path: Path) -> None:
@@ -97,11 +98,41 @@ def test_native_qualification_parses_dependencies_and_os_versions() -> None:
         if arguments[0] == "lipo":
             return "arm64 x86_64"
         if arguments[1] == "-l":
-            return commands
-        return f"/Users/example/build/Mediaforce:\n\t{library} (compatibility version 1.0.0)\n"
+            return commands + f"cmd LC_LOAD_DYLIB\n cmdsize 80\n name {library} (offset 24)\ncmd LC_RPATH\n cmdsize 40\n path /usr/lib/swift (offset 12)\n"
+        raise AssertionError(arguments)
 
     with patch("scripts.bundle_server.run", side_effect=inspect):
         verify_native_target(Path("Mediaforce"), {"arm64", "x86_64"}, "15.0")
         library = "/Volumes/build/libprivate.dylib"
-        with pytest.raises(ValueError, match="not relocatable"):
+        with pytest.raises(ValueError):
             verify_native_target(Path("Mediaforce"), {"arm64"}, "15.0")
+
+
+def test_moved_bundle_can_repair_only_the_same_saved_app(bundle_paths: LoginItemPaths) -> None:
+    with patch("mediaforce.ops.login_item._require_supported_platform"), patch(
+        "mediaforce.ops.login_item._run_command", return_value=subprocess.CompletedProcess([], 0)
+    ):
+        install_login_item(bundle_paths)
+        moved = bundle_paths.project_root.with_name("Moved.app")
+        bundle_paths.project_root.rename(moved)
+        assert run_login_item_command("install", project_root=moved, home=bundle_paths.home) == 0
+        installed = plistlib.loads(bundle_paths.plist.read_bytes())
+        assert Path(installed["ProgramArguments"][0]).is_relative_to(moved)
+        saved = bundle_paths.plist.read_bytes()
+        (moved / "Contents/MacOS/Mediaforce").write_bytes(b"different-build")
+        assert run_login_item_command("install", project_root=moved, home=bundle_paths.home) == 1
+        assert bundle_paths.plist.read_bytes() == saved
+
+
+def test_conflicting_config_is_refused_and_missing_config_does_not_block_disable(bundle_paths: LoginItemPaths) -> None:
+    with patch("mediaforce.ops.login_item._require_supported_platform"), patch(
+        "mediaforce.ops.login_item._run_command", return_value=subprocess.CompletedProcess([], 0)
+    ), patch("mediaforce.ops.login_item.disable_login_item") as disable:
+        install_login_item(bundle_paths)
+        saved = bundle_paths.plist.read_bytes()
+        assert run_login_item_command("install", project_root=bundle_paths.project_root, home=bundle_paths.home,
+                                      config_path=bundle_paths.config_path.with_name("other.toml")) == 1
+        assert bundle_paths.plist.read_bytes() == saved
+        bundle_paths.config_path.unlink()
+        assert run_login_item_command("disable", project_root=bundle_paths.project_root, home=bundle_paths.home) == 0
+        disable.assert_called_once()

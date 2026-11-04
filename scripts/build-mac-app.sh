@@ -17,7 +17,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 derived_data="$repo_root/.build/mac-app"
 project="$repo_root/macos/Mediaforce.xcodeproj"
 # macOS gives an ad-hoc signed app no notification permission, so the installed copy is team-signed.
-team_id="MM5YXC7T6E"
+team_id="$(uv run --directory "$repo_root" python -c 'from mediaforce.ops.login_item import MACOS_SIGNING_TEAM; print(MACOS_SIGNING_TEAM)')"
 
 generate_project() {
 	command -v xcodegen >/dev/null || { echo "xcodegen is required (brew install xcodegen)" >&2; exit 1; }
