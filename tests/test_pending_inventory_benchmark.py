@@ -36,13 +36,12 @@ def test_classification_rejects_dropped_schedule_input() -> None:
         benchmark.verify_classification()
 
 
-def test_comparison_rejects_display_telemetry_corruption() -> None:
+def test_comparison_rejects_missing_display_schedule_state() -> None:
     original = benchmark.baseline.web_app._decorate_encode_queue_for_scheduler
     def corrupted_decoration(config: Any, queue: dict[str, Any]) -> dict[str, Any]:
         result = original(config, queue)
-        # Mutation occurs only in the compact pass; counts still agree.
         if encode_queue.list_pending_encode_jobs is not benchmark.full_pending_read:
-            result["queued"][0]["attempt_summary"] = "lost display telemetry"
+            result["queued"][0].pop("schedule_state")
         return result
 
     with patch.object(benchmark.baseline.web_app, "_decorate_encode_queue_for_scheduler", corrupted_decoration):
