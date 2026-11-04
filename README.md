@@ -989,3 +989,9 @@ same waiting items and links as Needs you, including original-backup cleanup.
 
 Past attempts still marked as held remain available below the current decisions;
 Activity does not clear those records or count them as new decisions.
+
+The main window reuses unchanged library calculations between refreshes. Saved
+library inputs, source measurements, output records, original-file approvals,
+metadata and settings determine when those calculations are rebuilt. Work status,
+current sample approvals and time-based season holds are read again for each
+request. Reuse has no timed expiry and adds no background process.

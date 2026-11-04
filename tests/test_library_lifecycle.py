@@ -20,6 +20,7 @@ from mediaforce.library.candidate_selection import (
     season_identity,
 )
 from mediaforce.library.representatives import load_representative_selection
+from mediaforce.library.calculation_reuse import LibraryCalculations
 from mediaforce.library.scanner import _failed_probe_summary, scan_library
 from mediaforce.library.run_manifests import build_run_manifest, create_folder_manifest, select_encode_candidates
 from mediaforce.library.workflow_state import EncodeEligibility, build_folder_workflow_state, \
@@ -40,6 +41,80 @@ class LibraryLifecycleTests(unittest.TestCase):
     def tearDown(self) -> None:
         reset_engine_cache()
         self.temp_dir.cleanup()
+
+    def test_reused_plans_refresh_time_holds_saved_changes_and_configuration(self) -> None:
+        from mediaforce.library import candidate_selection
+
+        config = self._config()
+        calculations = LibraryCalculations()
+        with open_db(config.paths.db_path) as connection:
+            self._insert_item(connection, "tv/Show/Season 1/Episode 01.mkv", age_days=5)
+            self._insert_series_metadata(connection, "tv/Show", status="Ended", in_production=False)
+            connection.commit()
+            with patch.object(candidate_selection, "_prepare_candidates", wraps=candidate_selection._prepare_candidates) as prepare:
+                def read(at: datetime = NOW) -> list[candidate_selection.CandidateDecision]:
+                    with calculations.request():
+                        return project_candidates(connection, config, prefixes=["tv/Show"], now=at)
+
+                first = read()
+                assert not first[0].eligible
+                first[0].row["rel_path"] = "caller mutation"
+                assert read(NOW + timedelta(days=40))[0].eligible
+                assert prepare.call_count == 1
+                assert read()[0].row["rel_path"] == "tv/Show/Season 1/Episode 01.mkv"
+                connection.execute(library_items.update().values(status="promoted"))
+                assert read()[0].workflow_lane != "encode"
+                assert prepare.call_count == 2
+                connection.rollback()
+                assert read()[0].workflow_lane == "encode"
+                config.raw.setdefault("overrides", []).append({"path_prefix": "tv/Show", "planning": {"season_acquisition_hold_days": 0}})
+                assert read()[0].eligible
+                assert prepare.call_count == 4
+
+    def test_reused_motion_checks_follow_measurements_keeps_and_source_changes(self) -> None:
+        from mediaforce.core.db_tables import motion_keep_decisions
+        from mediaforce.library import motion_holds
+        from mediaforce.library.evidence_state import sync_library_item_evidence_state
+        from test_evidence_state import EvidenceStateProjectionTests
+
+        config = self._config()
+        calculations = LibraryCalculations()
+        with open_db(config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, "tv/Show/Season 1/Episode 01.mkv", age_days=100)
+            decisions = project_candidates(connection, config, now=NOW)
+
+            def read() -> motion_holds.MotionHolds:
+                with calculations.request():
+                    return motion_holds.queue_motion_holds(connection, decisions)
+
+            with patch.object(motion_holds, "_queue_motion_holds", wraps=motion_holds._queue_motion_holds) as partition:
+                assert item_id in read().check_needed
+                assert item_id in read().check_needed
+                assert partition.call_count == 1
+                connection.execute(library_items.update().values(cadence_summary_json=EvidenceStateProjectionTests._cadence_summary()))
+                item = connection.execute(library_items.select()).mappings().one()
+                sync_library_item_evidence_state(connection, {str(key): value for key, value in item.items()}, "cadence_analysis")
+                assert item_id not in read().held | read().check_needed
+                connection.execute(motion_keep_decisions.insert().values(library_item_id=item_id,
+                    source_fingerprint=item["fingerprint"], prefix="tv/Show/Season 1", reason_code="motion", kept_at="now"))
+                assert item_id in read().kept
+                connection.execute(library_items.update().values(content_version_fingerprint="new source"))
+                assert item_id in read().check_needed
+                assert item_id not in read().kept
+                assert partition.call_count == 4
+
+    def test_files_in_one_folder_keep_their_own_season_mismatch_hold(self) -> None:
+        config = self._config()
+        with open_db(config.paths.db_path) as connection:
+            first = self._insert_item(connection, "tv/Show/Season 1/Episode 01.mkv", age_days=100)
+            conflicting = self._insert_item(connection, "tv/Show/Season 1/Episode 02.mkv", age_days=100)
+            self._insert_series_metadata(connection, "tv/Show", status="Ended", in_production=False)
+            self._insert_plex_metadata(connection, conflicting, season_index=2, added_at=NOW - timedelta(days=100))
+            with LibraryCalculations().request():
+                decisions = {decision.item_id: decision for decision in project_candidates(connection, config, now=NOW)}
+            assert decisions[first].eligible
+            assert not decisions[conflicting].eligible
+            assert [reason.code for reason in decisions[conflicting].hold_reasons] == ["season_identity_conflict"]
 
     def test_season_identity_uses_numbered_folders_and_excludes_specials(self) -> None:
         numbered = season_identity({"rel_path": "tv/Big Brother/Season 027/Episode 01.mkv"})

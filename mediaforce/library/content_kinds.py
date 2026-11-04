@@ -8,9 +8,10 @@ from sqlalchemy import func, literal_column, select
 
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_item_evidence_state, library_items, series_metadata, source_admissions, source_measurements, \
-    source_transitions, source_versions, staged_artifacts, target_production_outcomes
+    source_transitions, source_versions, source_moves, staged_artifacts, target_production_outcomes, motion_keep_decisions
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.library.candidate_selection import season_identity
+from mediaforce.library.calculation_reuse import reuse_library_calculation
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, SourceEvidence, SourceEvidenceContext, load_source_evidence_bulk, load_source_evidence_context
 
@@ -300,9 +301,6 @@ def season_kind_report(
         sample_seasons: Collection[str] = (),
     measurement_roots: Collection[str] | None = None,
 ) -> dict[str, Any]:
-    admitted = _admitted_item_ids(connection)
-    context = load_source_evidence_context(connection)
-    animation = _series_animation(connection)
     items = _present_items(connection)
     seasons, series_of = _seasons(items, library_types)
     # A file kept original is finished; it still measures as an original but no longer waits.
@@ -312,12 +310,36 @@ def season_kind_report(
     approved = {prefix for prefix, waiting in waiting_by_season.items() if waiting and folder_approved(prefix)}
     measured_seasons = {prefix for prefix, waiting in waiting_by_season.items()
                         if (waiting and prefix not in approved) or prefix in sample_seasons}
-    evidence_by_item = load_source_evidence_bulk(
-        connection, (int(item["id"]) for prefix in measured_seasons for item in seasons[prefix] if int(item["id"]) in admitted),
-        context=context,
+    from mediaforce.library.source_intake import encoder_rule_hash
+
+    confirmations = _original_confirmation_inputs(connection)
+
+    def measure() -> tuple[dict[str, list[str]], dict[str, SeasonGrouping]]:
+        admitted = _admitted_item_ids(connection)
+        context = load_source_evidence_context(connection)
+        animation = _series_animation(connection)
+        evidence = load_source_evidence_bulk(
+            connection, (int(item["id"]) for prefix in measured_seasons for item in seasons[prefix] if int(item["id"]) in admitted),
+            context=context,
+        )
+        measured_groupings = {prefix: season_kind(_original_traits(seasons[prefix], admitted, evidence),
+                                         animated=animation.get(series_of[prefix])) for prefix in measured_seasons}
+        reasons = {prefix: _measurement_reasons(waiting_by_season[prefix], evidence, {}, measurement_roots)
+                   for prefix, measured_grouping in measured_groupings.items() if measured_grouping.reason == "no_measured_original"}
+        return reasons, measured_groupings
+
+    reasons_by_season, groupings = reuse_library_calculation(
+        connection, "season_measurements",
+        (select(library_items.c.id, library_items.c.rel_path, library_items.c.media_root, library_items.c.video_codec,
+                library_items.c.size_bytes, library_items.c.status, library_items.c.active_source_version_id,
+                library_items.c.content_version_fingerprint, library_items.c.missing_since),
+         *(select(table) for table in (source_versions, source_admissions, source_measurements, source_transitions, source_moves,
+                                      staged_artifacts, target_production_outcomes, series_metadata, motion_keep_decisions))),
+        (frozenset(measured_seasons), tuple(sorted(library_types.items())), confirmations,
+         None if measurement_roots is None else frozenset(measurement_roots),
+         json.dumps(HISTORICAL_OUTPUT_PROFILES, sort_keys=True), encoder_rule_hash()), measure,
+        inputs_current=lambda: confirmations == _original_confirmation_inputs(connection),
     )
-    groupings = {prefix: season_kind(_original_traits(seasons[prefix], admitted, evidence_by_item),
-                                    animated=animation.get(series_of[prefix])) for prefix in measured_seasons}
     failed = _failed_measurements(connection)
     rows = []
     totals: dict[str, Counter[str]] = defaultdict(Counter)
@@ -333,7 +355,8 @@ def season_kind_report(
         totals[grouping.kind]["seasons"] += 1
         totals[grouping.kind]["waiting_bytes"] += waiting_bytes
         rows.append({"season": prefix, **grouping.to_payload(),
-                     "measurement_reasons": _measurement_reasons(waiting, evidence_by_item, failed, measurement_roots)
+                     "measurement_reasons": sorted(set(reasons_by_season.get(prefix, ()))
+                                                   | {failed[int(item["id"])] for item in waiting if int(item["id"]) in failed})
                      if grouping.reason == "no_measured_original" else [],
                      "waiting_episodes": len(waiting),
                      "waiting_bytes": waiting_bytes})
@@ -354,3 +377,24 @@ def season_kind_report(
     if sample_seasons:
         report["kinds_by_season"] = {prefix: groupings[prefix].kind for prefix in sample_seasons if prefix in groupings}
     return report
+
+
+def _original_confirmation_inputs(connection: DBClient) -> list[tuple[str, bytes | None]]:
+    from mediaforce.library.original_registration import confirmation_directory, _identifier
+
+    references = connection.execute(select(source_admissions.c.confirmation_ref).where(
+        source_admissions.c.tier == "proven", source_admissions.c.basis == "owner",
+    ).distinct()).scalars()
+    inputs = []
+    for reference in sorted(str(value or "") for value in references):
+        try:
+            identifier = _identifier(reference.removeprefix("mac-app:"))
+        except ValueError:
+            continue
+        for suffix in (".json", ".dismissed"):
+            path = confirmation_directory() / f"{identifier}{suffix}"
+            try:
+                inputs.append((str(path), path.read_bytes()))
+            except OSError:
+                inputs.append((str(path), None))
+    return inputs

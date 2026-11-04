@@ -68,6 +68,7 @@ from mediaforce.execution import (
     search_quality_for_source,
     validate_manifest_items,
 )
+from mediaforce.library.calculation_reuse import LibraryCalculations
 from mediaforce.library.evidence_worker import default_evidence_worker_deps
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.background_work import background_work_is_paused, ensure_background_work_state
@@ -1189,8 +1190,10 @@ def create_app(
 
     from mediaforce.library.original_registration import list_original_previews
 
+    library_calculations = LibraryCalculations()
+
     def _main_window_payload() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection, kind_snapshot(connection, config, _load_calibration_state):
+        with library_calculations.request(), open_db(config.paths.db_path) as connection, kind_snapshot(connection, config, _load_calibration_state):
             cards = [asdict(card) for card in _list_library_detail_cards(config, connection)]
             payload = app_window_payload(
                 connection,

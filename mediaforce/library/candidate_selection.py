@@ -1,7 +1,7 @@
 import re
 from collections import Counter, defaultdict
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -13,6 +13,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, plex_item_metadata, series_metadata, staged_artifacts
 from mediaforce.core.type_defs import object_dict
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
+from mediaforce.library.calculation_reuse import reuse_library_calculation
 from mediaforce.library.library_settings import normalize_library_policy, normalize_library_type
 from mediaforce.library.media_scopes import (
     MediaScope,
@@ -220,6 +221,55 @@ def project_candidates(
         manual_override_prefixes: Collection[str] | None = None,
 ) -> list[CandidateDecision]:
     current_time = (now or datetime.now(tz=UTC)).astimezone(UTC)
+    plans = reuse_library_calculation(
+        connection, "candidate_plans", tuple(select(table) for table in (library_items, staged_artifacts, plex_item_metadata, series_metadata)),
+        (config.raw, config.paths, prefixes, statuses, manual_override_prefix, manual_override_prefixes),
+        lambda: _prepare_candidates(connection, config, prefixes=prefixes, statuses=statuses,
+                                    manual_override_prefix=manual_override_prefix, manual_override_prefixes=manual_override_prefixes),
+        copy_result=_copy_candidate_plans,
+    )
+    decisions = []
+    current_by_season: dict[SeasonIdentity | str, tuple[ProviderState, str | None, datetime | None, tuple[HoldReason, ...]]] = {}
+    for plan in plans:
+        decision = plan.decision
+        key = decision.season if decision.season is not None else str(decision.row["rel_path"])
+        if key not in current_by_season:
+            provider, status, observed = _provider_state(plan.metadata, now=current_time, stale_after=timedelta(days=plan.stale_days))
+            reasons = _hold_reasons(
+                season=decision.season, policy_enabled=plan.policy_enabled, mode=decision.policy_mode, provider_state=provider,
+                is_current=decision.is_current_season, activity_at=decision.season_activity_at, arrival_at=plan.arrival_at,
+                now=current_time, acquisition_days=plan.acquisition_days, inactive_days=plan.inactive_days,
+            )
+            current_by_season[key] = provider, status, observed, reasons
+        provider, status, observed, reasons = current_by_season[key]
+        decisions.append(replace(decision, provider_state=provider, provider_status=status, provider_observed_at=observed, hold_reasons=reasons))
+    return decisions
+
+
+@dataclass(frozen=True, slots=True)
+class _CandidatePlan:
+    decision: CandidateDecision
+    metadata: dict[str, Any]
+    policy_enabled: bool
+    acquisition_days: int
+    inactive_days: int
+    stale_days: int
+    arrival_at: datetime | None
+
+
+def _copy_candidate_plans(plans: list[_CandidatePlan]) -> list[_CandidatePlan]:
+    return [replace(plan, decision=replace(plan.decision, row=dict(plan.decision.row))) for plan in plans]
+
+
+def _prepare_candidates(
+        connection: DBClient,
+        config: MediaforceConfig,
+        *,
+        prefixes: list[str] | None = None,
+        statuses: set[str] | frozenset[str] | None = None,
+        manual_override_prefix: str | None = None,
+        manual_override_prefixes: Collection[str] | None = None,
+) -> list[_CandidatePlan]:
     library_types = config.library_type_map
     library_definitions = config.library_definition_map
     resolved_scopes = resolve_media_scopes(
@@ -307,7 +357,7 @@ def project_candidates(
     normalized_override = normalize_scope_prefix(manual_override_prefix or "")
     if normalized_override:
         normalized_overrides.add(normalized_override)
-    decisions: list[CandidateDecision] = []
+    plans: list[_CandidatePlan] = []
     production_roots = set(config.source_root_map)
     scan_roots = set(config.scan_source_root_map)
     library_context_by_root: dict[str, tuple[dict[str, Any], str, dict[str, Any]]] = {}
@@ -394,11 +444,6 @@ def project_candidates(
         inactive_days = _duration_days(policy.get("current_season_inactive_days"), 365)
         stale_days = _positive_int(policy.get("series_metadata_stale_days"), 7)
         series_metadata_row = metadata_by_series.get(season.series_prefix, {}) if season is not None else {}
-        provider_state, provider_status, provider_observed_at = _provider_state(
-            series_metadata_row,
-            now=current_time,
-            stale_after=timedelta(days=stale_days),
-        )
         highest_number = (
             max(numbered_by_series.get(season.series_prefix, set()), default=None)
             if season is not None
@@ -417,32 +462,19 @@ def project_candidates(
             and season is not None
             and season.season_prefix in normalized_overrides
         )
-        hold_reasons = _hold_reasons(
-            season=season,
-            policy_enabled=policy_enabled,
-            mode=mode,
-            provider_state=provider_state,
-            is_current=is_current,
-            activity_at=activity_at,
-            arrival_at=arrival_at,
-            now=current_time,
-            acquisition_days=acquisition_days,
-            inactive_days=inactive_days,
-        )
-        decisions.append(
-            CandidateDecision(
+        decision = CandidateDecision(
                 row=row,
                 workflow_lane=workflow_lane,
                 season=season,
                 policy_mode=mode,
-                provider_state=provider_state,
-                provider_status=provider_status,
-                provider_observed_at=provider_observed_at,
+                provider_state="unknown",
+                provider_status=None,
+                provider_observed_at=None,
                 is_current_season=is_current,
                 age=_media_age(row),
                 season_rank_age=rank_age,
                 season_activity_at=activity_at,
-                hold_reasons=hold_reasons,
+                hold_reasons=(),
                 manual_override=manual_override,
                 media_role=membership.role if membership is not None else None,
                 production_included=production_included,
@@ -452,8 +484,8 @@ def project_candidates(
                 ranking_mode=ranking_mode,
                 media_domain=library_type,
             )
-        )
-    return decisions
+        plans.append(_CandidatePlan(decision, series_metadata_row, policy_enabled, acquisition_days, inactive_days, stale_days, arrival_at))
+    return plans
 
 
 def encode_candidate_decisions(

@@ -16,8 +16,9 @@ from typing import Any
 from sqlalchemy import select
 
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import library_item_evidence_state, library_items
-from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, cadence_awaits_as_is_decision
+from mediaforce.core.db_tables import library_item_evidence_state, library_items, motion_keep_decisions
+from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, cadence_awaits_as_is_decision, cadence_policy_snapshot
+from mediaforce.library.calculation_reuse import reuse_library_calculation
 from mediaforce.library.candidate_selection import CandidateDecision, MotionHolds
 from mediaforce.library.evidence_state import EVIDENCE_STATE_ANALYSIS_REQUIRED, \
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, project_library_item_evidence_state, \
@@ -123,13 +124,18 @@ def cadence_safety_partition(
 
 
 def queue_motion_holds(connection: DBClient, decisions: Sequence[CandidateDecision]) -> MotionHolds:
-    """How the queue's motion-pattern gate splits these encode candidates, read without changing anything.
+    return reuse_library_calculation(
+        connection, "motion_holds",
+        (select(library_items.c.id, library_items.c.missing_since, library_items.c.fingerprint,
+                library_items.c.content_version_fingerprint, library_items.c.cadence_summary_json),
+         select(library_item_evidence_state).where(library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND),
+         select(motion_keep_decisions)),
+        (tuple(decision.item_id for decision in decisions if decision.workflow_lane == "encode"), cadence_policy_snapshot()),
+        lambda: _queue_motion_holds(connection, decisions),
+    )
 
-    Pages and library cards use this so they count and offer only what queueing takes; it is the same
-    split `cadence_queue_partition` makes, without syncing evidence rows or queueing checks. Like that
-    gate it covers every media domain and every candidate, including files a lifecycle hold protects,
-    since an override lifts the hold but never the motion-pattern gate.
-    """
+
+def _queue_motion_holds(connection: DBClient, decisions: Sequence[CandidateDecision]) -> MotionHolds:
     partition = cadence_safety_partition(
         connection,
         library_item_ids=[decision.item_id for decision in decisions if decision.workflow_lane == "encode"],

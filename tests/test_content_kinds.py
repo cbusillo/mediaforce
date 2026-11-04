@@ -10,10 +10,11 @@ from sqlalchemy import create_engine, event, select
 from mediaforce import cli
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import library_items, metadata, motion_keep_decisions, series_metadata, source_admissions, source_generations, source_measurements
+from mediaforce.core.db_tables import library_items, metadata, motion_keep_decisions, series_metadata, source_admissions, source_generations, source_measurements, source_versions, source_transitions, staged_artifacts, target_production_outcomes
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.utils import timestamp
 from mediaforce.library.content_kinds import EpisodeTraits, season_kind, season_kind_report
+from mediaforce.library.calculation_reuse import LibraryCalculations
 from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, append_measurement, append_version, json_text, \
     load_source_evidence, load_source_evidence_bulk
 from mediaforce.web.runtime.folder_state import state_slug
@@ -27,7 +28,8 @@ def connection() -> Iterator[DBClient]:
         database.exec_driver_sql("PRAGMA foreign_keys=ON")
         metadata.create_all(database)
         database.commit()
-        yield database
+        with LibraryCalculations().request():
+            yield database
     engine.dispose()
 
 
@@ -257,3 +259,68 @@ def test_unmeasured_seasons_outside_automatic_intake_name_the_prerequisite(
                              measurement_roots=roots)["seasons"][0]
     assert row["kind"] == "unmeasured"
     assert row["measurement_reasons"] == [reason]
+
+
+@pytest.mark.parametrize("change", ["measurement", "admission", "genre", "source", "missing", "kept", "library_type", "measurement_root", "approval", "version", "pending_change", "finished_encode", "production_receipt", "deleted_measurement"])
+def test_reused_classifications_follow_changed_saved_inputs(connection: DBClient, change: str) -> None:
+    from unittest.mock import patch
+    from mediaforce.library import content_kinds
+
+    prefix = "tv/Drama/Season 1"
+    item_id = _item(connection, f"{prefix}/published.mkv", status="promoted", codec="av1", current_dark=0.0)
+    _admit_historical_original(connection, item_id, dark=0.5)
+    waiting_id = _item(connection, f"{prefix}/waiting.mkv", status="discovered", codec="h264", current_dark=0.0)
+    connection.execute(series_metadata.insert().values(series_prefix="tv/Drama", tmdb_genres_json='["Drama"]', updated_at="now"))
+    library_types = {"tv": "tv"}
+    measurement_roots = {"tv"}
+    approved = False
+
+    def report() -> dict[str, Any]:
+        return season_kind_report(connection, library_types=library_types, folder_approved=lambda _: approved,
+                                  measurement_roots=measurement_roots)
+
+    with patch.object(content_kinds, "load_source_evidence_bulk", wraps=load_source_evidence_bulk) as load:
+        initial = report()
+        assert report() == initial
+        assert load.call_count == 1
+        if change == "measurement":
+            connection.execute(source_measurements.update().values(summary_json=json.dumps(_fingerprint(0.0))))
+        elif change == "admission":
+            connection.execute(source_admissions.update().values(tier="unknown"))
+        elif change == "version":
+            connection.execute(source_versions.update().where(source_versions.c.role == "input").values(profile_json='{"width": 3840, "height": 2160}'))
+        elif change == "pending_change":
+            active = connection.execute(select(library_items.c.active_source_version_id).where(library_items.c.id == item_id)).scalar_one()
+            connection.execute(source_transitions.insert().values(operation_id="moving", library_item_id=item_id,
+                before_version_id=active, after_version_id=active, expected_revision=0, kind="publish", outcome="prepared", evidence_json="{}", recorded_at="now"))
+        elif change == "finished_encode":
+            connection.execute(staged_artifacts.insert().values(library_item_id=waiting_id, staging_path="output.mkv", updated_at="now",
+                encode_completed_at="now", encode_origin="queue", encode_command_json='["-c:v", "libx264"]'))
+        elif change == "production_receipt":
+            payload = {"encode_command_json": '["-c:v", "libx264"]', "encode_origin": "queue"}
+            connection.execute(target_production_outcomes.insert().values(receipt_id="receipt", library_item_id=waiting_id,
+                observation_id="observation", manifest_run_id="run", item_index=0, encode_job_id="job", promoted_content_fingerprint="output",
+                payload_json=json.dumps(payload), payload_sha256=stable_json_hash(payload), recorded_at="now"))
+        elif change == "deleted_measurement":
+            connection.execute(source_measurements.delete())
+        elif change == "genre":
+            connection.execute(series_metadata.update().values(tmdb_genres_json='["Animation"]'))
+        elif change == "source":
+            connection.execute(library_items.update().where(library_items.c.id == item_id).values(content_version_fingerprint="changed"))
+        elif change == "missing":
+            connection.execute(library_items.update().where(library_items.c.id == item_id).values(missing_since="now"))
+        elif change == "kept":
+            connection.execute(motion_keep_decisions.insert().values(library_item_id=waiting_id, source_fingerprint=f"sample-{prefix}/waiting.mkv",
+                                                                    prefix=prefix, kept_at="now", reason_code="motion"))
+        elif change == "library_type":
+            library_types["tv"] = "movie"
+        elif change == "measurement_root":
+            measurement_roots.clear()
+        else:
+            approved = True
+        changed = report()
+        assert load.call_count == 2
+    with LibraryCalculations().request():
+        assert report() == changed
+    if change != "measurement_root":
+        assert changed != initial

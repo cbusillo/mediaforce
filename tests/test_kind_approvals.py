@@ -25,6 +25,7 @@ from mediaforce.encoding.free_space import ReservePreflight
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
 from mediaforce.web.runtime.encode_runtime import CONTROLLER_RESTART_STOP_REASON, KEPT_ORIGINAL_TERMINAL_REASON, unfinished_child_reason
 from mediaforce.library.content_kinds import season_evidence, season_grouping
+from mediaforce.library.calculation_reuse import LibraryCalculations
 from mediaforce.library.source_evidence import append_measurement, append_version
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK
@@ -1518,3 +1519,31 @@ def test_window_kind_snapshot_reuses_measurements_and_refreshes_genre_changes(tm
             assert kinds(config, SEASON) == "cartoon"
             assert effective_production_approval(config, EPISODE, load) is None
         assert kinds(config, SEASON) == "cartoon"
+
+
+def test_reused_library_classifications_do_not_retain_kind_approval_or_work_status(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    kinds = SeasonKinds()
+    load = KindAwareLoader(lambda *_args: None, kinds)
+    calculations = LibraryCalculations()
+    with open_db(config.paths.db_path) as connection:
+        item_id = _content_item(connection, EPISODE, status="discovered", codec="h264", current_dark=0.5)
+        _admit_historical_original(connection, item_id, dark=0.5)
+        connection.execute(series_metadata.insert().values(series_prefix="tv/Thriller", tmdb_genres_json='["Drama"]', updated_at="now"))
+        connection.commit()
+
+        def read_approval() -> Any:
+            with calculations.request(), kind_snapshot(connection, config, load):
+                return effective_production_approval(config, EPISODE, load)
+
+        assert read_approval() is None
+        assert approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")["ok"]
+        assert read_approval() is not None
+        assert stop_kind_approval(config, DARKER)
+        assert read_approval() is None
+        with calculations.request(), kind_snapshot(connection, config, load):
+            before = kinds_payload(connection, config, load_calibration_state=load)
+        _finished_sample(config, SEASON)
+        with calculations.request(), kind_snapshot(connection, config, load):
+            after = kinds_payload(connection, config, load_calibration_state=load)
+        assert before != after
