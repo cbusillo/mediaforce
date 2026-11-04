@@ -142,6 +142,7 @@ def stage_server(app: Path, cache: Path, identity: str) -> None:
         f"-mmacosx-version-min={minimum_os}", f'-DPYTHON_ABI="{abi}"', "-F", contents / "Frameworks", "-framework", "Python",
         "-I", framework / "Headers", "-Wl,-rpath,@executable_path/../Frameworks", ROOT / "macos/server-launcher.c",
         "-o", launcher)
+    shutil.rmtree(framework / "Versions" / abi / "lib" / f"python{abi}" / "test")
     for path in framework.rglob("*.o"):
         path.unlink()
     images = native_files(contents)
