@@ -1,8 +1,8 @@
 # Bundled server and Sparkle delivery proposal
 
-Draft for the review requested on [the packaging issue](https://github.com/cbusillo/mediaforce/issues/1044).
-Landing this document records a proposal; it does not approve its unsettled
-choices, authorize a release, or change the installed controller.
+Approved by [Director decision Q1243](https://github.com/cbusillo/mediaforce/issues/1044#issuecomment-6620011689).
+Approval permits implementation of this plan; a separate release request and
+any new access grants remain required.
 
 ## Settled direction and present implementation
 
@@ -20,7 +20,7 @@ checked database backup, switches that LaunchAgent and installs the app.
 There is no notarized Mediaforce release workflow or bundled Python engine.
 [Release flow](release-flow.md) remains the operating procedure until cutover.
 
-## Recommendation for review
+## Approved recommendation
 
 Keep the existing per-user background service and API, but launch its server
 from the installed app. Extend the current deploy transaction into one local
@@ -29,9 +29,10 @@ app together with the matching database backup, saved launch configuration
 and settings evidence. Do not introduce a privileged daemon, second server
 installer, release-clone manager, channel hierarchy or custom Sparkle installer.
 
-The proposed service lifecycle, Python packaging, update consent, feed hosting
-and rollback retention below need the Director's review before implementation.
-They are recommendations, not additional decisions inferred from Sparkle.
+Q1243 approves the recommended options below; the review alternatives are
+retained only as context for that decision.
+
+Embedded Python is a packaging choice, not a commitment to keep the server in Python; a piece may move to native Swift when it is being rewritten anyway and the move deletes Python rather than duplicating it. A full port is not planned.
 
 Considered `SMAppService.agent(plistName:)` with a bundled LaunchAgent and
 bundle-relative `BundleProgram`, which could remove our absolute-path plist
