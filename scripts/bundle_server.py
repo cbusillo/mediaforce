@@ -100,7 +100,7 @@ def prepare_framework(destination: Path, cache: Path) -> None:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     if digest != manifest["sha256"]:
         raise ValueError(f"Embedded Python digest mismatch: {archive}")
-    with tempfile.TemporaryDirectory(dir=cache) as scratch:
+    with tempfile.TemporaryDirectory(dir=cache, prefix=".python-support-", ignore_cleanup_errors=True) as scratch:
         with tarfile.open(archive) as source:
             source.extractall(scratch, filter="data")
         shutil.copytree(Path(scratch) / manifest["framework_source_path"], destination, symlinks=True)
