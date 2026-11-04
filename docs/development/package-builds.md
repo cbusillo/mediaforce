@@ -39,3 +39,41 @@ replace backend, Mac app, CLI, or PyCharm checks.
 The CI `tests` job runs the package build and verifier, and the required
 `acceptance` check passes only when it does, so package privacy
 is a required pull-request signal rather than a manual release convention.
+
+## Embedded Mac server
+
+The approved bundled-server plan is being delivered in steps. The existing
+controller deploy remains the installed delivery path until the separate
+update/rollback and release cutover work is complete.
+
+Build a signed app with its own universal Python runtime and locked server
+packages using the existing Mac build entrypoint:
+
+```bash
+bash scripts/build-mac-app.sh bundle /absolute/output /absolute/runtime-cache
+```
+
+The cache holds the digest-pinned Python support archive. Packaging installs
+only wheels from the lockfile, separately for the architectures in the built
+Release app. Native code must support the app's minimum macOS version, and is
+signed inside out with library validation retained. No encoder, SSH account,
+private config, credential file, database or media is bundled. The existing
+package verifier also accepts a staged `.app` directory.
+
+The embedded entrypoint is `Mediaforce.app/Contents/MacOS/mediaforce-server`.
+It requires `--config /absolute/saved-config.toml` and keeps the configured
+database, settings and other writable state outside the app. A private `.env`
+beside that database supplies optional environment defaults. An existing
+credential source can instead be read in place with `--credentials /absolute/path`;
+packaging and service installation never copy it. Shell environment values
+continue to take precedence.
+
+For an isolated installation with no existing service, the same executable
+accepts `--service install|enable|restart|disable|uninstall|status|logs` and uses
+the existing `com.mediaforce.web` LaunchAgent and log paths. Its working
+directory is the configured database's parent. Service setup verifies the
+signed bundle and refuses to replace another runtime or config. Use the later
+safe update transaction for that transition; this build command does not
+perform a deployment. Closing the UI leaves the background service running.
+The existing runtime lock prevents another app copy from opening the same
+runtime or database, even on a different port.

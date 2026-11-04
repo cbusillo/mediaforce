@@ -1,0 +1,4 @@
+python_abi = "3.13"
+framework_source_path = "Python.xcframework/macos-arm64_x86_64/Python.framework"
+url = "https://github.com/beeware/Python-Apple-support/releases/download/3.13-b14/Python-3.13-macOS-support.b14.tar.gz"
+sha256 = "771f1187a1a7da970f4b5bf6a9208a7d3ca6ef40f2fa1ee7ad9b780eb5a7cf66"

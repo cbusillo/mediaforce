@@ -118,6 +118,18 @@ def verify_package_archives(
 def _archive_members(
         archive: Path,
 ) -> _ArchiveView:
+    if archive.is_dir() and archive.suffix == ".app":
+        members = []
+        root = archive.resolve()
+        for path in archive.rglob("*"):
+            if path.is_symlink() and not path.resolve().is_relative_to(root):
+                raise PackageContentsError(f"App link escapes its bundle: {path}")
+            if path.is_file() and not path.is_symlink():
+                members.append(_ArchiveMember(
+                    path=PurePosixPath(path.relative_to(archive).as_posix()),
+                    size=path.stat().st_size, read=path.read_bytes,
+                ))
+        return _ArchiveView(members=tuple(members), close=lambda: None)
     if archive.suffix == ".whl":
         wheel = zipfile.ZipFile(archive)
         members = tuple(
@@ -172,6 +184,9 @@ def _reject_forbidden_members(archive: Path, members: Iterable[PurePosixPath]) -
 
 
 def _without_sdist_root(member: PurePosixPath) -> PurePosixPath:
+    bundled_prefix = ("Contents", "Resources", "server", "app")
+    if member.parts[:4] == bundled_prefix:
+        return PurePosixPath(*member.parts[4:])
     if len(member.parts) > 1 and SDIST_ROOT_RE.fullmatch(member.parts[0]):
         return PurePosixPath(*member.parts[1:])
     return member
@@ -180,6 +195,8 @@ def _without_sdist_root(member: PurePosixPath) -> PurePosixPath:
 def _scan_archive_text(archive: Path, members: Iterable[_ArchiveMember]) -> None:
     private_path = str(Path.home()).encode("utf-8")
     for member in members:
+        if member.path.parts[:3] == ("Contents", "Frameworks", "Python.framework"):
+            continue
         if not _scannable_member(member.path):
             continue
         if member.size > MAX_SCANNABLE_MEMBER_BYTES:

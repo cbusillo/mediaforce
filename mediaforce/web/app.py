@@ -2473,7 +2473,8 @@ def create_reloadable_app() -> FastAPI:
 
 
 def _load_project_env_file() -> None:
-    env_path = DEFAULT_CONFIG_PATH.parents[1] / ".env"
+    explicit_path = os.environ.get("MEDIAFORCE_ENV_FILE")
+    env_path = Path(explicit_path) if explicit_path else DEFAULT_CONFIG_PATH.parents[1] / ".env"
     if not env_path.exists():
         return
     for line in env_path.read_text().splitlines():

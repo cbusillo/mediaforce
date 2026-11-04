@@ -29,10 +29,27 @@ class LoginItemPaths:
     project_root: Path
     home: Path
     config_path: Path | None = None
+    credentials_path: Path | None = None
+
+    @property
+    def bundled(self) -> bool:
+        return self.project_root.suffix == ".app"
 
     @property
     def program(self) -> Path:
+        if self.bundled:
+            return self.project_root / "Contents" / "MacOS" / "mediaforce-server"
         return self.project_root / ".venv" / "bin" / "mediaforce-web"
+
+    @property
+    def working_directory(self) -> Path:
+        if self.bundled:
+            from mediaforce.core.config import load_config
+
+            if self.config_path is None or not self.config_path.is_absolute():
+                raise LoginItemError("the bundled server requires an absolute saved config path")
+            return load_config(self.config_path).paths.db_path.parent
+        return self.project_root
 
     @property
     def plist(self) -> Path:
@@ -55,10 +72,12 @@ def render_login_item_plist(paths: LoginItemPaths) -> bytes:
     arguments = [str(paths.program), "--no-reload"]
     if paths.config_path is not None:
         arguments.extend(["--config", str(paths.config_path)])
+    if paths.credentials_path is not None:
+        arguments.extend(["--credentials", str(paths.credentials_path)])
     payload = {
         "Label": LOGIN_ITEM_LABEL,
         "ProgramArguments": arguments,
-        "WorkingDirectory": str(paths.project_root),
+        "WorkingDirectory": str(paths.working_directory),
         "EnvironmentVariables": {"PATH": _login_item_path(paths.home)},
         "RunAtLoad": True,
         "KeepAlive": True,
@@ -72,14 +91,20 @@ def render_login_item_plist(paths: LoginItemPaths) -> bytes:
 
 def install_login_item(paths: LoginItemPaths) -> str:
     _require_supported_platform()
-    try:
-        require_release_directory(paths.project_root, paths.home)
-    except RuntimeProtectionError as exc:
-        raise LoginItemError(f"{exc}; use scripts/deploy-controller.sh (legacy recovery: release-flow.md)") from exc
+    if paths.bundled:
+        _require_bundled_install(paths)
+    else:
+        try:
+            require_release_directory(paths.project_root, paths.home)
+        except RuntimeProtectionError as exc:
+            raise LoginItemError(f"{exc}; use scripts/deploy-controller.sh (legacy recovery: release-flow.md)") from exc
     _require_program(paths.program)
     paths.plist.parent.mkdir(parents=True, exist_ok=True)
     paths.log_dir.mkdir(parents=True, exist_ok=True)
-    _carry_forward_runtime_env(paths)
+    if paths.bundled:
+        paths.working_directory.mkdir(parents=True, exist_ok=True)
+    else:
+        _carry_forward_runtime_env(paths)
     rendered = render_login_item_plist(paths)
     existed = paths.plist.exists()
     if paths.plist.exists() and paths.plist.read_bytes() == rendered:
@@ -170,31 +195,43 @@ def run_login_item_command(
         follow: bool = False,
         stderr: bool = False,
         lines: int = 80,
+        config_path: Path | None = None,
+        credentials_path: Path | None = None,
 ) -> int:
     home = (home or Path.home()).expanduser()
     # Service commands address the installed controller, regardless of the caller's checkout.
     root = project_root.expanduser().resolve()
-    try:
-        require_release_directory(root, home)
-    except RuntimeProtectionError:
-        root = runtime_directory(home) / "current"
+    requested_bundle = root.suffix == ".app"
+    if not requested_bundle:
+        try:
+            require_release_directory(root, home)
+        except RuntimeProtectionError:
+            root = runtime_directory(home) / "current"
     plist = LoginItemPaths(project_root=root, home=home).plist
-    config_path = None
     if plist.exists():
         try:
             installed = plistlib.loads(plist.read_bytes())
-            root = Path(installed["WorkingDirectory"])
+            arguments = installed.get("ProgramArguments", [])
+            installed_program = Path(arguments[0])
+            if requested_bundle and installed_program != LoginItemPaths(root, home).program:
+                raise ValueError("another app or legacy runtime owns the service; use the safe update transaction")
+            root = (
+                installed_program.parents[2]
+                if installed_program.name == "mediaforce-server"
+                else Path(installed["WorkingDirectory"])
+            )
             if not root.is_absolute():
                 raise ValueError("working directory is not absolute")
-            arguments = installed.get("ProgramArguments", [])
             if "--config" in arguments:
                 config_path = Path(arguments[arguments.index("--config") + 1])
                 if not config_path.is_absolute():
                     raise ValueError("configuration path is not absolute")
+            if "--credentials" in arguments:
+                credentials_path = Path(arguments[arguments.index("--credentials") + 1])
         except (OSError, ValueError, KeyError, IndexError, TypeError, plistlib.InvalidFileException) as exc:
             print(f"login item: cannot identify installed runtime: {exc}")
             return 1
-    paths = LoginItemPaths(project_root=root.resolve(), home=home, config_path=config_path)
+    paths = LoginItemPaths(project_root=root.resolve(), home=home, config_path=config_path, credentials_path=credentials_path)
     try:
         if action == "install":
             state = install_login_item(paths)
@@ -241,6 +278,28 @@ def _atomic_write(path: Path, payload: bytes, *, mode: int = 0o644) -> None:
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
+
+
+def _require_bundled_install(paths: LoginItemPaths) -> None:
+    _require_success(
+        _run_command(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R", "anchor apple generic", str(paths.project_root)]),
+        "verify the signed app bundle",
+    )
+    working = paths.working_directory.resolve()
+    if working.is_relative_to(paths.project_root.resolve()):
+        raise LoginItemError("the configured database must be outside the app bundle")
+    if paths.credentials_path is not None:
+        if not paths.credentials_path.is_absolute() or paths.credentials_path.resolve().is_relative_to(paths.project_root.resolve()):
+            raise LoginItemError("the saved credential source must be an absolute path outside the app bundle")
+        try:
+            with paths.credentials_path.open("rb"):
+                pass
+        except OSError as exc:
+            raise LoginItemError("the saved credential source is unreadable") from exc
+    if paths.plist.exists():
+        installed = plistlib.loads(paths.plist.read_bytes())
+        if installed.get("ProgramArguments") != plistlib.loads(render_login_item_plist(paths))["ProgramArguments"]:
+            raise LoginItemError("another app or configuration owns the service; use the safe update transaction")
 
 
 def _carry_forward_runtime_env(paths: LoginItemPaths) -> None:
