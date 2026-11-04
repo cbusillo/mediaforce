@@ -2,6 +2,7 @@ import json
 from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import batched
 from typing import Any, Literal
 
 from sqlalchemy import func, select
@@ -134,14 +135,18 @@ def _admitted_item_ids(connection: DBClient, *, item_ids: Collection[int] | None
     """Items whose active source has an admitted original; the reader gives every other item no traits."""
     query = (select(library_items.c.id, source_versions.c.generation_id)
              .join(source_versions, source_versions.c.version_id == library_items.c.active_source_version_id))
-    if item_ids is not None:
-        query = query.where(library_items.c.id.in_(item_ids))
-    active_sources = list(connection.execute(query))
+    queries = (query,) if item_ids is None else (
+        query.where(library_items.c.id.in_(batch)) for batch in batched(item_ids, 500)
+    )
+    active_sources = [row for scoped_query in queries for row in connection.execute(scoped_query)]
     generations = {row.generation_id for row in active_sources}
     if not generations:
         return set()
-    admitted = set(connection.execute(select(source_admissions.c.generation_id).where(
-        source_admissions.c.generation_id.in_(generations))).scalars())
+    admissions = select(source_admissions.c.generation_id)
+    admission_queries = (admissions,) if item_ids is None else (
+        admissions.where(source_admissions.c.generation_id.in_(batch)) for batch in batched(generations, 500)
+    )
+    admitted = {generation for admission_query in admission_queries for generation in connection.execute(admission_query).scalars()}
     return {int(row.id) for row in active_sources if row.generation_id in admitted}
 
 
@@ -301,7 +306,7 @@ def season_kind_report(
         connection, "season_measurements",
         (select(library_items.c.id, library_items.c.rel_path, library_items.c.media_root, library_items.c.video_codec,
                 library_items.c.size_bytes, library_items.c.status, library_items.c.active_source_version_id,
-                library_items.c.content_version_fingerprint, library_items.c.missing_since),
+                library_items.c.content_version_fingerprint, library_items.c.fingerprint, library_items.c.missing_since),
          *(select(table) for table in (source_versions, source_admissions, source_measurements, source_transitions, source_moves,
                                       staged_artifacts, target_production_outcomes, series_metadata, motion_keep_decisions))),
         (frozenset(measured_seasons), tuple(sorted(library_types.items())), confirmations,
@@ -349,7 +354,7 @@ def season_kind_report(
 
 
 def _original_confirmation_inputs(connection: DBClient) -> list[tuple[str, bytes | None]]:
-    from mediaforce.library.original_registration import confirmation_directory, _identifier
+    from mediaforce.library.original_registration import confirmation_files
 
     references = connection.execute(select(source_admissions.c.confirmation_ref).where(
         source_admissions.c.tier == "proven", source_admissions.c.basis == "owner",
@@ -357,11 +362,10 @@ def _original_confirmation_inputs(connection: DBClient) -> list[tuple[str, bytes
     inputs = []
     for reference in sorted(str(value or "") for value in references):
         try:
-            identifier = _identifier(reference.removeprefix("mac-app:"))
+            paths = confirmation_files(reference.removeprefix("mac-app:"))
         except ValueError:
             continue
-        for suffix in (".json", ".dismissed"):
-            path = confirmation_directory() / f"{identifier}{suffix}"
+        for path in paths:
             try:
                 inputs.append((str(path), path.read_bytes()))
             except OSError:

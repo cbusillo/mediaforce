@@ -1472,10 +1472,10 @@ def test_window_kind_snapshot_refreshes_genre_changes(tmp_path: Path, status: st
             approval = effective_production_approval(config, EPISODE, load)
             assert approval is not None and approval.kind == DARKER
         connection.execute(series_metadata.update().values(tmdb_genres_json='["Animation"]'))
-        connection.commit()
         with kind_snapshot(connection, config, load):
             assert kinds(config, SEASON) == "cartoon"
             assert effective_production_approval(config, EPISODE, load) is None
+        connection.commit()
         assert kinds(config, SEASON) == "cartoon"
 
 

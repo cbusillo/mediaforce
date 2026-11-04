@@ -126,6 +126,7 @@ class SeasonKinds:
             kind = snapshot[1].kinds_by_season.get(season_prefix)
             if kind is not None:
                 return kind
+            return season_grouping(snapshot[2], season_prefix, library_types=config.library_type_map).kind
         if not config.paths.db_path.exists():
             return None
         with open_readonly_db(config.paths.db_path) as connection, self._calculations.request(connection):
@@ -416,7 +417,8 @@ def _show_approvals(
         load_calibration_state: LoadCalibrationState,
 ) -> list[_ShowApproval]:
     """The current folder approvals on a show or its seasons, each with its sample's season and the seasons it governs."""
-    seasons = {"/".join(rel_path.split("/")[:3]) for rel_path, _ in episodes}
+    library_types = config.library_type_map
+    seasons = {season for rel_path, _ in episodes if (season := season_prefix_from_types(library_types, rel_path)) is not None}
     found: dict[str, tuple[EffectiveApproval, str]] = {}
     governed: dict[str, list[str]] = {}
     for folder in [show, *sorted(seasons)]:
@@ -491,12 +493,12 @@ class _KindContents:
     load_calibration: LoadCalibrationState
 
 
-_request_kind_contents: ContextVar[tuple[MediaforceConfig, _KindContents] | None] = ContextVar("kind_contents", default=None)
+_request_kind_contents: ContextVar[tuple[MediaforceConfig, _KindContents, DBClient] | None] = ContextVar("kind_contents", default=None)
 
 
 @contextmanager
 def kind_snapshot(connection: DBClient, config: MediaforceConfig, load: LoadCalibrationState) -> Iterator[None]:
-    token = _request_kind_contents.set((config, _kind_contents(connection, config, load)))
+    token = _request_kind_contents.set((config, _kind_contents(connection, config, load), connection))
     try:
         yield
     finally:
@@ -512,10 +514,12 @@ def _kind_contents(connection: DBClient, config: MediaforceConfig, load_calibrat
         return load_calibration_state(loader_config, prefix)
 
     load_calibration_state = cached_calibration_loader(load_calibration_state)
+    library_types = config.library_type_map
     episodes = _tv_episodes(connection, config)
     approvals_by_show = {show: found for show, files in episodes.items()
                          if (found := _show_approvals(config, show, files, folders_only))}
-    samples = _samples_in_hand(connection, {"/".join(path.split("/")[:3]) for files in episodes.values() for path, _ in files})
+    samples = _samples_in_hand(connection, {season for files in episodes.values() for path, _ in files
+                                          if (season := season_prefix_from_types(library_types, path)) is not None})
     report = _kind_report(
         connection, config, folders_only,
         sample_seasons={entry.sample_season for found in approvals_by_show.values() for entry in found}

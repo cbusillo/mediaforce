@@ -2,7 +2,7 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import create_engine, event, select
@@ -328,3 +328,40 @@ def test_reused_classifications_follow_changed_saved_inputs(connection: DBClient
         assert report() == changed
     if change != "measurement_root":
         assert changed != initial
+
+
+def test_lapsed_keep_with_only_a_file_fingerprint_refreshes_measurement_reasons(connection: DBClient) -> None:
+    prefix = "tv/Drama/Season 1"
+    _item(connection, f"{prefix}/waiting.mkv", status="discovered", codec="h264", current_dark=0.0)
+    kept = _item(connection, f"{prefix}/kept.mkv", status="discovered", codec="wmv2", current_dark=0.0)
+    connection.execute(library_items.update().where(library_items.c.id == kept).values(content_version_fingerprint=None, fingerprint="before"))
+    connection.execute(motion_keep_decisions.insert().values(
+        library_item_id=kept, source_fingerprint="before", prefix=prefix, kept_at="now", reason_code="motion",
+    ))
+
+    def report() -> dict[str, Any]:
+        return season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _: False)
+
+    assert report()["seasons"][0]["measurement_reasons"] == []
+    connection.execute(library_items.update().where(library_items.c.id == kept).values(fingerprint="after"))
+    changed = report()
+    assert changed["seasons"][0]["measurement_reasons"] == ["original_format_unidentified"]
+    with LibraryCalculations().request(connection):
+        assert report() == changed
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_admission_membership_handles_more_sources_than_one_sqlite_bind_batch(connection: DBClient, scoped: bool) -> None:
+    from mediaforce.library.content_kinds import _admitted_item_ids
+
+    ids = set()
+    for index in range(600):
+        item_id = _item(connection, f"tv/Drama/Season 1/{index}.mkv", status="discovered", codec="h264", current_dark=0.0)
+        _admit_historical_original(connection, item_id, dark=0.5)
+        ids.add(item_id)
+    driver = cast(sqlite3.Connection, connection.connection.driver_connection)
+    previous = driver.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 500)
+    try:
+        assert _admitted_item_ids(connection, item_ids=ids if scoped else None) == ids
+    finally:
+        driver.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous)
