@@ -151,11 +151,16 @@ def stage_server(app: Path, cache: Path, identity: str) -> None:
     for path in images:
         required = {path.relative_to(server).parts[0]} if path.is_relative_to(server) and path.relative_to(server).parts[0] in architectures else architectures
         verify_native_target(path, required, minimum_os)
+        run("xcrun", "strip", "-S", path)
+        if re.search(r"\bOSO\s", run("nm", "-a", path)):
+            raise ValueError(f"Native code retains a debug build path: {path}")
     for path in sorted(images, key=lambda image: len(image.parts), reverse=True):
         if path == contents / "MacOS" / info["CFBundleExecutable"]:
             continue
         run("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, path)
     run("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, framework)
+    for path in contents.rglob(".DS_Store"):
+        path.unlink()
     run("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, app)
     run("codesign", "--verify", "--deep", "--strict", app)
     verify_package_archives([app], source_defaults=ROOT / "mediaforce/package_defaults/defaults.toml")

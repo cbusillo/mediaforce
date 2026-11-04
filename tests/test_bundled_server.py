@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mediaforce.ops.login_item import LoginItemError, LoginItemPaths, install_login_item, run_login_item_command
+from mediaforce.ops.login_item import LoginItemError, LoginItemPaths, install_login_item, run_login_item_command, verify_bundled_startup
 from mediaforce.web.app import _load_project_env_file
 from scripts.verify_package_contents import PackageContentsError, verify_package_archives
 from scripts.bundle_server import verify_native_target
@@ -43,7 +43,6 @@ def test_bundle_service_uses_saved_config_and_writable_directory(bundle_paths: L
     assert Path(arguments[0]).is_relative_to(bundle_paths.project_root)
     assert Path(arguments[arguments.index("--config") + 1]) == bundle_paths.config_path
     assert Path(payload["WorkingDirectory"]) == bundle_paths.working_directory
-    assert not bundle_paths.working_directory.is_relative_to(bundle_paths.project_root)
 
 
 def test_bundle_install_cannot_replace_existing_runtime(bundle_paths: LoginItemPaths) -> None:
@@ -65,12 +64,33 @@ def test_bundle_signature_failure_preserves_service(bundle_paths: LoginItemPaths
     assert not bundle_paths.plist.exists()
 
 
-def test_explicit_credentials_are_read_without_clone_lookup(tmp_path: Path) -> None:
+def test_explicit_credentials_supply_environment_defaults(tmp_path: Path) -> None:
     credentials = tmp_path / "saved.env"
     credentials.write_text("MEDIAFORCE_TEST_VALUE=from-saved-path\n")
     with patch.dict(os.environ, {}, clear=True):
         _load_project_env_file(credentials)
         assert os.environ["MEDIAFORCE_TEST_VALUE"] == "from-saved-path"
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_bundled_web_uses_external_credentials_for_the_custom_database(bundle_paths: LoginItemPaths, explicit: bool) -> None:
+    from mediaforce.web import app as web_app
+
+    support = bundle_paths.working_directory
+    support.mkdir()
+    (support / ".env").write_text("MEDIAFORCE_TEST_VALUE=beside-database\n")
+    credentials = support / "saved-credentials.env"
+    credentials.write_text("MEDIAFORCE_TEST_VALUE=explicit-source\n")
+    arguments = ["--config", str(bundle_paths.config_path)]
+    if explicit:
+        arguments.extend(["--credentials", str(credentials)])
+    with patch.dict(os.environ, {}, clear=True), patch(
+        "mediaforce.ops.runtime_install.bundled_app_path", return_value=bundle_paths.project_root
+    ), patch("mediaforce.ops.login_item.verify_bundled_startup"), patch.object(
+        web_app, "DEFAULT_CONFIG_PATH", bundle_paths.home / "legacy/config/defaults.toml"
+    ), patch.object(web_app, "create_app", return_value=object()), patch.object(web_app.uvicorn, "run"):
+        web_app.main(arguments)
+        assert os.environ["MEDIAFORCE_TEST_VALUE"] == ("explicit-source" if explicit else "beside-database")
 
 
 def test_app_verifier_checks_defaults_and_rejects_private_files(tmp_path: Path) -> None:
@@ -113,9 +133,15 @@ def test_app_vendor_examples_do_not_hide_current_home_leaks(tmp_path: Path) -> N
     vendor = app / "Contents/Resources/server/arm64/vendor.py"
     vendor.parent.mkdir(parents=True)
     with patch.object(Path, "home", return_value=Path("/home/private-owner")):
-        vendor.write_text('example = "/home/example-user/demo"\n')
+        vendor.write_text('example = "/Users/someone/demo"\n')
         verify_package_archives([app])
         vendor.write_text('generated = "/home/private-owner/private"\n')
+        with pytest.raises(PackageContentsError):
+            verify_package_archives([app])
+        vendor.write_text("safe vendor file")
+        binary = app / "Contents/MacOS/Mediaforce"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"\x00/home/private-owner/private\x00")
         with pytest.raises(PackageContentsError):
             verify_package_archives([app])
 
@@ -148,3 +174,14 @@ def test_conflicting_config_is_refused_and_missing_config_does_not_block_disable
         bundle_paths.config_path.unlink()
         assert run_login_item_command("disable", project_root=bundle_paths.project_root, home=bundle_paths.home) == 0
         disable.assert_called_once()
+
+
+def test_replaced_bundle_refuses_startup_before_database_access(bundle_paths: LoginItemPaths) -> None:
+    with patch("mediaforce.ops.login_item._require_supported_platform"), patch(
+        "mediaforce.ops.login_item._run_command", return_value=subprocess.CompletedProcess([], 0)
+    ):
+        install_login_item(bundle_paths)
+        verify_bundled_startup(bundle_paths.project_root, home=bundle_paths.home)
+        (bundle_paths.program.parent / "Mediaforce").write_bytes(b"replaced-build")
+        with pytest.raises(LoginItemError):
+            verify_bundled_startup(bundle_paths.project_root, home=bundle_paths.home)

@@ -195,15 +195,16 @@ def _without_sdist_root(member: PurePosixPath) -> PurePosixPath:
 def _scan_archive_text(archive: Path, members: Iterable[_ArchiveMember]) -> None:
     private_path = str(Path.home()).encode("utf-8")
     for member in members:
-        if not _scannable_member(member.path):
-            continue
-        if member.size > MAX_SCANNABLE_MEMBER_BYTES:
+        scannable = _scannable_member(member.path)
+        if scannable and member.size > MAX_SCANNABLE_MEMBER_BYTES:
             raise PackageContentsError(
                 f"{archive.name} contains oversized scannable member {member.path}"
             )
         payload = member.read()
         if private_path and private_path not in EXAMPLE_HOME_PATHS and private_path in payload:
             raise PackageContentsError(f"{archive.name} contains the current machine's home path")
+        if not scannable:
+            continue
         vendor_runtime = member.path.parts[:3] == ("Contents", "Frameworks", "Python.framework")
         vendor_dependency = member.path.parts[:3] == ("Contents", "Resources", "server") and member.path.parts[3] in {"arm64", "x86_64"}
         if vendor_runtime or vendor_dependency:

@@ -285,11 +285,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "service":
         from mediaforce.ops.login_item import run_login_item_command
 
+        bundle = bundled_app_path()
+        if bundle is not None:
+            return run_login_item_command(
+                str(args.service_action), project_root=bundle,
+                config_path=args.config.expanduser().resolve() if args.config is not None else None,
+                credentials_path=args.credentials.expanduser().resolve() if args.credentials is not None else None,
+                follow=bool(getattr(args, "follow", False)),
+                stderr=bool(getattr(args, "stderr", False)), lines=int(getattr(args, "lines", 80)),
+            )
         return run_login_item_command(
             str(args.service_action),
-            project_root=bundled_app_path() or Path(__file__).resolve().parents[1],
-            config_path=args.config,
-            credentials_path=args.credentials,
+            project_root=Path(__file__).resolve().parents[1],
             follow=bool(getattr(args, "follow", False)),
             stderr=bool(getattr(args, "stderr", False)),
             lines=int(getattr(args, "lines", 80)),

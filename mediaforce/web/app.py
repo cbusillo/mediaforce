@@ -2380,7 +2380,11 @@ def main(argv: list[str] | None = None) -> None:
     from mediaforce.ops.runtime_install import bundled_app_path
 
     env_path = args.credentials
-    if bundled_app_path() is not None:
+    bundle = bundled_app_path()
+    if bundle is not None:
+        from mediaforce.ops.login_item import verify_bundled_startup
+
+        verify_bundled_startup(bundle)
         config = load_config(Path(args.config))
         env_path = env_path or config.paths.db_path.parent / ".env"
     if args.credentials is not None:

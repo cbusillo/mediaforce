@@ -262,6 +262,7 @@ class LoginItemTests(unittest.TestCase):
         self.assertEqual(result, 0)
         service.assert_called_once()
         self.assertEqual(service.call_args.args[0], "status")
+        self.assertEqual(service.call_args.kwargs["project_root"], Path(cli.__file__).resolve().parents[1])
         load_config.assert_not_called()
 
 
