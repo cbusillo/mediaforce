@@ -51,7 +51,6 @@ def host_runtime_rows(
         host_schedule_profile_key: Any,
         evaluate_encode_schedule_transition: Any,
         format_eta_seconds: Any,
-        always_schedule_profile: str,
         default_host_schedule_profile: str,
         now: datetime | None = None,
 ) -> list[dict[str, Any]]:
@@ -125,9 +124,6 @@ def host_runtime_rows(
             active_reason = "already compressing as much as it can"
         else:
             active_reason = ""
-        schedule_detail = str(policy["summary"])
-        if schedule_profile == always_schedule_profile and schedule_detail == "runs anytime":
-            schedule_detail = ""
         host_eta_seconds = _host_eta_seconds(host_running_jobs)
         host_speed = sum(_progress_float(job, "speed") for job in host_running_jobs)
         if active_probe_degraded:
@@ -165,9 +161,6 @@ def host_runtime_rows(
                 **runtime_host_payload,
                 "schedule_profile": schedule_profile,
                 "finish_current_file": policy.get("finish_current_file") is True,
-                "schedule_profile_label": str(policy.get("label") or "Always"),
-                "scheduler_summary": str(policy["summary"]),
-                "schedule_detail": schedule_detail,
                 **schedule_transition.to_payload(),
                 "max_parallel_encodes": max_parallel_encodes,
                 "active_encode_count": active_encode_count,
@@ -287,8 +280,6 @@ def _running_encode_jobs_for_hosts(connection: DBClient, *, format_eta_seconds: 
                 "schedule_close_deadline_at": row["schedule_close_deadline_at"],
                 "host_key": str(row["host_key"] or "").strip(),
                 "progress": decorated_progress,
-                "scheduler_status_copy": "running now",
-                "telemetry_summary": _running_job_telemetry_summary(decorated_progress),
             }
         )
     return jobs
@@ -350,32 +341,6 @@ def _decorate_running_job_progress(progress: dict[str, Any], *, format_eta_secon
         "eta_seconds": eta_seconds,
         "eta_copy": format_eta_seconds(eta_seconds),
     }
-
-
-def _running_job_telemetry_summary(progress: dict[str, Any]) -> str:
-    progress_state = str(progress.get("progress_state") or "").strip().lower()
-    phase_label = str(progress.get("phase_label") or "").strip()
-    include_numeric_summary = progress_state not in {"quality_search", "starting"}
-    summary_parts: list[str] = []
-    percent_complete = _float_or_none(progress.get("percent_complete"), allow_zero=True)
-    speed = _float_or_none(progress.get("speed"))
-    fps = _float_or_none(progress.get("fps"))
-    eta_copy = str(progress.get("eta_copy") or "").strip()
-    if percent_complete is not None and include_numeric_summary:
-        summary_parts.append(f"{percent_complete:.0f}%")
-    if speed not in {None, 0.0} and include_numeric_summary:
-        summary_parts.append(f"{speed:.2f}x")
-    if fps not in {None, 0.0} and include_numeric_summary:
-        summary_parts.append(f"{fps:.1f} fps")
-    if eta_copy and include_numeric_summary:
-        summary_parts.append(f"Est. ETA {eta_copy}")
-    if summary_parts:
-        return " · ".join(summary_parts)
-    if progress_state == "quality_search":
-        return phase_label or "Searching quality"
-    if progress_state == "starting":
-        return phase_label or "Starting to compress"
-    return phase_label
 
 
 def _float_or_none(value: Any, *, allow_zero: bool = False) -> float | None:
