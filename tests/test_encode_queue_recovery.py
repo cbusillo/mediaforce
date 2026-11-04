@@ -5,7 +5,6 @@ import hashlib
 import io
 import json
 import os
-import re
 import shutil
 import shlex
 import socket
@@ -4247,8 +4246,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     queue = web_app._decorate_encode_queue_for_scheduler(self.config, summarize_encode_queue(connection))
                     self.assertEqual(queue["telemetry"]["left_out_needs_attention_item_count"], 0)
                     self.assertEqual(queue["telemetry"]["left_out_failed_item_count"], 1)
-                    self.assertEqual(queue["needs_attention"][0]["scheduler_status_copy"],
-                                     unfinished_items_summary(queue["telemetry"]))
 
     def test_folder_badge_keeps_unknown_attention_when_a_file_path_has_become_a_folder(self) -> None:
         prefix = "tv/Show.mkv"
@@ -4632,12 +4629,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(remote_rows[0]["schedule_profile"], "always")
         self.assertEqual(remote_rows[0]["capabilities"], ["encode_queue", "sample_calibration"])
 
-    def test_schedule_profile_options_include_built_in_never(self) -> None:
-        options = settings_runtime.schedule_profile_options(schedule_profiles=[])
-
-        self.assertEqual(options[0]["key"], "always")
-        self.assertEqual(options[1]["key"], "never")
-
     def test_settings_schedule_rows_skip_reserved_never_profile(self) -> None:
         self.config.raw["encode_queue"]["schedule_profiles"] = [
             {
@@ -4715,7 +4706,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             rows = web_app._host_runtime_rows(connection, self.config)
 
         self.assertEqual(rows[0]["schedule_profile"], "never")
-        self.assertEqual(rows[0]["schedule_profile_label"], "Never")
         self.assertFalse(rows[0]["schedule_open"])
         self.assertIsNone(rows[0]["schedule_closes_at"])
         self.assertIsNone(rows[0]["schedule_next_opens_at"])
@@ -5802,9 +5792,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )
 
         self.assertEqual(hard_stop["schedule_state"], "active_hard_stop")
-        self.assertEqual(hard_stop["scheduler_status_copy"], "running until the work window closes")
         self.assertEqual(bypassed["schedule_state"], "bypassed")
-        self.assertEqual(bypassed["scheduler_status_copy"], "bypassing the work schedule")
         self.assertEqual(interrupted["schedule_state"], "schedule_interrupted")
         self.assertEqual(interrupted_parent["schedule_state"], "schedule_interrupted")
         self.assertEqual(draining["schedule_state"], "draining_no_fit")
@@ -16339,48 +16327,6 @@ raise SystemExit(0)
         assert eta_copy is None or isinstance(eta_copy, str)
         self.assertAlmostEqual(0.0 if eta_seconds is None else float(eta_seconds), 90.0)
         self.assertEqual(eta_copy, "1m 30s")
-        self.assertEqual(decorated["running"][0]["telemetry_summary"], "40% · 2.00x · Est. ETA 1m 0s")
-
-    def test_decorate_encode_queue_for_scheduler_labels_quality_search_phase(self) -> None:
-        manifest_path = self.root / "quality-search-manifest.json"
-        manifest_path.write_text(
-            json.dumps(
-                {
-                    "items": [
-                        {"duration_seconds": 60.0, "source_size_bytes": 1000},
-                    ]
-                }
-            )
-        )
-        encode_queue = {
-            "state": {"is_paused": False, "stop_requested": False},
-            "running": [
-                {
-                    "job_id": "quality-search-job",
-                    "prefix": "tv/House/Season 2",
-                    "status": "running",
-                    "manifest_path": str(manifest_path),
-                    "item_count": 1,
-                    "host": {"key": "cbusillo@studio", "schedule_profile": "always"},
-                    "attempt_count": 1,
-                    "progress": {
-                        "progress_state": "quality_search",
-                        "phase_label": "Searching quality",
-                        "percent_complete": 0.0,
-                    },
-                }
-            ],
-            "queued": [],
-            "recent": [],
-            "queued_count": 0,
-            "running_count": 1,
-            "retry_backoff_count": 0,
-            "needs_attention_count": 0,
-        }
-
-        decorated = web_app._decorate_encode_queue_for_scheduler(self.config, encode_queue)
-
-        self.assertEqual(decorated["running"][0]["telemetry_summary"], "Searching quality")
 
     def test_decorate_encode_queue_for_scheduler_uses_projected_eta_speed(self) -> None:
         manifest_path = self.root / "queue-eta-speed-manifest.json"
@@ -16480,7 +16426,6 @@ raise SystemExit(0)
                 )
                 self.assertIsNone(decorated["running"][0]["progress"]["eta_seconds"])
                 self.assertIsNone(decorated["running"][0]["progress"]["eta_copy"])
-                self.assertNotIn("ETA", decorated["running"][0]["telemetry_summary"])
                 self.assertNotEqual(decorated["telemetry"]["eta_copy"], "0s")
 
     def test_decorate_encode_queue_for_scheduler_counts_items_left_out_of_the_eta(self) -> None:
@@ -16540,90 +16485,7 @@ raise SystemExit(0)
         self.assertEqual(telemetry["left_out_needs_attention_item_count"], 3)
         self.assertEqual(telemetry["left_out_failed_item_count"], 2)
         self.assertEqual(telemetry["eta_copy"], "10m 0s")
-        summary = web_app._encode_queue_summary_copy(decorated, decorated["state"], None)
-        self.assertIn(
-            "estimated queue finish in 10m 0s (leaves out 3 items waiting for you and 2 that didn't finish)",
-            summary,
-        )
 
-    def test_decorate_encode_queue_attempt_numbers_cover_start_and_cap(self) -> None:
-        for attempt_count, status, expected_attempt in (
-                (0, "needs_attention", 1),
-                (web_app.ENCODE_JOB_MAX_ATTEMPTS + 4, "retry_backoff", web_app.ENCODE_JOB_MAX_ATTEMPTS),
-        ):
-            with self.subTest(attempt_count=attempt_count, status=status):
-                manifest_path = self.root / "attempt-summary-manifest.json"
-                manifest_path.write_text(json.dumps({"items": [{"duration_seconds": 60.0, "source_size_bytes": 1000}]}))
-                encode_queue = {
-                    "state": {"is_paused": False, "stop_requested": False},
-                    "running": [],
-                    "queued": [],
-                    "recent": [
-                        {
-                            "job_id": "attempt-summary-job",
-                            "prefix": "tv/House/Season 2",
-                            "status": status,
-                            "manifest_path": str(manifest_path),
-                            "item_count": 1,
-                            "host": {},
-                            "attempt_count": attempt_count,
-                            "started_at": "2026-04-03T21:14:17+00:00",
-                            "progress": {
-                                "progress_state": status,
-                                "overall_completed_duration_seconds": 12.0,
-                            },
-                        }
-                    ],
-                    "queued_count": 0,
-                    "running_count": 0,
-                    "retry_backoff_count": int(status == "retry_backoff"),
-                    "needs_attention_count": int(status == "needs_attention"),
-                }
-
-                decorated = web_app._decorate_encode_queue_for_scheduler(self.config, encode_queue)
-
-                summary = decorated["recent"][0]["attempt_summary"]
-                self.assertEqual(
-                    [int(value) for value in re.findall(r"-?\d+", summary)],
-                    [expected_attempt, web_app.ENCODE_JOB_MAX_ATTEMPTS],
-                )
-
-    def test_encode_queue_summary_copy_omits_queue_wide_attention_for_other_folders(self) -> None:
-        encode_queue = {
-            "running_count": 0,
-            "queued_count": 0,
-            "queued_waiting_count": 0,
-            "needs_attention_count": 1,
-        }
-        encode_job = {"status": "completed"}
-
-        summary = web_app._encode_queue_summary_copy(
-            encode_queue,
-            {"is_paused": False},
-            encode_job,
-        )
-
-        self.assertIn("latest folder job completed", summary)
-        self.assertNotIn("queue item", summary)
-        self.assertNotIn("needs attention", summary)
-
-    def test_encode_queue_summary_copy_labels_current_folder_attention(self) -> None:
-        encode_queue = {
-            "running_count": 0,
-            "queued_count": 0,
-            "queued_waiting_count": 0,
-            "needs_attention_count": 1,
-        }
-        encode_job = {"status": "needs_attention"}
-
-        summary = web_app._encode_queue_summary_copy(
-            encode_queue,
-            {"is_paused": False},
-            encode_job,
-        )
-
-        self.assertIn("latest folder job needs attention", summary)
-        self.assertNotIn("queue item", summary)
 
     def test_host_runtime_rows_include_running_job_telemetry(self) -> None:
         status = HostStatus(
@@ -16662,7 +16524,6 @@ raise SystemExit(0)
             rows = web_app._host_runtime_rows(connection, self.config)
 
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["running_jobs"][0]["telemetry_summary"], "55% · 3.00x · Est. ETA 1m 0s")
         self.assertEqual(rows[0]["telemetry"]["eta_copy"], "1m 0s")
 
     def test_host_runtime_rows_preserve_zero_progress_values(self) -> None:
@@ -16702,8 +16563,7 @@ raise SystemExit(0)
             rows = web_app._host_runtime_rows(connection, self.config)
 
         self.assertEqual(len(rows), 1)
-        # Zero progress stays visible; a zero ETA is no estimate at all, so it is not shown as "0s".
-        self.assertEqual(rows[0]["running_jobs"][0]["telemetry_summary"], "0%")
+        self.assertEqual(rows[0]["running_jobs"][0]["progress"]["percent_complete"], 0.0)
         self.assertIsNone(rows[0]["running_jobs"][0]["progress"]["eta_copy"])
         self.assertIsNone(rows[0]["telemetry"]["eta_copy"])
 

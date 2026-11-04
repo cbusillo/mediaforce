@@ -8,7 +8,6 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.timezones import system_timezone, valid_timezone_name
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.plain_failure import plain_failure_summary
-from mediaforce.encoding.encode_queue import unfinished_items_summary
 
 SCHEDULE_DAY_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 SCHEDULE_CLOSE_WAITING_REASON = "Waiting for the next work window."
@@ -29,7 +28,6 @@ class SchedulePolicyDeps:
 @dataclass(slots=True)
 class EncodeSchedulerDeps(SchedulePolicyDeps):
     encode_job_manifest_totals: Any
-    encode_job_max_attempts: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,7 +430,6 @@ def decorate_encode_job_telemetry(
     speed = _float_or_none(progress.get("speed"))
     eta_seconds = _float_or_none(progress.get("eta_seconds"))
     progress_state = str(progress.get("progress_state") or "").strip().lower()
-    phase_label = str(progress.get("phase_label") or "").strip()
     speed_value = speed if speed not in {None, 0, 0.0} else None
     if eta_seconds is not None and eta_seconds <= 0:
         # Zero is not an estimate: it is what a job reports before it has one.
@@ -454,25 +451,6 @@ def decorate_encode_job_telemetry(
         "eta_seconds": eta_seconds,
         "eta_copy": format_eta_seconds(eta_seconds),
     }
-    summary_parts: list[str] = []
-    include_numeric_summary = progress_state not in {"quality_search", "starting"}
-    if percent_complete is not None and include_numeric_summary:
-        summary_parts.append(f"{percent_complete:.0f}%")
-    if speed_value is not None and include_numeric_summary:
-        summary_parts.append(f"{speed:.2f}x")
-    if fps not in {None, 0, 0.0} and include_numeric_summary:
-        summary_parts.append(f"{fps:.1f} fps")
-    eta_copy = object_dict(decorated["progress"]).get("eta_copy")
-    if eta_copy and include_numeric_summary:
-        summary_parts.append(f"Est. ETA {eta_copy}")
-    if summary_parts:
-        decorated["telemetry_summary"] = " · ".join(summary_parts)
-    elif progress_state == "quality_search":
-        decorated["telemetry_summary"] = phase_label or "Searching quality"
-    elif progress_state == "starting":
-        decorated["telemetry_summary"] = phase_label or "Starting to compress"
-    else:
-        decorated["telemetry_summary"] = phase_label
     return decorated
 
 
@@ -546,11 +524,6 @@ def _queue_left_out_item_counts(
     }
 
 
-def left_out_items_copy(counts: dict[str, Any]) -> str | None:
-    summary = unfinished_items_summary(counts)
-    return f"leaves out {summary}" if summary else None
-
-
 def decorate_encode_job_for_scheduler(
         config: MediaforceConfig,
         job: dict[str, Any] | None,
@@ -566,16 +539,8 @@ def decorate_encode_job_for_scheduler(
     policy = schedule_profile_policy_for_host(config, host_payload, deps, profiles=schedule_profiles)
     status = str(decorated.get("status") or "")
     bypass_schedule = bool(decorated.get("bypass_schedule"))
-    attempt_count = int_value(decorated.get("attempt_count"))
     waiting_reason = str(decorated.get("waiting_reason") or "").strip()
     progress = object_dict(decorated.get("progress"))
-    has_started = bool(str(decorated.get("started_at") or "").strip())
-    if not has_started:
-        has_started = bool(str(progress.get("progress_state") or "").strip()) or (
-            float_value(progress.get("overall_completed_duration_seconds")) > 0.0
-        )
-    effective_attempt_count = attempt_count if attempt_count > 0 else (1 if has_started else 0)
-    display_attempt_count = min(effective_attempt_count, deps.encode_job_max_attempts)
     schedule_waiting = (
         status == "queued"
         and not scheduler_allows_encode_run(
@@ -595,28 +560,6 @@ def decorate_encode_job_for_scheduler(
     )
     decorated["schedule_waiting"] = schedule_waiting
     decorated["schedule_state"] = schedule_state
-    decorated["scheduler_summary"] = str(policy["summary"])
-    decorated["attempt_summary"] = (
-        f"attempt {display_attempt_count} of {deps.encode_job_max_attempts}"
-        if display_attempt_count
-        else "not started yet"
-    )
-    if schedule_state == "active_hard_stop":
-        decorated["scheduler_status_copy"] = "running until the work window closes"
-    elif schedule_state == "bypassed":
-        decorated["scheduler_status_copy"] = "bypassing the work schedule"
-    elif status == "running":
-        decorated["scheduler_status_copy"] = "running now"
-    elif status == "needs_attention":
-        decorated["scheduler_status_copy"] = decorated.get("attention_summary") or waiting_reason or "needs attention before retrying"
-    elif status == "retry_backoff":
-        decorated["scheduler_status_copy"] = waiting_reason or "waiting for retry backoff"
-    elif waiting_reason:
-        decorated["scheduler_status_copy"] = waiting_reason
-    elif schedule_waiting:
-        decorated["scheduler_status_copy"] = f"waiting for {policy['summary']}"
-    else:
-        decorated["scheduler_status_copy"] = "ready when a computer is free"
     # The raw error stays for Details; screens show this sentence instead.
     decorated["error_summary"] = plain_failure_summary(
         decorated.get("error"), failure_kind=decorated.get("last_failure_kind")
@@ -670,7 +613,6 @@ def decorate_encode_queue_for_scheduler(
     profiles = encode_queue_schedule_profiles(config, deps)
     queue_state = object_dict(encode_queue.get("state"))
     queue_state["scheduler"] = policy
-    queue_state["scheduler_summary"] = str(policy["summary"])
     queue_state["schedule_profiles"] = list(profiles.values())
     decorated = dict(encode_queue)
     decorated["state"] = queue_state
@@ -728,47 +670,3 @@ def decorate_encode_queue_for_scheduler(
     )
     decorated["telemetry"] = encode_queue_telemetry(decorated)
     return decorated
-
-
-def encode_queue_summary_copy(
-        encode_queue: dict[str, Any],
-        encode_queue_state: dict[str, Any],
-        encode_job: dict[str, Any] | None,
-) -> str:
-    parts = [
-        f"{int_value(encode_queue.get('running_count'))} running",
-        f"{int_value(encode_queue.get('queued_count'))} queued",
-    ]
-
-    status = str(encode_job.get("status") or "") if encode_job else ""
-    if status == "queued" and encode_job and encode_job.get("queue_position"):
-        queue_position = int_value(encode_job.get("queue_position"))
-        queue_depth = int_value(encode_job.get("queue_depth") or queue_position)
-        parts.append(f"this folder is {queue_position} of {queue_depth}")
-    elif status == "running":
-        parts.append("this folder is active now")
-    elif status == "needs_attention":
-        parts.append("latest folder job needs attention")
-    elif status in {"completed", "failed", "stopped"}:
-        parts.append(f"latest folder job {status}")
-    else:
-        parts.append("no folder job queued yet")
-
-    waiting_count = int_value(encode_queue.get("queued_waiting_count"))
-    if waiting_count:
-        parts.append(f"{waiting_count} waiting")
-
-    queue_eta_copy = str(object_dict(encode_queue.get("telemetry")).get("eta_copy") or "").strip()
-    if queue_eta_copy:
-        left_out_copy = left_out_items_copy(object_dict(encode_queue.get("telemetry")))
-        parts.append(
-            f"estimated queue finish in {queue_eta_copy}" + (f" ({left_out_copy})" if left_out_copy else "")
-        )
-
-    if encode_job and encode_job.get("scheduler_status_copy") and status in {"queued", "retry_backoff", "running", "needs_attention"}:
-        parts.append(str(encode_job["scheduler_status_copy"]))
-
-    if encode_queue_state.get("is_paused"):
-        parts.append("queue paused")
-
-    return " · ".join(parts)

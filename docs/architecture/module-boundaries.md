@@ -121,6 +121,10 @@ Guidance:
 
 ### `mediaforce/web/`
 
+The server returns scheduling state and numeric progress for the native Mac
+app. It no longer builds the retired web screen's schedule, attempt, telemetry
+or queue summary sentences, or its schedule-choice list.
+
 - `app.py`
   - app factory
   - middleware/static mounting

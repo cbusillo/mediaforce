@@ -225,7 +225,6 @@ from mediaforce.web.runtime.encode_scheduler import EncodeScheduleTransition, En
     decorate_encode_queue_for_scheduler as runtime_decorate_encode_queue_for_scheduler, \
     encode_queue_schedule_profiles as runtime_encode_queue_schedule_profiles, \
     encode_queue_scheduler_policy as runtime_encode_queue_scheduler_policy, \
-    encode_queue_summary_copy as runtime_encode_queue_summary_copy, \
     evaluate_encode_schedule_transition as runtime_evaluate_encode_schedule_transition, \
     format_eta_seconds as runtime_format_eta_seconds, \
     host_schedule_now as runtime_host_schedule_now, \
@@ -1434,7 +1433,6 @@ def create_app(
             encode_queue_state = object_dict(encode_queue.get("state"))
             scheduler_policy = object_dict(encode_queue_state.get("scheduler"))
             encode_job = _decorate_encode_job_for_scheduler(config, encode_job)
-            encode_queue_summary = _encode_queue_summary_copy(encode_queue, encode_queue_state, encode_job)
             lifecycle_decisions = (
                 project_candidates(connection, config, prefixes=[normalized_prefix])
                 if media_scope.domain == "movie" or media_scope.kind == "tv_series"
@@ -1613,7 +1611,6 @@ def create_app(
                 "encode_job": encode_job,
                 "encode_queue": encode_queue,
                 "encode_queue_state": encode_queue_state,
-                "encode_queue_summary": encode_queue_summary,
                 "encode_queue_scheduler": scheduler_policy,
                 "encode_candidate_count": encode_candidate_count,
                 "workflow_state": workflow_state,
@@ -2759,7 +2756,6 @@ def _host_runtime_rows(
         host_schedule_profile_key=_host_schedule_profile_key,
         evaluate_encode_schedule_transition=_evaluate_encode_schedule_transition,
         format_eta_seconds=_format_eta_seconds,
-        always_schedule_profile=ALWAYS_SCHEDULE_PROFILE,
         default_host_schedule_profile=DEFAULT_HOST_SCHEDULE_PROFILE,
         now=current_time,
     )
@@ -2886,11 +2882,8 @@ def _sample_host_schedule_fields(config: MediaforceConfig, status: HostStatus) -
     host_payload = {**host_config, **asdict(status)}
     policy = _schedule_profile_policy_for_host(config, host_payload)
     schedule_transition = _evaluate_encode_schedule_transition(policy, host_payload=host_payload)
-    summary = str(policy.get("summary") or "").strip()
     return {
         **schedule_transition.to_payload(),
-        "schedule_detail": summary,
-        "schedule_profile_label": str(policy.get("label") or "Always"),
         "storage_recovery_available": remote_mount_recovery_supported(config, host_config, status),
     }
 
@@ -3348,7 +3341,6 @@ def _encode_scheduler_deps() -> EncodeSchedulerDeps:
         always_schedule_profile=ALWAYS_SCHEDULE_PROFILE,
         default_scheduler_policy=DEFAULT_SCHEDULER_POLICY,
         encode_job_manifest_totals=runtime_encode_job_manifest_totals,
-        encode_job_max_attempts=ENCODE_JOB_MAX_ATTEMPTS,
     )
 
 
@@ -3480,14 +3472,6 @@ def _settings_archive_root(transcode_root: str) -> str:
 
 _calibration_draft_hash = runtime_calibration_draft_hash
 _review_gate = runtime_review_gate
-
-
-def _encode_queue_summary_copy(
-        encode_queue: dict[str, Any],
-        encode_queue_state: dict[str, Any],
-        encode_job: dict[str, Any] | None,
-) -> str:
-    return runtime_encode_queue_summary_copy(encode_queue, encode_queue_state, encode_job)
 
 
 def _folder_state_deps() -> FolderStateDeps:
