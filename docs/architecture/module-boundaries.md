@@ -121,6 +121,9 @@ Guidance:
 
 ### `mediaforce/web/`
 
+The server returns scheduling state and numeric progress for the native Mac
+app.
+
 - `app.py`
   - app factory
   - middleware/static mounting

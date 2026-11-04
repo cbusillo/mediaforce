@@ -27,15 +27,6 @@ DEFAULT_LIBRARY_COLOR_PALETTE = (
     "#6b7280",
 )
 SCHEDULE_DAY_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-SCHEDULE_DAY_LABELS = {
-    "mon": "Mon",
-    "tue": "Tue",
-    "wed": "Wed",
-    "thu": "Thu",
-    "fri": "Fri",
-    "sat": "Sat",
-    "sun": "Sun",
-}
 ALWAYS_SCHEDULE_PROFILE = "always"
 NEVER_SCHEDULE_PROFILE = "never"
 LEGACY_QUEUE_WINDOW_SCHEDULE_PROFILE = "queue_window"
@@ -426,43 +417,6 @@ def host_schedule_profile_key(host: dict[str, Any]) -> str:
     return canonical_schedule_profile_key(host.get("schedule_profile") or DEFAULT_HOST_SCHEDULE_PROFILE)
 
 
-def schedule_profile_options(*, schedule_profiles: list[dict[str, Any]]) -> list[dict[str, str]]:
-    options = [
-        {
-            "key": ALWAYS_SCHEDULE_PROFILE,
-            "label": "Always",
-            "summary": "Runs anytime.",
-        },
-        {
-            "key": NEVER_SCHEDULE_PROFILE,
-            "label": "Never",
-            "summary": "Never accepts queued encodes.",
-        },
-    ]
-    for row in schedule_profiles:
-        key = canonical_schedule_profile_key(row.get("key"))
-        if key in {ALWAYS_SCHEDULE_PROFILE, NEVER_SCHEDULE_PROFILE}:
-            continue
-        policy = normalize_encode_queue_scheduler(
-            {
-                "mode": "night",
-                "timezone": "host_local",
-                "days_of_week": row.get("days_of_week"),
-                "all_day_days_of_week": row.get("all_day_days_of_week"),
-                "start_hour": row.get("start_hour"),
-                "end_hour": row.get("end_hour"),
-            }
-        )
-        options.append(
-            {
-                "key": key,
-                "label": str(row.get("label") or key.replace("_", " ").title()),
-                "summary": str(policy["summary"]),
-            }
-        )
-    return options
-
-
 def settings_transcode_root_value(config: MediaforceConfig) -> str:
     media = config.raw.get("media")
     return stringify_pathlike(media.get("staging_root") if isinstance(media, dict) else None)
@@ -586,31 +540,6 @@ def normalize_schedule_days(value: JSONValue, *, default_to_all: bool) -> list[s
     return list(SCHEDULE_DAY_ORDER) if default_to_all else []
 
 
-def schedule_days_summary(days_of_week: list[str]) -> str:
-    if days_of_week == list(SCHEDULE_DAY_ORDER):
-        return "every day"
-    if days_of_week == list(SCHEDULE_DAY_ORDER[:5]):
-        return "weekdays"
-    if days_of_week == list(SCHEDULE_DAY_ORDER[5:]):
-        return "weekends"
-    return ", ".join(SCHEDULE_DAY_LABELS.get(day, day.title()) for day in days_of_week)
-
-
-def schedule_day_rule_summary(*, window_days: list[str], all_day_days: list[str], start_hour: int, end_hour: int) -> str:
-    segments: list[str] = []
-    if all_day_days:
-        all_day_summary = schedule_days_summary(all_day_days)
-        segments.append("all day" if all_day_summary == "every day" else f"{all_day_summary} all day")
-    if window_days:
-        window_summary = schedule_days_summary(window_days)
-        if start_hour == end_hour:
-            segments.append("all day" if window_summary == "every day" else f"{window_summary} all day")
-        else:
-            window_phrase = f"between {start_hour:02d}:00 and {end_hour:02d}:00"
-            segments.append(window_phrase if window_summary == "every day" else f"{window_summary} {window_phrase}")
-    return " and ".join(segment for segment in segments if segment)
-
-
 def normalize_encode_queue_scheduler(raw: dict[str, Any] | None) -> dict[str, Any]:
     payload = dict(DEFAULT_SCHEDULER_POLICY)
     if isinstance(raw, dict):
@@ -652,20 +581,6 @@ def normalize_encode_queue_scheduler(raw: dict[str, Any] | None) -> dict[str, An
         "days_of_week": days_of_week,
         "all_day_days_of_week": all_day_days_of_week,
     }
-    if mode == "anytime":
-        normalized["summary"] = "runs anytime"
-    elif mode == "never":
-        normalized["summary"] = "never runs"
-    else:
-        rule_summary = schedule_day_rule_summary(
-            window_days=days_of_week,
-            all_day_days=all_day_days_of_week,
-            start_hour=start_hour,
-            end_hour=end_hour,
-        )
-        normalized["summary"] = (
-            f"runs {rule_summary} ({timezone.replace('_', ' ')})" if rule_summary else "never runs"
-        )
     return normalized
 
 
