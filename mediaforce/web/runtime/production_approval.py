@@ -103,10 +103,14 @@ def sample_wait(config: MediaforceConfig, prefix: str, load: LoadCalibrationStat
 
 
 def season_prefix_of(config: MediaforceConfig, rel_path: str) -> str | None:
+    return season_prefix_from_types(config.library_type_map, rel_path)
+
+
+def season_prefix_from_types(library_types: Mapping[str, str], rel_path: str) -> str | None:
     path = PurePosixPath(str(rel_path or "").strip().strip("/"))
     if len(path.parts) < 3 or (len(path.parts) == 3 and path.suffix):
         return None
-    identity = season_identity({"rel_path": path.as_posix()}, library_types=config.library_type_map)
+    identity = season_identity({"rel_path": path.as_posix()}, library_types=library_types)
     return identity.season_prefix if identity is not None else None
 
 

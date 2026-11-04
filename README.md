@@ -989,3 +989,7 @@ same waiting items and links as Needs you, including original-backup cleanup.
 
 Past attempts still marked as held remain available below the current decisions;
 Activity does not clear those records or count them as new decisions.
+
+The main window reuses unchanged library calculations without timed expiry or a
+new background process. Each refresh still reads current work status and sample
+approvals.

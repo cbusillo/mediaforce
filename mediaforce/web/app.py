@@ -68,6 +68,7 @@ from mediaforce.execution import (
     search_quality_for_source,
     validate_manifest_items,
 )
+from mediaforce.library.calculation_reuse import LibraryCalculations
 from mediaforce.library.evidence_worker import default_evidence_worker_deps
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.background_work import background_work_is_paused, ensure_background_work_state
@@ -1189,8 +1190,11 @@ def create_app(
 
     from mediaforce.library.original_registration import list_original_previews
 
+    library_calculations = LibraryCalculations()
+
     def _main_window_payload() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection, kind_snapshot(connection, config, _load_calibration_state):
+        observed_at = datetime.now(UTC)
+        with open_db(config.paths.db_path) as connection, library_calculations.request(connection), kind_snapshot(connection, config, _load_calibration_state):
             cards = [asdict(card) for card in _list_library_detail_cards(config, connection)]
             payload = app_window_payload(
                 connection,
@@ -1200,7 +1204,7 @@ def create_app(
                 computers=_host_runtime_rows(connection, config, collect_statuses=_cached_host_statuses),
                 controller_storage=controller_storage_recovery_snapshot(config),
                 storage_admits_work=controller_storage_admission_issue(config, None) is None,
-                observed_at=datetime.now(UTC),
+                observed_at=observed_at,
                 kinds=_sample_start_status(kinds_payload(connection, config, load_calibration_state=_load_calibration_state)["kinds"]),
             )
             payload["original_previews"] = list_original_previews(config)

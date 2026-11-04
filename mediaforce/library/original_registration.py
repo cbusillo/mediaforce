@@ -35,7 +35,7 @@ def confirmation_directory() -> Path:
 
 def original_request_dismissed(preview_id: str, manifest_hash: str, problems: Sequence[Mapping[str, Any]] = ()) -> bool:
     try:
-        saved = json.loads((confirmation_directory() / f"{_identifier(preview_id)}.dismissed").read_text())
+        saved = json.loads(confirmation_files(preview_id)[1].read_text())
         acknowledged = saved["problems"]
         return (saved["manifest_hash"] == manifest_hash and isinstance(acknowledged, list)
                 and ((not problems and saved.get("request_dismissed") is True)
@@ -49,6 +49,12 @@ def _identifier(value: str) -> str:
     if UUID(value).hex != value:
         raise ValueError("Invalid original approval identifier")
     return value
+
+
+def confirmation_files(preview_id: str) -> tuple[Path, Path]:
+    identifier = _identifier(preview_id)
+    directory = confirmation_directory()
+    return directory / f"{identifier}.json", directory / f"{identifier}.dismissed"
 
 
 def _preview_path(config: MediaforceConfig, preview_id: str) -> Path:
@@ -167,7 +173,7 @@ def _read_preview(config: MediaforceConfig, preview_id: str) -> dict[str, Any]:
 
 def _confirmation(preview_id: str) -> dict[str, Any]:
     try:
-        receipt = json.loads((confirmation_directory() / f"{_identifier(preview_id)}.json").read_text())
+        receipt = json.loads(confirmation_files(preview_id)[0].read_text())
         if (receipt["preview_id"] != preview_id or receipt["owner_uid"] != os.getuid()
                 or receipt["authentication"] != "deviceOwnerAuthentication" or not receipt["confirmed_at"]):
             raise ValueError("Confirm this exact file list in the Mac app")
@@ -329,7 +335,7 @@ def list_original_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
                 if confirmed:
                     if "waiting" not in preview:
                         continue
-                elif (confirmation_directory() / f"{preview['preview_id']}.json").exists():
+                elif confirmation_files(preview["preview_id"])[0].exists():
                     problems = [{"item_id": None, "rel_path": None, "reason": "The saved Mac approval is invalid. Restore it or prepare an updated file list."}]
                     if original_request_dismissed(preview["preview_id"], preview["manifest_hash"], problems):
                         continue

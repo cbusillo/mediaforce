@@ -2,7 +2,7 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import create_engine, event, select
@@ -10,10 +10,11 @@ from sqlalchemy import create_engine, event, select
 from mediaforce import cli
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import library_items, metadata, motion_keep_decisions, series_metadata, source_admissions, source_generations, source_measurements
+from mediaforce.core.db_tables import library_items, metadata, motion_keep_decisions, series_metadata, source_admissions, source_generations, source_measurements, source_versions, source_transitions, staged_artifacts, target_production_outcomes
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.utils import timestamp
 from mediaforce.library.content_kinds import EpisodeTraits, season_kind, season_kind_report
+from mediaforce.library.calculation_reuse import LibraryCalculations
 from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, append_measurement, append_version, json_text, \
     load_source_evidence, load_source_evidence_bulk
 from mediaforce.web.runtime.folder_state import state_slug
@@ -27,7 +28,8 @@ def connection() -> Iterator[DBClient]:
         database.exec_driver_sql("PRAGMA foreign_keys=ON")
         metadata.create_all(database)
         database.commit()
-        yield database
+        with LibraryCalculations().request(database):
+            yield database
     engine.dispose()
 
 
@@ -153,15 +155,19 @@ def test_bulk_evidence_matches_individual_reads_and_report_queries_stay_bounded(
         nonlocal query_count
         query_count += 1
 
+    def report() -> dict[str, Any]:
+        with LibraryCalculations().request(connection):
+            return season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False)
+
     event.listen(connection.engine, "before_cursor_execute", count_query)
     try:
-        season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False)
+        report()
         first_queries = query_count
         for episode in range(3, 30):
             item_id = _item(connection, f"tv/Drama/Season 1/e{episode:02}.mkv", status="promoted", codec="av1", current_dark=0.0)
             _admit_historical_original(connection, item_id, dark=0.5)
         query_count = 0
-        first = season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False)
+        first = report()
         assert query_count == first_queries
         original = expected[item_ids[0]]
         assert original.original_version_id is not None
@@ -172,7 +178,7 @@ def test_bulk_evidence_matches_individual_reads_and_report_queries_stay_bounded(
                         "plan_sha256": f"plan-{item_ids[0]}"}, measured_at=None, recorded_at=timestamp(),
         )
         query_count = 0
-        refreshed = season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False)
+        refreshed = report()
         refreshed_queries = query_count
     finally:
         event.remove(connection.engine, "before_cursor_execute", count_query)
@@ -257,3 +263,105 @@ def test_unmeasured_seasons_outside_automatic_intake_name_the_prerequisite(
                              measurement_roots=roots)["seasons"][0]
     assert row["kind"] == "unmeasured"
     assert row["measurement_reasons"] == [reason]
+
+
+@pytest.mark.parametrize("change", ["measurement", "admission", "genre", "source", "missing", "kept", "library_type", "measurement_root", "approval", "version", "pending_change", "finished_encode", "production_receipt", "deleted_measurement"])
+def test_reused_classifications_follow_changed_saved_inputs(connection: DBClient, change: str) -> None:
+    from unittest.mock import patch
+    from mediaforce.library import content_kinds
+
+    prefix = "tv/Drama/Season 1"
+    item_id = _item(connection, f"{prefix}/published.mkv", status="promoted", codec="av1", current_dark=0.0)
+    _admit_historical_original(connection, item_id, dark=0.5)
+    waiting_id = _item(connection, f"{prefix}/waiting.mkv", status="discovered", codec="h264", current_dark=0.0)
+    connection.execute(series_metadata.insert().values(series_prefix="tv/Drama", tmdb_genres_json='["Drama"]', updated_at="now"))
+    library_types = {"tv": "tv"}
+    measurement_roots = {"tv"}
+    approved = False
+
+    def report() -> dict[str, Any]:
+        return season_kind_report(connection, library_types=library_types, folder_approved=lambda _: approved,
+                                  measurement_roots=measurement_roots)
+
+    with patch.object(content_kinds, "load_source_evidence_bulk", wraps=load_source_evidence_bulk) as load:
+        initial = report()
+        assert report() == initial
+        assert load.call_count == 1
+        if change == "measurement":
+            connection.execute(source_measurements.update().values(summary_json=json.dumps(_fingerprint(0.0))))
+        elif change == "admission":
+            connection.execute(source_admissions.update().values(tier="unknown"))
+        elif change == "version":
+            connection.execute(source_versions.update().where(source_versions.c.role == "input").values(profile_json='{"width": 3840, "height": 2160}'))
+        elif change == "pending_change":
+            active = connection.execute(select(library_items.c.active_source_version_id).where(library_items.c.id == item_id)).scalar_one()
+            connection.execute(source_transitions.insert().values(operation_id="moving", library_item_id=item_id,
+                before_version_id=active, after_version_id=active, expected_revision=0, kind="publish", outcome="prepared", evidence_json="{}", recorded_at="now"))
+        elif change == "finished_encode":
+            connection.execute(staged_artifacts.insert().values(library_item_id=waiting_id, staging_path="output.mkv", updated_at="now",
+                encode_completed_at="now", encode_origin="queue", encode_command_json='["-c:v", "libx264"]'))
+        elif change == "production_receipt":
+            payload = {"encode_command_json": '["-c:v", "libx264"]', "encode_origin": "queue"}
+            connection.execute(target_production_outcomes.insert().values(receipt_id="receipt", library_item_id=waiting_id,
+                observation_id="observation", manifest_run_id="run", item_index=0, encode_job_id="job", promoted_content_fingerprint="output",
+                payload_json=json.dumps(payload), payload_sha256=stable_json_hash(payload), recorded_at="now"))
+        elif change == "deleted_measurement":
+            connection.execute(source_measurements.delete())
+        elif change == "genre":
+            connection.execute(series_metadata.update().values(tmdb_genres_json='["Animation"]'))
+        elif change == "source":
+            connection.execute(library_items.update().where(library_items.c.id == item_id).values(content_version_fingerprint="changed"))
+        elif change == "missing":
+            connection.execute(library_items.update().where(library_items.c.id == item_id).values(missing_since="now"))
+        elif change == "kept":
+            connection.execute(motion_keep_decisions.insert().values(library_item_id=waiting_id, source_fingerprint=f"sample-{prefix}/waiting.mkv",
+                                                                    prefix=prefix, kept_at="now", reason_code="motion"))
+        elif change == "library_type":
+            library_types["tv"] = "movie"
+        elif change == "measurement_root":
+            measurement_roots.clear()
+        else:
+            approved = True
+        changed = report()
+        assert load.call_count == 2
+    with LibraryCalculations().request(connection):
+        assert report() == changed
+    if change != "measurement_root":
+        assert changed != initial
+
+
+def test_lapsed_keep_with_only_a_file_fingerprint_refreshes_measurement_reasons(connection: DBClient) -> None:
+    prefix = "tv/Drama/Season 1"
+    _item(connection, f"{prefix}/waiting.mkv", status="discovered", codec="h264", current_dark=0.0)
+    kept = _item(connection, f"{prefix}/kept.mkv", status="discovered", codec="wmv2", current_dark=0.0)
+    connection.execute(library_items.update().where(library_items.c.id == kept).values(content_version_fingerprint=None, fingerprint="before"))
+    connection.execute(motion_keep_decisions.insert().values(
+        library_item_id=kept, source_fingerprint="before", prefix=prefix, kept_at="now", reason_code="motion",
+    ))
+
+    def report() -> dict[str, Any]:
+        return season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _: False)
+
+    assert report()["seasons"][0]["measurement_reasons"] == []
+    connection.execute(library_items.update().where(library_items.c.id == kept).values(fingerprint="after"))
+    changed = report()
+    assert changed["seasons"][0]["measurement_reasons"] == ["original_format_unidentified"]
+    with LibraryCalculations().request(connection):
+        assert report() == changed
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_admission_membership_handles_more_sources_than_one_sqlite_bind_batch(connection: DBClient, scoped: bool) -> None:
+    from mediaforce.library.content_kinds import _admitted_item_ids
+
+    ids = set()
+    for index in range(600):
+        item_id = _item(connection, f"tv/Drama/Season 1/{index}.mkv", status="discovered", codec="h264", current_dark=0.0)
+        _admit_historical_original(connection, item_id, dark=0.5)
+        ids.add(item_id)
+    driver = cast(sqlite3.Connection, connection.connection.driver_connection)
+    previous = driver.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 500)
+    try:
+        assert _admitted_item_ids(connection, item_ids=ids if scoped else None) == ids
+    finally:
+        driver.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous)

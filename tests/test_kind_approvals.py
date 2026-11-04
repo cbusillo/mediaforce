@@ -24,7 +24,7 @@ from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, clear_terminal_
 from mediaforce.encoding.free_space import ReservePreflight
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
 from mediaforce.web.runtime.encode_runtime import CONTROLLER_RESTART_STOP_REASON, KEPT_ORIGINAL_TERMINAL_REASON, unfinished_child_reason
-from mediaforce.library.content_kinds import season_evidence, season_grouping
+from mediaforce.library.calculation_reuse import LibraryCalculations
 from mediaforce.library.source_evidence import append_measurement, append_version
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK
@@ -146,45 +146,6 @@ def test_no_seasons_kind_is_read_until_a_kind_is_approved(tmp_path: Path) -> Non
     assert effective_production_approval(config, EPISODE, _loader({}, {SEASON: DARKER}, asked)) is None
     assert asked == []
 
-
-def test_a_seasons_kind_is_read_again_only_when_its_evidence_changes(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    _insert_episode(config)
-    with open_db(config.paths.db_path) as connection:
-        connection.execute(series_metadata.insert().values(series_prefix="tv/Thriller", tmdb_genres_json='["Drama"]',
-                                                           updated_at="2026-10-26T00:00:00+00:00"))
-    kinds = SeasonKinds()
-    try:
-        with patch("mediaforce.web.runtime.kind_approvals.season_grouping", wraps=season_grouping) as grouping, \
-                patch("mediaforce.web.runtime.kind_approvals.season_evidence", wraps=season_evidence) as evidence:
-            kinds(config, SEASON)
-            kinds(config, SEASON)
-            kinds(config, OTHER_SEASON)
-            assert (grouping.call_count, evidence.call_count) == (2, 1)
-            with open_db(config.paths.db_path) as connection:
-                connection.execute(series_metadata.update().values(tmdb_genres_json='["Animation"]'))
-            kinds(config, SEASON)
-            assert (grouping.call_count, evidence.call_count) == (3, 1)
-            with open_db(config.paths.db_path) as connection:
-                connection.execute(source_generations.insert().values(generation_id="new", created_at="now"))
-                version = append_version(connection, generation_id="new", role="input", identity={}, profile={}, recorded_at="now")
-                connection.execute(source_admissions.insert().values(
-                    admission_id="new", generation_id="new", version_id=version, tier="probable", basis="readable-source",
-                    checks_json="{}", recorded_at="now"))
-            kinds(config, SEASON)
-            assert (grouping.call_count, evidence.call_count) == (4, 2)
-            # A publish settled in place, as a rollback does, adds no row but still changes what a season reads.
-            with open_db(config.paths.db_path) as connection:
-                connection.execute(source_transitions.insert().values(
-                    operation_id="publish", library_item_id=None, before_version_id=version, after_version_id=version,
-                    expected_revision=0, kind="publish", outcome="prepared", evidence_json="{}", recorded_at="now"))
-            kinds(config, SEASON)
-            with open_db(config.paths.db_path) as connection:
-                connection.execute(source_transitions.update().values(outcome="rolled_back"))
-            kinds(config, SEASON)
-            assert (grouping.call_count, evidence.call_count) == (6, 4)
-    finally:
-        reset_engine_cache()
 
 
 def test_a_kinds_approval_is_never_saved_as_a_folders_own(tmp_path: Path) -> None:
@@ -1495,7 +1456,7 @@ def test_a_new_sample_without_a_finished_draft_keeps_older_kind_samples_quiet(tm
 
 
 @pytest.mark.parametrize("status", ["discovered", "promoted"])
-def test_window_kind_snapshot_reuses_measurements_and_refreshes_genre_changes(tmp_path: Path, status: str) -> None:
+def test_window_kind_snapshot_refreshes_genre_changes(tmp_path: Path, status: str) -> None:
     config = _config(tmp_path)
     kinds = SeasonKinds()
     load = KindAwareLoader(lambda *_args: None, kinds)
@@ -1506,15 +1467,75 @@ def test_window_kind_snapshot_reuses_measurements_and_refreshes_genre_changes(tm
         connection.execute(series_metadata.insert().values(
             series_prefix="tv/Thriller", tmdb_genres_json='["Drama"]', updated_at="now"))
         connection.commit()
-        with kind_snapshot(connection, config, load), patch(
-                "mediaforce.web.runtime.kind_approvals.season_grouping", wraps=season_grouping) as grouping:
+        with kind_snapshot(connection, config, load):
             assert kinds(config, SEASON) == DARKER
             approval = effective_production_approval(config, EPISODE, load)
             assert approval is not None and approval.kind == DARKER
-            assert grouping.call_count == (1 if status == "promoted" else 0)
         connection.execute(series_metadata.update().values(tmdb_genres_json='["Animation"]'))
-        connection.commit()
         with kind_snapshot(connection, config, load):
             assert kinds(config, SEASON) == "cartoon"
             assert effective_production_approval(config, EPISODE, load) is None
+        connection.commit()
         assert kinds(config, SEASON) == "cartoon"
+
+
+def test_reused_library_classifications_do_not_retain_kind_approval_or_work_status(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    kinds = SeasonKinds()
+    load = KindAwareLoader(lambda *_args: None, kinds)
+    calculations = LibraryCalculations()
+    with open_db(config.paths.db_path) as connection:
+        item_id = _content_item(connection, EPISODE, status="discovered", codec="h264", current_dark=0.5)
+        _admit_historical_original(connection, item_id, dark=0.5)
+        connection.execute(series_metadata.insert().values(series_prefix="tv/Thriller", tmdb_genres_json='["Drama"]', updated_at="now"))
+        connection.commit()
+
+        def read_approval() -> Any:
+            with calculations.request(connection), kind_snapshot(connection, config, load):
+                return effective_production_approval(config, EPISODE, load)
+
+        assert read_approval() is None
+        assert approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")["ok"]
+        assert read_approval() is not None
+        assert stop_kind_approval(config, DARKER)
+        assert read_approval() is None
+        with calculations.request(connection), kind_snapshot(connection, config, load):
+            before = kinds_payload(connection, config, load_calibration_state=load)
+        _finished_sample(config, SEASON)
+        with calculations.request(connection), kind_snapshot(connection, config, load):
+            after = kinds_payload(connection, config, load_calibration_state=load)
+        assert before != after
+
+
+def test_scan_during_refresh_does_not_save_older_membership_under_newer_inputs(tmp_path: Path) -> None:
+    from mediaforce.library import content_kinds
+
+    config = _config(tmp_path)
+    with open_db(config.paths.db_path) as connection:
+        item_id = _content_item(connection, EPISODE, status="discovered", codec="h264", current_dark=0.5)
+        _admit_historical_original(connection, item_id, dark=0.5)
+        connection.execute(series_metadata.insert().values(series_prefix="tv/Thriller", tmdb_genres_json='["Drama"]', updated_at="now"))
+    calculations = LibraryCalculations()
+    present_items = content_kinds._present_items
+    added = False
+
+    def scan_after_read(reader: DBClient, season_prefix: str | None = None) -> Any:
+        nonlocal added
+        items = present_items(reader, season_prefix)
+        if not added:
+            added = True
+            with open_db(config.paths.db_path) as writer:
+                _content_item(writer, f"{SEASON}/new.mkv", status="discovered", codec="h264", current_dark=0.0)
+        return items
+
+    with open_db(config.paths.db_path) as connection, patch.object(content_kinds, "_present_items", side_effect=scan_after_read):
+        def report() -> dict[str, Any]:
+            with calculations.request(connection):
+                return content_kinds.season_kind_report(connection, library_types=config.library_type_map, folder_approved=lambda _: False)
+
+        report()
+        second = report()
+        with LibraryCalculations().request(connection):
+            fresh = content_kinds.season_kind_report(connection, library_types=config.library_type_map, folder_approved=lambda _: False)
+        assert second == fresh
+        assert second["seasons"][0]["episodes"] == 2

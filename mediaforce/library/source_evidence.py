@@ -3,7 +3,7 @@ import json
 import os
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from itertools import batched
 from pathlib import Path
@@ -18,7 +18,9 @@ from mediaforce.core.db_tables import library_items, source_admissions, source_g
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.db_tables import target_production_outcomes
 from mediaforce.core.evidence import canonical_json_bytes, stable_json_hash
+from mediaforce.core.type_defs import object_dict
 from mediaforce.core.utils import descriptor_content_version_fingerprint, descriptor_sha256, file_stat_signature, timestamp
+from mediaforce.library.calculation_reuse import reuse_library_calculation
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EvidenceKind, parse_evidence_summary
 from mediaforce.encoding.cadence import cadence_measurement_complete
 
@@ -369,17 +371,38 @@ def _library_output(origin: object) -> bool:
     return str(origin or "").strip().casefold() in {"", "cli", "cli-production", "queue"}
 
 
+_CONTEXT_OUTPUT_VERSIONS = select(source_versions).where(source_versions.c.role == "output")
+_CONTEXT_OUTPUT_TRANSITIONS = select(source_transitions.c.after_version_id, source_transitions.c.evidence_json).where(
+    source_transitions.c.kind.in_(("encode", "publish", "historical-encode", "historical-publish")),
+    source_transitions.c.outcome == "committed",
+)
+_CONTEXT_STAGED_ARTIFACTS = select(staged_artifacts).where(staged_artifacts.c.encode_completed_at.is_not(None))
+_CONTEXT_PRODUCTION_RECEIPTS = select(target_production_outcomes.c.payload_json, target_production_outcomes.c.payload_sha256)
+
+
 def load_source_evidence_context(connection: DBClient) -> SourceEvidenceContext:
-    """One pass-local snapshot of output identities and the codec exclusions they establish."""
+    if not inspect(connection).has_table("source_versions"):
+        return _read_source_evidence_context(connection)
+    queries = (_CONTEXT_OUTPUT_VERSIONS, _CONTEXT_OUTPUT_TRANSITIONS, _CONTEXT_STAGED_ARTIFACTS, _CONTEXT_PRODUCTION_RECEIPTS)
+    return reuse_library_calculation(
+        connection, "source_context", queries, HISTORICAL_OUTPUT_PROFILES,
+        lambda: _read_source_evidence_context(connection),
+        copy_result=_copy_source_evidence_context,
+    )
+
+
+def _copy_source_evidence_context(context: SourceEvidenceContext) -> SourceEvidenceContext:
+    return replace(context, outputs=tuple(dict(row) for row in context.outputs),
+                   sampled_outputs={key: tuple(dict(row) for row in rows) for key, rows in context.sampled_outputs.items()})
+
+
+def _read_source_evidence_context(connection: DBClient) -> SourceEvidenceContext:
     outputs: tuple[Mapping[str, Any], ...] = ()
     conflicts: set[str] = set()
     if inspect(connection).has_table("source_versions"):
-        outputs = tuple(connection.execute(select(source_versions).where(source_versions.c.role == "output")).mappings().all())
+        outputs = tuple(object_dict(row) for row in connection.execute(_CONTEXT_OUTPUT_VERSIONS).mappings())
         library_outputs = set()
-        for row in connection.execute(select(source_transitions.c.after_version_id, source_transitions.c.evidence_json).where(
-            source_transitions.c.kind.in_(("encode", "publish", "historical-encode", "historical-publish")),
-            source_transitions.c.outcome == "committed",
-        )).mappings():
+        for row in connection.execute(_CONTEXT_OUTPUT_TRANSITIONS).mappings():
             try:
                 evidence = json.loads(row["evidence_json"])
             except (ValueError, TypeError):
@@ -388,9 +411,9 @@ def load_source_evidence_context(connection: DBClient) -> SourceEvidenceContext:
                 library_outputs.add(row["after_version_id"])
         conflicts.update(normalize_codec(row["video_codec"]) for row in outputs
                          if row["version_id"] in library_outputs and row["video_codec"])
-    stages = connection.execute(select(staged_artifacts).where(staged_artifacts.c.encode_completed_at.is_not(None))).mappings().all()
+    stages = connection.execute(_CONTEXT_STAGED_ARTIFACTS).mappings().all()
     commands = [row["encode_command_json"] for row in stages if _library_output(row["encode_origin"])]
-    for receipt in connection.execute(select(target_production_outcomes.c.payload_json, target_production_outcomes.c.payload_sha256)).mappings():
+    for receipt in connection.execute(_CONTEXT_PRODUCTION_RECEIPTS).mappings():
         try:
             payload = json.loads(receipt["payload_json"])
             if (isinstance(payload, dict) and stable_json_hash(payload) == receipt["payload_sha256"]
