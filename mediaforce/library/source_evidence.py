@@ -18,6 +18,7 @@ from mediaforce.core.db_tables import library_items, source_admissions, source_g
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.db_tables import target_production_outcomes
 from mediaforce.core.evidence import canonical_json_bytes, stable_json_hash
+from mediaforce.core.type_defs import object_dict
 from mediaforce.core.utils import descriptor_content_version_fingerprint, descriptor_sha256, file_stat_signature, timestamp
 from mediaforce.library.calculation_reuse import reuse_library_calculation
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EvidenceKind, parse_evidence_summary
@@ -399,7 +400,7 @@ def _read_source_evidence_context(connection: DBClient) -> SourceEvidenceContext
     outputs: tuple[Mapping[str, Any], ...] = ()
     conflicts: set[str] = set()
     if inspect(connection).has_table("source_versions"):
-        outputs = tuple(cast(Mapping[str, Any], row) for row in connection.execute(_CONTEXT_OUTPUT_VERSIONS).mappings())
+        outputs = tuple(object_dict(row) for row in connection.execute(_CONTEXT_OUTPUT_VERSIONS).mappings())
         library_outputs = set()
         for row in connection.execute(_CONTEXT_OUTPUT_TRANSITIONS).mappings():
             try:
