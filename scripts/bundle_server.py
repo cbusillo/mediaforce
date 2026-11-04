@@ -144,9 +144,13 @@ def stage_server(app: Path, cache: Path, identity: str) -> None:
         "-o", launcher)
     for path in framework.rglob("*.o"):
         path.unlink()
-    for path in native_files(contents):
+    images = native_files(contents)
+    for path in images:
         required = {path.relative_to(server).parts[0]} if path.is_relative_to(server) and path.relative_to(server).parts[0] in architectures else architectures
         verify_native_target(path, required, minimum_os)
+    for path in sorted(images, key=lambda image: len(image.parts), reverse=True):
+        if path == contents / "MacOS" / info["CFBundleExecutable"]:
+            continue
         run("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, path)
     run("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, framework)
     run("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, app)
