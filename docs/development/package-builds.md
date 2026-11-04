@@ -82,3 +82,9 @@ runtime or database, even on a different port.
 
 The application uses macOS certificate trust through `truststore`, preserving
 HTTPS verification without a checkout-specific OpenSSL certificate path.
+The verifier checks private/runtime names and the current build user's home
+path throughout the app. Its generic machine-path heuristics apply to
+Mediaforce's own files; Python and third-party packages contain public path
+examples and are assembled from the digest-pinned runtime and hashed lockfile.
+Upstream Python tests, development objects and local wheel-origin records are
+omitted from the app.

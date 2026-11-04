@@ -304,8 +304,8 @@ def _require_bundled_install(paths: LoginItemPaths) -> None:
     if "AppTranslocation" in paths.project_root.parts:
         raise LoginItemError("move Mediaforce to its permanent location before setting up the background service")
     _require_success(
-        _run_command(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R",
-                      f'anchor apple generic and certificate leaf[subject.OU] = "{MACOS_SIGNING_TEAM}"', str(paths.project_root)]),
+        _run_command(["/usr/bin/codesign", "--verify", "--deep", "--strict",
+                      f'-R=anchor apple generic and certificate leaf[subject.OU] = "{MACOS_SIGNING_TEAM}"', str(paths.project_root)]),
         "verify the signed app bundle",
     )
     working = paths.working_directory.resolve()

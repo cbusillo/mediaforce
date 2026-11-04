@@ -108,6 +108,18 @@ def test_native_qualification_parses_dependencies_and_os_versions() -> None:
             verify_native_target(Path("Mediaforce"), {"arm64"}, "15.0")
 
 
+def test_app_vendor_examples_do_not_hide_current_home_leaks(tmp_path: Path) -> None:
+    app = tmp_path / "Mediaforce.app"
+    vendor = app / "Contents/Resources/server/arm64/vendor.py"
+    vendor.parent.mkdir(parents=True)
+    with patch.object(Path, "home", return_value=Path("/home/private-owner")):
+        vendor.write_text('example = "/home/example-user/demo"\n')
+        verify_package_archives([app])
+        vendor.write_text('generated = "/home/private-owner/private"\n')
+        with pytest.raises(PackageContentsError):
+            verify_package_archives([app])
+
+
 def test_moved_bundle_can_repair_only_the_same_saved_app(bundle_paths: LoginItemPaths) -> None:
     with patch("mediaforce.ops.login_item._require_supported_platform"), patch(
         "mediaforce.ops.login_item._run_command", return_value=subprocess.CompletedProcess([], 0)
