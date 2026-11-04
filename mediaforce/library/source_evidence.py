@@ -470,7 +470,9 @@ def load_source_evidence_bulk(
     requested = tuple(dict.fromkeys(int(item_id) for item_id in item_ids))
     if not requested:
         return {}
-    items = {int(row["id"]): row for row in _evidence_rows(connection, select(library_items), library_items.c.id, requested)}
+    item_query = select(library_items.c.id, library_items.c.active_source_version_id,
+                        library_items.c.size_bytes, library_items.c.content_version_fingerprint)
+    items = {int(row["id"]): row for row in _evidence_rows(connection, item_query, library_items.c.id, requested)}
     active_ids = {str(row["active_source_version_id"]) for row in items.values() if row["active_source_version_id"]}
     current_versions = {str(row["version_id"]): row
                         for row in _evidence_rows(connection, select(source_versions), source_versions.c.version_id, active_ids)}
@@ -481,8 +483,10 @@ def load_source_evidence_bulk(
     for row in admission_rows:
         admissions_by_generation[str(row["generation_id"])].append(row)
     original_ids = {str(rows[0]["version_id"]) for rows in admissions_by_generation.values() if len(rows) == 1}
-    originals = {str(row["version_id"]): row
-                 for row in _evidence_rows(connection, select(source_versions), source_versions.c.version_id, original_ids)}
+    originals = {version_id: row for version_id, row in current_versions.items() if version_id in original_ids}
+    originals.update({str(row["version_id"]): row for row in _evidence_rows(
+        connection, select(source_versions), source_versions.c.version_id, original_ids - originals.keys(),
+    )})
     pending_items = {int(row["library_item_id"]) for row in _evidence_rows(
         connection, select(source_transitions.c.library_item_id).where(source_transitions.c.outcome.in_(("prepared", "unresolved"))),
         source_transitions.c.library_item_id, requested,
