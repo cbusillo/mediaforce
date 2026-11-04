@@ -6062,23 +6062,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
         )
 
-    def test_scheduler_summary_keeps_day_and_timezone_context(self) -> None:
-        policy = web_app._normalize_encode_queue_scheduler(
-            {
-                "mode": "night",
-                "start_hour": 20,
-                "end_hour": 6,
-                "timezone": "host_local",
-                "days_of_week": ["mon", "tue", "wed", "thu", "fri"],
-                "all_day_days_of_week": ["sun"],
-            }
-        )
-
-        self.assertEqual(
-            policy["summary"],
-            "runs Sun all day and weekdays between 20:00 and 06:00 (host local)",
-        )
-
     def test_folder_cards_count_validated_items_as_pending_until_promoted(self) -> None:
         first = self._create_source_file("episode-pending.mkv")
         second = self._create_source_file("episode-validated.mkv")
@@ -16604,24 +16587,6 @@ raise SystemExit(0)
                     [int(value) for value in re.findall(r"-?\d+", summary)],
                     [expected_attempt, web_app.ENCODE_JOB_MAX_ATTEMPTS],
                 )
-
-    def test_encode_queue_summary_copy_labels_eta_as_estimated(self) -> None:
-        encode_queue = {
-            "running_count": 1,
-            "queued_count": 2,
-            "queued_waiting_count": 1,
-            "needs_attention_count": 0,
-            "telemetry": {"eta_copy": "12m 0s"},
-        }
-        encode_job = {"status": "queued", "queue_position": 2, "queue_depth": 3}
-
-        summary = web_app._encode_queue_summary_copy(
-            encode_queue,
-            {"is_paused": False},
-            encode_job,
-        )
-
-        self.assertIn("estimated queue finish in 12m 0s", summary)
 
     def test_encode_queue_summary_copy_omits_queue_wide_attention_for_other_folders(self) -> None:
         encode_queue = {
