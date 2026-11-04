@@ -118,6 +118,18 @@ def verify_package_archives(
 def _archive_members(
         archive: Path,
 ) -> _ArchiveView:
+    if archive.is_dir() and archive.suffix == ".app":
+        members = []
+        root = archive.resolve()
+        for path in archive.rglob("*"):
+            if path.is_symlink() and not path.resolve().is_relative_to(root):
+                raise PackageContentsError(f"App link escapes its bundle: {path}")
+            if path.is_file() and not path.is_symlink():
+                members.append(_ArchiveMember(
+                    path=PurePosixPath(path.relative_to(archive).as_posix()),
+                    size=path.stat().st_size, read=path.read_bytes,
+                ))
+        return _ArchiveView(members=tuple(members), close=lambda: None)
     if archive.suffix == ".whl":
         wheel = zipfile.ZipFile(archive)
         members = tuple(
@@ -172,6 +184,9 @@ def _reject_forbidden_members(archive: Path, members: Iterable[PurePosixPath]) -
 
 
 def _without_sdist_root(member: PurePosixPath) -> PurePosixPath:
+    bundled_prefix = ("Contents", "Resources", "server", "app")
+    if member.parts[:4] == bundled_prefix:
+        return PurePosixPath(*member.parts[4:])
     if len(member.parts) > 1 and SDIST_ROOT_RE.fullmatch(member.parts[0]):
         return PurePosixPath(*member.parts[1:])
     return member
@@ -180,15 +195,20 @@ def _without_sdist_root(member: PurePosixPath) -> PurePosixPath:
 def _scan_archive_text(archive: Path, members: Iterable[_ArchiveMember]) -> None:
     private_path = str(Path.home()).encode("utf-8")
     for member in members:
-        if not _scannable_member(member.path):
-            continue
-        if member.size > MAX_SCANNABLE_MEMBER_BYTES:
+        scannable = _scannable_member(member.path)
+        if scannable and member.size > MAX_SCANNABLE_MEMBER_BYTES:
             raise PackageContentsError(
                 f"{archive.name} contains oversized scannable member {member.path}"
             )
         payload = member.read()
         if private_path and private_path not in EXAMPLE_HOME_PATHS and private_path in payload:
             raise PackageContentsError(f"{archive.name} contains the current machine's home path")
+        if not scannable:
+            continue
+        vendor_runtime = member.path.parts[:3] == ("Contents", "Frameworks", "Python.framework")
+        vendor_dependency = member.path.parts[:3] == ("Contents", "Resources", "server") and member.path.parts[3] in {"arm64", "x86_64"}
+        if vendor_runtime or vendor_dependency:
+            continue
         if PRIVATE_MACHINE_PATH_RE.search(payload):
             raise PackageContentsError(
                 f"{archive.name} contains a machine-specific absolute path in {member.path}"

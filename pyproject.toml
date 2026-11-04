@@ -14,7 +14,8 @@ dependencies = [
     "sqlalchemy>=2.0.52,<3",
     "starlette>=1.6.0",
     "uvicorn",
-    "hatchling"
+    "hatchling",
+    "truststore>=0.10.4,<0.11",
 ]
 
 [project.scripts]

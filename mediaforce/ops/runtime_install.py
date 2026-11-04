@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -11,6 +12,13 @@ from pathlib import Path
 
 class RuntimeProtectionError(RuntimeError):
     pass
+
+
+def bundled_app_path() -> Path | None:
+    executable = Path(sys.executable).resolve()
+    if executable.name == "mediaforce-server" and executable.parent.name == "MacOS" and executable.parents[1].name == "Contents":
+        return executable.parents[2]
+    return None
 
 
 def runtime_directory(home: Path) -> Path:

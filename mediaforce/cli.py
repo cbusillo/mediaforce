@@ -8,12 +8,12 @@ from typing import Any, Sequence
 from sqlalchemy import select
 
 from mediaforce.core.config import (
-    DEFAULT_CONFIG_PATH,
     MediaforceConfig,
     load_config,
     migrate_config_state,
 )
 from mediaforce.core.db import DBClient, open_db, open_readonly_db
+from mediaforce.ops.runtime_install import bundled_app_path
 from mediaforce.core.process_control import ScheduleWindowClosedError
 from mediaforce.core.db_tables import run_manifests as run_manifests_table
 from mediaforce.execution import HeldFile, describe_item_plan, encode_manifest_items, promote_manifest_items, \
@@ -59,11 +59,13 @@ class TargetSizePreflightBlocked(RuntimeError):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manifest-driven AV1 planning for mediaforce")
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Path to the TOML config file")
+    parser.add_argument("--config", type=Path, help="Path to the TOML config file")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     service_parser = subparsers.add_parser("service", help="Manage the local macOS mediaforce-web login item")
+    if bundled_app_path() is not None:
+        service_parser.add_argument("--credentials", type=Path, help="Read credentials from this existing file")
     service_actions = service_parser.add_subparsers(dest="service_action", required=True)
     for action in ("install", "enable", "disable", "restart", "status", "uninstall"):
         service_actions.add_parser(action)
@@ -284,6 +286,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "service":
         from mediaforce.ops.login_item import run_login_item_command
 
+        bundle = bundled_app_path()
+        if bundle is not None:
+            return run_login_item_command(
+                str(args.service_action), project_root=bundle,
+                config_path=args.config.expanduser().resolve() if args.config is not None else None,
+                credentials_path=args.credentials.expanduser().resolve() if args.credentials is not None else None,
+                follow=bool(getattr(args, "follow", False)),
+                stderr=bool(getattr(args, "stderr", False)), lines=int(getattr(args, "lines", 80)),
+            )
         return run_login_item_command(
             str(args.service_action),
             project_root=Path(__file__).resolve().parents[1],
