@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
+from typing import Any
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -302,16 +303,16 @@ class ControllerStorageRecoveryTest(TestCase):
             True, True, self.mounts[0].mount_point, self.mounts[0].source, "smbfs", True
         )
 
-        def media(snapshot: dict[str, object]) -> dict[str, object]:
+        def media(snapshot: dict[str, Any]) -> dict[str, Any]:
             return next(m for m in snapshot["mounts"] if m["mount_point"] == "/Volumes/media")  # type: ignore[index]
 
-        def run(probe: ControllerMountProbe) -> dict[str, object]:
+        def run(probe: ControllerMountProbe) -> dict[str, Any]:
             with patch.object(recovery, "_utc_now", return_value=NOW), patch.object(
                 recovery, "probe_controller_mount", return_value=probe,
-            ), patch.object(recovery, "mount_controller_smb_no_ui") as mount:
+            ), patch.object(recovery, "mount_controller_smb_no_ui") as attempt:
                 recovery.process_controller_storage_recovery_once(self.config)
             self.assertEqual(
-                [call for call in mount.call_args_list if call.args[0].mount_point == Path("/Volumes/media")], [],
+                [call for call in attempt.call_args_list if call.args[0].mount_point == Path("/Volumes/media")], [],
             )
             return media(recovery.controller_storage_recovery_snapshot(self.config))
 
