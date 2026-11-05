@@ -205,6 +205,7 @@ struct NeedsYouRoundTwoPage: View {
 }
 
 /// What one waiting show says on its card, drawn from the same facts as its notice.
+@MainActor
 private struct Card {
     let item: AttentionNotice
     let name: String
@@ -228,9 +229,9 @@ private struct Card {
             action = Words.sampleAction(sample.action) ?? "Open sample"
         } else if let kind {
             name = Words.kindName(kind.kind)
-            posterPrefix = kind.sampleSeason.map(MediaPoster.titlePrefix)
+            posterPrefix = kind.sampleSeason.map { MediaPoster.titlePrefix($0) }
             headline = kind.sampleSeason?.split(separator: "/").dropFirst().joined(separator: ", ") ?? name
-            state = "Decides every show like it"
+            state = kind.sampleReady == true ? "Sample ready" : "Needs your choice"
             reason = item.body
             action = "Review kind"
         } else if let season {
