@@ -225,7 +225,8 @@ def _probe_controller_volume(
     ):
         return ControllerMountProbe(
             False, False, mount_point, observed_source, filesystem, True,
-            "mount_identity_mismatch", "The expected mount path is occupied by a different volume.",
+            "mount_identity_mismatch",
+            _mismatch_detail(observed_source, filesystem, expected_mount.source, resolve_server),
         )
     access_results = access_output.splitlines()
     accessible = len(access_results) == len(access_specs) and all(value == "1" for value in access_results)
@@ -385,6 +386,33 @@ def smb_servers_confirmed_different(first_server: str, second_server: str) -> bo
     first = _resolve_server_addresses(first_server)
     second = _resolve_server_addresses(second_server)
     return bool(first) and bool(second) and not first & second
+
+
+def _mismatch_detail(
+        observed_source: str,
+        filesystem: str | None,
+        expected_source: str,
+        resolve_server: ServerResolver | None,
+) -> str:
+    """What sat at the required path and how it compares with the saved mapping, never the sign-in."""
+    expected = _smb_identity(expected_source)
+    saved = f"//{expected[1]}/{expected[2]}" if expected else "its saved SMB mapping"
+    observed = _smb_identity(observed_source)
+    if filesystem != "smbfs" or observed is None:
+        kind = f"{filesystem} " if filesystem else ""
+        return f"Found a {kind}volume at the required path, not the saved SMB share {saved}."
+    found = f"Found //{observed[1]}/{observed[2]} at the required path; the saved mapping is {saved}."
+    if expected is None or observed[2] != expected[2]:
+        return f"{found} It is a different share."
+    resolve = resolve_server or _resolve_server_addresses
+    observed_addresses, expected_addresses = resolve(observed[1]), resolve(expected[1])
+    if observed[1] == expected[1] or observed_addresses & expected_addresses:
+        if observed[0] != expected[0]:
+            return f"{found} It is the same server and share under a different sign-in."
+        return f"{found} It looks like the same server and share, but the check could not confirm it; check again."
+    if observed_addresses and expected_addresses:
+        return f"{found} It is a different server."
+    return f"{found} The server names differ and could not be matched to one machine, so it may be the same server under another name."
 
 
 def smb_source_identity(source: str) -> tuple[str, str, str] | None:

@@ -32,6 +32,8 @@ _SCHEMA_VERSION = 1
 _INITIAL_RETRY_SECONDS = 30
 _MAX_RETRY_SECONDS = 300
 _READY_FRESHNESS_SECONDS = 90
+_EARLIER_PREFIX = "Earlier: "
+_MAX_OBSERVED_DETAIL = 1000
 _PROCESS_GENERATION = uuid.uuid4().hex
 _ACTION_REQUIRED_FAILURES = frozenset({
     "invalid_mapping",
@@ -40,6 +42,13 @@ _ACTION_REQUIRED_FAILURES = frozenset({
     "mount_result_unknown",
     "mount_timeout",
     "unexpected_mount_path",
+})
+
+# Latch causes the probe itself observed. A later probe of the path supersedes them, so the saved
+# reason follows it; the latch stays. Causes from a mount attempt (timeout, unknown result) and
+# invalid mappings are not observations, and a fresh probe never rewrites them.
+_PROBE_OBSERVED_FAILURES = frozenset({
+    "mount_identity_mismatch", "mount_path_occupied", "unexpected_mount_path",
 })
 
 _RETRYABLE_FAILURES = frozenset({
@@ -152,6 +161,7 @@ def process_controller_storage_recovery_once(
                 continue
 
             failure_kind = probe.failure_kind or "mount_absent"
+            refresh = not prior_indeterminate and _latched_on_observation(prior)
             if failure_kind in {"probe_failed", "probe_timeout"}:
                 states_by_mount[str(root)] = _failed_state(
                     mount_point=root,
@@ -168,6 +178,7 @@ def process_controller_storage_recovery_once(
                         or (prior.reason if prior and prior.status == "action_required" else None)
                         or _stable_reason(failure_kind)
                     ),
+                    detail=_retained_detail(None, prior) if refresh else None,
                     failure_kind=failure_kind,
                     attempted=False,
                 )
@@ -179,8 +190,10 @@ def process_controller_storage_recovery_once(
                     previous=prior,
                     now=checked_at,
                     status="action_required",
-                    reason=_stable_reason(failure_kind),
+                    reason=_latched_reason(failure_kind) if refresh else _stable_reason(failure_kind),
+                    detail=_retained_detail(None, prior) if refresh else None,
                     failure_kind=failure_kind,
+                    refresh_failure_kind=refresh,
                     attempted=False,
                 )
                 continue
@@ -190,19 +203,24 @@ def process_controller_storage_recovery_once(
                 or failure_kind in _ACTION_REQUIRED_FAILURES
                 or (prior and prior.status == "action_required")
             ):
+                latched = prior is not None and prior.status == "action_required"
+                if prior_indeterminate:
+                    reason = previous.state_error or _stable_reason(failure_kind)
+                elif refresh:
+                    reason = _latched_reason(failure_kind)
+                else:
+                    reason = (prior.reason if latched and prior else None) or _stable_reason(failure_kind)
                 states_by_mount[str(root)] = _failed_state(
                     mount_point=root,
                     requirement_signature=signature,
                     previous=prior,
                     now=now,
                     status="action_required",
-                    reason=(
-                        previous.state_error
-                        if prior_indeterminate
-                        else (prior.reason if prior and prior.status == "action_required" else None)
-                        or _stable_reason(failure_kind)
-                    ),
+                    reason=reason,
+                    detail=_retained_detail(_safe_detail(failure_kind, probe.detail), prior) if refresh
+                    else _safe_detail(failure_kind, probe.detail),
                     failure_kind=failure_kind,
+                    refresh_failure_kind=refresh,
                     attempted=False,
                 )
                 continue
@@ -456,6 +474,7 @@ def _failed_state(
         reason: str,
         detail: str | None = None,
         failure_kind: str | None = None,
+        refresh_failure_kind: bool = False,
         attempted: bool,
 ) -> ControllerStorageMountState:
     count = max(1, (previous.failure_count if previous else 0) + (1 if attempted else 0))
@@ -479,7 +498,7 @@ def _failed_state(
         detail=detail,
         last_failure_kind=(
             previous.last_failure_kind
-            if previous and previous.status == "action_required"
+            if previous and previous.status == "action_required" and not refresh_failure_kind
             else failure_kind or (previous.last_failure_kind if previous else None)
         ),
         first_failure_at=(previous.first_failure_at if previous else None) or timestamp,
@@ -518,6 +537,35 @@ def _stable_reason(failure_kind: str) -> str:
     }.get(failure_kind, "The required SMB share is unavailable; Mediaforce will retry.")
 
 
+def _latched_on_observation(state: ControllerStorageMountState | None) -> bool:
+    """Whether a manual-recovery latch rests on what a probe saw, so a later probe may restate it."""
+    if state is None or state.status != "action_required" or state.last_failure_kind is None:
+        return False
+    return state.last_failure_kind in _PROBE_OBSERVED_FAILURES or (
+        state.last_failure_kind in _RETRYABLE_FAILURES
+        and state.reason == _latched_reason(state.last_failure_kind)
+    )
+
+
+def _latched_reason(failure_kind: str) -> str:
+    """The reason for a latch whose cause has since changed: the latest probe, plus the manual step."""
+    if failure_kind == "mount_absent":
+        return "Nothing is mounted at the required volume path now, and an earlier problem there needs a manual reconnect."
+    if failure_kind == "path_unavailable":
+        return "The share is mounted, but a required path on it is unavailable; an earlier problem needs a manual reconnect."
+    return _stable_reason(failure_kind)
+
+
+def _retained_detail(fresh: str | None, previous: ControllerStorageMountState | None) -> str | None:
+    """A new observation replaces the saved one; with none, the earlier one stays, marked as earlier."""
+    if fresh:
+        return fresh
+    earlier = previous.detail if previous else None
+    if not earlier or earlier.startswith(_EARLIER_PREFIX):
+        return earlier
+    return f"{_EARLIER_PREFIX}{earlier}"
+
+
 def _safe_detail(failure_kind: str, detail: str | None) -> str | None:
     if failure_kind == "mount_result_unknown" and detail:
         exit_match = re.search(r"\bosascript exit (-?\d+)\b", detail)
@@ -533,6 +581,9 @@ def _safe_detail(failure_kind: str, detail: str | None) -> str | None:
     if failure_kind == "unexpected_mount_path":
         match = re.search(r"(/Volumes/[A-Za-z0-9 ._()'\-]+)", detail)
         return f"Unexpected mount path: {match.group(1)}." if match else None
+    if failure_kind == "mount_identity_mismatch" and detail.startswith("Found "):
+        # Built by the probe from the server and share names only; a sign-in never reaches the record.
+        return detail[:_MAX_OBSERVED_DETAIL]
     return None
 
 

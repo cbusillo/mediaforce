@@ -44,6 +44,14 @@ checking its contents and ownership. If NetFS mounts at a suffixed path such as
 Inspect Finder for such a mount and eject it deliberately before restoring
 the expected path. Automatic recovery never unmounts volumes or removes folders.
 
+A stopped recovery keeps waiting for a manual reconnect, but each fresh check
+restates why: if the other volume has since gone, the record says nothing is
+mounted there now. When a different share is found, the record keeps its server
+and share names, and whether it is a different share, a different server or
+possibly the same server under another name. It never keeps a user name or
+password. That note stays, marked "Earlier", after the volume goes. A finished
+file that waits for the controller's work window also lists this storage hold.
+
 ### Computer recovery and outage warnings
 
 A separate supervised worker under the same elected background owner checks
