@@ -266,7 +266,7 @@ def _tv_show(
         "season_count": len(seasons),
         "episode_count": sum(int(card.get("item_count") or 0) for card in cards) + len(loose),
         "bytes": sum(int(card.get("total_size_bytes") or 0) for card in cards) + loose_bytes,
-        "estimated_saved_bytes": None if any(card.get("details_loading") for card in cards)
+        "estimated_saved_bytes": None if any(_estimated_saved_bytes(card) is None for card in cards)
         else sum(int(card.get("projected_reclaim_bytes") or 0) for card in cards),
         "loose_files": {"state": NOT_IN_SEASON_FOLDER, "episode_count": len(loose), "bytes": loose_bytes} if loose else None,
         "seasons": [
@@ -299,6 +299,12 @@ def _tv_season(identity: Mapping[str, Any], card: Mapping[str, Any]) -> dict[str
     }
 
 
+def _estimated_saved_bytes(card: Mapping[str, Any]) -> int | None:
+    if card.get("details_loading") or card.get("estimate_unavailable_count") or card.get("projected_reclaim_bytes") is None:
+        return None
+    return int(card["projected_reclaim_bytes"])
+
+
 def movies_payload(titles: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     listed = [
         {
@@ -307,8 +313,7 @@ def movies_payload(titles: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             "library": title.get("library_label"),
             "file_count": int(title.get("item_count") or 0),
             "bytes": int(title.get("total_size_bytes") or 0),
-            "estimated_saved_bytes": None if title.get("details_loading") or title.get("projected_reclaim_bytes") is None
-            else int(title["projected_reclaim_bytes"]),
+            "estimated_saved_bytes": _estimated_saved_bytes(title),
             "state": movie_state(title),
         }
         for title in titles
@@ -356,8 +361,7 @@ def other_media_payload(library: Mapping[str, Any]) -> dict[str, Any]:
             "library": unit.get("library_label"),
             "file_count": int(unit.get("item_count") or 0),
             "bytes": int(unit.get("total_size_bytes") or 0),
-            "estimated_saved_bytes": None if unit.get("details_loading") or unit.get("projected_reclaim_bytes") is None
-            else int(unit["projected_reclaim_bytes"]),
+            "estimated_saved_bytes": _estimated_saved_bytes(unit),
             "state": other_media_state(unit),
         }
         for unit in library.get("work_units") or []

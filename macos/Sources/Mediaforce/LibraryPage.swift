@@ -19,7 +19,7 @@ struct LibraryPage: View {
                 } else if let explanation = Words.workExplanation(facts) {
                     Text(explanation).foregroundStyle(.secondary)
                 }
-                StorageBar(facts: facts, kind: kind, open: open)
+                StorageBar(facts: facts, kind: kind, listing: listing, open: open)
                 if includesTV {
                     FinishedShelf(seasons: Array(facts.recentlyFinishedSeasons.prefix(6)), posters: model.posters, open: open)
                     if !facts.samples.approvedNotStarted.isEmpty {
@@ -35,7 +35,7 @@ struct LibraryPage: View {
                 Text(Words.libraryReadFailure(kind, hasPrevious: listing.hasLoaded(kind)))
                     .font(.callout).foregroundStyle(.secondary)
             }
-            if rows.contains(where: \.listCutShort) {
+            if listing.truncated {
                 Text(Words.otherMediaTruncated).font(.callout).foregroundStyle(.secondary)
             }
             if rows.isEmpty && listing.hasLoaded && listing.unavailable.isEmpty {

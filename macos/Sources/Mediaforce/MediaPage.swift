@@ -45,7 +45,7 @@ struct MediaPage: View {
             if onlySeasons != nil {
                 Button(Words.showEverything, action: showEverything).buttonStyle(QuietLinkStyle()).font(.callout)
             }
-            if rows.contains(where: \.listCutShort) {
+            if listing.truncated {
                 Text(Words.otherMediaTruncated)
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -121,14 +121,25 @@ enum MediaKind: String, CaseIterable, Identifiable, Sendable {
 @MainActor
 @Observable
 final class MediaListing {
-    private var snapshots: [MediaKind: [MediaRow]] = [:]
+    private var snapshots: [MediaKind: MediaRow.Loaded] = [:]
     private(set) var unavailable: [MediaKind] = []
     private(set) var loading = true
 
     var hasLoaded: Bool { !snapshots.isEmpty }
     func hasLoaded(_ kind: MediaKind) -> Bool { snapshots[kind] != nil }
+    var truncated: Bool { snapshots.values.contains(where: \.truncated) }
     var rows: [MediaRow] {
-        snapshots.values.flatMap { $0 }.sorted { ($0.stateRank, -$0.bytes, $0.id) < ($1.stateRank, -$1.bytes, $1.id) }
+        snapshots.values.flatMap(\.rows).sorted { ($0.stateRank, -$0.bytes, $0.id) < ($1.stateRank, -$1.bytes, $1.id) }
+    }
+
+    var estimateIsPartial: Bool {
+        snapshots.count < 3 || !unavailable.isEmpty || truncated || rows.contains { $0.saved == nil }
+    }
+
+    func estimatedTotalSavedBytes(savedSoFar: Int64) -> Int64? {
+        let estimates = rows.compactMap(\.saved)
+        guard !estimates.isEmpty || !estimateIsPartial else { return nil }
+        return savedSoFar + estimates.reduce(0, +)
     }
 
     func watch(_ client: MediaforceClient, kind: MediaKind) async {
@@ -143,8 +154,8 @@ final class MediaListing {
         let results = await withTaskGroup(of: Read.self) { group in
             for kind in kinds {
                 group.addTask {
-                    do { return Read(kind: kind, rows: try await MediaRow.load(client, kind: kind)) }
-                    catch { return Read(kind: kind, rows: nil) }
+                    do { return Read(kind: kind, loaded: try await MediaRow.load(client, kind: kind)) }
+                    catch { return Read(kind: kind, loaded: nil) }
                 }
             }
             var results: [Read] = []
@@ -152,16 +163,16 @@ final class MediaListing {
             return results
         }
         guard !Task.isCancelled else { return }
-        unavailable = kinds.filter { kind in results.contains { $0.kind == kind && $0.rows == nil } }
+        unavailable = kinds.filter { kind in results.contains { $0.kind == kind && $0.loaded == nil } }
         for result in results {
-            if let rows = result.rows { snapshots[result.kind] = rows }
+            if let loaded = result.loaded { snapshots[result.kind] = loaded }
         }
         loading = false
     }
 
     private struct Read: Sendable {
         let kind: MediaKind
-        let rows: [MediaRow]?
+        let loaded: MediaRow.Loaded?
     }
 }
 
@@ -173,8 +184,6 @@ struct MediaRow: Identifiable, Sendable {
     let bytes: Int64
     let saved: Int64?
     let state: LibraryStateGroup
-    // The server's Other media listing stopped at its cap, so this list is not the whole library.
-    var listCutShort = false
     // Whose poster a row shows when it isn't its own, as a season shows its show's.
     var posterPrefix: String?
 
@@ -194,8 +203,13 @@ struct MediaRow: Identifiable, Sendable {
         .sorted { $0.bytes > $1.bytes }
     }
 
+    struct Loaded: Sendable {
+        let rows: [MediaRow]
+        let truncated: Bool
+    }
+
     @MainActor
-    static func load(_ client: MediaforceClient, kind: MediaKind = .everything) async throws -> [MediaRow] {
+    static func load(_ client: MediaforceClient, kind: MediaKind = .everything) async throws -> Loaded {
         async let tv: TVShowsFacts? = kind == .everything || kind == .tv ? client.tvShows() : nil
         async let movies: MoviesFacts? = kind == .everything || kind == .movies ? client.movies() : nil
         async let other: OtherMediaFacts? = kind == .everything || kind == .other ? client.otherMedia() : nil
@@ -208,10 +222,10 @@ struct MediaRow: Identifiable, Sendable {
                      bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup)
         } + (others?.items ?? []).map {
             MediaRow(id: $0.prefix, name: $0.title, kind: .other, detail: Words.count($0.fileCount, "file"),
-                     bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup, listCutShort: others?.truncated ?? false)
+                     bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup)
         }
         // What needs the Director comes first, then the biggest.
-        return rows.sorted { ($0.stateRank, -$0.bytes) < ($1.stateRank, -$1.bytes) }
+        return Loaded(rows: rows.sorted { ($0.stateRank, -$0.bytes) < ($1.stateRank, -$1.bytes) }, truncated: others?.truncated ?? false)
     }
 }
 
