@@ -80,7 +80,7 @@ struct NeedsYouProposalPage: View {
                         Divider()
                         ForEach(rows, id: \.id) { item in
                             HStack(alignment: .center, spacing: 16) {
-                                widget.artwork(item, width: 58)
+                                widget.artwork(item, width: 64)
                                 VStack(alignment: .leading, spacing: 5) {
                                     HStack(spacing: 6) { WaitingMark(); Text(item.title).font(.title3.weight(.semibold)) }
                                     reasonLine(item)
