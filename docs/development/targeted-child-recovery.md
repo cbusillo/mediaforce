@@ -143,8 +143,28 @@ the Director-watched session on a real encode computer.
   plain sentence; the raw detail stays on the error as a diagnostic.
 - Not shown stopped (the step failed, timed out, found survivors, or the run
   had no scoped temp folder): the temp folder is kept, and an encode records
-  `containment_unproven` and waits for the user, with a plain instruction to
-  check that computer is idle and then try the file again.
+  `containment_unproven` with the failed stop's diagnostic.
+  - A mounted remote encode below its attempt limit saves the run's scoped
+    folder, bound to the job, attempt, start, saved computer and selected
+    outputs, and waits in `retry_backoff`. The queue's ordinary retry pass
+    handles it: inside the computer's work window it wakes the computer as
+    for any retry, and its cleanup runs the same stop step on that folder
+    before touching any output. A computer that does not answer keeps the
+    file waiting for it under the usual retry backoff. Another active owner
+    of the output also keeps it waiting, without a check. Once the run is
+    shown stopped and the attempt is unchanged, the usual cleanup removes the
+    unfinished output and the file is queued, within its existing attempt
+    limit, schedule and validation.
+  - When the computer answers but does not confirm the run ended (survivors,
+    a refused sign-in, a failed check), or the saved folder, attempt or
+    outputs no longer match, the file goes to the user with the original
+    explanation and that detail.
+  - On its last attempt, or without a saved scoped folder (older records,
+    local, streamed and scratch work), the file waits for the user with the
+    plain instruction to check that computer is idle and then try the file
+    again. The user's Retry keeps its existing route. A generic empty process
+    list, an unreachable computer, an old pid, elapsed time or an absent
+    output never shows a run stopped.
 
 A sample job records the same kind, message and whether the run was stopped in
 its result, without retrying on its own.
