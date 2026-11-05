@@ -82,7 +82,8 @@ actor RenderLoads {
 @MainActor
 enum RenderCommand {
     static let mainPages = ["library", "tv", "movies", "other", "needs-you", "activity", "space-saved", "media",
-                            "settings:libraries", "settings:compression", "settings:computers", "settings:metadata"]
+                            "settings:libraries", "settings:compression", "settings:computers", "settings:metadata",
+                            "needs-you-a", "needs-you-a:empty", "needs-you-b", "needs-you-b:empty", "needs-you-c", "needs-you-c:empty"]
 
     @discardableResult
     static func run(_ options: RenderOptions, session: URLSession = .shared) async throws -> [String: [URL]] {
@@ -185,6 +186,12 @@ enum RenderCommand {
             }
             let endpoint = value == "libraries" ? "library" : value
             return (view, ["/api/app/settings/\(endpoint)"])
+        }
+        if name.hasPrefix("needs-you-"), let proposal = NeedsYouProposal(rawValue: String(name.dropFirst("needs-you-".count))) {
+            let view = NeedsYouProposalPage(proposal: proposal, empty: value == "empty", facts: model.facts!, posters: model.posters)
+                .toolbar { ToolbarItem(placement: .navigation) { PauseButton(facts: model.facts!, model: model) } }
+                .frame(minWidth: 1100, minHeight: 700)
+            return (AnyView(view), [])
         }
         let place: Place
         let paths: Set<String>

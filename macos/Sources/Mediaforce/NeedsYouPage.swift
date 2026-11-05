@@ -71,22 +71,22 @@ struct WaitingItems: View {
     }
 
     @ViewBuilder
-    private func artwork(_ item: AttentionNotice) -> some View {
+    func artwork(_ item: AttentionNotice, width: CGFloat = 44) -> some View {
         switch item.opens {
         case .sample(let prefix), .item(let prefix):
             MediaPoster(titlePrefix: MediaPoster.titlePrefix(prefix), name: item.title,
                         kind: MediaKind(rawValue: String(prefix.split(separator: "/").first ?? "")) ?? .other,
-                        posters: posters, width: 44)
+                        posters: posters, width: width)
         default:
             Image(systemName: symbol(item.opens))
-                .font(.title2)
+                .font(.system(size: width * 0.45))
                 .foregroundStyle(.secondary)
-                .frame(width: 44, height: 66)
+                .frame(width: width, height: width * 1.5)
                 .accessibilityHidden(true)
         }
     }
 
-    private func symbol(_ place: Place?) -> String {
+    func symbol(_ place: Place?) -> String {
         switch place {
         case .kind: "film"
         case .spaceSaved: "trash"
@@ -94,7 +94,7 @@ struct WaitingItems: View {
         }
     }
 
-    private func actionTitle(_ place: Place) -> String {
+    func actionTitle(_ place: Place) -> String {
         switch place {
         case .kind: "Review kind"
         case .sample: "Open sample"
