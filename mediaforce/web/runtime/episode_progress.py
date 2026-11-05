@@ -17,6 +17,7 @@ from mediaforce.hosts.work_window import CONTROLLER_WORK_WINDOW_WAIT, controller
 from mediaforce.core.type_defs import float_value, int_value, object_dict
 from mediaforce.library.staged_validation import AUTOMATIC_PUBLISH_ORIGINS, not_remade_blockers, staged_validation_outcome
 from mediaforce.library.workflow_state import ItemWorkflowState
+from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
 from mediaforce.web.runtime.encode_runtime import KEPT_ORIGINAL_TERMINAL_REASON, size_exception_question, unfinished_child_reason
 from mediaforce.web.runtime.file_encode_outcomes import file_encode_outcomes
 
@@ -82,6 +83,9 @@ def load_season_episode_progress(
                           and stage["encode_origin"] in AUTOMATIC_PUBLISH_ORIGINS and stage["promoted_at"] is None}
     window = controller_work_schedule(config) if config is not None and waiting_to_publish else None
     if window is not None and not window.is_open:
+        # The files queued behind the same storage show it as their reason; a finished file waiting
+        # on the window waits on it too, and the owner needs both to know what ends the wait.
+        storage_hold = config is not None and controller_storage_admission_issue(config, None) is not None
         for episode in episodes:
             if episode["rel_path"] in waiting_to_publish and episode["stage"] == "checking":
                 episode["stage"] = "waiting"
@@ -90,6 +94,8 @@ def load_season_episode_progress(
                     episode["wait_reason"] = {"code": code}
                 else:
                     episode["additional_wait_reasons"].append({"code": code})
+                if storage_hold:
+                    episode["additional_wait_reasons"].append({"code": "storage_reconnect"})
     outcomes_by_path = {item.rel_path: outcomes[item.item_id] for item in items if item.item_id in outcomes}
     for episode in episodes:
         outcome = outcomes_by_path.get(episode["rel_path"])

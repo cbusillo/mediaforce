@@ -149,6 +149,42 @@ class ControllerMountTests(unittest.TestCase):
         for refused in (other_server, unresolved, other_share, other_user):
             self.assertEqual(refused.failure_kind, "mount_identity_mismatch")
 
+    def test_mismatch_names_what_was_found_and_how_it_compares_without_the_sign_in(self) -> None:
+        mount = ControllerSmbMount("//cbusillo@nas.shiny/media", Path("/Volumes/media"))
+        addresses = {
+            "nas.shiny": frozenset({"192.0.2.37"}),
+            "nas._smb._tcp.local": frozenset({"192.0.2.37"}),
+            "other-nas.shiny": frozenset({"192.0.2.99"}),
+        }
+
+        def probe(source: str, filesystem: str = "smbfs") -> ControllerMountProbe:
+            return probe_controller_mount(
+                mount, self.required_paths,
+                run_subprocess=Mock(return_value=self._probe(source=source, filesystem=filesystem)),
+                resolve_server=lambda server: addresses.get(server, frozenset()),
+            )
+
+        details = {
+            "other_server": probe("//guest:hunter2@other-nas.shiny/media").detail,
+            "unresolved": probe("//guest@unknown.shiny/media").detail,
+            "other_share": probe("//guest@nas.shiny/extras").detail,
+            "other_sign_in": probe("//guest@nas._smb._tcp.local/media").detail,
+            "not_smb": probe("/dev/disk9s1", filesystem="apfs").detail,
+        }
+
+        for detail in details.values():
+            self.assertNotIn("guest", detail or "")
+            self.assertNotIn("hunter2", detail or "")
+        self.assertEqual(len(set(details.values())), len(details))
+        self.assertIn("//other-nas.shiny/media", details["other_server"] or "")
+        self.assertIn("//nas.shiny/media", details["other_server"] or "")
+        self.assertIn("different server", details["other_server"] or "")
+        self.assertIn("//unknown.shiny/media", details["unresolved"] or "")
+        self.assertIn("another name", details["unresolved"] or "")
+        self.assertIn("different share", details["other_share"] or "")
+        self.assertIn("same server and share", details["other_sign_in"] or "")
+        self.assertIn("apfs", details["not_smb"] or "")
+
     def test_bonjour_service_name_resolves_through_its_advertised_host(self) -> None:
         lookups: list[str] = []
 

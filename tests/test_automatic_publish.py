@@ -1325,6 +1325,22 @@ def test_publication_window_wait_is_shown_and_clears_without_a_database_write(co
         assert {"code": CONTROLLER_WORK_WINDOW_WAIT} not in file["additional_wait_reasons"]
 
 
+def test_publication_window_wait_also_lists_a_controller_storage_hold(config: MediaforceConfig) -> None:
+    from datetime import UTC, datetime
+
+    from mediaforce.hosts.work_window import CONTROLLER_WORK_WINDOW_WAIT
+
+    _stage(config, "tv/Show/Season 1/e1.mkv")
+    configure_controller_night(config)
+    hold = "Controller storage: Storage at /Volumes/media is unavailable. Reconnect storage in Finder."
+    with controller_clock(datetime(2026, 10, 29, 9, tzinfo=UTC)), patch(
+        "mediaforce.web.runtime.episode_progress.controller_storage_admission_issue", return_value=hold,
+    ):
+        [file] = item_payload(config, "tv/Show/Season 1", sound=lambda *_args: None)["files"]  # type: ignore[index]
+    assert file["wait_reason"] == {"code": CONTROLLER_WORK_WINDOW_WAIT}
+    assert file["additional_wait_reasons"] == [{"code": "storage_reconnect"}]
+
+
 @pytest.mark.parametrize("origin,needs_owner", [("calibration", False), ("cli-review", False), ("queue", True)])
 def test_local_window_does_not_promise_to_publish_samples_or_files_needing_a_decision(
         config: MediaforceConfig, origin: str, needs_owner: bool,

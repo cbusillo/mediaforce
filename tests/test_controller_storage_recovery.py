@@ -281,6 +281,86 @@ class ControllerStorageRecoveryTest(TestCase):
         recovered = recovery.controller_storage_recovery_snapshot(self.config)
         self.assertEqual({item["status"] for item in recovered["mounts"]}, {"ready"})
 
+    def _mismatch_probe(self, detail: str | None = None) -> ControllerMountProbe:
+        return ControllerMountProbe(
+            False, False, self.mounts[0].mount_point, "//other-nas.example/media", "smbfs", True,
+            "mount_identity_mismatch",
+            detail or "Found //other-nas.example/media at the required path; the saved mapping is "
+                      "//nas/media. It is a different server.",
+        )
+
+    def test_latched_mismatch_describes_the_latest_probe_and_keeps_the_latch(self) -> None:
+        absent = ControllerMountProbe(
+            False, False, self.mounts[0].mount_point, failure_kind="mount_absent",
+            detail="The expected controller volume is not mounted.",
+        )
+        occupied = ControllerMountProbe(
+            False, False, self.mounts[0].mount_point, occupied=True, failure_kind="mount_path_occupied",
+            detail="The expected controller mount path exists without a mounted volume.",
+        )
+        ready = ControllerMountProbe(
+            True, True, self.mounts[0].mount_point, self.mounts[0].source, "smbfs", True
+        )
+
+        def media(snapshot: dict[str, object]) -> dict[str, object]:
+            return next(m for m in snapshot["mounts"] if m["mount_point"] == "/Volumes/media")  # type: ignore[index]
+
+        def run(probe: ControllerMountProbe) -> dict[str, object]:
+            with patch.object(recovery, "_utc_now", return_value=NOW), patch.object(
+                recovery, "probe_controller_mount", return_value=probe,
+            ), patch.object(recovery, "mount_controller_smb_no_ui") as mount:
+                recovery.process_controller_storage_recovery_once(self.config)
+            self.assertEqual(
+                [call for call in mount.call_args_list if call.args[0].mount_point == Path("/Volumes/media")], [],
+            )
+            return media(recovery.controller_storage_recovery_snapshot(self.config))
+
+        mismatch = run(self._mismatch_probe())
+        self.assertEqual(mismatch["last_failure_kind"], "mount_identity_mismatch")
+        self.assertIn("//other-nas.example/media", str(mismatch["detail"]))
+        self.assertNotIn("@", str(mismatch["detail"]))
+
+        for _ in range(3):  # the latch holds across repeated fresh probes of an empty path
+            gone = run(absent)
+            self.assertEqual(gone["status"], "action_required")
+            self.assertEqual(gone["last_failure_kind"], "mount_absent")
+            self.assertNotIn("different SMB share", str(gone["reason"]))
+            self.assertIn("Nothing is mounted", str(gone["reason"]))
+            self.assertNotIn("will retry", str(gone["reason"]))
+            self.assertIsNone(gone["next_retry_at"])
+            # What was seen when it first stopped stays; the probe has nothing new to add.
+            self.assertEqual(gone["detail"], f"Earlier: {mismatch['detail']}")
+            self.assertEqual(gone["first_failure_at"], mismatch["first_failure_at"])
+            self.assertEqual(gone["failure_count"], mismatch["failure_count"])
+
+        held = run(occupied)
+        self.assertEqual((held["status"], held["last_failure_kind"]), ("action_required", "mount_path_occupied"))
+        self.assertEqual(held["reason"], recovery._stable_reason("mount_path_occupied"))
+
+        again = run(self._mismatch_probe("Found //third.example/media at the required path; the saved mapping is //nas/media."))
+        self.assertEqual(again["last_failure_kind"], "mount_identity_mismatch")
+        self.assertIn("//third.example/media", str(again["detail"]))
+
+        with patch.object(recovery, "_utc_now", return_value=NOW), patch.object(
+            recovery, "probe_controller_mount", return_value=ready,
+        ), patch.object(recovery, "mount_controller_smb_no_ui") as mount:
+            recovery.process_controller_storage_recovery_once(self.config)
+        mount.assert_not_called()
+        recovered = media(recovery.controller_storage_recovery_snapshot(self.config))
+        self.assertEqual((recovered["status"], recovered["reason"], recovered["detail"]), ("ready", None, None))
+
+    def test_mount_attempt_latch_keeps_its_own_evidence_when_the_path_is_later_empty(self) -> None:
+        absent = ControllerMountProbe(False, False, self.mounts[0].mount_point, failure_kind="mount_absent")
+        timeout = ControllerMountResult(False, True, "mount_timeout", "private", absent)
+        with patch.object(recovery, "_utc_now", return_value=NOW), patch.object(
+            recovery, "probe_controller_mount", return_value=absent,
+        ), patch.object(recovery, "mount_controller_smb_no_ui", return_value=timeout):
+            recovery.process_controller_storage_recovery_once(self.config)
+            recovery.process_controller_storage_recovery_once(self.config)
+        state = recovery.controller_storage_recovery_snapshot(self.config)["mounts"][0]
+        self.assertEqual(state["last_failure_kind"], "mount_timeout")
+        self.assertEqual(state["reason"], recovery._stable_reason("mount_timeout"))
+
     def test_missing_mapping_requires_action_without_mount_attempt(self) -> None:
         save_controller_smb_mounts(
             controller_smb_mounts_path(self.config.paths.runtime_settings_path),
