@@ -33,7 +33,7 @@ _INITIAL_RETRY_SECONDS = 30
 _MAX_RETRY_SECONDS = 300
 _READY_FRESHNESS_SECONDS = 90
 _EARLIER_PREFIX = "Earlier: "
-_MAX_OBSERVED_DETAIL = 300
+_MAX_OBSERVED_DETAIL = 1000
 _PROCESS_GENERATION = uuid.uuid4().hex
 _ACTION_REQUIRED_FAILURES = frozenset({
     "invalid_mapping",
@@ -161,6 +161,7 @@ def process_controller_storage_recovery_once(
                 continue
 
             failure_kind = probe.failure_kind or "mount_absent"
+            refresh = not prior_indeterminate and _latched_on_observation(prior)
             if failure_kind in {"probe_failed", "probe_timeout"}:
                 states_by_mount[str(root)] = _failed_state(
                     mount_point=root,
@@ -177,11 +178,11 @@ def process_controller_storage_recovery_once(
                         or (prior.reason if prior and prior.status == "action_required" else None)
                         or _stable_reason(failure_kind)
                     ),
+                    detail=_retained_detail(None, prior) if refresh else None,
                     failure_kind=failure_kind,
                     attempted=False,
                 )
                 continue
-            refresh = not prior_indeterminate and _latched_on_observation(prior)
             if probe.mounted and not probe.accessible:
                 states_by_mount[str(root)] = _failed_state(
                     mount_point=root,
@@ -580,7 +581,7 @@ def _safe_detail(failure_kind: str, detail: str | None) -> str | None:
     if failure_kind == "unexpected_mount_path":
         match = re.search(r"(/Volumes/[A-Za-z0-9 ._()'\-]+)", detail)
         return f"Unexpected mount path: {match.group(1)}." if match else None
-    if failure_kind == "mount_identity_mismatch" and detail.startswith("Found ") and "@" not in detail:
+    if failure_kind == "mount_identity_mismatch" and detail.startswith("Found "):
         # Built by the probe from the server and share names only; a sign-in never reaches the record.
         return detail[:_MAX_OBSERVED_DETAIL]
     return None

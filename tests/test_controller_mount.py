@@ -171,6 +171,13 @@ class ControllerMountTests(unittest.TestCase):
             "other_sign_in": probe("//guest@nas._smb._tcp.local/media").detail,
             "not_smb": probe("/dev/disk9s1", filesystem="apfs").detail,
         }
+        # A lookup that failed once must not be reported as a different sign-in for the same account.
+        lookups = iter([frozenset(), frozenset()])
+        same_account = probe_controller_mount(
+            mount, self.required_paths,
+            run_subprocess=Mock(return_value=self._probe(source="//cbusillo@nas._smb._tcp.local/media")),
+            resolve_server=lambda server: next(lookups, addresses.get(server, frozenset())),
+        ).detail
 
         for detail in details.values():
             self.assertNotIn("guest", detail or "")
@@ -184,6 +191,8 @@ class ControllerMountTests(unittest.TestCase):
         self.assertIn("different share", details["other_share"] or "")
         self.assertIn("same server and share", details["other_sign_in"] or "")
         self.assertIn("apfs", details["not_smb"] or "")
+        self.assertNotIn("different sign-in", same_account or "")
+        self.assertIn("could not confirm", same_account or "")
 
     def test_bonjour_service_name_resolves_through_its_advertised_host(self) -> None:
         lookups: list[str] = []

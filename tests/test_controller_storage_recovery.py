@@ -334,6 +334,12 @@ class ControllerStorageRecoveryTest(TestCase):
             self.assertEqual(gone["first_failure_at"], mismatch["first_failure_at"])
             self.assertEqual(gone["failure_count"], mismatch["failure_count"])
 
+        timed_out = run(ControllerMountProbe(
+            False, False, self.mounts[0].mount_point, failure_kind="probe_timeout",
+        ))
+        self.assertEqual(timed_out["detail"], f"Earlier: {mismatch['detail']}")
+        self.assertEqual(run(absent)["detail"], f"Earlier: {mismatch['detail']}")
+
         held = run(occupied)
         self.assertEqual((held["status"], held["last_failure_kind"]), ("action_required", "mount_path_occupied"))
         self.assertEqual(held["reason"], recovery._stable_reason("mount_path_occupied"))

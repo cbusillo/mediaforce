@@ -381,16 +381,10 @@ def is_bonjour_smb_server(server: str) -> bool:
     return _bonjour_smb_instance(server) is not None
 
 
-def smb_servers_confirmed_different(
-        first_server: str,
-        second_server: str,
-        *,
-        resolve_server: ServerResolver | None = None,
-) -> bool:
+def smb_servers_confirmed_different(first_server: str, second_server: str) -> bool:
     """True only when both names resolve and share no address; an unresolved name proves nothing."""
-    resolve = resolve_server or _resolve_server_addresses
-    first = resolve(first_server)
-    second = resolve(second_server)
+    first = _resolve_server_addresses(first_server)
+    second = _resolve_server_addresses(second_server)
     return bool(first) and bool(second) and not first & second
 
 
@@ -410,11 +404,13 @@ def _mismatch_detail(
     found = f"Found //{observed[1]}/{observed[2]} at the required path; the saved mapping is {saved}."
     if expected is None or observed[2] != expected[2]:
         return f"{found} It is a different share."
-    if observed[1] == expected[1] or same_smb_share(
-            f"//{observed[1]}/{observed[2]}", f"//{expected[1]}/{expected[2]}", resolve_server=resolve_server,
-    ):
-        return f"{found} It is the same server and share under a different sign-in."
-    if smb_servers_confirmed_different(observed[1], expected[1], resolve_server=resolve_server):
+    resolve = resolve_server or _resolve_server_addresses
+    observed_addresses, expected_addresses = resolve(observed[1]), resolve(expected[1])
+    if observed[1] == expected[1] or observed_addresses & expected_addresses:
+        if observed[0] != expected[0]:
+            return f"{found} It is the same server and share under a different sign-in."
+        return f"{found} It looks like the same server and share, but the check could not confirm it; check again."
+    if observed_addresses and expected_addresses:
         return f"{found} It is a different server."
     return f"{found} The server names differ and could not be matched to one machine, so it may be the same server under another name."
 
