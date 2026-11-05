@@ -148,14 +148,14 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
             """
         case "/api/app/tv-shows": """
             {"shows": [{"show_prefix": "tv/Lucifer", "show": "Lucifer", "season_count": 1, "episode_count": 16,
-                        "bytes": 60000000000, "seasons": [{"prefix": "tv/Lucifer/Season 2", "season": 2,
+                        "bytes": 60000000000, "estimated_saved_bytes": 50000000000, "seasons": [{"prefix": "tv/Lucifer/Season 2", "season": 2,
                         "episode_count": 16, "bytes": 60000000000, "needs_you": true, "state": "ready_to_compare"}]}]}
             """
         case "/api/app/movies": """
-            {"movies": [{"prefix": "movies/Example", "title": "Example", "file_count": 1, "bytes": 1000, "state": "ready"}]}
+            {"movies": [{"prefix": "movies/Example", "title": "Example", "file_count": 1, "bytes": 1000, "estimated_saved_bytes": 600, "state": "ready"}]}
             """
         case "/api/app/other": """
-            {"items": [{"prefix": "other/Example", "title": "Example", "file_count": 1, "bytes": 1000, "state": "ready"}], "truncated": false}
+            {"items": [{"prefix": "other/Example", "title": "Example", "file_count": 1, "bytes": 1000, "estimated_saved_bytes": 400, "state": "ready"}], "truncated": false}
             """
         case "/api/hosts": "{\"hosts\": []}"
         case "/api/app/activity": ActivityTests.payload

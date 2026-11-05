@@ -50,6 +50,18 @@ def test_a_capped_library_says_so() -> None:
     assert other_media_payload(_library(_unit("other/a"), truncated=True))["truncated"] is True
 
 
+def test_other_media_with_unestimated_files_has_no_complete_estimate() -> None:
+    payload = other_media_payload(_library(_unit("other/Trips", estimate_unavailable_count=1)))
+    assert payload["items"][0]["estimated_saved_bytes"] is None
+
+
+def test_finished_other_files_need_no_estimate_but_incomplete_membership_stays_unknown() -> None:
+    finished = _unit("other/Trips", lane=None, reclaim=None, statuses={"promoted": 3})
+    assert other_media_payload(_library(finished))["items"][0]["estimated_saved_bytes"] == 0
+    capped = finished | {"statuses": {"promoted": 2}}
+    assert other_media_payload(_library(capped))["items"][0]["estimated_saved_bytes"] is None
+
+
 @pytest.mark.parametrize(("unit", "code"), [
     (_unit("o/a", readiness="blocked", lane="processing"), "cannot_start"),
     (_unit("o/b", readiness="browse_only", lane="attention"), "view_only"),

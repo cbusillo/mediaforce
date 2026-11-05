@@ -34,18 +34,28 @@ struct WorkStatus: View {
 struct StorageBar: View {
     let facts: MainWindowFacts
     let kind: MediaKind
+    let listing: MediaListing
     let open: (Place) -> Void
 
     var body: some View {
-        HStack(spacing: 32) {
+        HStack(alignment: .top, spacing: 24) {
             metric(Words.size(kind.totalBytes(in: facts.library)), label: "In the library")
             metric(Words.size(kind.originalBytes(in: facts.library)), label: "Still original")
             if kind == .everything {
                 Button { open(.spaceSaved) } label: {
-                    metric(Words.size(facts.spaceSaved.bytes), label: Words.spaceSaved)
+                    metric(Words.size(facts.spaceSaved.bytes), label: Words.savedSoFarLabel)
                 }
                 .buttonStyle(.plain)
                 .pointerStyle(.link)
+                .help(Words.spaceSaved)
+                VStack(alignment: .leading, spacing: 4) {
+                    let estimate = listing.estimatedTotalSavedBytes(savedSoFar: facts.spaceSaved.bytes)
+                    metric(estimate.map { "About \(Words.size($0))" } ?? Words.notKnownYet, label: Words.estimatedTotalSavings)
+                    if estimate != nil && listing.estimateIsPartial && !listing.loading {
+                        Text(Words.partialSavingsEstimate)
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
             Spacer()
         }

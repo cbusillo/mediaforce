@@ -27,6 +27,10 @@ The current implementation covers:
 - discovery and inventory into SQLite, refreshed in the background
 - the Mac app: TV, Movies, and Other libraries, Activity, Finished, and
   Settings, talking to the local server's API
+- Library shows saved-so-far beside estimated total savings, adding the server's
+  remaining TV, movie, and Other estimates. Missing estimates, an incomplete
+  listing, or a failed library refresh mark the total as partial; no available
+  estimate says it is not known yet.
 - “Needs you” gathers every item counted by the Dock badge, with links to sample decisions,
   kind approvals, seasons, computers, and original-backup cleanup. Opening the app from the Dock, its waiting
   menu-bar notice, or a notification shows the list while anything waits
@@ -228,6 +232,11 @@ routing; video frames in the compare player may be blank. The macOS CI render
 job exercises the same renderer in the native test gate, reusing existing fixtures, and
 keeps its PNGs in the `mac-pages` artifact. It fails for unreadable or blank
 pages; it does not compare pixel hashes against a saved design.
+
+For source validation while local media work is running, use the pull request's
+`mac-app` CI job on its isolated `macos-latest` runner and download `mac-pages`
+from that exact run. It runs `scripts/build-mac-app.sh test` and the offscreen
+renderer without installing or restarting the workstation's app or server.
 
 ## Commands
 

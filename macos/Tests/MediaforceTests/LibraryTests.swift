@@ -4,6 +4,43 @@ import XCTest
 
 final class LibraryTests: XCTestCase {
     @MainActor
+    func testSavingsUseAllThreeServerEstimatesAndKeepMissingCoverageHonest() async {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [PartialLibraryServer.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel(); PartialLibraryServer.mode = .populated }
+        let client = MediaforceClient(baseURL: URL(string: "http://mediaforce.invalid")!, session: session)
+        let listing = MediaListing()
+        XCTAssertNil(listing.estimatedTotalSavedBytes(savedSoFar: 10))
+
+        PartialLibraryServer.mode = .complete
+        await listing.refresh(client, kind: .everything)
+        XCTAssertEqual(listing.estimatedTotalSavedBytes(savedSoFar: 10), 160)
+        XCTAssertFalse(listing.estimateIsPartial)
+
+        PartialLibraryServer.mode = .partial
+        await listing.refresh(client, kind: .everything)
+        XCTAssertEqual(listing.estimatedTotalSavedBytes(savedSoFar: 10), 140)
+        XCTAssertTrue(listing.estimateIsPartial)
+
+        PartialLibraryServer.mode = .truncated
+        await listing.refresh(client, kind: .everything)
+        XCTAssertEqual(listing.estimatedTotalSavedBytes(savedSoFar: 10), 140)
+        XCTAssertTrue(listing.estimateIsPartial)
+        XCTAssertTrue(listing.truncated)
+
+        PartialLibraryServer.mode = .failing
+        await listing.refresh(client, kind: .everything)
+        XCTAssertEqual(listing.estimatedTotalSavedBytes(savedSoFar: 10), 140)
+        XCTAssertTrue(listing.estimateIsPartial)
+
+        PartialLibraryServer.mode = .empty
+        await listing.refresh(client, kind: .everything)
+        XCTAssertEqual(listing.estimatedTotalSavedBytes(savedSoFar: 10), 10)
+        XCTAssertFalse(listing.estimateIsPartial)
+    }
+
+    @MainActor
     func testCombinedLibraryKeepsMoviesWhenAnotherLibraryFails() async {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [PartialLibraryServer.self]
@@ -16,6 +53,8 @@ final class LibraryTests: XCTestCase {
         XCTAssertFalse(listing.hasLoaded(.tv))
         XCTAssertTrue(listing.hasLoaded(.movies))
         XCTAssertEqual(listing.rows.map(\.kind), [.movies])
+        XCTAssertNil(listing.estimatedTotalSavedBytes(savedSoFar: 10))
+        XCTAssertTrue(listing.estimateIsPartial)
     }
 
     @MainActor
@@ -44,7 +83,7 @@ final class LibraryTests: XCTestCase {
 }
 
 private final class PartialLibraryServer: URLProtocol, @unchecked Sendable {
-    enum Mode { case populated, failing, empty }
+    enum Mode { case populated, failing, empty, complete, partial, truncated }
     nonisolated(unsafe) static var mode = Mode.populated
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -52,6 +91,13 @@ private final class PartialLibraryServer: URLProtocol, @unchecked Sendable {
     override func startLoading() {
         let body: String
         switch request.url?.path {
+        case "/api/app/tv-shows" where Self.mode == .empty:
+            body = "{\"shows\": []}"
+        case "/api/app/tv-shows" where [.complete, .partial, .truncated].contains(Self.mode):
+            body = """
+            {"shows": [{"show_prefix": "tv/Example", "show": "A show", "season_count": 1, "episode_count": 1,
+                        "bytes": 150, "estimated_saved_bytes": 100, "seasons": []}]}
+            """
         case "/api/app/movies":
             if Self.mode == .failing {
                 client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))
@@ -63,8 +109,14 @@ private final class PartialLibraryServer: URLProtocol, @unchecked Sendable {
             }
             body = """
             {"movies": [{"prefix": "films/Example", "title": "A movie", "file_count": 1,
-                         "bytes": 70, "state": "ready"}]}
+                         "bytes": 70, "state": "ready", "estimated_saved_bytes": \(Self.mode == .populated ? "null" : "30")}]}
             """
+        case "/api/app/other" where [.complete, .partial].contains(Self.mode):
+            body = """
+            {"items": [{"prefix": "other/Example", "title": "A folder", "file_count": 1,
+                        "bytes": 50, "state": "ready", "estimated_saved_bytes": \(Self.mode == .partial ? "null" : "20")}], "truncated": false}
+            """
+        case "/api/app/other" where Self.mode == .truncated: body = "{\"items\": [], \"truncated\": true}"
         case "/api/app/other": body = "{\"items\": [], \"truncated\": false}"
         default:
             client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))

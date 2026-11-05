@@ -45,6 +45,12 @@ def test_movies_list_biggest_first_with_their_estimates() -> None:
 _PENDING_BADGE = {"review_badge": {"label": "Needs a look", "tone": "attention"}}
 
 
+def test_a_finished_movie_has_no_remaining_savings_to_estimate() -> None:
+    title = _title("movies/Alien (1979)", state="complete", lane="complete", reclaim=None)
+    assert movies_payload([title])["movies"][0]["estimated_saved_bytes"] == 0
+    assert movies_payload([title | {"details_loading": True}])["movies"][0]["estimated_saved_bytes"] is None
+
+
 @pytest.mark.parametrize(("title", "code"), [
     (_title("m/a", availability="browse_only"), "view_only"),
     (_title("m/b", state="browse_only", lane="complete"), "view_only"),

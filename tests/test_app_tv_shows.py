@@ -70,6 +70,12 @@ def test_a_show_has_no_estimate_while_any_season_is_still_loading(connection: DB
     assert shows[0]["estimated_saved_bytes"] is None
 
 
+@pytest.mark.parametrize("missing", [{"projected_reclaim_bytes": None}, {"estimate_unavailable_count": 1}])
+def test_a_partial_season_estimate_is_not_a_whole_show_total(connection: DBClient, missing: dict[str, Any]) -> None:
+    shows = _shows(connection, [_card("tv/ER/Season 1"), _card("tv/ER/Season 2") | missing])
+    assert shows[0]["estimated_saved_bytes"] is None
+
+
 def test_seasons_project_the_canonical_attention_fact_or_only_motion_checks_can_start(connection: DBClient) -> None:
     compressing = _card("tv/ER/Season 1", key="making_season", tone="active", action=None)
     approved = _card("tv/ER/Season 2", key="ready_to_make", tone="ready", action="queue_encode")
