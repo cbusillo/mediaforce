@@ -20,7 +20,7 @@ struct NeedsYouRoundTwoPage: View {
 
     var body: some View {
         PageFrame(title: Words.needsYou, subtitle: items.isEmpty ? "Nothing waiting" : "\(items.count) waiting") {
-            WorkStatus(facts: facts, open: open)
+            if let status { Text(status).foregroundStyle(.secondary).frame(maxWidth: 640, alignment: .leading) }
             if items.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Nothing is waiting for you").font(.title2.weight(.semibold))
@@ -35,6 +35,16 @@ struct NeedsYouRoundTwoPage: View {
             }
             FinishedShelf(seasons: Array(facts.recentlyFinishedSeasons.prefix(6)), posters: posters, open: open)
         }
+    }
+
+    // What Mediaforce is doing, without the sentences that point at this page's own items.
+    private var status: String? {
+        guard let explanation = Words.workExplanation(facts) else { return nil }
+        let pointers = ["waiting in Needs you", "need you first", "waiting for you in Media"]
+        let kept = explanation.split(separator: ". ").map(String.init).filter { sentence in
+            !pointers.contains { sentence.contains($0) }
+        }
+        return kept.isEmpty ? nil : kept.joined(separator: ". ")
     }
 
     // Stat numbers in the TV shows page's own style: the value leads, its label recedes.
@@ -107,8 +117,8 @@ struct NeedsYouRoundTwoPage: View {
             Text(card.reason)
                 .font(.caption).foregroundStyle(.secondary)
                 .lineLimit(4)
-                .fixedSize(horizontal: false, vertical: true)
-            action(card, primary: primary).padding(.top, 2)
+                .frame(height: 58, alignment: .topLeading)
+            action(card, primary: primary)
         }
         .frame(width: Self.cardWidth, alignment: .leading)
     }
@@ -230,7 +240,7 @@ private struct Card {
         } else if let kind {
             name = Words.kindName(kind.kind)
             posterPrefix = kind.sampleSeason.map { MediaPoster.titlePrefix($0) }
-            headline = kind.sampleSeason?.split(separator: "/").dropFirst().joined(separator: ", ") ?? name
+            headline = kind.sampleSeason?.split(separator: "/").last.map(String.init) ?? name
             state = kind.sampleReady == true ? "Sample ready" : "Needs your choice"
             reason = item.body
             action = "Review kind"

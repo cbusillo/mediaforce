@@ -178,7 +178,7 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
     static let busierDay: String = {
         var facts = try! JSONSerialization.jsonObject(with: Data(MainWindowTests.facts.utf8)) as! [String: Any]
         var work = facts["work"] as! [String: Any]
-        work["kinds_needing_you"] = [["kind": "darker_live_action", "sample_season": "tv/Lucifer/Season 3",
+        work["kinds_needing_you"] = [["kind": "darker_live_action", "sample_season": "tv/Futurama/Season 5",
                                       "sample_status": "completed", "sample_ready": true, "one_time": false,
                                       "settings_available": false, "sample_start_prefix": NSNull()]]
         facts["work"] = work
@@ -311,17 +311,20 @@ private enum StandInPoster {
             NSBezierPath(rect: NSRect(x: 180, y: 250, width: 60, height: 170)).fill()
             NSBezierPath(rect: NSRect(x: 125, y: 305, width: 170, height: 60)).fill()
         default:
-            glow?.draw(in: NSBezierPath(ovalIn: NSRect(x: -60, y: 120, width: 540, height: 460)), relativeCenterPosition: NSPoint(x: 0, y: -0.2))
-            NSColor.black.withAlphaComponent(0.85).setFill()
-            let figure = NSBezierPath()
-            figure.move(to: NSPoint(x: 120, y: 0))
-            figure.line(to: NSPoint(x: 150, y: 250))
-            figure.appendOval(in: NSRect(x: 172, y: 300, width: 76, height: 92))
-            figure.move(to: NSPoint(x: 150, y: 250))
-            figure.curve(to: NSPoint(x: 270, y: 250), controlPoint1: NSPoint(x: 170, y: 310), controlPoint2: NSPoint(x: 250, y: 310))
-            figure.line(to: NSPoint(x: 300, y: 0))
-            figure.close()
-            figure.fill()
+            glow?.draw(in: NSBezierPath(ovalIn: NSRect(x: -40, y: 90, width: 500, height: 380)), relativeCenterPosition: NSPoint(x: 0, y: -0.35))
+            NSColor.black.withAlphaComponent(0.9).setFill()
+            let skyline: [(Double, Double)] = [(0, 150), (34, 210), (70, 170), (96, 280), (128, 190), (160, 240), (196, 330),
+                                               (226, 200), (262, 260), (300, 180), (330, 230), (366, 160), (396, 200)]
+            for (x, height) in skyline {
+                NSBezierPath(rect: NSRect(x: x, y: 0, width: 36, height: height)).fill()
+            }
+            look.glow.withAlphaComponent(0.6).setFill()
+            for (x, height) in skyline where height > 200 {
+                for row in stride(from: 40.0, to: height - 20, by: 26) {
+                    NSBezierPath(rect: NSRect(x: x + 10, y: row, width: 5, height: 8)).fill()
+                    NSBezierPath(rect: NSRect(x: x + 22, y: row + 10, width: 5, height: 8)).fill()
+                }
+            }
         }
         let font = NSFont(name: look.font, size: show.count <= 3 ? 120 : 58) ?? .systemFont(ofSize: 58, weight: .heavy)
         let style = NSMutableParagraphStyle()
