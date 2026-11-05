@@ -3799,6 +3799,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             job, _ = self._remote_quality_timeout_failure(
                 connection, "owned-elsewhere", attempt_count=1, remote_process_contained=False, scoped_temp_dir=scope,
             )
+            computer.quality_runs_stopped.clear()
             partial = staging_runtime.partial_output_path(self._staging_path("owned-elsewhere.mkv"))
             partial.parent.mkdir(parents=True, exist_ok=True)
             partial.write_text("new attempt frames")
@@ -3809,6 +3810,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             encode_runtime.reconcile_encode_jobs(connection, self.config, web_app._encode_queue_runtime_deps())
             waiting = load_encode_job(connection, job["job_id"])
             assert waiting is not None
+            self.assertEqual(computer.quality_runs_stopped, [])
             self.assertEqual(waiting["status"], "retry_backoff")
             self.assertEqual(partial.read_text(), "new attempt frames")
             self.assertEqual(waiting["progress"]["quality_containment"]["detail"], "fixture stop failed at the timeout")
@@ -3827,7 +3829,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 encode_runtime.reconcile_encode_jobs(connection, self.config, web_app._encode_queue_runtime_deps())
             replaced = load_encode_job(connection, job["job_id"])
             assert replaced is not None
-        self.assertNotEqual(replaced["status"], "queued")
+        self.assertEqual((replaced["status"], replaced["attempt_count"], replaced["worker_id"]), ("running", 2, "new-worker"))
         self.assertEqual(partial.read_text(), "new attempt frames")
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)

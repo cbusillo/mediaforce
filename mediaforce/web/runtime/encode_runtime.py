@@ -445,18 +445,19 @@ def _confirm_quality_run_stopped(
     """None once the waiting job's own timed-out quality run is confirmed ended and the job is unchanged."""
     host = object_dict(job.get("host"))
     manifest_path = Path(str(job.get("manifest_path") or "").strip())
+    unconfirmed: _EncodeRetryArtifactCleanupResult | None = None
     try:
         if config is None:
             raise RuntimeError("Mediaforce's settings were unavailable, so the quality run could not be checked.")
         items = _encode_job_estimate_items(job, manifest_items_cache={manifest_path: manifest_items}, strict_indexes=True)
         stop_timed_out_remote_quality_run(host, _quality_containment_scope(config, job, items), wake_before_connect=False)
     except RemoteHostUnreachableError as exc:
-        return _deferred_cleanup_result(
+        unconfirmed = _deferred_cleanup_result(
             [_StagingPathCleanupResult(_StagingPathCleanupOutcome.CLEANUP_DEFERRED, detail=str(exc), host_unreachable=True)],
             host, deps,
         )
     except Exception as exc:
-        return _EncodeRetryArtifactCleanupResult(
+        unconfirmed = _EncodeRetryArtifactCleanupResult(
             _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED, detail=str(exc)[-2000:], check_failed=True,
         )
     connection.commit()
@@ -466,8 +467,9 @@ def _confirm_quality_run_stopped(
             _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED,
             detail="The queue attempt changed; refresh the file before retrying.",
         )
-    deps.logger.info("Quality run for %s is confirmed ended on its computer.", job["job_id"])
-    return None
+    if unconfirmed is None:
+        deps.logger.info("Quality run for %s is confirmed ended on its computer.", job["job_id"])
+    return unconfirmed
 
 
 def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig, deps: EncodeQueueRuntimeDeps) -> None:
@@ -690,6 +692,7 @@ def reconcile_encode_jobs(
         retry_not_before = deps.parse_iso(payload.get("retry_not_before"))
         if retry_not_before is not None and retry_not_before > now:
             continue
+        snapshot = stable_json_hash(payload)
         retry_host = object_dict(payload.get("host"))
         state = load_queue_state(connection)
         wake_error: str | None = None
@@ -801,11 +804,9 @@ def reconcile_encode_jobs(
                         else f"Waiting to reach {host_label} to remove an unfinished file it left; "
                         f"next try at {retry_not_before}"
                     ),
-                    "updated_at": deps.now_iso(),
                 }
             )
-            save_encode_job(connection, payload)
-            sync_encode_job_parent(connection, payload, deps)
+            _save_swept_job(connection, payload, snapshot, deps)
             continue
         if cleanup_outcome.outcome is _EncodeRetryArtifactCleanupOutcome.CLEANUP_FAILED:
             transition_encode_job_failure(
@@ -5207,16 +5208,20 @@ def _cleanup_encode_retry_artifacts_locked(
             _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED,
             detail="An active encode's output ownership could not be checked; retry when it ends.",
         )
-    active_items, active_paths = active
     now_iso = deps.now_iso()
     cleanup_succeeded_for_all = True
     staging_cleanup_deferrals: list[_StagingPathCleanupResult] = []
     manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
+    selected_indexes = indexes if isinstance(indexes, list) else list(range(len(manifest_items)))
     if current is not None and _waits_for_quality_run_stop(current):
+        if any(_owned_by_active_encode(connection, item.get("library_item_id"), (_manifest_staging_value(config, item, host),),
+                                       active)
+               for item in (manifest_items[index] for index in selected_indexes
+                            if isinstance(index, int) and 0 <= index < len(manifest_items))):
+            return _ACTIVE_OWNER_CLEANUP_DEFERRAL
         unconfirmed = _confirm_quality_run_stopped(connection, config, current, manifest_items, deps)
         if unconfirmed is not None:
             return unconfirmed
-    selected_indexes = indexes if isinstance(indexes, list) else list(range(len(manifest_items)))
     for index in selected_indexes:
         if not isinstance(index, int) or index < 0 or index >= len(manifest_items):
             continue
@@ -5240,19 +5245,11 @@ def _cleanup_encode_retry_artifacts_locked(
         library_status = str(stage_row["library_status"] if stage_row is not None else "").strip()
         artifact_present = stage_row is not None and stage_row["staging_path"] is not None
         promoted = artifact_present and stage_row["promoted_at"] is not None
-        manifest_staging_value = (
-            str(resolve_item_staging_path(config, item, host=host, host_media_access_for_host=host_media_access_for_host))
-            if config is not None and (item.get("rel_path") or item.get("staging_path")) else item.get("staging_path")
-        )
+        manifest_staging_value = _manifest_staging_value(config, item, host)
         staging_value = stage_row["staging_path"] if artifact_present else manifest_staging_value
         staging_path = Path(str(staging_value)) if str(staging_value or "").strip() else None
-        cli_active = library_item_id is not None and _active_standalone_cli_encode(connection, int(library_item_id))
-        if cli_active or library_item_id in active_items or any(
-                str(value) in active_paths for value in (staging_value, manifest_staging_value) if value):
-            return _EncodeRetryArtifactCleanupResult(
-                _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED,
-                detail="An active encode owns this file or its output; retry when it ends.",
-            )
+        if _owned_by_active_encode(connection, library_item_id, (staging_value, manifest_staging_value), active):
+            return _ACTIVE_OWNER_CLEANUP_DEFERRAL
         complete = (
             promoted
             or library_status in {"encoded", "validated"}
@@ -5329,6 +5326,27 @@ def _cleanup_encode_retry_artifacts_locked(
     if cleanup_succeeded_for_all:
         return _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.CLEANED)
     return _deferred_cleanup_result(staging_cleanup_deferrals, object_dict(host), deps)
+
+
+_ACTIVE_OWNER_CLEANUP_DEFERRAL = _EncodeRetryArtifactCleanupResult(
+    _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED,
+    detail="An active encode owns this file or its output; retry when it ends.",
+)
+
+
+def _manifest_staging_value(config: MediaforceConfig | None, item: dict[str, Any], host: dict[str, Any] | None) -> Any:
+    if config is not None and (item.get("rel_path") or item.get("staging_path")):
+        return str(resolve_item_staging_path(config, item, host=host, host_media_access_for_host=host_media_access_for_host))
+    return item.get("staging_path")
+
+
+def _owned_by_active_encode(
+        connection: DBClient, library_item_id: Any, output_values: tuple[Any, ...], active: tuple[set[int], set[str]],
+) -> bool:
+    active_items, active_paths = active
+    return ((library_item_id is not None and _active_standalone_cli_encode(connection, int(library_item_id)))
+            or library_item_id in active_items
+            or any(str(value) in active_paths for value in output_values if value))
 
 
 def _encode_retry_artifact_cleanup_error_message(
