@@ -138,12 +138,14 @@ class RemoteQualityTimeoutError(RuntimeError):
             remote_process_contained: bool,
             output_tail: str | None = None,
             stalled: bool = False,
+            scoped_temp_dir: str | None = None,
+            containment_detail: str | None = None,
     ) -> None:
         outcome = (
             "that run was stopped."
             if remote_process_contained
             else "the run on that computer was not confirmed stopped. "
-                 "Check that computer is idle, then try this file again."
+                 "The file stays stopped until that run is confirmed ended."
         )
         what_happened = (
             f"printed nothing for {_plain_duration(timeout_seconds)}"
@@ -161,6 +163,8 @@ class RemoteQualityTimeoutError(RuntimeError):
         self.host_key = host_key
         self.host_label = host_label
         self.output_tail = output_tail
+        self.scoped_temp_dir = scoped_temp_dir
+        self.containment_detail = containment_detail
         self.temp_cleanup_error: str | None = None
 
     def note_temp_files_left(self, cleanup_error: str) -> None:
@@ -904,15 +908,23 @@ def _run_quality_command(
         host_payload = object_dict(host)
         host_key = str(host_payload.get("key") or host_payload.get("host") or "").strip()
         output_tail = _remote_quality_output_tail(exc.stdout, exc.stderr)
+        containment_detail = None
+        try:
+            contained = _stop_timed_out_remote_quality_run(host_payload, temp_dir)
+        except Exception as containment_error:
+            contained = False
+            containment_detail = f"{type(containment_error).__name__}: {containment_error}"[-2000:]
         # The raw timeout names the whole SSH command and its PATH setup; the owner gets plain words.
         error = RemoteQualityTimeoutError(
             phase=_quality_phase(cmd),
             timeout_seconds=exc.timeout,
             host_key=host_key,
             host_label=str(host_payload.get("label") or "").strip() or host_key or "another computer",
-            remote_process_contained=_stop_timed_out_remote_quality_run(host_payload, temp_dir),
+            remote_process_contained=contained,
             output_tail=output_tail,
             stalled=isinstance(exc, ProcessOutputStalledError),
+            scoped_temp_dir=temp_dir,
+            containment_detail=containment_detail,
         )
         if output_tail is not None:
             error.add_note(f"Last output from that computer:\n{output_tail}")
@@ -929,15 +941,16 @@ def _stop_timed_out_remote_quality_run(host: dict[str, object], scoped_temp_dir:
         return False
     containment_host = dict(host)
     containment_host.pop(SCHEDULE_CLOSE_DEADLINE_KEY, None)
-    try:
-        result = run_remote_command(
-            containment_host,
-            ["sh", "-c", REMOTE_QUALITY_CONTAINMENT_SCRIPT, "sh", scoped_temp_dir],
-            REMOTE_QUALITY_CONTAINMENT_TIMEOUT_SECONDS,
-        )
-    except Exception:  # noqa: BLE001 - any failure here leaves the run unproven, which is the safe answer.
-        return False
-    return result.returncode == 0 and REMOTE_QUALITY_CONTAINED_MARKER in result.stdout.split()
+    result = run_remote_command(
+        containment_host,
+        ["sh", "-c", REMOTE_QUALITY_CONTAINMENT_SCRIPT, "sh", scoped_temp_dir],
+        REMOTE_QUALITY_CONTAINMENT_TIMEOUT_SECONDS,
+        wake_before_connect=False,
+    )
+    if result.returncode != 0 or REMOTE_QUALITY_CONTAINED_MARKER not in result.stdout.split():
+        detail = (result.stderr or result.stdout).strip()[-2000:]
+        raise RuntimeError(f"Quality run stop was not confirmed (exit {result.returncode}). {detail}".strip())
+    return True
 
 
 def _quality_phase(cmd: list[str]) -> str:

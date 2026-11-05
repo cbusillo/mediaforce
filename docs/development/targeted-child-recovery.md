@@ -143,8 +143,23 @@ the Director-watched session on a real encode computer.
   plain sentence; the raw detail stays on the error as a diagnostic.
 - Not shown stopped (the step failed, timed out, found survivors, or the run
   had no scoped temp folder): the temp folder is kept, and an encode records
-  `containment_unproven` and waits for the user, with a plain instruction to
-  check that computer is idle and then try the file again.
+  `containment_unproven`. The queue retains the scoped folder and failed stop
+  diagnostic, bound to the job's attempt, start, selected outputs and saved
+  host. For mounted remote work, it checks that same folder with the existing
+  stop helper during the computer's work window, without waking it. Pause,
+  Stop, another active owner and a changed attempt prevent the check. Failed
+  checks back off with the existing cleanup delay and keep the file
+  non-runnable, with the reason recorded. A positive stop result enters the
+  ordinary `remote_quality_timeout` retry path; existing attempt limits,
+  output cleanup, schedules and validation still apply before work resumes.
+
+An ordinary Retry cannot substitute final-output cleanup for quality-run
+containment. Older records without their own scoped folder, local managed
+process failures, and scratch/stream cases keep waiting for a separately
+bounded recovery check. A generic empty process list, an unreachable host,
+an old PID, elapsed time or an absent output cannot supply that proof. Never
+reconstruct a run identity from folder age or change database rows to force
+a retry.
 
 A sample job records the same kind, message and whether the run was stopped in
 its result, without retrying on its own.

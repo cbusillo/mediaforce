@@ -656,6 +656,8 @@ def run_calibration_job(
                 "failure_message": str(exc),
                 "host_key": exc.host_key,
                 "remote_process_contained": exc.remote_process_contained,
+                "scoped_temp_dir": exc.scoped_temp_dir,
+                "containment_detail": exc.containment_detail,
             },
         )
     except Exception as exc:
