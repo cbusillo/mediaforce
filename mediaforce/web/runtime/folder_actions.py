@@ -2106,6 +2106,7 @@ def _recover_active_folder_encode_job(
                 for index in object_list(child.get("manifest_indexes"))
                 if isinstance(index, int)
             })
+    for child in recoverable_children:
         connection.execute(delete(encode_jobs).where(encode_jobs.c.job_id == str(child.get("job_id") or "")))
 
     recovery_notes = notes.strip() or str(active_encode_job.get("notes") or "").strip()
