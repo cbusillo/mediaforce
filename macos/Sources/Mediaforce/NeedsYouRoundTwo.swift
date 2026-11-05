@@ -41,10 +41,9 @@ struct NeedsYouRoundTwoPage: View {
     private var status: String? {
         guard let explanation = Words.workExplanation(facts) else { return nil }
         let pointers = ["waiting in Needs you", "need you first", "waiting for you in Media"]
-        let kept = explanation.split(separator: ". ").map(String.init).filter { sentence in
-            !pointers.contains { sentence.contains($0) }
-        }
-        return kept.isEmpty ? nil : kept.joined(separator: ". ")
+        let sentences = explanation.split(separator: ". ").map { $0.hasSuffix(".") ? String($0) : "\($0)." }
+        let kept = sentences.filter { sentence in !pointers.contains { sentence.contains($0) } }
+        return kept.isEmpty ? nil : kept.joined(separator: " ")
     }
 
     // Stat numbers in the TV shows page's own style: the value leads, its label recedes.
