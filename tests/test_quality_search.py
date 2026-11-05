@@ -535,8 +535,8 @@ class RemoteQualityTimeoutTests(unittest.TestCase):
                     self.assertEqual(exc.failure_kind, CONTAINMENT_UNPROVEN_FAILURE_KIND)
                     temp_dir = next(cmd[2] for _, cmd, _ in calls if cmd[0] == "mkdir")
                     self.assertEqual(exc.scoped_temp_dir, temp_dir)
+                    self.assertTrue(exc.containment_detail)
                     self._assert_plain(exc)
-                    self.assertIn("not confirmed stopped", str(exc))
                     # The run on that computer may still be using its temp folder, so it is not removed.
                     self.assertNotIn("rm", [cmd[0] for _, cmd, _ in calls])
 

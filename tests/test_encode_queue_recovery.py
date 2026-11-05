@@ -3658,10 +3658,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             deps.load_config = Mock(return_value=self.config)
             deps.ensure_encode_host_ready = Mock(return_value=False)
             deps.encode_manifest_items = Mock(side_effect=exc)
-            encode_runtime.run_encode_job(
-                config_path=self.config.paths.config_path, job_id=job["job_id"],
-                process_controller=ManagedProcessController(), deps=deps,
-            )
+            with patch.object(encode_runtime, "_cleanup_encode_retry_artifacts") as cleanup:
+                encode_runtime.run_encode_job(
+                    config_path=self.config.paths.config_path, job_id=job["job_id"],
+                    process_controller=ManagedProcessController(), deps=deps,
+                )
+            cleanup.assert_not_called()
         else:
             encode_runtime.transition_encode_job_failure(
                 connection, self.config, job, deps,
@@ -3670,6 +3672,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
         updated = load_encode_job(connection, f"job-{name}")
         assert updated is not None
+        if scoped_temp_dir is not None and not remote_process_contained and updated["status"] == "retry_backoff":
+            updated["retry_not_before"] = (datetime.now(tz=UTC) - timedelta(seconds=1)).isoformat()
+            save_encode_job(connection, updated)
+            connection.commit()
         return updated, str(exc)
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
@@ -3701,7 +3707,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_later_quality_containment_proof_uses_the_same_attempt_and_bounded_retry(self) -> None:
         deps = web_app._encode_queue_runtime_deps()
-        scope = str(self.config.staging_root / (".mediaforce-ab-av1-" + "a" * 32))
+        scope = str(encoding_quality._scoped_quality_temp_dir(
+            manifest_runtime._quality_temp_dir_for_encode_host(self.config, {"key": "remote-a", "mode": "ssh"}),
+            host={"mode": "ssh", "host": "fixture.invalid"},
+        ))
         with open_db(self.config.paths.db_path) as connection:
             for attempts in (1, deps.encode_job_max_attempts):
                 with self.subTest(attempts=attempts):
@@ -3721,7 +3730,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     with patch.object(encode_runtime, "_stop_timed_out_remote_quality_run", return_value=True) as stop, patch.object(
                             encode_runtime, "run_remote_command", new=_remote_cleanup_succeeds):
                         encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
-                    stop.assert_called_once_with(job["host"], scope)
+                    stop.assert_called_once_with(job["host"], scope, wake_before_connect=False)
                     updated = load_encode_job(connection, job["job_id"])
                     assert updated is not None
                     self.assertEqual(updated["attempt_count"], attempts)
@@ -3776,7 +3785,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 connection, "quality-proof-failed", attempt_count=1,
                 remote_process_contained=False, scoped_temp_dir=scope,
             )
-            for result in (False, RuntimeError("unrecognised writer"), subprocess.TimeoutExpired(["ssh"], 30)):
+            for result in (False, RuntimeError("unrecognised writer"), AttributeError("malformed fixture"), subprocess.TimeoutExpired(["ssh"], 30)):
                 with self.subTest(result=result):
                     save_encode_job(connection, copy.deepcopy(job))
                     connection.commit()
@@ -3787,11 +3796,11 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     stop.assert_called_once()
                     updated = load_encode_job(connection, job["job_id"])
                     assert updated is not None
-                    self.assertEqual(updated["status"], "needs_attention")
+                    self.assertEqual(updated["status"], "retry_backoff")
                     self.assertEqual(updated["attempt_count"], 1)
                     self.assertEqual(updated["last_failure_kind"], "containment_unproven")
                     self.assertTrue(updated["progress"]["quality_containment"]["detail"])
-                    self.assertIsNone(updated["retry_not_before"])
+                    self.assertIsNotNone(updated["retry_not_before"])
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_quality_recovery_honors_pause_stop_and_computer_work_windows(self) -> None:
@@ -3814,7 +3823,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     stop.assert_not_called()
                     current = load_encode_job(connection, job["job_id"])
                     assert current is not None
-                    self.assertEqual(current["status"], "needs_attention")
+                    self.assertEqual(current["status"], "retry_backoff")
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_quality_recovery_preserves_an_active_owner_and_a_replaced_attempt(self) -> None:
@@ -3838,7 +3847,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             save_encode_job(connection, copy.deepcopy(job))
             connection.commit()
 
-            def replace_attempt(*_args: object) -> bool:
+            def replace_attempt(*_args: object, **_kwargs: object) -> bool:
                 newer = {**copy.deepcopy(job), "attempt_count": 2, "status": "running", "worker_id": "new-worker"}
                 save_encode_job(connection, newer)
                 connection.commit()
@@ -3846,7 +3855,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             with patch.object(encode_runtime, "_stop_timed_out_remote_quality_run", side_effect=replace_attempt), patch.object(
                     encode_runtime, "_cleanup_encode_retry_artifacts") as cleanup:
-                encode_runtime._reconcile_quality_containment(connection, self.config, deps)
+                encode_runtime._recheck_quality_containment(connection, self.config, copy.deepcopy(job), deps)
             cleanup.assert_not_called()
             updated = load_encode_job(connection, job["job_id"])
             assert updated is not None
@@ -3854,7 +3863,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             save_encode_job(connection, copy.deepcopy(job))
             connection.commit()
 
-            def stop_queue(*_args: object) -> bool:
+            def stop_queue(*_args: object, **_kwargs: object) -> bool:
                 state = load_queue_state(connection)
                 state.update({"is_paused": True, "stop_requested": True, "updated_at": deps.now_iso()})
                 save_queue_state(connection, state)
@@ -3863,24 +3872,57 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             with patch.object(encode_runtime, "_stop_timed_out_remote_quality_run", side_effect=stop_queue), patch.object(
                     encode_runtime, "_cleanup_encode_retry_artifacts") as cleanup:
-                encode_runtime._reconcile_quality_containment(connection, self.config, deps)
+                encode_runtime._recheck_quality_containment(connection, self.config, copy.deepcopy(job), deps)
             cleanup.assert_not_called()
             current = load_encode_job(connection, job["job_id"])
             assert current is not None
-            self.assertEqual(current["status"], "needs_attention")
+            self.assertEqual(current["status"], "retry_backoff")
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
-    def test_owner_retry_cannot_substitute_output_cleanup_for_quality_containment(self) -> None:
+    def test_automatic_quality_wait_does_not_ask_the_owner_but_legacy_still_does(self) -> None:
+        scope = str(self.config.staging_root / (".mediaforce-ab-av1-" + "f" * 32))
         with open_db(self.config.paths.db_path) as connection:
-            job, _ = self._remote_quality_timeout_failure(
-                connection, "owner-quality-proof", attempt_count=1, remote_process_contained=False,
+            pending, _ = self._remote_quality_timeout_failure(
+                connection, "automatic-quality-wait", attempt_count=1,
+                remote_process_contained=False, scoped_temp_dir=scope,
             )
-            with patch.object(encode_runtime, "_cleanup_encode_retry_artifacts") as cleanup:
-                with self.assertRaises(HTTPException) as raised:
-                    encode_runtime.prepare_terminal_encode_job_for_requeue(
-                        connection, job, deps=web_app._encode_queue_runtime_deps(), config=self.config)
-                self.assertEqual(raised.exception.status_code, 409)
-            cleanup.assert_not_called()
+            self.assertEqual(pending["status"], "retry_backoff")
+            self.assertFalse(encode_runtime.unfinished_child_reason(pending)[2])
+            self.assertEqual(summarize_encode_queue(connection)["needs_attention_count"], 0)
+            self.assertFalse(web_app._folder_needs_attention_badges(connection))
+            legacy, _ = self._remote_quality_timeout_failure(
+                connection, "legacy-quality-wait", attempt_count=1, remote_process_contained=False,
+            )
+            self.assertEqual(legacy["status"], "needs_attention")
+            self.assertTrue(encode_runtime.unfinished_child_reason(legacy)[2])
+            self.assertEqual(summarize_encode_queue(connection)["needs_attention_count"], 1)
+
+    def test_folder_retry_keeps_earlier_children_when_later_cleanup_refuses(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._write_manifest("cleanup-refusal.json", [{"staging_path": str(self._staging_path("first.mkv"))}])
+            for name in ("first", "refused"):
+                self._save_job(connection, job_id=name, manifest_name="cleanup-refusal.json",
+                               host={"mode": "local"}, status="failed", attempt_count=1)
+            children = [load_encode_job(connection, name) for name in ("first", "refused")]
+            assert all(child is not None for child in children)
+            parts = [child for child in children if child is not None]
+            parent = {**parts[0], "job_id": "parent", "job_kind": "folder"}
+            connection.commit()
+
+            def prepare(_connection: DBClient, child: dict[str, Any]) -> None:
+                connection.commit()
+                if child["job_id"] == "refused":
+                    raise HTTPException(status_code=409, detail="fixture writer is still active")
+
+            with self.assertRaises(HTTPException):
+                folder_actions_runtime._recover_active_folder_encode_job(
+                    connection, parent, notes="", now_iso=web_app._now_iso,
+                    prepare_terminal_encode_job_for_requeue_fn=prepare, save_encode_job=save_encode_job,
+                    recovery_plan=(parts, [0, 1]),
+                )
+            connection.rollback()
+            for name in ("first", "refused"):
+                self.assertIsNotNone(load_encode_job(connection, name))
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_remote_quality_timeout_at_the_attempt_cap_goes_to_the_owner_in_plain_words(self) -> None:
@@ -26585,6 +26627,8 @@ raise SystemExit(0)
         queued_partial = staging[2].with_name(f"{staging[2].stem}.partial{staging[2].suffix}")
         queued_partial.parent.mkdir(parents=True, exist_ok=True)
         queued_partial.write_text("still being made")
+        backoff_partial = staging_runtime.partial_output_path(staging[3])
+        backoff_partial.write_text("waiting for the earlier run to stop")
         now = web_app._now_iso()
 
         def job(job_id: str, **values: Any) -> dict[str, Any]:
@@ -26627,7 +26671,7 @@ raise SystemExit(0)
             ))
             save_encode_job(connection, job(
                 "retrying-sibling", status="retry_backoff", manifest_indexes=[3], attempt_count=2,
-                retry_not_before=now, last_failure_kind="storage_io",
+                retry_not_before=now, last_failure_kind="containment_unproven",
             ))
             before = {row["job_id"]: row for row in list_child_encode_jobs(connection, "stopped-parent")}
 
@@ -26666,6 +26710,7 @@ raise SystemExit(0)
             [(0,), (2,)],
         )
         self.assertTrue(queued_partial.exists())
+        self.assertEqual(backoff_partial.read_text(), "waiting for the earlier run to stop")
         self.assertEqual(statuses, ["planned", "encoding", "encoding", "encoding"])
 
     def test_requeue_refuses_to_plan_a_folder_again_while_older_parts_are_still_queued(self) -> None:

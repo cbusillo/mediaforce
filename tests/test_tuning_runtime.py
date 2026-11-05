@@ -8156,8 +8156,6 @@ class TuningRuntimeTests(unittest.TestCase):
                     host_key="remote-a",
                     host_label="Remote A",
                     remote_process_contained=contained,
-                    scoped_temp_dir="/fixture/.mediaforce-ab-av1-" + "f" * 32,
-                    containment_detail=None if contained else "fixture stop did not complete",
                 )
 
                 failed = self._run_calibration_job_with_failing_quality_search(timeout)
@@ -8170,8 +8168,6 @@ class TuningRuntimeTests(unittest.TestCase):
                         "failure_message": str(timeout),
                         "host_key": "remote-a",
                         "remote_process_contained": contained,
-                        "scoped_temp_dir": timeout.scoped_temp_dir,
-                        "containment_detail": timeout.containment_detail,
                     },
                 )
 

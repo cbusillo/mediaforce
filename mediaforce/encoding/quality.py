@@ -931,7 +931,9 @@ def _run_quality_command(
         raise error from None
 
 
-def _stop_timed_out_remote_quality_run(host: dict[str, object], scoped_temp_dir: str | None) -> bool:
+def _stop_timed_out_remote_quality_run(
+        host: dict[str, object], scoped_temp_dir: str | None, *, wake_before_connect: bool = True,
+) -> bool:
     """Stop what is left of a timed-out run on that computer; True only once nothing of it is left.
 
     Stopping the local SSH client does not stop the run on the computer. Without its scoped temp
@@ -945,7 +947,7 @@ def _stop_timed_out_remote_quality_run(host: dict[str, object], scoped_temp_dir:
         containment_host,
         ["sh", "-c", REMOTE_QUALITY_CONTAINMENT_SCRIPT, "sh", scoped_temp_dir],
         REMOTE_QUALITY_CONTAINMENT_TIMEOUT_SECONDS,
-        wake_before_connect=False,
+        wake_before_connect=wake_before_connect,
     )
     if result.returncode != 0 or REMOTE_QUALITY_CONTAINED_MARKER not in result.stdout.split():
         detail = (result.stderr or result.stdout).strip()[-2000:]

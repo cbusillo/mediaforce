@@ -585,82 +585,73 @@ def _quality_containment_scope(config: MediaforceConfig, job: dict[str, Any]) ->
     return scope
 
 
-def _reconcile_quality_containment(connection: DBClient, config: MediaforceConfig, deps: EncodeQueueRuntimeDeps) -> None:
+def _recheck_quality_containment(
+        connection: DBClient, config: MediaforceConfig, job: dict[str, Any], deps: EncodeQueueRuntimeDeps,
+) -> None:
+    snapshot = stable_json_hash(job)
+    progress = object_dict(job.get("progress"))
+    context = object_dict(progress.get("quality_containment"))
+    host = object_dict(job.get("host"))
     state = load_queue_state(connection)
     if state.get("is_paused") or state.get("stop_requested"):
         return
-    rows = connection.execute(select(encode_jobs.c.job_id).where(
-        encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS),
-        encode_jobs.c.status == "needs_attention", encode_jobs.c.last_failure_kind == "containment_unproven",
-    )).mappings().all()
-    for row in rows:
-        job = load_encode_job(connection, str(row["job_id"]))
-        if job is None:
-            continue
-        snapshot = stable_json_hash(job)
-        progress = object_dict(job.get("progress"))
-        context = object_dict(progress.get("quality_containment"))
-        now = datetime.now(tz=UTC)
-        next_check = deps.parse_iso(context.get("check_not_before"))
-        if next_check is not None and next_check > now:
-            continue
-        host = object_dict(job.get("host"))
-        checking_processes = False
-        try:
-            scope = _quality_containment_scope(config, job)
-            if not deps.scheduler_allows_encode_run(
-                    deps.schedule_profile_policy_for_host(config, host), now=now, host_payload=host,
-                    bypass_schedule=bool(job.get("bypass_schedule"))):
-                raise RuntimeError("Waiting for that computer's work window to confirm its earlier quality run ended.")
+    scope = None
+    checking_processes = False
+    try:
+        scope = _quality_containment_scope(config, job)
+        if not deps.scheduler_allows_encode_run(
+                deps.schedule_profile_policy_for_host(config, host), now=datetime.now(tz=UTC), host_payload=host,
+                bypass_schedule=bool(job.get("bypass_schedule"))):
+            raise RuntimeError("Waiting for that computer's work window to confirm its earlier quality run ended.")
+        connection.commit()
+        with _locked_encode_dispatch(connection), _locked_manifest_cleanup(Path(job["manifest_path"])):
+            current = load_encode_job(connection, str(job["job_id"]))
+            if current is None or stable_json_hash(current) != snapshot:
+                return
+            active = _active_encode_outputs(connection, config, exclude_job_id=str(job["job_id"]),
+                                            statuses=("queued", "retry_backoff", "running"))
+            items = _encode_job_estimate_items(job, manifest_items_cache={}, strict_indexes=True)
+            if active is None or any(
+                    item.get("library_item_id") in active[0]
+                    or str(resolve_item_staging_path(config, item, host=host,
+                                                   host_media_access_for_host=host_media_access_for_host)) in active[1]
+                    or (item.get("library_item_id") is not None
+                        and _active_standalone_cli_encode(connection, int(item["library_item_id"])))
+                    for item in items):
+                raise RuntimeError("Another encode may own this file; its earlier run remains unconfirmed.")
+            checking_processes = True
+            if not _stop_timed_out_remote_quality_run(host, scope, wake_before_connect=False):
+                raise RuntimeError("The earlier quality run was not confirmed stopped.")
+            checking_processes = False
             connection.commit()
-            with _locked_encode_dispatch(connection), _locked_manifest_cleanup(Path(job["manifest_path"])):
-                current = load_encode_job(connection, str(job["job_id"]))
-                if current is None or stable_json_hash(current) != snapshot:
-                    continue
-                active = _active_encode_outputs(connection, config, statuses=("queued", "retry_backoff", "running"))
-                items = _encode_job_estimate_items(job, manifest_items_cache={}, strict_indexes=True)
-                if active is None or any(
-                        item.get("library_item_id") in active[0]
-                        or str(resolve_item_staging_path(config, item, host=host,
-                                                       host_media_access_for_host=host_media_access_for_host)) in active[1]
-                        or (item.get("library_item_id") is not None
-                            and _active_standalone_cli_encode(connection, int(item["library_item_id"])))
-                        for item in items):
-                    raise RuntimeError("Another encode may own this file; its earlier run remains unconfirmed.")
-                checking_processes = True
-                if not _stop_timed_out_remote_quality_run(host, scope):
-                    raise RuntimeError("The earlier quality run was not confirmed stopped.")
-                checking_processes = False
-                connection.commit()
-                current = load_encode_job(connection, str(job["job_id"]))
-                if current is None or stable_json_hash(current) != snapshot:
-                    continue
-                connection.exec_driver_sql("BEGIN IMMEDIATE")
-                current = load_encode_job(connection, str(job["job_id"]))
-                state = load_queue_state(connection)
-                if (current is None or stable_json_hash(current) != snapshot
-                        or state.get("is_paused") or state.get("stop_requested")):
-                    connection.rollback()
-                    continue
-                context.update({"verified_at": deps.now_iso(), "detail": None})
-                progress["quality_containment"] = context
-                job["progress"] = progress
-            transition_encode_job_failure(
-                connection, config, job, deps, failure_kind=REMOTE_QUALITY_TIMEOUT_FAILURE_KIND,
-                error_message="The earlier quality run on that computer is now confirmed stopped.",
-            )
-        except BlockingIOError:
-            continue
-        except (OSError, ValueError, KeyError, TypeError, IndexError, RuntimeError, subprocess.SubprocessError) as exc:
-            deferrals = int_value(progress.get("cleanup_deferrals")) + 1
-            progress["cleanup_deferrals"] = deferrals
-            context.update({"detail": str(exc)[-2000:], "check_not_before": (
-                now + timedelta(seconds=_encode_job_retry_delay_seconds(deferrals, deps))).isoformat(timespec="seconds")})
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            current = load_encode_job(connection, str(job["job_id"]))
+            state = load_queue_state(connection)
+            if (current is None or stable_json_hash(current) != snapshot
+                    or state.get("is_paused") or state.get("stop_requested")):
+                connection.rollback()
+                return
+            context.update({"verified_at": deps.now_iso(), "detail": None})
             progress["quality_containment"] = context
-            reason = (f"Waiting for {_computer_label(host)} to confirm its earlier quality run ended."
-                      if checking_processes else str(exc))
-            job.update({"progress": progress, "waiting_reason": reason})
-            _save_swept_job(connection, job, snapshot, deps)
+            job["progress"] = progress
+        transition_encode_job_failure(
+            connection, config, job, deps, failure_kind=REMOTE_QUALITY_TIMEOUT_FAILURE_KIND,
+            error_message="The earlier quality run on that computer is now confirmed stopped.",
+        )
+    except BlockingIOError:
+        return
+    except Exception as exc:
+        deps.logger.warning("Quality containment check for %s failed: %s", job["job_id"], exc)
+        checks = int_value(context.get("checks")) + 1
+        context.update({"detail": str(exc)[-2000:], "checks": checks})
+        progress["quality_containment"] = context
+        reason = (f"Waiting for {_computer_label(host)} to confirm its earlier quality run ended."
+                  if checking_processes else str(exc))
+        job.update({"progress": progress, "waiting_reason": reason, "retry_not_before": (
+            datetime.now(tz=UTC) + timedelta(seconds=_encode_job_retry_delay_seconds(checks, deps))).isoformat(timespec="seconds")})
+        if scope is None:
+            job.update({"status": "needs_attention", "retry_not_before": None})
+        _save_swept_job(connection, job, snapshot, deps)
 
 
 def reconcile_encode_jobs(
@@ -670,7 +661,6 @@ def reconcile_encode_jobs(
         *,
         restart_recovery: bool = False,
 ) -> None:
-    _reconcile_quality_containment(connection, config, deps)
     now = datetime.now(tz=UTC)
     running_rows = connection.execute(
         select(encode_jobs.c.job_id)
@@ -728,6 +718,9 @@ def reconcile_encode_jobs(
             continue
         retry_not_before = deps.parse_iso(payload.get("retry_not_before"))
         if retry_not_before is not None and retry_not_before > now:
+            continue
+        if payload.get("last_failure_kind") == "containment_unproven":
+            _recheck_quality_containment(connection, config, payload, deps)
             continue
         retry_host = object_dict(payload.get("host"))
         state = load_queue_state(connection)
@@ -1774,6 +1767,8 @@ def unfinished_child_reason(child: Mapping[str, Any]) -> tuple[str, str, bool]:
                 return reason, label, needs_owner
         return f"waiting:{waiting_reason}", waiting_reason, False
     if status == "retry_backoff":
+        if child.get("last_failure_kind") == "containment_unproven":
+            return "waiting_containment", "waiting to confirm its earlier run ended", False
         computer = str(object_dict(child.get("progress")).get(WAITING_FOR_COMPUTER_PROGRESS_KEY) or "").strip()
         if computer:
             return f"waiting_for_computer:{computer}", f"waiting for {computer} to be available", False
@@ -2190,6 +2185,13 @@ def transition_encode_job_failure(
         except (OSError, ValueError, KeyError, TypeError, IndexError, RuntimeError) as exc:
             progress["quality_containment"] = {"detail": str(exc)[-2000:]}
         job["progress"] = progress
+    containment_pending = False
+    if failure_kind == "containment_unproven":
+        try:
+            _quality_containment_scope(config, job)
+            containment_pending = True
+        except (OSError, ValueError, KeyError, TypeError, IndexError, RuntimeError):
+            containment_pending = False
     now = datetime.now(tz=UTC)
     now_iso = now.isoformat(timespec="seconds")
     assigned_host = object_dict(job.get("host"))
@@ -2231,7 +2233,7 @@ def transition_encode_job_failure(
         }
     )
 
-    if retryable and (attempt_count < deps.encode_job_max_attempts or retry_beyond_attempt_cap):
+    if containment_pending or (retryable and (attempt_count < deps.encode_job_max_attempts or retry_beyond_attempt_cap)):
         retry_delay = _encode_job_retry_delay_seconds(min(attempt_count, deps.encode_job_max_attempts), deps)
         retry_not_before = (now + timedelta(seconds=retry_delay)).isoformat(timespec="seconds")
         retry_reason = _encode_retry_waiting_reason(
@@ -2262,15 +2264,16 @@ def transition_encode_job_failure(
         save_encode_job(connection, job)
         sync_encode_job_parent(connection, job, deps)
         connection.commit()
-        _cleanup_encode_retry_artifacts(
-            connection,
-            manifest_path=Path(str(job["manifest_path"])),
-            indexes=job.get("manifest_indexes"),
-            host=assigned_host,
-            expected_job=job,
-            deps=deps,
-            config=config,
-        )
+        if not containment_pending:
+            _cleanup_encode_retry_artifacts(
+                connection,
+                manifest_path=Path(str(job["manifest_path"])),
+                indexes=job.get("manifest_indexes"),
+                host=assigned_host,
+                expected_job=job,
+                deps=deps,
+                config=config,
+            )
         connection.commit()
         return
 
@@ -5092,6 +5095,7 @@ def _encode_failure_retries_after_attempt_cap(
 
 def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) -> str:
     reason = {
+        "containment_unproven": "waiting to confirm the earlier quality run ended",
         "worker_restart": "Mediaforce restarted",
         "stale_lease": "a computer stopped reporting in",
         "host_unavailable": "a computer was unavailable",
@@ -5128,12 +5132,6 @@ def prepare_terminal_encode_job_for_requeue(
             for child in children:
                 prepare_terminal_encode_job_for_requeue(connection, child, deps=deps, config=config)
             return
-
-    if job.get("last_failure_kind") == "containment_unproven":
-        raise HTTPException(status_code=409, detail=(
-            "The earlier run is not confirmed stopped. Mediaforce checks its saved work folder before trying again. "
-            "If that record is missing, the earlier run needs a separate recovery check."
-        ))
 
     # Legacy and malformed folder jobs may have no child rows or no non-completed child
     # manifest indexes; in those cases, fallback to the job-level indexes to avoid

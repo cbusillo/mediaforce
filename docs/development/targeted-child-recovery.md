@@ -145,18 +145,22 @@ the Director-watched session on a real encode computer.
   had no scoped temp folder): the temp folder is kept, and an encode records
   `containment_unproven`. The queue retains the scoped folder and failed stop
   diagnostic, bound to the job's attempt, start, selected outputs and saved
-  host. For mounted remote work, it checks that same folder with the existing
+  host. When that identity is available for mounted remote work, the file
+  waits in the existing `retry_backoff` state, with no cleanup or dispatch
+  before proof. It checks that same folder with the existing
   stop helper during the computer's work window, without waking it. Pause,
   Stop, another active owner and a changed attempt prevent the check. Failed
-  checks back off with the existing cleanup delay and keep the file
+  checks use the existing delay function with their own check count, leaving
+  retry-cleanup history unchanged, and keep the file
   non-runnable, with the reason recorded. A positive stop result enters the
   ordinary `remote_quality_timeout` retry path; existing attempt limits,
   output cleanup, schedules and validation still apply before work resumes.
 
-An ordinary Retry cannot substitute final-output cleanup for quality-run
-containment. Older records without their own scoped folder, local managed
-process failures, and scratch/stream cases keep waiting for a separately
-bounded recovery check. A generic empty process list, an unreachable host,
+Older records without their own scoped folder, local managed process failures,
+and scratch/stream cases retain their existing supported operator-retry route,
+after separately qualified job-specific containment and output custody. This
+source change neither performs nor waives that qualification, and does not
+automatically re-admit those records. A generic empty process list, an unreachable host,
 an old PID, elapsed time or an absent output cannot supply that proof. Never
 reconstruct a run identity from folder age or change database rows to force
 a retry.
