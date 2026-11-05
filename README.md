@@ -233,6 +233,11 @@ job exercises the same renderer in the native test gate, reusing existing fixtur
 keeps its PNGs in the `mac-pages` artifact. It fails for unreadable or blank
 pages; it does not compare pixel hashes against a saved design.
 
+For source validation while local media work is running, use the pull request's
+`mac-app` CI job on its isolated `macos-latest` runner and download `mac-pages`
+from that exact run. It runs `scripts/build-mac-app.sh test` and the offscreen
+renderer without installing or restarting the workstation's app or server.
+
 ## Commands
 
 On macOS, Mediaforce now prefers Homebrew's `ffmpeg-full` and `ffprobe` from
