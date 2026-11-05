@@ -121,6 +121,7 @@ enum MediaKind: String, CaseIterable, Identifiable, Sendable {
 @MainActor
 @Observable
 final class MediaListing {
+    private static let libraryKinds = MediaKind.allCases.filter { $0 != .everything }
     private var snapshots: [MediaKind: MediaRow.Loaded] = [:]
     private(set) var unavailable: [MediaKind] = []
     private(set) var loading = true
@@ -133,7 +134,7 @@ final class MediaListing {
     }
 
     var estimateIsPartial: Bool {
-        snapshots.count < 3 || !unavailable.isEmpty || truncated || rows.contains { $0.saved == nil }
+        snapshots.count < Self.libraryKinds.count || !unavailable.isEmpty || truncated || rows.contains { $0.saved == nil }
     }
 
     func estimatedTotalSavedBytes(savedSoFar: Int64) -> Int64? {
@@ -150,7 +151,7 @@ final class MediaListing {
     }
 
     func refresh(_ client: MediaforceClient, kind: MediaKind) async {
-        let kinds: [MediaKind] = kind == .everything ? [.tv, .movies, .other] : [kind]
+        let kinds: [MediaKind] = kind == .everything ? Self.libraryKinds : [kind]
         let results = await withTaskGroup(of: Read.self) { group in
             for kind in kinds {
                 group.addTask {

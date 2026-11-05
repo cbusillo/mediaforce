@@ -300,7 +300,15 @@ def _tv_season(identity: Mapping[str, Any], card: Mapping[str, Any]) -> dict[str
 
 
 def _estimated_saved_bytes(card: Mapping[str, Any]) -> int | None:
-    if card.get("details_loading") or card.get("estimate_unavailable_count") or card.get("projected_reclaim_bytes") is None:
+    if card.get("details_loading"):
+        return None
+    workflow = card.get("workflow_state") or {}
+    statuses = card.get("statuses") or {}
+    if workflow.get("state") == "complete" or workflow.get("primary_lane") == "complete":
+        return 0
+    if card.get("item_count") and statuses.get("promoted") == card["item_count"]:
+        return 0
+    if card.get("estimate_unavailable_count") or card.get("projected_reclaim_bytes") is None:
         return None
     return int(card["projected_reclaim_bytes"])
 

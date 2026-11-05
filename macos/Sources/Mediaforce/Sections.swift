@@ -43,15 +43,16 @@ struct StorageBar: View {
             metric(Words.size(kind.originalBytes(in: facts.library)), label: "Still original")
             if kind == .everything {
                 Button { open(.spaceSaved) } label: {
-                    metric(Words.size(facts.spaceSaved.bytes), label: "Saved so far")
+                    metric(Words.size(facts.spaceSaved.bytes), label: Words.savedSoFarLabel)
                 }
                 .buttonStyle(.plain)
                 .pointerStyle(.link)
+                .help(Words.spaceSaved)
                 VStack(alignment: .leading, spacing: 4) {
-                    metric(listing.estimatedTotalSavedBytes(savedSoFar: facts.spaceSaved.bytes).map { "About \(Words.size($0))" }
-                           ?? Words.notKnownYet, label: "Estimated total savings")
-                    if listing.estimateIsPartial && !listing.loading {
-                        Text("Partial total; some estimates are unavailable.")
+                    let estimate = listing.estimatedTotalSavedBytes(savedSoFar: facts.spaceSaved.bytes)
+                    metric(estimate.map { "About \(Words.size($0))" } ?? Words.notKnownYet, label: Words.estimatedTotalSavings)
+                    if estimate != nil && listing.estimateIsPartial && !listing.loading {
+                        Text(Words.partialSavingsEstimate)
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
