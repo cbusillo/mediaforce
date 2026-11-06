@@ -15,16 +15,9 @@
 - Prefer the simplest design that is still clean, explicit, and maintainable
 - Eliminate code smells, bad practices, and unnecessary complexity before
   calling work done
-- Keep naming descriptive and intent-revealing
 - Update docs when behavior or workflow meaningfully changes
-- Type hints are required at API boundaries: function and method signatures, and
-  public data shapes that cross module or runtime boundaries
-- Prefer local type inference when it is already clear; add local annotations
-  when they materially improve readability or tooling
-- Prefer code that reads clearly without comments; reserve comments for why,
-  constraints, and decision context
-- Extract repeated logic into helpers instead of duplicating code or branching
-  the same behavior in parallel places
+- Follow [Python style](../style/python.md) for the full shared guide and
+  Mediaforce's Python-specific guidance.
 - Keep touched files warning-clean in Ruff when the warning is actionable
   and the fix is local to the work
 
