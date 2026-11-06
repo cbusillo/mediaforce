@@ -1,38 +1,13 @@
 # Python Style
 
-Use straightforward, typed, production-ready Python.
-
-## Purpose
-
-- Define the house style for Python used in the FastAPI backend, CLI, and
-  utilities.
-
-## Core rules
-
-- Type hints are required at API boundaries: all function and method
-  signatures, plus public data shapes that act as external contracts
-- Prefer local type inference when the type is obvious
-- Add local annotations when they materially improve clarity or tooling,
-  especially for ambiguous empty containers and values crossing dynamic
-  boundaries
-- Prefer small functions, early returns, and descriptive names
-- Use f-strings, PEP 604 unions, and `pathlib.Path`
-- Fix root causes instead of layering workarounds
-- Keep comments rare; use them for constraints or why, not for what the code does
-- Avoid broad `except Exception` blocks unless they re-raise, classify, or log
-  a real boundary failure
+Read the full shared
+[Python and Odoo style](https://github.com/cbusillo/codex-skills/blob/main/skills/references/python-odoo-style.md)
+before writing Python. Odoo-specific rules apply only to Odoo; Mediaforce's
+supported Python versions and Ruff settings remain in `pyproject.toml`.
+Its gate checks annotations; it does not require Ruff formatting.
 
 ## Repo specifics
 
 - FastAPI backend code lives under `mediaforce/`
-- Prefer updating existing helpers and modules over adding parallel abstractions
+- Type public data shapes that cross module or runtime boundaries.
 - Keep runtime/config assumptions out of code when they belong in config
-- Use Ruff for fast Python annotation/style enforcement.
-- Follow [inspection authority](../policies/acceptance-gate.md#inspection-authority) for IDE validation.
-- Prefer narrow, justified suppressions only when a warning is a confirmed tool
-  false positive that cannot be fixed in code
-
-## Before committing
-
-- Remove code smells, dead branches, and avoidable complexity
-- Make the code something we would be happy to maintain
