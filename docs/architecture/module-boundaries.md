@@ -239,7 +239,7 @@ app.
       sample notice: the workflow state's wider-run rules for encode work, the
       page's own newest sample job and saved sample (never an overlapping
       episode's or show's), and `production_approval` for whether an approval
-      governs; the module docstring states the precedence
+      governs
     - under a current approval, a scope where neither queueing, an override of
       its lifecycle hold, nor a show's older-seasons action would take a file or
       start a motion-pattern check, and some file is held for its motion
