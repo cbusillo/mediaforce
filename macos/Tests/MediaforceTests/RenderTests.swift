@@ -131,17 +131,19 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
             return
         }
         let path = request.url!.path
-        let payload = payload(path)
-        let response = HTTPURLResponse(url: request.url!, statusCode: payload == nil ? 404 : 200,
+        let body = path.hasPrefix("/api/app/posters/")
+            ? StandInPoster.png(String(path.dropFirst("/api/app/posters/".count)))
+            : payload(path).map { Data($0.utf8) }
+        let response = HTTPURLResponse(url: request.url!, statusCode: body == nil ? 404 : 200,
                                        httpVersion: nil, headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data((payload ?? "").utf8))
+        client?.urlProtocol(self, didLoad: body ?? Data())
         client?.urlProtocolDidFinishLoading(self)
     }
 
     func payload(_ path: String) -> String? {
         switch path {
-        case "/api/app/main-window": MainWindowTests.facts
+        case "/api/app/main-window": Self.busierDay
         case "/api/app/kinds": """
             {"kinds": [{"kind": "bright_live_action", "one_time": false, "seasons": 1, "waiting_bytes": 1000,
                         "shows": [], "settings": [], "approval": null, "sample_season": null}], "left_out": []}
@@ -171,6 +173,29 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
         default: nil
         }
     }
+
+    // PROTOTYPE for #1296: the shared sample facts on a busier day, using only reasons the app already has.
+    static let busierDay: String = {
+        var facts = try! JSONSerialization.jsonObject(with: Data(MainWindowTests.facts.utf8)) as! [String: Any]
+        var work = facts["work"] as! [String: Any]
+        work["kinds_needing_you"] = [["kind": "darker_live_action", "sample_season": "tv/Futurama/Season 5",
+                                      "sample_status": "completed", "sample_ready": true, "one_time": false,
+                                      "settings_available": false, "sample_start_prefix": NSNull()]]
+        facts["work"] = work
+        var samples = facts["samples"] as! [String: Any]
+        var waiting = samples["waiting_on_you"] as! [[String: Any]]
+        waiting.append(["prefix": "tv/ER/Season 1", "show_prefix": "tv/ER", "show": "ER", "season_folder": "Season 1",
+                        "season": 1, "state": "needs_help", "action": "choose_size", "failure": "bound_exhausted"])
+        waiting.append(["prefix": "tv/Futurama/Season 4", "show_prefix": "tv/Futurama", "show": "Futurama",
+                        "season_folder": "Season 4", "season": 4, "state": "ready_to_compare", "action": "review_sample",
+                        "failure": NSNull()])
+        samples["waiting_on_you"] = waiting
+        facts["samples"] = samples
+        var biggest = facts["biggest_not_started"] as! [[String: Any]]
+        biggest[0]["waiting_sample_prefix"] = "tv/ER/Season 1"
+        facts["biggest_not_started"] = biggest
+        return String(decoding: try! JSONSerialization.data(withJSONObject: facts), as: UTF8.self)
+    }()
 
     private func item(_ prefix: String) -> String {
         let kind = prefix == "tv/Lucifer" ? "tv_series" : prefix.hasPrefix("movies/") ? "movie" : prefix.hasPrefix("other/") ? "other" : "tv_season"
@@ -226,5 +251,92 @@ private final class BlockedFilesRenderServer: RenderFixtureServer, @unchecked Se
              "episode": 2, "stage": "needs_you", "validation": "size_held", "bytes": 900000000, "original_backup": false],
         ]
         return (try? JSONSerialization.data(withJSONObject: item)).map { String(decoding: $0, as: UTF8.self) }
+    }
+}
+
+// PROTOTYPE for #1296: drawn stand-in artwork so render pages show posters instead of grey boxes. Not real show art.
+private enum StandInPoster {
+    private struct Look {
+        let top: NSColor
+        let bottom: NSColor
+        let glow: NSColor
+        let font: String
+        let title: NSColor
+    }
+
+    private static func look(_ show: String) -> Look {
+        switch show {
+        case "Lucifer":
+            Look(top: NSColor(srgbRed: 0.07, green: 0.03, blue: 0.05, alpha: 1), bottom: NSColor(srgbRed: 0.45, green: 0.05, blue: 0.09, alpha: 1),
+                 glow: NSColor(srgbRed: 0.98, green: 0.45, blue: 0.22, alpha: 0.85), font: "Didot-Bold", title: .white)
+        case "Futurama":
+            Look(top: NSColor(srgbRed: 0.05, green: 0.16, blue: 0.33, alpha: 1), bottom: NSColor(srgbRed: 0.10, green: 0.55, blue: 0.60, alpha: 1),
+                 glow: NSColor(srgbRed: 0.98, green: 0.72, blue: 0.25, alpha: 1), font: "ArialRoundedMTBold",
+                 title: NSColor(srgbRed: 1, green: 0.86, blue: 0.30, alpha: 1))
+        case "ER":
+            Look(top: NSColor(srgbRed: 0.04, green: 0.13, blue: 0.14, alpha: 1), bottom: NSColor(srgbRed: 0.16, green: 0.45, blue: 0.42, alpha: 1),
+                 glow: NSColor(srgbRed: 0.85, green: 0.96, blue: 0.95, alpha: 0.7), font: "HelveticaNeue-CondensedBlack", title: .white)
+        default:
+            Look(top: NSColor(srgbRed: 0.12, green: 0.12, blue: 0.16, alpha: 1), bottom: NSColor(srgbRed: 0.35, green: 0.33, blue: 0.45, alpha: 1),
+                 glow: NSColor(srgbRed: 0.9, green: 0.85, blue: 0.75, alpha: 0.7), font: "AvenirNext-Heavy", title: .white)
+        }
+    }
+
+    static func png(_ titlePrefix: String) -> Data? {
+        let show = titlePrefix.removingPercentEncoding?.split(separator: "/").last.map(String.init) ?? titlePrefix
+        let look = look(show)
+        let size = NSSize(width: 420, height: 590)
+        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
+                                            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        let bounds = NSRect(origin: .zero, size: size)
+        NSGradient(starting: look.bottom, ending: look.top)?.draw(in: bounds, angle: 90)
+        let glow = NSGradient(colors: [look.glow, look.glow.withAlphaComponent(0)])
+        switch show {
+        case "Futurama":
+            glow?.draw(in: NSBezierPath(ovalIn: NSRect(x: 40, y: 150, width: 340, height: 340)), relativeCenterPosition: NSPoint(x: -0.3, y: 0.3))
+            look.glow.withAlphaComponent(0.55).setStroke()
+            let ring = NSBezierPath(ovalIn: NSRect(x: -10, y: 270, width: 440, height: 90))
+            ring.lineWidth = 7
+            ring.stroke()
+        case "ER":
+            for (index, y) in stride(from: 120.0, to: 460, by: 58).enumerated() {
+                look.glow.withAlphaComponent(0.10 + 0.06 * Double(index)).setFill()
+                NSBezierPath(rect: NSRect(x: 0, y: y, width: size.width, height: 10)).fill()
+            }
+            NSColor(srgbRed: 0.85, green: 0.12, blue: 0.14, alpha: 0.9).setFill()
+            NSBezierPath(rect: NSRect(x: 180, y: 250, width: 60, height: 170)).fill()
+            NSBezierPath(rect: NSRect(x: 125, y: 305, width: 170, height: 60)).fill()
+        default:
+            glow?.draw(in: NSBezierPath(ovalIn: NSRect(x: -40, y: 90, width: 500, height: 380)), relativeCenterPosition: NSPoint(x: 0, y: -0.35))
+            NSColor.black.withAlphaComponent(0.9).setFill()
+            let skyline: [(Double, Double)] = [(0, 150), (34, 210), (70, 170), (96, 280), (128, 190), (160, 240), (196, 330),
+                                               (226, 200), (262, 260), (300, 180), (330, 230), (366, 160), (396, 200)]
+            for (x, height) in skyline {
+                NSBezierPath(rect: NSRect(x: x, y: 0, width: 36, height: height)).fill()
+            }
+            look.glow.withAlphaComponent(0.6).setFill()
+            for (x, height) in skyline where height > 200 {
+                for row in stride(from: 40.0, to: height - 20, by: 26) {
+                    NSBezierPath(rect: NSRect(x: x + 10, y: row, width: 5, height: 8)).fill()
+                    NSBezierPath(rect: NSRect(x: x + 22, y: row + 10, width: 5, height: 8)).fill()
+                }
+            }
+        }
+        let font = NSFont(name: look.font, size: show.count <= 3 ? 120 : 58) ?? .systemFont(ofSize: 58, weight: .heavy)
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.5)
+        shadow.shadowBlurRadius = 8
+        let title = NSAttributedString(string: show, attributes: [.font: font, .foregroundColor: look.title,
+                                                                  .paragraphStyle: style, .shadow: shadow, .kern: 1.5])
+        let height = title.boundingRect(with: NSSize(width: size.width - 40, height: 400), options: .usesLineFragmentOrigin).height
+        title.draw(with: NSRect(x: 20, y: size.height - 50 - height, width: size.width - 40, height: height), options: .usesLineFragmentOrigin)
+        NSGraphicsContext.restoreGraphicsState()
+        return bitmap.representation(using: .png, properties: [:])
     }
 }
