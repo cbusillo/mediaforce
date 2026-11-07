@@ -1,3 +1,4 @@
+import logging
 import os
 import subprocess
 import threading
@@ -9,7 +10,7 @@ from typing import Any
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.process_control import ManagedProcessController
 from mediaforce.hosts.controller_mount import controller_mount_lock, is_bonjour_smb_server, same_smb_share, \
-    smb_source_identity
+    smb_mismatch_detail, smb_source_identity
 from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQUIRED_ISSUE
 from mediaforce.hosts.config import execution_mode_for_host, host_media_access_for_host, \
     host_status_targets_current_machine, host_targets_current_machine, normalize_host_media_access, \
@@ -81,6 +82,7 @@ __all__ = [
 ]
 
 
+LOGGER = logging.getLogger(__name__)
 _MOUNT_RECOVERY_COOLDOWN_SECONDS = 120.0
 _MOUNT_RECOVERY_STATE_LOCK = threading.Lock()
 _MOUNT_RECOVERY_COOLDOWNS: dict[tuple[str, str], float] = {}
@@ -225,15 +227,21 @@ def learn_controller_smb_mounts(config: MediaforceConfig) -> int:
         return 0
     path = controller_smb_mounts_path(config.paths.runtime_settings_path)
     merged = {m.mount_point: m for m in load_controller_smb_mounts(path)}
+    expected = {m.mount_point: m for m in configured_controller_smb_mounts(config)}
     adopted = 0
     for mount in learned:
-        saved = merged.get(mount.mount_point)
-        # A different share at a saved root is never adopted; the storage check reports it (#1333).
+        saved = expected.get(mount.mount_point)
+        if saved is not None and not same_smb_share(mount.source, saved.source):
+            # A different share at a mapped root is never adopted (#1333).
+            LOGGER.warning(
+                "Kept the saved SMB mapping for %s. %s",
+                mount.mount_point,
+                smb_mismatch_detail(mount.source, "smbfs", saved.source, None),
+            )
+            continue
         # Finder may reconnect a share under its Bonjour service name, which no-UI remounts can't
         # reach, so a saved ordinary name stays; an ordinary name replaces a saved Bonjour one (#612).
-        if saved is not None and (
-                not same_smb_share(mount.source, saved.source) or _bonjour_alias_of(mount.source, saved.source)
-        ):
+        if saved is not None and _bonjour_alias_of(mount.source, saved.source):
             continue
         merged[mount.mount_point] = mount
         adopted += 1
