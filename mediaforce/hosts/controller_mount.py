@@ -226,7 +226,7 @@ def _probe_controller_volume(
         return ControllerMountProbe(
             False, False, mount_point, observed_source, filesystem, True,
             "mount_identity_mismatch",
-            _mismatch_detail(observed_source, filesystem, expected_mount.source, resolve_server),
+            smb_mismatch_detail(observed_source, filesystem, expected_mount.source, resolve_server),
         )
     access_results = access_output.splitlines()
     accessible = len(access_results) == len(access_specs) and all(value == "1" for value in access_results)
@@ -381,14 +381,7 @@ def is_bonjour_smb_server(server: str) -> bool:
     return _bonjour_smb_instance(server) is not None
 
 
-def smb_servers_confirmed_different(first_server: str, second_server: str) -> bool:
-    """True only when both names resolve and share no address; an unresolved name proves nothing."""
-    first = _resolve_server_addresses(first_server)
-    second = _resolve_server_addresses(second_server)
-    return bool(first) and bool(second) and not first & second
-
-
-def _mismatch_detail(
+def smb_mismatch_detail(
         observed_source: str,
         filesystem: str | None,
         expected_source: str,
@@ -541,6 +534,6 @@ __all__ = [
     "probe_controller_volume",
     "is_bonjour_smb_server",
     "same_smb_share",
-    "smb_servers_confirmed_different",
+    "smb_mismatch_detail",
     "smb_source_identity",
 ]
