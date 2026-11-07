@@ -25,7 +25,7 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         remote._MOUNT_RECOVERY_COOLDOWNS.clear()
         remote._MOUNT_RECOVERY_NO_GUI_SESSIONS.clear()
 
-    def test_learning_keeps_saved_server_name_when_finder_used_an_alias(self) -> None:
+    def test_learning_adopts_only_the_saved_share_or_a_new_root(self) -> None:
         from mediaforce.hosts.mount_runtime import controller_smb_mounts_path, load_controller_smb_mounts, \
             save_controller_smb_mounts
 
@@ -35,6 +35,7 @@ class RemoteMountRuntimeTests(unittest.TestCase):
             ControllerSmbMount("//cbusillo@old-nas.shiny/extras", Path("/Volumes/extras")),
             ControllerSmbMount("//cbusillo@nas._smb._tcp.local/staging", Path("/Volumes/staging")),
             ControllerSmbMount("//cbusillo@nas.shiny/archive", Path("/Volumes/archive")),
+            ControllerSmbMount("//cbusillo@nas.shiny/movies", Path("/Volumes/movies")),
         ])
         addresses = {
             "nas.shiny": frozenset({"192.168.1.37"}),
@@ -47,12 +48,15 @@ class RemoteMountRuntimeTests(unittest.TestCase):
             "//cbusillo@nas._smb._tcp.local/extras on /Volumes/extras (smbfs, nodev, nosuid)",
             "//cbusillo@nas.shiny/staging on /Volumes/staging (smbfs, nodev, nosuid)",
             "//cbusillo@silent._smb._tcp.local/archive on /Volumes/archive (smbfs, nodev, nosuid)",
+            "//cbusillo@nas.shiny/backups on /Volumes/movies (smbfs, nodev, nosuid)",
+            "//cbusillo@nas.shiny/tv on /Volumes/tv (smbfs, nodev, nosuid)",
         ])
 
         with patch("mediaforce.remote._controller_smb_mount_output", return_value=mount_output), patch(
                 "mediaforce.remote._controller_required_mount_roots",
                 return_value={
                     Path("/Volumes/media"), Path("/Volumes/extras"), Path("/Volumes/staging"), Path("/Volumes/archive"),
+                    Path("/Volumes/movies"), Path("/Volumes/tv"),
                 },
         ), patch(
             "mediaforce.hosts.controller_mount._resolve_server_addresses",
@@ -62,8 +66,11 @@ class RemoteMountRuntimeTests(unittest.TestCase):
 
         saved = {mount.mount_point: mount.source for mount in load_controller_smb_mounts(path)}
         self.assertEqual(saved[Path("/Volumes/media")], "//cbusillo@nas.shiny/media")
-        # Both names resolve to different servers: the share really moved, so learning takes it.
-        self.assertEqual(saved[Path("/Volumes/extras")], "//cbusillo@nas._smb._tcp.local/extras")
+        # A share on a different server, or a different share, is never saved over the mapping (#1333).
+        self.assertEqual(saved[Path("/Volumes/extras")], "//cbusillo@old-nas.shiny/extras")
+        self.assertEqual(saved[Path("/Volumes/movies")], "//cbusillo@nas.shiny/movies")
+        # A root with no saved mapping yet is learned from what is mounted there.
+        self.assertEqual(saved[Path("/Volumes/tv")], "//cbusillo@nas.shiny/tv")
         # A saved Bonjour name gives way to an ordinary host name for the same share.
         self.assertEqual(saved[Path("/Volumes/staging")], "//cbusillo@nas.shiny/staging")
         # A Bonjour name that does not resolve proves nothing, so the saved name stays.
