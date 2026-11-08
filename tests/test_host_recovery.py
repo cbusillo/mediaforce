@@ -940,7 +940,7 @@ def test_work_that_needs_a_computer_reconnects_its_storage_without_a_dialog(
         config: MediaforceConfig, empty_host_status_cache: None,
 ) -> None:
     # A Finder request from unattended work left a window nobody answered and kept M1 mini out of
-    # work for hours (#1344). Work uses the background no-dialog pass, on its retry delay.
+    # work for hours (#1344). Work uses the background no-dialog pass instead, each time.
     host = config.raw["remote_hosts"][0]
     leftover = NoUiMountResult(ok=False, uncertain=True, action="An earlier storage connection is still running on Worker.")
     with patch("mediaforce.web.runtime.host_runtime.collect_host_statuses", return_value=[status()]), patch_attr(
@@ -953,4 +953,4 @@ def test_work_that_needs_a_computer_reconnects_its_storage_without_a_dialog(
                 host_runtime.ensure_encode_host_ready(
                     config, host, lifecycle_command_timeout_seconds=1, lifecycle_poll_seconds=0,
                 )
-    assert mount.call_count == 1
+    assert mount.call_count == 2

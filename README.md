@@ -948,7 +948,7 @@ healthy mount can be observed and learned.
 
 Remote mounted-media macOS hosts reconnect through Finder only for explicit
 Prepare (Set up computer), on the controller or a remote Mac. Sampling and
-encode dispatch use the background no-dialog connection on its retry delay,
+encode dispatch use the background no-dialog connection instead,
 because a dialog nobody answers keeps that computer out of work. These paths
 require a signed-in console user with the share password saved in the login
 Keychain. After a missing desktop session, sign in on that computer and use

@@ -69,7 +69,8 @@ def process_host_recovery_once(
             if not acquired:
                 continue
             previous = host_recovery_snapshot(config)["hosts"].get(key, {})
-            if not _retry_due(previous):
+            retry_at = _parse_time(previous.get("next_retry_at"))
+            if retry_at and timedelta(0) < retry_at - datetime.now(timezone.utc) <= timedelta(seconds=_MAX_RETRY_SECONDS):
                 continue
             _recovery_pass(config, host, key, previous, state_error=state_error, requested=False)
     if state_error:
@@ -86,7 +87,7 @@ def retry_host_connection(config: MediaforceConfig, host_key: str, *, requested:
     """Run one recovery pass for one computer now: the same no-dialog connection the background
     worker uses, without waiting out its retry delay. Refuses while another check or connection
     for that computer is running. Work that needs the computer passes requested=False: nobody
-    has done anything at that computer, so its retry delay and any wait for someone there stay."""
+    has done anything at that computer, so a wait for someone there stays."""
     host = next((
         host for host in config.remote_hosts
         if host_key and str(host.get("host") or "") == host_key and not host_targets_current_machine(host)
@@ -99,21 +100,13 @@ def retry_host_connection(config: MediaforceConfig, host_key: str, *, requested:
         if not acquired:
             return False, f"{label} is already being checked or connected. Try again when that finishes."
         previous = host_recovery_snapshot(config)["hosts"].get(host_key, {})
-        state = (
-            _recovery_pass(config, host, host_key, previous, state_error=state_error, requested=requested)
-            if requested or _retry_due(previous) else previous
-        )
+        state = _recovery_pass(config, host, host_key, previous, state_error=state_error, requested=requested)
     if state["status"] == "ready":
         return True, f"{state['label']} is connected."
     reason = (state["reason"] or "").strip()
     if reason and not reason.endswith((".", "!", "?")):
         reason += "."
     return False, f"{state['label']} is still unavailable. {reason}".strip()
-
-
-def _retry_due(previous: dict[str, Any]) -> bool:
-    retry_at = _parse_time(previous.get("next_retry_at"))
-    return not (retry_at and timedelta(0) < retry_at - datetime.now(timezone.utc) <= timedelta(seconds=_MAX_RETRY_SECONDS))
 
 
 def _recovery_pass(
