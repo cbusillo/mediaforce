@@ -16,6 +16,8 @@ from mediaforce.hosts.status_helpers import _classify_ssh_failure, _find_local_t
 from mediaforce.hosts.types import HostStatus
 
 REMOTE_TOOL_CACHE_TTL_SECONDS = 24 * 60 * 60
+_LOCAL_LIST_COMMAND = "/bin/ls"
+_LOCAL_LIST_TIMEOUT_SECONDS = 10
 _REMOTE_TOOL_CACHE: dict[str, tuple[float, dict[str, object]]] = {}
 
 
@@ -429,11 +431,7 @@ def _current_machine_host_status(
     source_paths = [str(path) for path in source_path_map.values()]
     staging_path = str(config.staging_root_for_host(host)) if require_paths and media_access != "stream" else None
     path_access = {
-        str(path): {
-            "exists": path.exists(),
-            "read": _local_path_readable(path),
-            "write": _local_path_writable(path) if staging_path and str(path) == staging_path else False,
-        }
+        str(path): _local_path_access(path, check_write=bool(staging_path) and str(path) == staging_path)
         for path in status_paths
     }
     tools = local_tool_status_snapshot()
@@ -469,16 +467,29 @@ def _current_machine_host_status(
     )
 
 
+def _local_path_access(path: Path, *, check_write: bool) -> dict[str, bool]:
+    readable = _local_path_readable(path)
+    return {
+        "exists": path.exists(),
+        "read": readable,
+        "write": readable and check_write and _local_path_writable(path),
+    }
+
+
 def _local_path_readable(path: Path) -> bool:
-    if path.is_dir():
-        try:
-            next(path.iterdir(), None)
-        except StopIteration:
-            return True
-        except OSError:
-            return False
-        return True
-    return path.exists() and path.is_file()
+    if not path.is_dir():
+        return path.exists() and path.is_file()
+    try:
+        listing = subprocess.run(
+            [_LOCAL_LIST_COMMAND, "-f", "--", str(path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_LOCAL_LIST_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return listing.returncode == 0
 
 
 def _local_path_writable(path: Path) -> bool:
