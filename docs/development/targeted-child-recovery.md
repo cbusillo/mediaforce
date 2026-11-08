@@ -214,7 +214,10 @@ worker or unused-preparation cleanup owns shutdown. Automatic retry cleanup
 retains its existing backoff. A schedule-close transition completes cleanup before the
 computer's configured shutdown command. A late sweep result cannot overwrite
 a job that was requeued or changed while SSH was running. A failed host connection, incomplete inventory, or surviving writer
-keeps the unfinished file and delays automatic retry. Making a terminal file
+keeps the unfinished file and delays automatic retry. A saved selection that
+names no item in its manifest counts as an unreadable manifest, never as a
+finished cleanup. A retry queued after a real cleanup keeps
+`retry_cleanup_receipt` on its row: the computer it cleaned and when. Making a terminal file
 again reports HTTP 409 with a wait message until cleanup succeeds, except when
 the only thing missing is an answer from the computer that made the file, for
 example because it sleeps outside its work window. Then the owner's folder
