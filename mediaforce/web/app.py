@@ -203,6 +203,7 @@ from mediaforce.web.runtime.host_recovery import process_host_recovery_once, ret
 from mediaforce.web.runtime.host_status import refresh_current_machine_host_statuses
 from mediaforce.web.runtime.recovery_alerts import record_recovery_alerts
 from mediaforce.web.runtime.controller_storage_recovery import (
+    controller_storage_admission,
     controller_storage_admission_issue,
     controller_storage_recovery_snapshot,
     process_controller_storage_recovery_once,
@@ -1180,6 +1181,7 @@ def create_app(
             "compact": bool(compact),
             "hosts": hosts,
             "controller_storage": controller_storage_recovery_snapshot(config),
+            "controller_storage_admission": controller_storage_admission(config),
         }
 
     def _release_work_snapshot() -> ReleaseWorkSnapshot:

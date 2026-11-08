@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 import os
 import plistlib
 import sqlite3
@@ -127,7 +128,10 @@ def test_deploy_refuses_unpaused_or_running_work(paused: bool, encodes: int, sam
 
 
 @pytest.mark.parametrize(
-    "outcome", ["healthy", "unhealthy", "slow", "resume-lost", "backup-failed", "prepare-failed", "app-install-failed", "trim-failed"],
+    "outcome", [
+        "healthy", "unhealthy", "slow", "storage-stalled", "storage-unchecked", "resume-lost", "backup-failed", "prepare-failed",
+        "app-install-failed", "trim-failed",
+    ],
 )
 @pytest.mark.parametrize("stopped,initially_paused", [(False, True), (True, False), (True, True)])
 @pytest.mark.parametrize("legacy_rollback", [False, True])
@@ -138,6 +142,8 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(
     from urllib.error import URLError
     from mediaforce.core.utils import timestamp
     from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
+    from mediaforce.hosts.controller_mount import ControllerMountProbe
+    from mediaforce.web.runtime import controller_storage_recovery as recovery
 
     home, old = tmp_path / "home", tmp_path / "worktrees/legacy"
     candidate = runtime_install.runtime_directory(home) / "releases/candidate"
@@ -175,6 +181,33 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(
     resume_queue = not stopped or not initially_paused
     service_running = not stopped
     clock = [0.0]
+    storage_config = MediaforceConfig(
+        raw={"media": {"source_roots": {"tv": "/Volumes/media/tv"}, "staging_root": "/Volumes/media/staging"}},
+        paths=ConfigPaths(project_root=tmp_path, config_path=tmp_path / "config.toml", db_path=database,
+                          run_manifest_dir=tmp_path / "runs", web_state_dir=tmp_path / "web",
+                          review_dir=tmp_path / "review", runtime_settings_path=tmp_path / "storage-settings.json"),
+    )
+
+    storage_passes: list[float] = []
+
+    def wall_clock() -> datetime:
+        return datetime(2026, 11, 8, tzinfo=timezone.utc) + timedelta(seconds=clock[0])
+
+    def storage_pass(*, mounted: bool = True) -> None:
+        probe = ControllerMountProbe(mounted, mounted, Path("/Volumes/media"), failure_kind=None if mounted else "mount_absent")
+        with patch.object(recovery.sys, "platform", "darwin"), patch.object(
+            recovery, "probe_controller_volume", return_value=probe,
+        ):
+            recovery.process_controller_storage_recovery_once(storage_config)
+        storage_passes.append(clock[0])
+
+    def candidate_storage_loop() -> None:
+        # Runs every 30 seconds after the candidate starts. A stalled loop finishes only its first pass, and that
+        # pass lands after the health check (#1337). An unchecked one never runs, leaving the old failure record.
+        if outcome == "storage-unchecked" or (outcome == "storage-stalled" and storage_passes):
+            return
+        if not storage_passes or clock[0] - storage_passes[-1] >= 30:
+            storage_pass()
 
     def api(_base_url: str, route: str, *, post: bool = False) -> dict:
         if stopped and route.startswith("/api/dashboard?"):
@@ -184,6 +217,12 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(
                 raise URLError("candidate unavailable")
             if outcome == "slow" and clock[0] < 60:
                 raise RemoteDisconnected("migration still running")
+        if route == "/api/hosts":
+            candidate_storage_loop()
+            return {
+                "controller_storage": recovery.controller_storage_recovery_snapshot(storage_config),
+                "controller_storage_admission": recovery.controller_storage_admission(storage_config),
+            }
         if post:
             resume_requests.append(True)
             if outcome == "resume-lost":
@@ -244,13 +283,21 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(
         controller_deploy, "_launch_target", return_value="gui/fixture/service"
     ), patch.object(controller_deploy.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, b"", b"")), patch.object(
         controller_deploy.time, "sleep", side_effect=sleep
-    ), patch.object(controller_deploy.time, "monotonic", side_effect=lambda: clock[0]):
+    ), patch.object(controller_deploy.time, "monotonic", side_effect=lambda: clock[0]), patch.object(
+        recovery, "_utc_now", side_effect=wall_clock,
+    ), patch.object(controller_deploy, "_utc_now", side_effect=wall_clock):
+        storage_pass(mounted=False)  # the previous service's last record: share missing
+        storage_passes.clear()
+        clock[0] += 1
         if outcome in {"healthy", "slow"} or (outcome == "resume-lost" and not resume_queue):
             controller_deploy._deploy(tmp_path / "source", "main", stage, home, "http://fixture", database=database, startup_timeout=90, stopped_config=config if stopped else None)
         else:
-            with pytest.raises((RuntimeError, OSError)):
+            failure = {
+                "storage-stalled": "needs a fresh availability check", "storage-unchecked": "storage check is not keeping",
+            }.get(outcome)
+            with pytest.raises((RuntimeError, OSError), match=failure):
                 controller_deploy._deploy(tmp_path / "source", "main", stage, home, "http://fixture", database=database, startup_timeout=90, stopped_config=config if stopped else None)
-    assert service_running is (outcome != "unhealthy" and (not stopped or outcome not in {"backup-failed", "prepare-failed"}))
+    assert service_running is (outcome not in {"unhealthy", "storage-stalled", "storage-unchecked"} and (not stopped or outcome not in {"backup-failed", "prepare-failed"}))
     healthy_candidate = outcome in {"healthy", "slow", "resume-lost", "app-install-failed", "trim-failed"}
     assert resume_requests == ([True] if healthy_candidate and resume_queue else [])
     assert installed_apps == ([candidate] if healthy_candidate else [])

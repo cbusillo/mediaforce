@@ -31,7 +31,7 @@ CONTROLLER_STORAGE_RECOVERY_FILE_NAME = "controller-storage-recovery.json"
 _SCHEMA_VERSION = 1
 _INITIAL_RETRY_SECONDS = 30
 _MAX_RETRY_SECONDS = 300
-_READY_FRESHNESS_SECONDS = 90
+READY_FRESHNESS_SECONDS = 90
 _EARLIER_PREFIX = "Earlier: "
 _MAX_OBSERVED_DETAIL = 1000
 _PROCESS_GENERATION = uuid.uuid4().hex
@@ -265,45 +265,58 @@ def controller_storage_admission_issue(
         config: MediaforceConfig,
         host: dict[str, Any] | None,
 ) -> str | None:
+    return _admission(config, host)[0]
+
+
+def controller_storage_admission(config: MediaforceConfig) -> dict[str, Any]:
+    """Whether storage lets work start, and whether this service process's check stands behind that answer.
+    The deploy reads it after the freshness window: a record written once at startup reads fresh until
+    then, so only a later read shows the storage check keeps running (#1340)."""
+    issue, checked = _admission(config, None)
+    return {"issue": issue, "checked": checked}
+
+
+def _admission(config: MediaforceConfig, host: dict[str, Any] | None) -> tuple[str | None, bool]:
+    """Returns the reason work cannot start, and False when no current check backs the answer."""
     required_roots = _required_roots_for_host(config, host)
     if not required_roots:
-        return None
+        return None, True
     snapshot = _load_snapshot(controller_storage_recovery_path(config))
     if snapshot.state_error:
         return (
             f"Controller storage: {snapshot.state_error} "
             "Reconnect storage in Finder or with Set up computer; readiness checks continue."
-        )
+        ), True
     by_mount = {Path(state.mount_point): state for state in snapshot.mounts}
     now = _utc_now()
     for root in sorted(required_roots, key=str):
         state = by_mount.get(root)
         if state is None:
-            return f"Controller storage at {root} has not been checked."
+            return f"Controller storage at {root} has not been checked.", False
         if state.status != "ready":
             if state.status == "checking":
-                return "Controller storage: readiness is being checked."
+                return "Controller storage: readiness is being checked.", False
             message = state.reason or f"Storage at {root} is unavailable."
             if state.status == "action_required":
                 return (
                     f"Controller storage: {message} Reconnect storage in Finder or with Set up computer; "
                     "readiness checks continue."
-                )
+                ), True
             retry = f" Retry at {state.next_retry_at}." if state.next_retry_at else ""
-            return f"Controller storage: {message}{retry}"
+            return f"Controller storage: {message}{retry}", True
         if state.verification_generation != _PROCESS_GENERATION:
-            return f"Controller storage at {root} needs a check by the current service process."
+            return f"Controller storage at {root} needs a check by the current service process.", False
         checked = _parse_utc(state.last_check_at)
         if (
             checked is None
             or checked > now
-            or now - checked > timedelta(seconds=_READY_FRESHNESS_SECONDS)
+            or now - checked > timedelta(seconds=READY_FRESHNESS_SECONDS)
         ):
-            return f"Controller storage at {root} needs a fresh availability check."
+            return f"Controller storage at {root} needs a fresh availability check.", False
         expected_signature = _expected_signature_for_root(config, root)
         if expected_signature is not None and state.requirement_signature != expected_signature:
-            return f"Controller storage requirements at {root} have changed and need a fresh check."
-    return None
+            return f"Controller storage requirements at {root} have changed and need a fresh check.", False
+    return None, True
 
 
 def _required_mounts(
@@ -690,6 +703,7 @@ def _integer(value: object) -> int:
 __all__ = [
     "ControllerStorageMountState",
     "ControllerStorageRecoverySnapshot",
+    "controller_storage_admission",
     "controller_storage_admission_issue",
     "controller_storage_recovery_path",
     "controller_storage_recovery_snapshot",

@@ -31,8 +31,13 @@ gate, refuses a dirty previous runtime, and prepares the candidate before
 stopping the service. It rechecks the gate, stops the login item, verifies port
 8777 closes, takes an online SQLite backup and runs `pragma quick_check`, then
 switches the plist atomically and starts the candidate. Startup runs migrations.
-After the API health check succeeds it protects that stage's rollback and
-resumes the encode queue. Preparation failure leaves the existing service alone
+After the API health check succeeds it reads `controller_storage` and
+`controller_storage_admission` from `/api/hosts` until the candidate's own
+storage check has run again a full 90-second freshness window after its first
+pass, and that check either admits work or reports a real reason such as an
+unmounted share. A check that stops after one pass, or never replaces the
+previous service's record, fails the deploy as a candidate startup failure
+(#1340). It then protects that stage's rollback and resumes the encode queue. Preparation failure leaves the existing service alone
 and creates no stage. If the backup fails after the port is verified closed,
 it restores the unchanged previous login item. Uncertain listener custody or
 a candidate startup failure leaves the service disabled for reconciliation;
