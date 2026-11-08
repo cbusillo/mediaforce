@@ -249,21 +249,19 @@ def test_controller_card_follows_its_storage_after_a_restart(
         host_status.refresh_host_status_cache(config)
     assert not _host_cards(config)["user@localhost"]["available"]
     with patch_attr(web_app, "load_config", return_value=config), patch_attr(
-        web_app, "process_controller_storage_recovery_once",
-    ), patch_attr(
         host_status, "controller_storage_recovery_snapshot", return_value=storage("ready"),
     ) as snapshot, patch_attr(
         host_status, "probe_host_status", return_value=controller(available=True),
     ) as probe:
-        web_app._controller_storage_pass(config.paths.config_path, threading.Event())
+        web_app._controller_host_status_pass(config.paths.config_path)
         cards = _host_cards(config)
         assert cards["user@localhost"]["available"]
         assert cards["user@worker"]["available"]
-        web_app._controller_storage_pass(config.paths.config_path, threading.Event())
+        web_app._controller_host_status_pass(config.paths.config_path)
         assert probe.call_count == 1, "unchanged storage needs no second check"
         snapshot.return_value = storage("retrying")
         probe.return_value = controller(available=False)
-        web_app._controller_storage_pass(config.paths.config_path, threading.Event())
+        web_app._controller_host_status_pass(config.paths.config_path)
         assert not _host_cards(config)["user@localhost"]["available"]
         assert {call.args[1]["host"] for call in probe.call_args_list} == {"user@localhost"}
 

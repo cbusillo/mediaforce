@@ -72,9 +72,11 @@ until a check finds the storage connected, for example after Retry connection or
 Set up computer. When no one
 is logged in at the computer, the warning asks for a login, and connections keep
 retrying so storage returns on its own after that.
-These checks also update the computer cards, and each controller storage pass
-re-checks the controller's own card when its storage changed, so the cards stay
-current with an idle queue while web reads stay check-free.
+These checks also update the computer cards. A separate loop re-checks the
+controller's own card when its storage changed and records outage alerts, so the
+cards stay current with an idle queue while web reads stay check-free. A check
+there that never returns cannot hold back the controller storage check, whose
+freshness decides whether work may start.
 Explicit Set up computer retains its existing Finder behavior and shares that
 computer's recovery process lock. Remote probes and connections cannot hold the
 controller readiness lock or delay its background checks. An interrupted/ambiguous remote mount is persisted before SSH
