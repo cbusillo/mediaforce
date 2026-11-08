@@ -143,6 +143,7 @@ WAITING_FOR_COMPUTER_PROGRESS_KEY = "waiting_for_computer"
 # Progress key marking an owner's retry the queue finishes once its computer is back. It outlives
 # temporary waits and goes only when cleanup gets through or the retry asks the owner.
 PENDING_OWNER_RETRY_PROGRESS_KEY = "pending_owner_retry"
+RETRY_CLEANUP_RECEIPT_PROGRESS_KEY = "retry_cleanup_receipt"
 
 
 def _computer_label(host: Mapping[str, Any]) -> str:
@@ -827,6 +828,9 @@ def reconcile_encode_jobs(
         progress.pop(WAITING_FOR_COMPUTER_PROGRESS_KEY, None)
         progress.pop(PENDING_OWNER_RETRY_PROGRESS_KEY, None)
         progress.pop(QUALITY_CONTAINMENT_PROGRESS_KEY, None)
+        progress[RETRY_CLEANUP_RECEIPT_PROGRESS_KEY] = {
+            "host": str(retry_host.get("key") or retry_host.get("host") or ""), "cleaned_at": deps.now_iso(),
+        }
         payload.update(
             {
                 "status": "queued",
@@ -5212,19 +5216,21 @@ def _cleanup_encode_retry_artifacts_locked(
     cleanup_succeeded_for_all = True
     staging_cleanup_deferrals: list[_StagingPathCleanupResult] = []
     manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
-    selected_indexes = indexes if isinstance(indexes, list) else list(range(len(manifest_items)))
+    selected_indexes = [
+        index for index in (indexes if isinstance(indexes, list) else range(len(manifest_items)))
+        if isinstance(index, int) and 0 <= index < len(manifest_items)
+    ]
+    if not selected_indexes:
+        return _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE)
     if current is not None and _waits_for_quality_run_stop(current):
         if any(_owned_by_active_encode(connection, item.get("library_item_id"), (_manifest_staging_value(config, item, host),),
                                        active)
-               for item in (manifest_items[index] for index in selected_indexes
-                            if isinstance(index, int) and 0 <= index < len(manifest_items))):
+               for item in (manifest_items[index] for index in selected_indexes)):
             return _ACTIVE_OWNER_CLEANUP_DEFERRAL
         unconfirmed = _confirm_quality_run_stopped(connection, config, current, manifest_items, deps)
         if unconfirmed is not None:
             return unconfirmed
     for index in selected_indexes:
-        if not isinstance(index, int) or index < 0 or index >= len(manifest_items):
-            continue
         item = manifest_items[index]
         library_item_id = item.get("library_item_id")
         stage_row = None

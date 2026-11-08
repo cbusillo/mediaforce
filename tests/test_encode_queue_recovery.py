@@ -787,6 +787,47 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIsNone(job["retry_not_before"])
         self.assertIsNone(job["waiting_reason"])
 
+    def test_retry_backoff_with_no_valid_selected_item_is_not_cleaned(self) -> None:
+        source_path = self._create_source_file("episode-replaced-manifest.mkv")
+        staging_path = self.root / "remote-staging" / "tv" / "show" / "episode-replaced-manifest.mkv"
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            manifest_path = self._write_manifest(
+                "manifest-replaced.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-replaced-manifest",
+                manifest_name=manifest_path.name,
+                host={"key": "m2", "label": "M2 MBP", "mode": "ssh", "media_access": "mounted"},
+                status="retry_backoff",
+                attempt_count=1,
+                retry_not_before="2000-01-01T00:00:00+00:00",
+                waiting_reason="retrying",
+            )
+            job = load_encode_job(connection, "job-replaced-manifest")
+            assert job is not None
+            save_encode_job(connection, {**job, "manifest_indexes": [5]})
+
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.run_remote_command",
+                    side_effect=_remote_cleanup_succeeds,
+            ) as remote_command, patch(
+                "mediaforce.web.runtime.encode_runtime.clear_stale_encoding_items_when_idle",
+                return_value=0,
+            ):
+                web_app._reconcile_encode_jobs(connection, self.config)
+
+            job = load_encode_job(connection, "job-replaced-manifest")
+
+        assert job is not None
+        remote_command.assert_not_called()
+        self.assertEqual(job["status"], "needs_attention")
+        self.assertEqual(job["terminal_reason"], "manifest_unreadable")
+        self.assertNotIn("retry_cleanup_receipt", object_dict(job["progress"]))
+
     def test_retry_backoff_terminalizes_corrupt_manifest(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             manifest_path = self._write_manifest("manifest-corrupt.json", [])
@@ -925,6 +966,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         assert cleaned is not None
         self.assertEqual(cleaned["status"], "queued")
         self.assertNotIn("cleanup_deferrals", cleaned["progress"])
+        receipt = cleaned["progress"]["retry_cleanup_receipt"]
+        self.assertEqual(receipt["host"], "m2")
+        self.assertGreaterEqual(datetime.fromisoformat(receipt["cleaned_at"]), before.replace(microsecond=0))
 
     def test_retry_backoff_terminalizes_local_cleanup_failure(self) -> None:
         source_path = self._create_source_file("episode-local-cleanup.mkv")
