@@ -1352,6 +1352,34 @@ def test_main_window_reuses_kind_measurements_and_the_next_read_sees_new_work(tm
         assert kinds_payload(connection, config, load_calibration_state=load)["left_out"][0]["season"] == SEASON
 
 
+def test_library_reads_reuse_the_main_windows_calculations_and_the_next_read_sees_new_work(tmp_path: Path) -> None:
+    from mediaforce.web import app as web_app
+
+    config = _config(tmp_path)
+    config.raw["media"]["staging_root"] = str(tmp_path / "staging")
+    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
+    with open_db(config.paths.db_path) as connection:
+        _completed_and_waiting_seasons(connection)
+    with patch("mediaforce.web.app.load_config", return_value=config):
+        app = web_app.create_app(config.paths.config_path)
+
+    def read(path: str) -> dict[str, Any]:
+        response = _route_endpoint(app, path, "GET")()
+        assert response.status_code == 200
+        return json.loads(response.body)
+
+    def seasons(shows: dict[str, Any]) -> set[str]:
+        return {season["prefix"] for show in shows["shows"] for season in show["seasons"]}
+
+    read("/api/app/main-window")
+    with patch("mediaforce.library.candidate_selection._prepare_candidates", side_effect=AssertionError("planned again")), \
+            patch("mediaforce.library.content_kinds.load_source_evidence_context", side_effect=AssertionError("measured again")):
+        assert seasons(read("/api/app/tv-shows")) == {APPROVED_SEASON, SEASON}
+        read("/api/app/kinds")
+    _waiting_episode(config, f"{OTHER_SEASON}/Sitcom.S01E01.mkv", 1_000)
+    assert seasons(read("/api/app/tv-shows")) == {APPROVED_SEASON, SEASON, OTHER_SEASON}
+
+
 def test_activity_names_next_approved_season_while_production_waits_for_current_work(tmp_path: Path) -> None:
     from mediaforce.web.runtime.kind_approvals import next_approved_season
 
