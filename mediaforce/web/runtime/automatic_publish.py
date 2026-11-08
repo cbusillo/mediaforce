@@ -1,5 +1,6 @@
 import json
 import logging
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Collection
@@ -145,7 +146,8 @@ def _try_publish_file(
             else "Storage or a required file is unavailable. Mediaforce will retry this file."
         )
         _record_wait(connection, item_id, "waiting", reason)
-    except OSError:
+    # A read that times out is storage that stalled, not a broken file.
+    except (OSError, subprocess.TimeoutExpired):
         connection.rollback()
         _record_wait(
             connection,
@@ -154,7 +156,7 @@ def _try_publish_file(
             "Storage or a required file is unavailable. Mediaforce will retry this file.",
             retry_after=time.time() + PUBLISH_RETRY_DELAY_SECONDS,
         )
-    except Exception:
+    except Exception as exc:
         LOGGER.exception("Automatic check or publish failed for item %s", item_id)
         connection.rollback()
         failure_attempts += 1
@@ -167,6 +169,7 @@ def _try_publish_file(
             if exhausted
             else "Mediaforce could not check or publish this file. It will try again.",
             failure_attempts=failure_attempts,
+            error=type(exc).__name__,
             retry_after=None
             if exhausted
             else time.time() + PUBLISH_RETRY_DELAY_SECONDS * failure_attempts,
@@ -205,15 +208,12 @@ def _publish_file(
     if source["status"] not in {"encoded", "validated"} or library_item_is_missing(source):
         return
     validation = object_dict(json.loads(stage["validation_json"] or "{}"))
-    if object_dict(validation.get("automatic_publish")).get("state") in {
-        "unsafe",
-        "failed",
-    }:
+    delivery = object_dict(validation.get("automatic_publish"))
+    # A pause from before pauses named their error may be a storage timeout, which now waits instead; check it once more.
+    unnamed_pause = delivery.get("state") == "failed" and not {"blockers", "error"} & delivery.keys()
+    if delivery.get("state") in {"unsafe", "failed"} and not unnamed_pause:
         return
-    if (
-        float(object_dict(validation.get("automatic_publish")).get("retry_after") or 0)
-        > time.time()
-    ):
+    if float(delivery.get("retry_after") or 0) > time.time():
         return
     if stage["encode_origin"] not in AUTOMATIC_PUBLISH_ORIGINS:
         _record_wait(
@@ -501,8 +501,12 @@ def _record_wait(
     failure_attempts: int | None = None,
     retry_after: float | None = None,
     blockers: list[str] | None = None,
+    error: str | None = None,
 ) -> None:
-    """Save why a staged file is not published yet; ``blockers`` are codes for why a failed copy was not made again."""
+    """Save why a staged file is not published yet.
+
+    ``blockers`` are codes for why a failed copy was not made again; ``error`` names an unknown failure's exception.
+    """
     row = connection.execute(
         select(staged_artifacts.c.validation_json).where(
             staged_artifacts.c.library_item_id == item_id
@@ -523,6 +527,8 @@ def _record_wait(
         delivery["failure_attempts"] = failure_attempts
     if blockers is not None:
         delivery["blockers"] = blockers
+    if error is not None:
+        delivery["error"] = error
     if retry_after is None and state == "waiting":
         retry_after = time.time() + PUBLISH_RETRY_DELAY_SECONDS
     changed_reason = {

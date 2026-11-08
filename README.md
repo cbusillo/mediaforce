@@ -542,8 +542,9 @@ uv run mediaforce staged-integrity "tv/Show/Season 1" --details
 ```
 
 Mediaforce checks finished production files and publishes each passing file
-automatically, retaining the original in the Cleanup folder. Temporary holds
-retry; unknown failures retry with a delay before pausing for the manual check or publish override.
+automatically, retaining the original in the Cleanup folder. Temporary holds,
+including a storage read that times out, retry without limit; unknown failures retry with a delay before
+pausing for the manual check or publish override.
 Changed approvals, failed checks, and file conflicts stay with that file.
 Reasons appear in its staged-integrity details. Sample outputs never
 publish automatically. Older outputs without an unambiguous recorded production origin use

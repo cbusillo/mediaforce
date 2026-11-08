@@ -1,4 +1,5 @@
 import json
+import subprocess
 import threading
 from dataclasses import replace
 from collections.abc import Iterator
@@ -705,6 +706,46 @@ def test_short_storage_outage_does_not_exhaust_retries(config: MediaforceConfig)
     with patch.object(delivery.time, "time", return_value=delivery.PUBLISH_RETRY_DELAY_SECONDS + 1):
         _run(config)
     assert _status(config, item_id) == "promoted"
+
+
+def test_storage_read_timeout_waits_without_using_up_tries(config: MediaforceConfig) -> None:
+    item_id, _, _ = _stage(config, "tv/Show/Season 1/one.mkv")
+    stalled_read = subprocess.TimeoutExpired(["ffprobe"], 60)
+    for attempt in range(delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1):
+        with (
+            patch.object(delivery, "validate_one_item", side_effect=stalled_read),
+            patch.object(delivery.time, "time", return_value=attempt * (delivery.PUBLISH_RETRY_DELAY_SECONDS + 1)),
+        ):
+            _run(config)
+    with open_db(config.paths.db_path) as connection:
+        saved = json.loads(connection.execute(
+            select(staged_artifacts.c.validation_json).where(staged_artifacts.c.library_item_id == item_id)
+        ).scalar_one())["automatic_publish"]
+    assert saved["state"] == "waiting"
+    assert "failure_attempts" not in saved
+    with patch.object(delivery.time, "time", return_value=10_000):
+        _run(config)
+    assert _status(config, item_id) == "promoted"
+
+
+def test_pause_without_a_named_error_is_checked_once_more(config: MediaforceConfig) -> None:
+    pause = {"state": "failed", "reason": "Automatic publishing paused after retrying.", "failure_attempts": 3}
+    unnamed_id, _, _ = _stage(config, "tv/Show/Season 1/unnamed.mkv")
+    named_id, _, _ = _stage(config, "tv/Show/Season 1/named.mkv")
+    with open_db(config.paths.db_path) as connection:
+        for item_id, record in ((unnamed_id, pause), (named_id, {**pause, "error": "RuntimeError"})):
+            connection.execute(
+                staged_artifacts.update()
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(validation_json=json.dumps({"passed": True, "automatic_publish": record}))
+            )
+        connection.commit()
+    validate = delivery.validate_one_item
+    with patch.object(delivery, "validate_one_item", side_effect=validate) as checks:
+        _run(config)
+    assert [call.args[2]["library_item_id"] for call in checks.call_args_list] == [unnamed_id]
+    assert _status(config, unnamed_id) == "promoted"
+    assert _status(config, named_id) == "encoded"
 
 
 def test_changing_free_space_counts_do_not_create_wait_events(config: MediaforceConfig) -> None:
