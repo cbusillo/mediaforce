@@ -356,10 +356,18 @@ def _no_ui_failure(
             ),
             retry=False,
         )
-    if result.returncode in {_MOUNT_BUSY_EXIT, _MOUNT_HELPER_EXIT, _MOUNT_REQUEST_WAITING_EXIT}:
+    if result.returncode == _MOUNT_REQUEST_WAITING_EXIT:
+        # Usually a Finder request with its window open: only someone at that computer can end it (#1344).
+        return NoUiMountResult(
+            ok=False, uncertain=True,
+            action=(
+                f"{label} is still waiting on an earlier request to connect the {share} share, usually a window "
+                f"on its screen. On {label}, answer or cancel that window; Mediaforce then reconnects on its own."
+            ),
+        )
+    if result.returncode in {_MOUNT_BUSY_EXIT, _MOUNT_HELPER_EXIT}:
         observation = {
             _MOUNT_BUSY_EXIT: "An earlier storage request still holds its lock",
-            _MOUNT_REQUEST_WAITING_EXIT: "An earlier storage connection is still running",
             _MOUNT_HELPER_EXIT: "The storage helper could not complete its check",
         }[result.returncode]
         if _helper_markers(result).get("MEDIAFORCE_MOUNT") == "mount-table-unreadable":

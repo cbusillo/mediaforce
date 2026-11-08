@@ -942,14 +942,14 @@ def test_work_that_needs_a_computer_reconnects_its_storage_without_a_dialog(
     # A Finder request from unattended work left a window nobody answered and kept M1 mini out of
     # work for hours (#1344). Work uses the background no-dialog pass instead, each time.
     host = config.raw["remote_hosts"][0]
-    leftover = NoUiMountResult(ok=False, uncertain=True, action="An earlier storage connection is still running on Worker.")
+    leftover = NoUiMountResult(ok=False, uncertain=True, action="Worker is still waiting on an earlier request.")
     with patch("mediaforce.web.runtime.host_runtime.collect_host_statuses", return_value=[status()]), patch_attr(
         recovery, "probe_host_status", return_value=status(),
     ), patch_attr(recovery, "recover_remote_host_mounts_no_ui", return_value=leftover) as mount, patch(
         "mediaforce.remote.mount_smb_shares", side_effect=AssertionError("Finder dialog"),
     ):
         for _ in range(2):
-            with pytest.raises(HostReadinessError, match="earlier storage connection is still running"):
+            with pytest.raises(HostReadinessError, match="still waiting on an earlier request"):
                 host_runtime.ensure_encode_host_ready(
                     config, host, lifecycle_command_timeout_seconds=1, lifecycle_poll_seconds=0,
                 )
