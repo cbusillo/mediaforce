@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 from contextlib import ExitStack
+from datetime import datetime, timedelta, timezone
 import json
 from http.client import HTTPException
 import os
@@ -66,22 +67,37 @@ def require_paused_idle_dashboard(dashboard: dict) -> None:
         raise RuntimeError("work is running or the encode queue is not paused; not deploying")
 
 
-def require_storage_admission(base_url: str) -> None:
-    """A storage record written once at startup reads fresh for its first window, so the check reads it after
-    that window has passed: only then does a stopped storage check show (#1340)."""
-    time.sleep(READY_FRESHNESS_SECONDS + 1)
-    deadline = time.monotonic() + STORAGE_CHECK_SECONDS
+def require_storage_admission(base_url: str, started_at: datetime) -> None:
+    """A record written once at startup reads fresh for a whole freshness window, so the candidate passes only when
+    its storage check is still running a full window after its first pass and still lets work start or names a
+    real reason (#1340)."""
+    first_pass = _storage_pass_since(base_url, started_at, checked=False, wait_seconds=STORAGE_CHECK_SECONDS)
+    _storage_pass_since(
+        base_url, first_pass + timedelta(seconds=READY_FRESHNESS_SECONDS), checked=True,
+        wait_seconds=READY_FRESHNESS_SECONDS + STORAGE_CHECK_SECONDS,
+    )
+
+
+def _storage_pass_since(base_url: str, since: datetime, *, checked: bool, wait_seconds: int) -> datetime:
+    deadline = time.monotonic() + wait_seconds
     while True:
         try:
-            admission = _api(base_url, "/api/hosts")["controller_storage_admission"]
-            if admission["checked"] is True:
-                return
-            issue = admission["issue"]
+            hosts = _api(base_url, "/api/hosts")
+            admission = hosts["controller_storage_admission"]
+            updated_at = hosts["controller_storage"]["updated_at"]
+            passed_at = datetime.fromisoformat(updated_at) if updated_at else None
+            if passed_at is not None and passed_at >= since and (admission["checked"] is True or not checked):
+                return passed_at
+            issue = admission["issue"] or "its storage check has not run again"
         except (OSError, HTTPException, ValueError, KeyError, TypeError) as exc:
             issue = f"storage could not be read ({exc})"
         if time.monotonic() >= deadline:
             raise RuntimeError(f"candidate storage check is not keeping work admissible: {issue}")
         time.sleep(5)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def prepare_release(source: Path, target: str, home: Path) -> Path:
@@ -302,6 +318,7 @@ def _deploy(
             pause_stopped_queue(stopped_config)
         if release_stopped_runtime is not None:
             release_stopped_runtime()
+        started_at = _utc_now()
         enable_login_item(paths)
         deadline = time.monotonic() + startup_timeout
         while True:
@@ -312,7 +329,7 @@ def _deploy(
                 if time.monotonic() >= deadline:
                     raise RuntimeError("candidate did not become healthy") from exc
                 time.sleep(1)
-        require_storage_admission(base_url)
+        require_storage_admission(base_url, started_at)
     except Exception:
         if not candidate_started and port_closed and stopped_config is None:
             if plist.read_bytes() != previous_payload:
