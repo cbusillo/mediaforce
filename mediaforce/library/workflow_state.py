@@ -118,6 +118,7 @@ class ScopeJobStates:
 NO_SCOPE_JOBS = ScopeJobStates(overlapping=None, own=None)
 # Files no job from a wider scope can still be working on: held, kept original, finished, or gone from disk.
 OUT_OF_WIDER_JOB_STATES = frozenset({"held", "kept_original", "complete", "missing"})
+_SETTLED_ITEM_STATES = frozenset({"kept_original", "complete", "missing"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,7 +342,10 @@ def derive_item_workflow_state(
         has_staged_output=has_staged_output,
         blocker=blocker,
         motion_held=held_for_motion,
-        publish_stopped=state in {"ready_to_validate", "ready_to_promote"} and stopped_publish_state(row.get("validation_json")) is not None,
+        publish_stopped=(
+            has_staged_output and status in {"encoded", "validated"} and state not in _SETTLED_ITEM_STATES
+            and stopped_publish_state(row.get("validation_json")) is not None
+        ),
     )
 
 
