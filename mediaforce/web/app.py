@@ -1222,7 +1222,7 @@ def create_app(
             )
 
     def _tv_shows_payload() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
+        with open_db(config.paths.db_path) as connection, library_calculations.request(connection), kind_snapshot(connection, config, _load_calibration_state):
             return tv_shows_payload(
                 connection,
                 library_types=config.library_type_map,
@@ -1870,7 +1870,7 @@ def create_app(
     sample_start_waits: dict[str, SampleStartWait] = {}
 
     def _kinds_payload() -> dict[str, Any]:
-        with open_readonly_db(config.paths.db_path) as connection:
+        with open_readonly_db(config.paths.db_path) as connection, library_calculations.request(connection):
             payload = kinds_payload(connection, config, load_calibration_state=_load_calibration_state)
         payload["kinds"] = _sample_start_status(payload["kinds"])
         return payload
