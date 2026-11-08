@@ -4260,23 +4260,41 @@ def _acquire_background_worker_leadership(
     return None
 
 
-def _controller_storage_pass(config_path: Path, stop_event: threading.Event) -> None:
+def _controller_host_status_pass(config_path: Path) -> None:
+    """This Mac's card and the outage alerts follow saved storage state on their own loop, so a check
+    that never returns here cannot stop the storage check that lets work start (#1337)."""
     config = load_config(config_path)
     try:
-        process_controller_storage_recovery_once(config, stop_event=stop_event)
         refresh_current_machine_host_statuses(config)
     finally:
         record_recovery_alerts(config)
 
 
 def _controller_storage_worker_loop(*, config_path: Path, stop_event: threading.Event) -> None:
-    run_supervised_worker_loop(
-        process_once_fn=lambda: _controller_storage_pass(config_path, stop_event),
-        poll_seconds=30.0,
-        stop_event=stop_event,
-        logger=LOGGER,
-        failure_message="Controller storage recovery pass failed; it will retry.",
+    host_status = threading.Thread(
+        target=run_supervised_worker_loop,
+        kwargs={
+            "process_once_fn": lambda: _controller_host_status_pass(config_path),
+            "poll_seconds": 30.0,
+            "stop_event": stop_event,
+            "logger": LOGGER,
+            "failure_message": "This Mac's status check failed; it will retry.",
+        },
+        name="controller-host-status-worker",
     )
+    host_status.start()
+    try:
+        run_supervised_worker_loop(
+            process_once_fn=lambda: process_controller_storage_recovery_once(
+                load_config(config_path), stop_event=stop_event,
+            ),
+            poll_seconds=30.0,
+            stop_event=stop_event,
+            logger=LOGGER,
+            failure_message="Controller storage recovery pass failed; it will retry.",
+        )
+    finally:
+        host_status.join()
 
 
 def _host_recovery_worker_loop(*, config_path: Path, stop_event: threading.Event) -> None:

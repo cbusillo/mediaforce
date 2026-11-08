@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
+import time
 from typing import Any
 from unittest import TestCase
 from unittest.mock import patch
@@ -617,6 +618,58 @@ class ControllerStorageRecoveryTest(TestCase):
                 "2026-09-12T12:00:30Z",
             },
         )
+
+    def test_storage_check_stays_fresh_after_restart_while_this_macs_host_check_hangs(self) -> None:
+        # cbusillo/mediaforce#1337: after a restart the first pass found storage ready, then this Mac's
+        # host check never returned, so no later pass refreshed the record and work stopped starting.
+        clock = [NOW]
+        host_check_started = threading.Event()
+        release_host_check = threading.Event()
+        stop_event = threading.Event()
+        supervised_loop = web_app.run_supervised_worker_loop
+
+        def ready_probe(mount: ControllerSmbMount, _paths: object) -> ControllerMountProbe:
+            return ControllerMountProbe(True, True, mount.mount_point, mount.source, "smbfs", True)
+
+        def hanging_host_check(_config: MediaforceConfig) -> None:
+            host_check_started.set()
+            release_host_check.wait(10)
+
+        def fast_loop(**kwargs: Any) -> None:
+            supervised_loop(**{**kwargs, "poll_seconds": 0.01})
+
+        def admission_issue_within(seconds: float) -> str | None:
+            deadline = time.monotonic() + seconds
+            issue = recovery.controller_storage_admission_issue(self.config, None)
+            while issue is not None and time.monotonic() < deadline:
+                time.sleep(0.01)
+                issue = recovery.controller_storage_admission_issue(self.config, None)
+            return issue
+
+        with patch.object(recovery, "_utc_now", side_effect=lambda: clock[0]), patch.object(
+            recovery, "probe_controller_mount", side_effect=ready_probe,
+        ), patch.object(recovery, "mount_controller_smb_no_ui") as mount, patch.object(
+            web_app, "load_config", return_value=self.config,
+        ), patch.object(
+            web_app, "refresh_current_machine_host_statuses", side_effect=hanging_host_check,
+        ), patch.object(web_app, "record_recovery_alerts"), patch.object(
+            web_app, "run_supervised_worker_loop", side_effect=fast_loop,
+        ):
+            worker = threading.Thread(
+                target=web_app._controller_storage_worker_loop,
+                kwargs={"config_path": self.config.paths.config_path, "stop_event": stop_event},
+            )
+            worker.start()
+            try:
+                self.assertIsNone(admission_issue_within(2.0))
+                self.assertTrue(host_check_started.wait(2.0), "this Mac's card is still checked")
+                clock[0] = NOW + timedelta(minutes=2)
+                self.assertIsNone(admission_issue_within(2.0))
+            finally:
+                stop_event.set()
+                release_host_check.set()
+                worker.join(5)
+        mount.assert_not_called()
 
     def test_stop_event_prevents_later_root_checks(self) -> None:
         stop_event = threading.Event()
