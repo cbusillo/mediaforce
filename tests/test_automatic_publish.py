@@ -722,6 +722,7 @@ def test_storage_read_timeout_waits_without_using_up_tries(config: MediaforceCon
             select(staged_artifacts.c.validation_json).where(staged_artifacts.c.library_item_id == item_id)
         ).scalar_one())["automatic_publish"]
     assert saved["state"] == "waiting"
+    assert "timed out" in saved["reason"]
     assert "failure_attempts" not in saved
     with patch.object(delivery.time, "time", return_value=10_000):
         _run(config)

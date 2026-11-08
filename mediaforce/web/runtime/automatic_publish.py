@@ -146,14 +146,16 @@ def _try_publish_file(
             else "Storage or a required file is unavailable. Mediaforce will retry this file."
         )
         _record_wait(connection, item_id, "waiting", reason)
-    # A read that times out is storage that stalled, not a broken file.
-    except (OSError, subprocess.TimeoutExpired):
+    # A read that times out is almost always storage that stalled, which a stat cannot detect; keep waiting on it.
+    except (OSError, subprocess.TimeoutExpired) as exc:
         connection.rollback()
         _record_wait(
             connection,
             item_id,
             "waiting",
-            "Storage or a required file is unavailable. Mediaforce will retry this file.",
+            "Reading this file timed out. Mediaforce will retry this file."
+            if isinstance(exc, subprocess.TimeoutExpired)
+            else "Storage or a required file is unavailable. Mediaforce will retry this file.",
             retry_after=time.time() + PUBLISH_RETRY_DELAY_SECONDS,
         )
     except Exception as exc:
