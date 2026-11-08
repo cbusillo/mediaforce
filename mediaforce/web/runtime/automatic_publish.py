@@ -21,6 +21,7 @@ from mediaforce.execution import promote_one_item, validate_one_item
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT, library_item_is_missing
 from mediaforce.library.staged_integrity import staged_integrity_report
 from mediaforce.library.staged_validation import AUTOMATIC_PUBLISH_ORIGINS, NOT_REMADE_AFTER_FAILED_CHECK, REMAKING_AFTER_FAILED_CHECK, \
+    publish_stop_awaits_owner, \
     missed_only_final_size, missed_only_over_final_size, staged_validation_outcome
 from mediaforce.web.runtime.folder_actions import production_action_blocker
 from mediaforce.hosts.work_window import controller_work_allowed
@@ -211,9 +212,7 @@ def _publish_file(
         return
     validation = object_dict(json.loads(stage["validation_json"] or "{}"))
     delivery = object_dict(validation.get("automatic_publish"))
-    # A pause from before pauses named their error may be a storage timeout, which now waits instead; check it once more.
-    unnamed_pause = delivery.get("state") == "failed" and not {"blockers", "error"} & delivery.keys()
-    if delivery.get("state") in {"unsafe", "failed"} and not unnamed_pause:
+    if publish_stop_awaits_owner(delivery):
         return
     if float(delivery.get("retry_after") or 0) > time.time():
         return
