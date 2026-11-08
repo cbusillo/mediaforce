@@ -83,10 +83,11 @@ def process_host_recovery_once(
             _update_snapshot(config, lambda _hosts: None, clear_state_error=True)
 
 
-def retry_host_connection(config: MediaforceConfig, host_key: str) -> tuple[bool, str]:
+def retry_host_connection(config: MediaforceConfig, host_key: str, *, requested: bool = True) -> tuple[bool, str]:
     """Run one recovery pass for one computer now: the same no-dialog connection the background
     worker uses, without waiting out its retry delay. Refuses while another check or connection
-    for that computer is running."""
+    for that computer is running. Work that needs the computer passes requested=False: nobody
+    has done anything at that computer, so a wait for someone there stays."""
     host = next((
         host for host in config.remote_hosts
         if host_key and str(host.get("host") or "") == host_key and not host_targets_current_machine(host)
@@ -99,7 +100,7 @@ def retry_host_connection(config: MediaforceConfig, host_key: str) -> tuple[bool
         if not acquired:
             return False, f"{label} is already being checked or connected. Try again when that finishes."
         previous = host_recovery_snapshot(config)["hosts"].get(host_key, {})
-        state = _recovery_pass(config, host, host_key, previous, state_error=state_error, requested=True)
+        state = _recovery_pass(config, host, host_key, previous, state_error=state_error, requested=requested)
     if state["status"] == "ready":
         return True, f"{state['label']} is connected."
     reason = (state["reason"] or "").strip()
