@@ -5360,25 +5360,20 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             platform="macos",
         )
         available = replace(missing, available=True, message="Mounted and ready", missing_paths=[])
-        mount_result = remote.HostSetupResult(
-            ok=True,
-            message="Connected shared storage on Remote Mac.",
-            performed_steps=["Connected media using the remote Finder Keychain."],
-        )
 
         with patch(
                 "mediaforce.web.runtime.host_runtime.collect_host_statuses",
                 side_effect=[[missing], [available]],
         ), patch(
-            "mediaforce.web.runtime.host_runtime.recover_remote_host_mounts",
-            return_value=mount_result,
+            "mediaforce.web.runtime.host_runtime.retry_host_connection",
+            return_value=(True, "Remote Mac is connected."),
         ) as mount_mock, patch(
             "mediaforce.web.runtime.host_runtime.run_host_lifecycle_command"
         ) as lifecycle_mock:
             started = web_app._ensure_encode_host_ready(self.config, host)
 
         self.assertFalse(started)
-        mount_mock.assert_called_once_with(self.config, host, missing)
+        mount_mock.assert_called_once_with(self.config, "remote@mac", requested=False)
         lifecycle_mock.assert_not_called()
 
     def test_ensure_encode_host_ready_recovers_storage_after_host_wakes(self) -> None:
@@ -5407,7 +5402,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             platform="macos",
         )
         available = replace(missing, available=True, message="Mounted and ready", missing_paths=[], missing_mounts=[])
-        mount_result = remote.HostSetupResult(ok=True, message="Connected shared storage on Remote Mac.")
 
         with patch(
                 "mediaforce.web.runtime.host_runtime.collect_host_statuses",
@@ -5416,14 +5410,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "mediaforce.web.runtime.host_runtime.run_host_lifecycle_command",
             return_value=subprocess.CompletedProcess(args=["sh"], returncode=0, stdout="", stderr=""),
         ) as lifecycle_mock, patch(
-            "mediaforce.web.runtime.host_runtime.recover_remote_host_mounts",
-            return_value=mount_result,
+            "mediaforce.web.runtime.host_runtime.retry_host_connection",
+            return_value=(True, "Remote Mac is connected."),
         ) as mount_mock, patch("mediaforce.web.runtime.host_runtime.time.sleep") as sleep_mock:
             started = web_app._ensure_encode_host_ready(self.config, host)
 
         self.assertTrue(started)
         lifecycle_mock.assert_called_once()
-        mount_mock.assert_called_once_with(self.config, host, missing)
+        mount_mock.assert_called_once_with(self.config, "remote@mac", requested=False)
         sleep_mock.assert_not_called()
 
     def test_ensure_encode_host_ready_returns_false_when_host_already_available(self) -> None:

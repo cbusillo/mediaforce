@@ -15,10 +15,9 @@ from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.type_defs import float_value, object_dict
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
-from mediaforce.web.runtime.host_recovery import host_absence_state, host_recovery_snapshot
+from mediaforce.web.runtime.host_recovery import host_absence_state, host_recovery_snapshot, retry_host_connection
 from mediaforce.remote import HostReadinessError, HostStatus, collect_host_statuses, host_status_targets_current_machine, \
-    normalize_host_media_access, recover_remote_host_mounts, remote_mount_recovery_supported, \
-    run_host_lifecycle_command
+    normalize_host_media_access, remote_mount_recovery_supported, run_host_lifecycle_command
 
 
 SAMPLE_HOST_OUTSIDE_WINDOW_DETAIL = "Outside its work window"
@@ -457,13 +456,11 @@ def _recover_host_mounts(
             or "Controller storage is unavailable; automatic recovery will check it again.",
             failure_kind="controller_storage_unavailable",
         )
-    mount_result = recover_remote_host_mounts(config, host, status)
-    if not mount_result.ok:
-        detail = f" Details: {mount_result.detail}" if mount_result.detail else ""
-        raise HostReadinessError(
-            f"{mount_result.message}{detail}",
-            failure_kind=mount_result.failure_kind or "host_unavailable",
-        )
+    # The background pass, which never opens a dialog: unattended work must not leave one that
+    # nobody answers, because it keeps that computer out of work until someone does (#1344).
+    connected, message = retry_host_connection(config, str(host.get("host") or ""), requested=False)
+    if not connected:
+        raise HostReadinessError(message, failure_kind="host_unavailable")
     host_key = str(host.get("key") or host.get("host") or host.get("label") or status.key).strip()
     return fresh_host_status_for_key(config, host_key) or status
 
