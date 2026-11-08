@@ -16,7 +16,7 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifacts
 from mediaforce.encoding.encode_queue import load_latest_encode_job
-from mediaforce.library.workflow_state import build_folder_workflow_state
+from mediaforce.library.workflow_state import EncodeEligibility, build_folder_workflow_state
 from mediaforce.tuning.calibration_jobs import list_queue_summary, save_job
 from mediaforce.web import app as web_app
 from mediaforce.web.runtime import dashboard_payloads
@@ -676,6 +676,42 @@ def test_running_folder_keeps_owner_child_problems_in_its_attention_fact(config:
         state = _page_state(connection, config, SEASON, {})
         assert state["key"] == "making_season"
         assert state["needs_you"] is True
+
+
+@pytest.mark.parametrize("still_included", [True, False])
+@pytest.mark.parametrize("status", ["encoded", "validated"])
+@pytest.mark.parametrize(("delivery", "needs_you"), [
+    ({"state": "failed", "reason": "Paused.", "failure_attempts": 3, "error": "ValueError"}, True),
+    ({"state": "unsafe", "reason": "Couldn't put the files back."}, True),
+    ({"state": "waiting", "reason": "Will retry.", "retry_after": 1.0}, False),
+    ({"state": "failed", "reason": "Paused before pauses named their error.", "failure_attempts": 3}, False),
+])
+def test_only_a_publish_stop_nothing_will_retry_raises_its_season(
+        config: MediaforceConfig, status: str, delivery: dict[str, Any], needs_you: bool, still_included: bool,
+) -> None:
+    with open_db(config.paths.db_path) as connection:
+        item_id = _insert_item(connection, EPISODE, status=status, staged=True)
+        _insert_item(connection, f"{SEASON}/episode-2.mkv", status=status, staged=True)
+        connection.execute(staged_artifacts.update().where(staged_artifacts.c.library_item_id == item_id).values(
+            validation_json=json.dumps({"passed": True, "automatic_publish": delivery})))
+        workflow = build_folder_workflow_state(
+            connection, SEASON, library_types=config.library_type_map,
+            candidate_eligibility={item_id: EncodeEligibility(eligible=still_included)},
+        ).to_payload()
+        card = card_page_states(connection, config, [(SEASON, workflow, None)], _sources({}))[SEASON]
+
+    assert card["needs_you"] is needs_you
+
+
+def test_a_stale_publish_stop_on_a_published_file_raises_nothing(config: MediaforceConfig) -> None:
+    with open_db(config.paths.db_path) as connection:
+        item_id = _insert_item(connection, EPISODE, status="encoded", staged=True)
+        connection.execute(staged_artifacts.update().where(staged_artifacts.c.library_item_id == item_id).values(
+            validation_json=json.dumps({"passed": True, "automatic_publish": {"state": "unsafe"}})))
+        _promote(connection, EPISODE)
+        state = _page_state(connection, config, SEASON, {})
+
+    assert state["needs_you"] is False
 
 
 @pytest.mark.parametrize(("status", "key"), [("running", "making_test"), ("retry_backoff", "sample_waiting")])

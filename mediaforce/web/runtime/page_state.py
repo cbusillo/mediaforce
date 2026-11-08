@@ -157,8 +157,12 @@ def decide_page_state(facts: PageStateFacts) -> PageState:
 
 
 def _needs_you(state: PageState, facts: PageStateFacts) -> bool:
-    return state.key in {"ready_to_compare", "needs_help"} or state.primary_action == "decide_motion" or (
-        state.key == "making_season" and bool(object_dict(facts.workflow).get("needs_owner"))
+    workflow = object_dict(facts.workflow)
+    return (
+        state.key in {"ready_to_compare", "needs_help"}
+        or state.primary_action == "decide_motion"
+        or (state.key == "making_season" and bool(workflow.get("needs_owner")))
+        or int(object_dict(workflow.get("counts")).get("publish_stopped") or 0) > 0
     )
 
 

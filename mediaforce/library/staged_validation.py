@@ -13,6 +13,7 @@ AUTOMATIC_PUBLISH_ORIGINS = frozenset({"queue", "cli-production"})
 REMAKING_AFTER_FAILED_CHECK = "remaking"
 # The automatic publisher's state for a failed copy it could not make again, which waits on the owner.
 NOT_REMADE_AFTER_FAILED_CHECK = "failed"
+_NAMED_PAUSE_FIELDS = frozenset({"blockers", "error"})
 
 
 def held_size_prediction(raw_validation: Any) -> dict[str, Any] | None:
@@ -87,6 +88,20 @@ def staged_validation_passed(raw_validation: Any) -> bool | None:
     if not isinstance(payload, dict) or not isinstance(payload.get("passed"), bool):
         return None
     return bool(payload["passed"])
+
+
+def publish_stop_awaits_owner(delivery: Mapping[str, Any]) -> bool:
+    state = delivery.get("state")
+    return state == "unsafe" or (state == "failed" and bool(_NAMED_PAUSE_FIELDS & delivery.keys()))
+
+
+def stopped_publish_state(raw_validation: Any) -> str | None:
+    try:
+        payload = object_dict(json.loads(str(raw_validation or "{}")))
+    except json.JSONDecodeError:
+        return None
+    delivery = object_dict(payload.get("automatic_publish"))
+    return str(delivery["state"]) if payload.get("passed") is not False and publish_stop_awaits_owner(delivery) else None
 
 
 def not_remade_blockers(raw_validation: Any) -> list[str] | None:
