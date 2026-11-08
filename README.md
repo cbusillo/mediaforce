@@ -946,11 +946,12 @@ For first bootstrap, a private `controller_smb_mounts` list in runtime settings
 may supply the same `source` and `/Volumes/...` `mount_point` fields until a
 healthy mount can be observed and learned.
 
-Remote mounted-media macOS hosts reconnect through Finder before preparation,
-sampling, or encode dispatch. Explicit Prepare on the controller also uses
-Finder. These Finder paths require a signed-in console user with the share
-password saved in the login Keychain. Repeated automatic failures use a bounded
-cooldown. After a missing desktop session, sign in on that computer and use
+Remote mounted-media macOS hosts reconnect through Finder only for explicit
+Prepare (Set up computer), on the controller or a remote Mac. Sampling and
+encode dispatch use the background no-dialog connection on its retry delay,
+because a dialog nobody answers keeps that computer out of work. These paths
+require a signed-in console user with the share password saved in the login
+Keychain. After a missing desktop session, sign in on that computer and use
 Prepare to retry; on the controller, attempts remain suppressed until its
 console login session changes. Each computer keeps at most one Finder request
 per share: a request Finder has not

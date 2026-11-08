@@ -14,9 +14,9 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig, load_runtime_s
 from mediaforce.hosts.controller_mount import ControllerMountProbe
 from mediaforce.hosts.mount_runtime import ControllerSmbMount, NoUiMountResult, save_controller_smb_mounts, \
     controller_smb_mounts_path
-from mediaforce.remote import HostStatus
+from mediaforce.remote import HostReadinessError, HostStatus
 from mediaforce.web import app as web_app
-from mediaforce.web.runtime import host_recovery as recovery, host_status, recovery_alerts as alerts
+from mediaforce.web.runtime import host_recovery as recovery, host_runtime, host_status, recovery_alerts as alerts
 
 NOW = datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
 
@@ -934,3 +934,23 @@ def test_synchronous_raw_status_cache_starts_with_real_results_and_refreshes(con
         probe.return_value = [status(available=True)]
         assert host_status.current_host_statuses(config)[0].available
         assert probe.call_count == 2
+
+
+def test_work_that_needs_a_computer_reconnects_its_storage_without_a_dialog(
+        config: MediaforceConfig, empty_host_status_cache: None,
+) -> None:
+    # A Finder request from unattended work left a window nobody answered and kept M1 mini out of
+    # work for hours (#1344). Work uses the background no-dialog pass, on its retry delay.
+    host = config.raw["remote_hosts"][0]
+    leftover = NoUiMountResult(ok=False, uncertain=True, action="An earlier storage connection is still running on Worker.")
+    with patch("mediaforce.web.runtime.host_runtime.collect_host_statuses", return_value=[status()]), patch_attr(
+        recovery, "probe_host_status", return_value=status(),
+    ), patch_attr(recovery, "recover_remote_host_mounts_no_ui", return_value=leftover) as mount, patch(
+        "mediaforce.remote.mount_smb_shares", side_effect=AssertionError("Finder dialog"),
+    ):
+        for _ in range(2):
+            with pytest.raises(HostReadinessError, match="earlier storage connection is still running"):
+                host_runtime.ensure_encode_host_ready(
+                    config, host, lifecycle_command_timeout_seconds=1, lifecycle_poll_seconds=0,
+                )
+    assert mount.call_count == 1
