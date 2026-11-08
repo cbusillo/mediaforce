@@ -4,7 +4,6 @@ Each episode gets one stage. Its own current encode outcome says what is happeni
 its library and staged state say what already happened or why nothing will.
 """
 
-import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -15,7 +14,8 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.hosts.work_window import CONTROLLER_WORK_WINDOW_WAIT, controller_work_schedule
 from mediaforce.core.type_defs import float_value, int_value, object_dict
-from mediaforce.library.staged_validation import AUTOMATIC_PUBLISH_ORIGINS, not_remade_blockers, staged_validation_outcome
+from mediaforce.library.staged_validation import AUTOMATIC_PUBLISH_ORIGINS, not_remade_blockers, staged_validation_outcome, \
+    stopped_publish_state
 from mediaforce.library.workflow_state import ItemWorkflowState
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
 from mediaforce.web.runtime.encode_runtime import KEPT_ORIGINAL_TERMINAL_REASON, size_exception_question, unfinished_child_reason
@@ -75,7 +75,7 @@ def load_season_episode_progress(
     publish_stopped = {
         item_id: state
         for item_id, row in staged.items()
-        if (state := _stopped_publish_state(row["validation_json"])) is not None
+        if (state := stopped_publish_state(row["validation_json"])) is not None
     }
     episodes = season_episode_progress(items, run_by_rel_path, bytes_saved, validation, not_remade, publish_stopped)
     waiting_to_publish = {item.rel_path for item in items if item.status in {"encoded", "validated"}
@@ -265,12 +265,3 @@ def _staged_rows(connection: DBClient, item_ids: list[int]) -> dict[int, Mapping
         .where(staged_artifacts.c.library_item_id.in_(item_ids))
     ).mappings().fetchall()
     return {int(row["library_item_id"]): row for row in rows}
-
-
-def _stopped_publish_state(raw_validation: Any) -> str | None:
-    try:
-        payload = object_dict(json.loads(str(raw_validation or "{}")))
-    except json.JSONDecodeError:
-        return None
-    state = object_dict(payload.get("automatic_publish")).get("state")
-    return str(state) if payload.get("passed") is not False and state in {"failed", "unsafe"} else None

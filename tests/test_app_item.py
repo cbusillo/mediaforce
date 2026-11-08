@@ -114,7 +114,7 @@ def test_a_failed_copy_that_could_not_be_made_again_says_why(config: MediaforceC
 def test_a_passed_copy_with_stopped_publishing_waits_without_holding_other_files(
     config: MediaforceConfig, tmp_path: Path, publish_state: str | None, passed: bool | None,
 ) -> None:
-    validation = {"passed": passed, "automatic_publish": {"state": publish_state}}
+    validation = {"passed": passed, "automatic_publish": {"state": publish_state, "error": "ValueError"}}
     with open_db(config.paths.db_path) as connection:
         item_id = _episode(connection, tmp_path, 1, size=900, status="validated")
         _replaced(connection, tmp_path, 2, size=100, original_size=700)

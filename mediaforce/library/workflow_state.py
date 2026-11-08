@@ -18,7 +18,7 @@ from mediaforce.library.motion_keep_state import kept_original_clause
 from mediaforce.library.media_scopes import MediaScope, MediaScopeConflict, media_scope_from_prefix, normalize_scope_prefix, \
     path_matches_scope, resolve_media_scope, resolve_media_scopes, scope_prefix_overlap_filter, scope_rel_path_filter, scopes_overlap
 from mediaforce.library.remake_intents import remake_intent
-from mediaforce.library.staged_validation import staged_validation_outcome
+from mediaforce.library.staged_validation import staged_validation_outcome, stopped_publish_state
 
 WorkflowItemState = Literal[
     "missing",
@@ -130,6 +130,7 @@ class ItemWorkflowState:
     has_staged_output: bool
     blocker: str | None = None
     motion_held: bool = False
+    publish_stopped: bool = False
 
     def to_payload(self) -> WorkflowPayload:
         return {
@@ -340,6 +341,7 @@ def derive_item_workflow_state(
         has_staged_output=has_staged_output,
         blocker=blocker,
         motion_held=held_for_motion,
+        publish_stopped=state in {"ready_to_validate", "ready_to_promote"} and stopped_publish_state(row.get("validation_json")) is not None,
     )
 
 
@@ -451,6 +453,7 @@ def _build_folder_state(
         "processing": lane_counts.get("processing", 0),
         "complete": lane_counts.get("complete", 0),
         "blocked": lane_counts.get("blocked", 0),
+        "publish_stopped": sum(item.publish_stopped for item in items),
     }
     state, lane, label, tone, detail, action = _folder_summary(
         prefix,

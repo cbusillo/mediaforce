@@ -640,7 +640,7 @@ def test_checked_copy_or_keep_supersedes_its_run_but_not_an_independent_writer(
             if checked_state == "size_held":
                 validation.update(checks=[{"passed": False, "message": FAR_BELOW_PREDICTION_CHECK}], size_prediction={"held": True})
             elif checked_state == "publish_failed":
-                validation = {"passed": True, "automatic_publish": {"state": "failed"}}
+                validation = {"passed": True, "automatic_publish": {"state": "failed", "error": "ValueError"}}
             connection.execute(staged_artifacts.insert().values(
                 library_item_id=item_id, staging_path="checked.mkv", validation_json=json.dumps(validation), updated_at="now"))
 
