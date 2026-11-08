@@ -27,6 +27,7 @@ from mediaforce.ops.login_item import (
 from mediaforce.ops.runtime_install import (
     register_runtime_roots, require_release_directory, retain_deploy_stage, retained_deploy_stage, runtime_activity, runtime_directory,
 )
+from mediaforce.web.runtime.controller_storage_recovery import READY_FRESHNESS_SECONDS
 from mediaforce.web.runtime_lock import exclusive_mediaforce_runtime_lock, reserve_mediaforce_database_identity
 
 
@@ -35,6 +36,7 @@ DEPLOY_LOCK_WAIT_SECONDS = 600
 MAC_APP_NAME = "Mediaforce.app"
 APPLICATIONS = Path("/Applications")
 KEPT_RELEASES = 3
+STORAGE_CHECK_SECONDS = 60
 
 
 def _run(command: list[str], *, cwd: Path | None = None) -> str:
@@ -62,6 +64,24 @@ def require_paused_idle_dashboard(dashboard: dict) -> None:
         value != 0 for value in (queue["running_count"], calibration["sample"]["running_count"], calibration["full"]["running_count"])
     ):
         raise RuntimeError("work is running or the encode queue is not paused; not deploying")
+
+
+def require_storage_admission(base_url: str) -> None:
+    """A storage record written once at startup reads fresh for its first window, so the check reads it after
+    that window has passed: only then does a stopped storage check show (#1340)."""
+    time.sleep(READY_FRESHNESS_SECONDS + 1)
+    deadline = time.monotonic() + STORAGE_CHECK_SECONDS
+    while True:
+        try:
+            admission = _api(base_url, "/api/hosts")["controller_storage_admission"]
+            if admission["checked"] is True:
+                return
+            issue = admission["issue"]
+        except (OSError, HTTPException, ValueError, KeyError, TypeError) as exc:
+            issue = f"storage could not be read ({exc})"
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"candidate storage check is not keeping work admissible: {issue}")
+        time.sleep(5)
 
 
 def prepare_release(source: Path, target: str, home: Path) -> Path:
@@ -292,6 +312,7 @@ def _deploy(
                 if time.monotonic() >= deadline:
                     raise RuntimeError("candidate did not become healthy") from exc
                 time.sleep(1)
+        require_storage_admission(base_url)
     except Exception:
         if not candidate_started and port_closed and stopped_config is None:
             if plist.read_bytes() != previous_payload:
