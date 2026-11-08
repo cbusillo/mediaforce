@@ -357,12 +357,12 @@ def _no_ui_failure(
             retry=False,
         )
     if result.returncode == _MOUNT_REQUEST_WAITING_EXIT:
-        # Usually a Finder request with its window open: only someone at that computer can end it (#1344).
+        # Often a Finder request with its window open, which only someone at that computer can end (#1344).
         return NoUiMountResult(
             ok=False, uncertain=True,
             action=(
-                f"{label} is still waiting on an earlier request to connect the {share} share, usually a window "
-                f"on its screen. On {label}, answer or cancel that window; Mediaforce then reconnects on its own."
+                f"{label} is still waiting on an earlier request to connect the {share} share. If a window asking "
+                f"to connect it is open on {label}, answer or cancel it there; Mediaforce keeps trying."
             ),
         )
     if result.returncode in {_MOUNT_BUSY_EXIT, _MOUNT_HELPER_EXIT}:
