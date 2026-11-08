@@ -1,5 +1,4 @@
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 from typing import Callable
@@ -16,6 +15,10 @@ from mediaforce.hosts.status_helpers import _classify_ssh_failure, _find_local_t
 from mediaforce.hosts.types import HostStatus
 
 REMOTE_TOOL_CACHE_TTL_SECONDS = 24 * 60 * 60
+_LOCAL_LIST_COMMAND = "/bin/ls"
+_LOCAL_SHELL = "/bin/sh"
+_LOCAL_WRITE_CHECK_SCRIPT = 'probe="$1/.mediaforce-write-test.$$" && : > "$probe" && /bin/rm -f "$probe"'
+_LOCAL_CHECK_TIMEOUT_SECONDS = 10
 _REMOTE_TOOL_CACHE: dict[str, tuple[float, dict[str, object]]] = {}
 
 
@@ -470,32 +473,29 @@ def _current_machine_host_status(
 
 
 def _local_path_readable(path: Path) -> bool:
-    if path.is_dir():
-        try:
-            next(path.iterdir(), None)
-        except StopIteration:
-            return True
-        except OSError:
-            return False
-        return True
-    return path.exists() and path.is_file()
+    if not path.is_dir():
+        return path.exists() and path.is_file()
+    return _local_check_passed([_LOCAL_LIST_COMMAND, "-f", "--", str(path)])
 
 
 def _local_path_writable(path: Path) -> bool:
     if not path.is_dir():
         return False
-    probe_path: str | None = None
+    return _local_check_passed([_LOCAL_SHELL, "-c", _LOCAL_WRITE_CHECK_SCRIPT, "mediaforce-write-check", str(path)])
+
+
+def _local_check_passed(command: list[str]) -> bool:
     try:
-        with tempfile.NamedTemporaryFile(prefix=".mediaforce-write-test.", dir=path, delete=False) as probe:
-            probe_path = probe.name
-    except OSError:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_LOCAL_CHECK_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
         return False
-    if probe_path:
-        try:
-            Path(probe_path).unlink()
-        except OSError:
-            pass
-    return True
+    return completed.returncode == 0
 
 
 def _local_mount_present(path: Path) -> bool:
