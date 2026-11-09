@@ -216,6 +216,7 @@ private struct ShowCard: View {
             .buttonStyle(.plain)
             .pointerStyle(.link)
             .accessibilityLabel(item.title)
+            .help(card.state)
             Text(card.name).font(.callout.weight(.semibold)).lineLimit(1)
             if let description = card.description {
                 Text(description)
