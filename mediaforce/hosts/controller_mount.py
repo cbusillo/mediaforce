@@ -16,7 +16,7 @@ from typing import Iterator, Literal
 from urllib.parse import unquote
 
 from mediaforce.hosts.mount_runtime import (
-    NO_UI_SMB_MOUNT_JXA, ControllerSmbMount, controller_smb_mounts_from_output, remote_smb_mounts_for_paths,
+    NETFS_AUTHENTICATION_STATUSES, NO_UI_SMB_MOUNT_JXA, ControllerSmbMount, controller_smb_mounts_from_output, remote_smb_mounts_for_paths,
 )
 
 
@@ -270,8 +270,7 @@ def mount_controller_smb_no_ui(
         )
     except subprocess.TimeoutExpired:
         return ControllerMountResult(
-            False, True, "mount_timeout",
-            "The no-UI controller SMB mount attempt timed out and must not be retried automatically.", before,
+            False, False, "mount_timeout", "The no-UI controller SMB mount attempt timed out.", before,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return ControllerMountResult(
@@ -286,6 +285,10 @@ def mount_controller_smb_no_ui(
             f"The no-UI SMB helper returned an unreadable result: osascript exit {result.returncode}"
             f"{diagnostic_detail}.",
             before,
+        )
+    if status in NETFS_AUTHENTICATION_STATUSES:
+        return ControllerMountResult(
+            False, True, "mount_sign_in_refused", f"The no-UI SMB helper returned status {status}.", before,
         )
     if status != 0:
         return ControllerMountResult(

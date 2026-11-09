@@ -54,7 +54,7 @@ _FINDER_UNREACHABLE_MARKERS = (
 _FINDER_ERROR_SHOWN_CHARS = 300
 # NetFS reports a failed sign-in with the BSD errors EAUTH (80) and ENEEDAUTH (81) from <sys/errno.h>.
 # With UIOption=NoUI that means the login Keychain has no usable password for the share.
-_NETFS_AUTHENTICATION_STATUSES = frozenset({80, 81})
+NETFS_AUTHENTICATION_STATUSES = frozenset({80, 81})
 # Asks NetFS to connect a share with what the login Keychain already holds; NoUI means it never
 # opens a dialog, so it fails instead of asking for a password.
 NO_UI_SMB_MOUNT_JXA = r'''ObjC.import("Foundation");
@@ -385,7 +385,7 @@ def _no_ui_failure(
     status = _netfs_status(_helper_markers(result).get("MEDIAFORCE_MOUNT_NETFS", ""))
     if status is None:
         return NoUiMountResult(ok=False, uncertain=True)
-    if status in _NETFS_AUTHENTICATION_STATUSES:
+    if status in NETFS_AUTHENTICATION_STATUSES:
         return NoUiMountResult(
             ok=False,
             action=(
