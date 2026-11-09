@@ -246,6 +246,29 @@ class ControllerStorageRecoveryTest(TestCase):
         state = self._media_state()
         self.assertEqual((state["status"], state["failure_count"]), ("ready", 0))
 
+    def test_timeout_record_saved_by_earlier_version_retries(self) -> None:
+        absent = ControllerMountProbe(False, False, self.mounts[0].mount_point, failure_kind="mount_absent")
+        ready = ControllerMountResult(True, False, None, None, ControllerMountProbe(
+            True, True, self.mounts[0].mount_point, self.mounts[0].source, "smbfs", True,
+        ))
+        signature = recovery._expected_signature_for_root(self.config, self.mounts[0].mount_point)
+        assert signature is not None
+        saved = recovery._failed_state(
+            mount_point=self.mounts[0].mount_point, requirement_signature=signature, previous=None,
+            now=NOW - timedelta(hours=6), status="action_required",
+            reason="The SMB mount request did not finish and needs operator review.",
+            failure_kind="mount_timeout", attempted=True,
+        )
+        recovery._save_snapshot(recovery.controller_storage_recovery_path(self.config), [saved], NOW)
+
+        with patch.object(recovery, "_utc_now", return_value=NOW), patch.object(
+            recovery, "probe_controller_mount", return_value=absent,
+        ), patch.object(recovery, "mount_controller_smb_no_ui", return_value=ready) as mount:
+            recovery.process_controller_storage_recovery_once(self.config)
+
+        self.assertEqual(mount.call_args_list[0].args[0], self.mounts[0])
+        self.assertEqual(self._media_state()["status"], "ready")
+
     def test_refused_sign_in_stops_retrying_and_says_so(self) -> None:
         absent = ControllerMountProbe(False, False, self.mounts[0].mount_point, failure_kind="mount_absent")
         refused = ControllerMountResult(False, True, "mount_sign_in_refused", None, absent)

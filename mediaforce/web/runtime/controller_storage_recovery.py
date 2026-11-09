@@ -132,7 +132,8 @@ def process_controller_storage_recovery_once(
                 prior is not None
                 and prior.status == "action_required"
                 and prior.last_failure_kind in _RETRYABLE_FAILURES
-                and prior.reason == _stable_reason(prior.last_failure_kind)
+                # A timeout saved by an earlier version carries that version's wording.
+                and (prior.last_failure_kind == "mount_timeout" or prior.reason == _stable_reason(prior.last_failure_kind))
             ):
                 prior = replace(prior, status="retrying")
             if sys.platform != "darwin":
