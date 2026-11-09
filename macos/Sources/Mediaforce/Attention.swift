@@ -17,6 +17,7 @@ struct AttentionMemory: Codable, Equatable, Sendable {
 
 struct Attention: Equatable, Sendable {
     static let mostSeasonsNamedSeparately = 3
+    static let backupsNoticeID = "backups"
 
     let notices: [AttentionNotice]
     let badgeCount: Int
@@ -198,7 +199,7 @@ struct Attention: Equatable, Sendable {
 
     static func backupsNotice(_ backups: MainWindowFacts.OriginalBackups) -> AttentionNotice {
         AttentionNotice(
-            id: "backups",
+            id: backupsNoticeID,
             title: "Original backups are ready to delete",
             body: "\(Words.count(backups.count, "original backup")), \(Words.size(backups.bytes)). Delete them in Mediaforce when you're ready.",
             opens: .spaceSaved

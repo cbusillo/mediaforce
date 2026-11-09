@@ -69,7 +69,7 @@ without waiting for a cache to expire.
 
 ## Show posters
 
-Needs you uses the same cached posters as Media.
+Needs you draws each waiting show as a poster card from the same cached posters as Media.
 
 `GET /api/app/posters/{show_prefix}`, for example `/api/app/posters/tv/Futurama`,
 returns the show's poster image, or `404` with `{"poster": "none"}` when

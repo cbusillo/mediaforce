@@ -313,6 +313,34 @@ final class AttentionTests: XCTestCase {
         XCTAssertEqual(Place(notificationValue: Place.needsYou.notificationValue), .needsYou)
     }
 
+    @MainActor
+    func testAShowCardGivesAReasonOnlyWhenItAddsOne() throws {
+        let ready = try facts(waitingSamples: [(prefix: "tv/E/Season 3", state: "ready_to_compare", action: "review_sample")])
+        XCTAssertNil(WaitingShow(try XCTUnwrap(Attention.waitingItems(ready).first), facts: ready).description)
+        let failed = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(MainWindowTests.facts.utf8))
+        let item = try XCTUnwrap(Attention.waitingItems(failed).first { $0.opens == .sample("tv/Lucifer/Season 2") })
+        XCTAssertEqual(WaitingShow(item, facts: failed).description, Words.sampleFailure("missing_clips"))
+    }
+
+    func testNeedsYouPutsKindsFirstAndDrawsEveryWaitingItem() throws {
+        let waiting = try facts(waitingSamples: [(prefix: "tv/E/Season 3", state: "ready_to_compare", action: "review_sample")],
+                                computers: [(key: "mini", state: "password_needed", needsYou: true)],
+                                kinds: [(kind: "cartoon", sampleSeason: "tv/F/Season 1")], backups: 3)
+        let groups = WaitingGroups(waiting)
+        XCTAssertEqual(groups.first, groups.kinds.first)
+        XCTAssertEqual(groups.kinds.count, 1)
+        XCTAssertEqual(groups.shows.map(\.opens), [.sample("tv/E/Season 3")])
+        let drawn = groups.kinds + groups.shows + groups.computers + [groups.backups].compactMap { $0 }
+        XCTAssertEqual(Set(drawn.map(\.id)), Set(Attention.waitingItems(waiting).map(\.id)))
+        XCTAssertTrue(WaitingGroups(try facts()).isEmpty)
+    }
+
+    func testNeedsYouStatusDoesNotPointAtItsOwnItems() throws {
+        let waiting = try facts(kinds: [(kind: "cartoon", sampleSeason: "tv/F/Season 1")])
+        XCTAssertNotNil(Words.workExplanation(waiting))
+        XCTAssertNil(Words.workExplanation(waiting, onNeedsYou: true))
+    }
+
     func testCountsReadNaturally() {
         XCTAssertEqual(Words.count(1, "episode"), "1 episode")
         XCTAssertEqual(Words.count(15, "episode"), "15 episodes")
