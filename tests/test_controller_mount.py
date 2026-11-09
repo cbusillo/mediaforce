@@ -373,7 +373,7 @@ class ControllerMountTests(unittest.TestCase):
         self.assertNotIn("password", command[4].lower())
         self.assertEqual(run.call_args_list[1].kwargs["timeout"], 30)
 
-    def test_mount_timeout_requires_action_and_does_not_probe_again(self) -> None:
+    def test_mount_timeout_can_retry_and_does_not_probe_again(self) -> None:
         absent = subprocess.CompletedProcess(
             ["sh"], 0, "MEDIAFORCE_MOUNT_PATH_PRESENT=0\nMEDIAFORCE_ACCESS_BEGIN\n0\n0\n", "",
         )
@@ -384,9 +384,22 @@ class ControllerMountTests(unittest.TestCase):
         )
 
         self.assertFalse(result.ok)
-        self.assertTrue(result.action_required)
+        self.assertFalse(result.action_required)
         self.assertEqual(result.failure_kind, "mount_timeout")
         self.assertEqual(run.call_count, 2)
+
+    def test_refused_sign_in_requires_action(self) -> None:
+        absent = subprocess.CompletedProcess(
+            ["sh"], 0, "MEDIAFORCE_MOUNT_PATH_PRESENT=0\nMEDIAFORCE_ACCESS_BEGIN\n0\n0\n", "",
+        )
+        refused = subprocess.CompletedProcess(["osascript"], 0, json.dumps({"status": 80}), "")
+        run = Mock(side_effect=[absent, refused])
+
+        result = mount_controller_smb_no_ui(self.mount, self.required_paths, run_subprocess=run)
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.action_required)
+        self.assertEqual(result.failure_kind, "mount_sign_in_refused")
 
     def test_status_zero_without_expected_fresh_mount_fails_closed_without_unmount(self) -> None:
         absent = subprocess.CompletedProcess(

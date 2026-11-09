@@ -40,19 +40,19 @@ _ACTION_REQUIRED_FAILURES = frozenset({
     "mount_identity_mismatch",
     "mount_path_occupied",
     "mount_result_unknown",
-    "mount_timeout",
+    "mount_sign_in_refused",
     "unexpected_mount_path",
 })
 
 # Latch causes the probe itself observed. A later probe of the path supersedes them, so the saved
-# reason follows it; the latch stays. Causes from a mount attempt (timeout, unknown result) and
+# reason follows it; the latch stays. Causes from a mount attempt (unknown result, refused sign-in) and
 # invalid mappings are not observations, and a fresh probe never rewrites them.
 _PROBE_OBSERVED_FAILURES = frozenset({
     "mount_identity_mismatch", "mount_path_occupied", "unexpected_mount_path",
 })
 
 _RETRYABLE_FAILURES = frozenset({
-    "mount_absent", "mount_failed", "mount_helper_failed",
+    "mount_absent", "mount_failed", "mount_helper_failed", "mount_timeout",
     "path_unavailable", "probe_failed", "probe_timeout",
 })
 
@@ -132,7 +132,8 @@ def process_controller_storage_recovery_once(
                 prior is not None
                 and prior.status == "action_required"
                 and prior.last_failure_kind in _RETRYABLE_FAILURES
-                and prior.reason == _stable_reason(prior.last_failure_kind)
+                # A timeout saved by an earlier version carries that version's wording.
+                and (prior.last_failure_kind == "mount_timeout" or prior.reason == _stable_reason(prior.last_failure_kind))
             ):
                 prior = replace(prior, status="retrying")
             if sys.platform != "darwin":
@@ -541,7 +542,8 @@ def _stable_reason(failure_kind: str) -> str:
         "mount_helper_failed": "The SMB mount helper is unavailable; Mediaforce will retry.",
         "mount_identity_mismatch": "A different SMB share is mounted at the required volume path.",
         "mount_path_occupied": "The required volume path is occupied by an unexpected filesystem.",
-        "mount_timeout": "The SMB mount request did not finish and needs operator review.",
+        "mount_sign_in_refused": "The saved sign-in for the SMB share was refused.",
+        "mount_timeout": "The required SMB share did not answer in time; Mediaforce will retry.",
         "mount_result_unknown": "The SMB mount result was ambiguous and needs operator review.",
         "path_unavailable": "The required path on the SMB share is unavailable.",
         "probe_failed": "The mounted share identity could not be verified safely.",
