@@ -3516,7 +3516,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "host_unavailable")
         self.assertTrue(encode_runtime._encode_failure_is_retryable("host_unavailable", str(exc), job["host"]))
 
-    def test_mount_configuration_failure_retries_the_episode_but_not_past_its_attempts(self) -> None:
+    def test_mount_configuration_failure_retries_the_episode_past_its_attempts(self) -> None:
         job = {"host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"}}
         exc = remote.HostReadinessError(
             "Mediaforce could not identify the SMB share.",
@@ -3527,7 +3527,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(failure_kind, "host_configuration")
         self.assertTrue(encode_runtime._encode_failure_is_retryable(failure_kind, str(exc), job["host"]))
         self.assertTrue(encode_runtime._encode_failure_is_host_related(failure_kind, str(exc), job["host"]))
-        self.assertFalse(
+        self.assertTrue(
             encode_runtime._encode_failure_retries_after_attempt_cap(failure_kind, str(exc), job["host"])
         )
 
@@ -3577,20 +3577,158 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(updated["last_host"]["key"], "remote-a")
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
-    def test_computer_setup_failure_at_the_attempt_cap_goes_to_the_owner(self) -> None:
+    def test_computer_setup_failure_at_the_attempt_cap_waits_and_gives_the_try_back(self) -> None:
+        max_attempts = web_app._encode_queue_runtime_deps().encode_job_max_attempts
         with open_db(self.config.paths.db_path) as connection:
-            updated = self._computer_setup_failure(
-                connection,
-                "episode-setup-exhausted",
-                attempt_count=web_app._encode_queue_runtime_deps().encode_job_max_attempts,
-            )
+            updated = self._computer_setup_failure(connection, "episode-setup-exhausted", attempt_count=max_attempts)
 
         assert updated is not None
-        self.assertEqual(updated["status"], "needs_attention")
-        self.assertEqual(updated["terminal_reason"], "max_attempts_exhausted")
+        self.assertEqual(updated["status"], "retry_backoff")
+        self.assertIsNone(updated["terminal_reason"])
+        self.assertEqual(updated["attempt_count"], max_attempts - 1)
         self.assertEqual(updated["last_failure_kind"], "host_configuration")
         # The computer still cools down, so it counts toward blocking it for the next episode.
         self.assertIsNotNone(updated["host_cooldown_until"])
+
+    def _storage_failure_at_the_attempt_cap(
+            self, connection: DBClient, name: str, failure_kind: str, *, storage_issue: str | None,
+    ) -> dict[str, Any]:
+        source_path = self._create_source_file(f"{name}.mkv")
+        item_id = self._insert_library_item(connection, source_path, status="encoding")
+        self._write_manifest(
+            f"manifest-{name}.json",
+            [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{name}.mkv"))}],
+        )
+        failed_host = {"key": "local", "label": "This Mac", "mode": "local"}
+        self._save_job(
+            connection,
+            job_id=f"job-{name}",
+            manifest_name=f"manifest-{name}.json",
+            host=failed_host,
+            status="running",
+            attempt_count=web_app._encode_queue_runtime_deps().encode_job_max_attempts,
+        )
+        job = load_encode_job(connection, f"job-{name}")
+        assert job is not None
+
+        def admission_for_host(_config: Any, host: dict[str, Any] | None = None) -> dict[str, Any]:
+            return {"issue": storage_issue if host == failed_host else "Another computer's storage is down.", "checked": True}
+
+        with patch.object(encode_runtime, "controller_storage_admission", side_effect=admission_for_host):
+            web_app._transition_encode_job_failure(
+                connection, self.config, job, failure_kind=failure_kind, error_message="Input/output error",
+            )
+        updated = load_encode_job(connection, f"job-{name}")
+        assert updated is not None
+        return updated
+
+    def test_storage_failure_during_a_confirmed_outage_waits_and_gives_the_try_back(self) -> None:
+        max_attempts = web_app._encode_queue_runtime_deps().encode_job_max_attempts
+        for failure_kind in ("storage_io", "controller_media_access"):
+            with self.subTest(failure_kind), open_db(self.config.paths.db_path) as connection:
+                updated = self._storage_failure_at_the_attempt_cap(
+                    connection, f"outage-{failure_kind}", failure_kind, storage_issue="Controller storage: unavailable.",
+                )
+            self.assertEqual(updated["status"], "retry_backoff")
+            self.assertIsNone(updated["terminal_reason"])
+            self.assertEqual(updated["attempt_count"], max_attempts - 1)
+
+    def test_storage_failure_on_healthy_storage_still_stops_and_is_not_released(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            for failure_kind in ("storage_io", "controller_media_access"):
+                with self.subTest(failure_kind):
+                    updated = self._storage_failure_at_the_attempt_cap(
+                        connection, f"file-fault-{failure_kind}", failure_kind, storage_issue=None,
+                    )
+                    self.assertEqual(updated["status"], "needs_attention")
+            encode_runtime._release_jobs_stranded_by_an_outage(connection, web_app._encode_queue_runtime_deps())
+            statuses = {
+                job_id: load_encode_job(connection, job_id)["status"]
+                for job_id in ("job-file-fault-storage_io", "job-file-fault-controller_media_access")
+            }
+
+        self.assertEqual(set(statuses.values()), {"needs_attention"})
+
+    def test_restart_releases_only_jobs_an_earlier_outage_stranded(self) -> None:
+        def stranded(connection: DBClient, name: str, failure_kind: str) -> None:
+            source_path = self._create_source_file(f"{name}.mkv")
+            item_id = self._insert_library_item(connection, source_path, status="planned")
+            self._write_manifest(
+                f"manifest-{name}.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{name}.mkv"))}],
+            )
+            self._save_job(
+                connection,
+                job_id=f"job-{name}",
+                manifest_name=f"manifest-{name}.json",
+                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                status="needs_attention",
+                attempt_count=3,
+            )
+            job = load_encode_job(connection, f"job-{name}")
+            assert job is not None
+            job.update({"terminal_reason": "max_attempts_exhausted", "last_failure_kind": failure_kind})
+            save_encode_job(connection, job)
+
+        released_kinds = ("host_configuration", "storage_io", "controller_media_access")
+        with open_db(self.config.paths.db_path) as connection:
+            for failure_kind in (*released_kinds, "containment_unproven", "deterministic"):
+                stranded(connection, f"stranded-{failure_kind}", failure_kind)
+            with patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable):
+                web_app._recover_encode_queue(connection, self.config)
+            statuses = {
+                failure_kind: load_encode_job(connection, f"job-stranded-{failure_kind}")["status"]
+                for failure_kind in (*released_kinds, "containment_unproven", "deterministic")
+            }
+
+        self.assertEqual(
+            statuses,
+            {
+                "host_configuration": "retry_backoff",
+                "storage_io": "retry_backoff",
+                "controller_media_access": "retry_backoff",
+                "containment_unproven": "needs_attention",
+                "deterministic": "needs_attention",
+            },
+        )
+
+    def test_restart_release_leaves_a_containment_hold_and_its_parents_reason_alone(self) -> None:
+        def shard(connection: DBClient, name: str, failure_kind: str, *, error: str) -> dict[str, Any]:
+            source_path = self._create_source_file(f"{name}.mkv")
+            item_id = self._insert_library_item(connection, source_path, status="planned")
+            self._write_manifest(
+                f"manifest-{name}.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{name}.mkv"))}],
+            )
+            self._save_job(
+                connection, job_id=name, manifest_name=f"manifest-{name}.json",
+                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"}, status="needs_attention", attempt_count=1,
+            )
+            job = load_encode_job(connection, name)
+            assert job is not None
+            job.update({
+                "job_kind": "shard", "parent_job_id": "parent", "manifest_indexes": [0],
+                "terminal_reason": failure_kind, "last_failure_kind": failure_kind, "error": error,
+            })
+            save_encode_job(connection, job)
+            return job
+
+        with open_db(self.config.paths.db_path) as connection:
+            hold = shard(connection, "held", "containment_unproven", error="The run was not confirmed stopped.")
+            shard(connection, "sibling", "host_configuration", error="The computer could not connect storage.")
+            save_encode_job(connection, {**hold, "job_id": "parent", "job_kind": "folder", "parent_job_id": None})
+            before_hold = load_encode_job(connection, "held")
+            encode_runtime._release_jobs_stranded_by_an_outage(connection, web_app._encode_queue_runtime_deps())
+            after_hold = load_encode_job(connection, "held")
+            parent = load_encode_job(connection, "parent")
+            sibling = load_encode_job(connection, "sibling")
+
+        assert parent is not None and sibling is not None
+        self.assertEqual(after_hold, before_hold)
+        self.assertEqual(sibling["status"], "retry_backoff")
+        self.assertEqual(parent["status"], "needs_attention")
+        self.assertEqual(parent["terminal_reason"], "containment_unproven")
+        self.assertEqual(parent["error"], "The run was not confirmed stopped.")
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_last_attempt_setup_failures_still_block_that_computer(self) -> None:
@@ -4092,7 +4230,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
         )
 
-    def test_controller_storage_failure_retries_other_hosts_within_attempt_cap(self) -> None:
+    def test_controller_storage_failure_retries_past_its_attempts(self) -> None:
         job = {"host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"}}
         exc = remote.HostReadinessError(
             "The controller SMB volume is not mounted.",
@@ -4102,7 +4240,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         failure_kind = encode_runtime._classify_encode_failure(exc, job)
         self.assertEqual(failure_kind, "controller_storage_unavailable")
         self.assertTrue(encode_runtime._encode_failure_is_retryable(failure_kind, str(exc), job["host"]))
-        self.assertFalse(
+        self.assertTrue(
             encode_runtime._encode_failure_retries_after_attempt_cap(failure_kind, str(exc), job["host"])
         )
 

@@ -269,11 +269,11 @@ def controller_storage_admission_issue(
     return _admission(config, host)[0]
 
 
-def controller_storage_admission(config: MediaforceConfig) -> dict[str, Any]:
+def controller_storage_admission(config: MediaforceConfig, host: dict[str, Any] | None = None) -> dict[str, Any]:
     """Whether storage lets work start, and whether this service process's check stands behind that answer.
     The deploy reads it after the freshness window: a record written once at startup reads fresh until
     then, so only a later read shows the storage check keeps running (#1340)."""
-    issue, checked = _admission(config, None)
+    issue, checked = _admission(config, host)
     return {"issue": issue, "checked": checked}
 
 
