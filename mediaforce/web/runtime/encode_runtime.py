@@ -28,7 +28,7 @@ from fastapi import HTTPException
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.runtime.scratch_reservations import calibration_scratch_reservations
-from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
+from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission, controller_storage_admission_issue
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
 from mediaforce.hosts.transport import SSH_ACCESS_REFUSED_MARKERS, ssh_host_unreachable
@@ -313,6 +313,7 @@ def recover_encode_queue(
     connection.commit()
     reconcile_encode_jobs(connection, config, deps, restart_recovery=True)
     sweep_stopped_remote_encodes(connection, config, deps)
+    _release_jobs_stranded_by_an_outage(connection, deps)
     clear_stale_encoding_items_when_idle(connection, config, deps)
     connection.commit()
 
@@ -881,6 +882,9 @@ class ControllerShutdownCancelledError(ProcessCancelledError):
 # A child stopped only because Mediaforce shut down keeps this terminal reason until the next
 # start confirms its earlier encode ended and queues it again. An owner's Stop never sets it.
 CONTROLLER_RESTART_STOP_REASON = "controller_restart"
+STORAGE_FAILURE_KINDS_NEEDING_EVIDENCE = frozenset({"storage_io", "controller_media_access"})
+OUTAGE_STOP_KINDS = STORAGE_FAILURE_KINDS_NEEDING_EVIDENCE | {"controller_storage_unavailable", "host_configuration"}
+OUTAGE_CHECKED_AT_STOP_KEY = "outage_checked_at_stop"
 # An owner's Stop is final until the owner retries the episode, even while its cleanup is unfinished.
 STOPPED_CLEANUP_PENDING_MESSAGE = (
     "Stopped. It stays stopped until you retry it; before it runs again, its earlier encode is ended "
@@ -2171,11 +2175,13 @@ def transition_encode_job_failure(
     waits_for_quality_run = _record_quality_containment(
         config, job, failure_kind=failure_kind, failure=failure, error_message=error_message,
     ) and attempt_count < deps.encode_job_max_attempts
-    retryable = waits_for_quality_run or _encode_failure_is_retryable(failure_kind, error_message, assigned_host)
+    storage_outage = _storage_outage_explains_failure(config, failure_kind)
+    retryable = (waits_for_quality_run or storage_outage
+                 or _encode_failure_is_retryable(failure_kind, error_message, assigned_host))
     if auto_policy_retry:
         retryable = True
     host_related = _encode_failure_is_host_related(failure_kind, error_message, assigned_host)
-    retry_beyond_attempt_cap = _encode_failure_retries_after_attempt_cap(
+    retry_beyond_attempt_cap = storage_outage or _encode_failure_retries_after_attempt_cap(
         failure_kind,
         error_message,
         assigned_host,
@@ -2223,6 +2229,7 @@ def transition_encode_job_failure(
                 "retry_not_before": retry_not_before,
                 "waiting_reason": retry_reason,
                 "terminal_reason": None,
+                "attempt_count": max(attempt_count - 1, 0) if retry_beyond_attempt_cap else attempt_count,
                 # A file that did not fit a computer's scratch folder tries another computer next. Only this
                 # job avoids it: the global block counts host-related failures, and a smaller file may still fit.
                 "host_cooldown_until": (
@@ -2274,9 +2281,34 @@ def transition_encode_job_failure(
     )
     _attach_failure_analysis_to_progress(job, failure_analysis)
     _attach_unknown_failure_detail(job, failure_kind, error_message)
+    if failure_kind in OUTAGE_STOP_KINDS:
+        job["progress"] = {**object_dict(job.get("progress")), OUTAGE_CHECKED_AT_STOP_KEY: True}
     save_encode_job(connection, job)
     sync_encode_job_parent(connection, job, deps)
     connection.commit()
+
+
+def _storage_outage_explains_failure(config: MediaforceConfig, failure_kind: str) -> bool:
+    if failure_kind not in STORAGE_FAILURE_KINDS_NEEDING_EVIDENCE:
+        return False
+    admission = controller_storage_admission(config)
+    return bool(admission["issue"]) and bool(admission["checked"])
+
+
+def _release_jobs_stranded_by_an_outage(connection: DBClient, deps: EncodeQueueRuntimeDeps) -> None:
+    rows = connection.execute(
+        select(encode_jobs.c.job_id)
+        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+        .where(encode_jobs.c.status == "needs_attention")
+        .where(encode_jobs.c.last_failure_kind.in_(OUTAGE_STOP_KINDS))
+    ).mappings().fetchall()
+    for row in rows:
+        job = load_encode_job(connection, str(row["job_id"]))
+        if job is None or object_dict(job.get("progress")).get(OUTAGE_CHECKED_AT_STOP_KEY):
+            continue
+        snapshot = stable_json_hash(job)
+        _requeue_restart_stopped_job(job, deps)
+        _save_swept_job(connection, job, snapshot, deps)
 
 
 def _record_quality_containment(
@@ -5084,10 +5116,6 @@ def _encode_failure_retries_after_attempt_cap(
         error_message: str,
         host_payload: dict[str, Any],
 ) -> bool:
-    # A setup problem needs someone to fix the computer, so an episode that no healthy computer took within
-    # its attempts goes to the owner with that reason instead of waiting on the broken one forever.
-    if failure_kind in {"controller_storage_unavailable", "host_configuration"}:
-        return False
     if not _encode_failure_is_host_related(failure_kind, error_message, host_payload):
         return False
     lowered = error_message.lower()
@@ -5107,6 +5135,7 @@ def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) ->
         "host_scratch": "a work folder problem on the computer",
         REMOTE_QUALITY_TIMEOUT_FAILURE_KIND: "a quality check that ran too long on a computer",
         "storage_io": "a problem reading or writing media",
+        "controller_media_access": "storage on this Mac being unavailable",
         "controller_database_busy": "a busy moment in Mediaforce",
         OUTPUT_NOT_VISIBLE_FAILURE_KIND: "a finished file this machine could not see",
         "unknown": "an error Mediaforce does not recognise",
