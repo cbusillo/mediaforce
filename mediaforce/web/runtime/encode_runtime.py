@@ -2175,7 +2175,7 @@ def transition_encode_job_failure(
     waits_for_quality_run = _record_quality_containment(
         config, job, failure_kind=failure_kind, failure=failure, error_message=error_message,
     ) and attempt_count < deps.encode_job_max_attempts
-    storage_outage = _storage_outage_explains_failure(config, failure_kind)
+    storage_outage = _storage_outage_explains_failure(config, failure_kind, assigned_host)
     retryable = (waits_for_quality_run or storage_outage
                  or _encode_failure_is_retryable(failure_kind, error_message, assigned_host))
     if auto_policy_retry:
@@ -2288,10 +2288,10 @@ def transition_encode_job_failure(
     connection.commit()
 
 
-def _storage_outage_explains_failure(config: MediaforceConfig, failure_kind: str) -> bool:
+def _storage_outage_explains_failure(config: MediaforceConfig, failure_kind: str, host: dict[str, Any]) -> bool:
     if failure_kind not in STORAGE_FAILURE_KINDS_NEEDING_EVIDENCE:
         return False
-    admission = controller_storage_admission(config)
+    admission = controller_storage_admission(config, host)
     return bool(admission["issue"]) and bool(admission["checked"])
 
 

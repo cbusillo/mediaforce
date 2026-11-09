@@ -3599,19 +3599,22 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             f"manifest-{name}.json",
             [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{name}.mkv"))}],
         )
+        failed_host = {"key": "local", "label": "This Mac", "mode": "local"}
         self._save_job(
             connection,
             job_id=f"job-{name}",
             manifest_name=f"manifest-{name}.json",
-            host={"key": "local", "label": "This Mac", "mode": "local"},
+            host=failed_host,
             status="running",
             attempt_count=web_app._encode_queue_runtime_deps().encode_job_max_attempts,
         )
         job = load_encode_job(connection, f"job-{name}")
         assert job is not None
-        with patch.object(
-            encode_runtime, "controller_storage_admission", return_value={"issue": storage_issue, "checked": True},
-        ):
+
+        def admission_for_host(_config: Any, host: dict[str, Any] | None = None) -> dict[str, Any]:
+            return {"issue": storage_issue if host == failed_host else "Another computer's storage is down.", "checked": True}
+
+        with patch.object(encode_runtime, "controller_storage_admission", side_effect=admission_for_host):
             web_app._transition_encode_job_failure(
                 connection, self.config, job, failure_kind=failure_kind, error_message="Input/output error",
             )
@@ -3671,7 +3674,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             for failure_kind in (*released_kinds, "containment_unproven", "deterministic"):
                 stranded(connection, f"stranded-{failure_kind}", failure_kind)
-            encode_runtime._release_jobs_stranded_by_an_outage(connection, web_app._encode_queue_runtime_deps())
+            with patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable):
+                web_app._recover_encode_queue(connection, self.config)
             statuses = {
                 failure_kind: load_encode_job(connection, f"job-stranded-{failure_kind}")["status"]
                 for failure_kind in (*released_kinds, "containment_unproven", "deterministic")
@@ -3687,6 +3691,44 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "deterministic": "needs_attention",
             },
         )
+
+    def test_restart_release_leaves_a_containment_hold_and_its_parents_reason_alone(self) -> None:
+        def shard(connection: DBClient, name: str, failure_kind: str, *, error: str) -> dict[str, Any]:
+            source_path = self._create_source_file(f"{name}.mkv")
+            item_id = self._insert_library_item(connection, source_path, status="planned")
+            self._write_manifest(
+                f"manifest-{name}.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{name}.mkv"))}],
+            )
+            self._save_job(
+                connection, job_id=name, manifest_name=f"manifest-{name}.json",
+                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"}, status="needs_attention", attempt_count=1,
+            )
+            job = load_encode_job(connection, name)
+            assert job is not None
+            job.update({
+                "job_kind": "shard", "parent_job_id": "parent", "manifest_indexes": [0],
+                "terminal_reason": failure_kind, "last_failure_kind": failure_kind, "error": error,
+            })
+            save_encode_job(connection, job)
+            return job
+
+        with open_db(self.config.paths.db_path) as connection:
+            hold = shard(connection, "held", "containment_unproven", error="The run was not confirmed stopped.")
+            shard(connection, "sibling", "host_configuration", error="The computer could not connect storage.")
+            save_encode_job(connection, {**hold, "job_id": "parent", "job_kind": "folder", "parent_job_id": None})
+            before_hold = load_encode_job(connection, "held")
+            encode_runtime._release_jobs_stranded_by_an_outage(connection, web_app._encode_queue_runtime_deps())
+            after_hold = load_encode_job(connection, "held")
+            parent = load_encode_job(connection, "parent")
+            sibling = load_encode_job(connection, "sibling")
+
+        assert parent is not None and sibling is not None
+        self.assertEqual(after_hold, before_hold)
+        self.assertEqual(sibling["status"], "retry_backoff")
+        self.assertEqual(parent["status"], "needs_attention")
+        self.assertEqual(parent["terminal_reason"], "containment_unproven")
+        self.assertEqual(parent["error"], "The run was not confirmed stopped.")
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_last_attempt_setup_failures_still_block_that_computer(self) -> None:
