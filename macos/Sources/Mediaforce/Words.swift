@@ -227,7 +227,8 @@ extension Words {
         return Attention.waitingOnYou(facts) > 0 ? "Waiting for you" : "All caught up"
     }
 
-    static func workExplanation(_ facts: MainWindowFacts) -> String? {
+    /// On Needs you itself, sentences that point at that page's own items are left out.
+    static func workExplanation(_ facts: MainWindowFacts, onNeedsYou: Bool = false) -> String? {
         let work = facts.work
         var sentences: [String] = []
         if work.pausedByOwner {
@@ -245,16 +246,29 @@ extension Words {
             sentences.append("Work is waiting and no computer can take it right now. See Computers for why.")
         }
         sentences.append(contentsOf: work.originalCheckWaitReasons)
-        if work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
-            sentences.append("Nothing is being compressed. \(count(facts.samples.waitingOnYou.count, "sample")) under Samples need you first.")
-        }
-        if !work.kindsNeedingYou.isEmpty {
-            sentences.append("\(count(work.kindsNeedingYou.count, "kind")) waiting in Needs you.")
-        }
-        if !work.seasonsNeedingYou.isEmpty {
-            sentences.append("\(count(work.seasonsNeedingYou.count, "season")) waiting for you in Media.")
+        if !onNeedsYou {
+            if work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
+                sentences.append("Nothing is being compressed. \(count(facts.samples.waitingOnYou.count, "sample")) under Samples need you first.")
+            }
+            if !work.kindsNeedingYou.isEmpty {
+                sentences.append("\(count(work.kindsNeedingYou.count, "kind")) waiting in Needs you.")
+            }
+            if !work.seasonsNeedingYou.isEmpty {
+                sentences.append("\(count(work.seasonsNeedingYou.count, "season")) waiting for you in Media.")
+            }
         }
         return sentences.isEmpty ? nil : sentences.joined(separator: " ")
+    }
+
+    /// The button that goes with a waiting item, named for where it opens.
+    static func waitingAction(_ place: Place?) -> String {
+        switch place {
+        case .kind: "Review kind"
+        case .sample: "Open sample"
+        case .computer: "Open computer"
+        case .spaceSaved: "Review original backups"
+        default: "Open"
+        }
     }
 
     static func staleNotice(_ connection: ServerState, lastHeard: Date?) -> String {
