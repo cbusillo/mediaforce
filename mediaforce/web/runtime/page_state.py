@@ -91,6 +91,7 @@ SAMPLE_FAILED_STATUSES = frozenset({"failed", "stopped", "needs_attention"})
 # A size goal that cannot be met stops the same way on every retry; the owner chooses another size.
 SIZE_GOAL_FAILURES: frozenset[FailureKind] = frozenset({"arithmetic_infeasible", "bound_exhausted", "quality_conflict"})
 _RECORDED_STOP_REASONS: tuple[RecordedStopReason, ...] = get_args(RecordedStopReason)
+_LEFT_OUT_OF_A_SEASON_RETRY = frozenset({CONTAINMENT_UNPROVEN_FAILURE_KIND, "final_size_target_miss"})
 _SAMPLE_TARGET_FAILURES: dict[str, FailureKind] = {
     "infeasible": "arithmetic_infeasible",
     "bound_exhausted": "bound_exhausted",
@@ -211,7 +212,7 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
             "needs_help",
             "attention",
             recovery_kind="season",
-            primary_action=_stopped_season_action(failure),
+            primary_action=_stopped_season_action(failure, facts.encode_children),
             failure=failure,
             source_job=_source_job(encode_job, "encode"),
         )
@@ -578,11 +579,17 @@ def _sample_failure(job: Mapping[str, Any]) -> FailureKind:
     return _failure_from_error(job.get("error"))
 
 
-def _stopped_season_action(failure: FailureKind) -> PageAction:
+def _stopped_season_action(failure: FailureKind, children: Sequence[Mapping[str, Any]]) -> PageAction:
     if failure in SIZE_GOAL_FAILURES:
         return "choose_size"
-    # A season retry remakes every stopped file, so one this hold covers would be remade with the rest.
-    return "check_computer" if failure == CONTAINMENT_UNPROVEN_FAILURE_KIND else "retry_encode"
+    if failure == CONTAINMENT_UNPROVEN_FAILURE_KIND and not _season_retry_would_remake_a_file(children):
+        return "check_computer"
+    return "retry_encode"
+
+
+def _season_retry_would_remake_a_file(children: Sequence[Mapping[str, Any]]) -> bool:
+    stopped = (unfinished_child_reason(run) for run in children if run.get("status") in OWNER_CHILD_STATUSES)
+    return any(needs_owner and reason not in _LEFT_OUT_OF_A_SEASON_RETRY for reason, _label, needs_owner in stopped)
 
 
 def _encode_failure(job: Mapping[str, Any], children: Sequence[Mapping[str, Any]]) -> FailureKind:

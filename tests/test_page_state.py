@@ -315,20 +315,33 @@ def _stopped_part(failure_kind: str, status: str = "needs_attention") -> dict[st
 @pytest.mark.parametrize("encode_job", [
     {**_encode("needs_attention", "The run was not confirmed stopped."), **_stopped_part("containment_unproven")},
     {**_encode("needs_attention", "Some other part's words."), "job_kind": "folder"},
-    {**_encode("needs_attention", "conflicts with the configured quality floor (target_band_violates_quality_floor)"),
-     "job_kind": "folder"},
 ])
-def test_a_season_with_a_file_held_for_an_unconfirmed_stop_offers_no_retry(encode_job: dict[str, Any]) -> None:
+def test_a_season_with_only_a_file_held_for_an_unconfirmed_stop_offers_no_retry(encode_job: dict[str, Any]) -> None:
     state = _decide(
         workflow=_workflow("attention", "needs_attention", job_id="encode-old"),
         encode_job=encode_job,
         encode_children=() if encode_job.get("last_failure_kind") else (
-            _stopped_part("unknown"), _stopped_part("containment_unproven"),
+            _stopped_part("containment_unproven"), _stopped_part("final_size_target_miss"),
+            _stopped_part("unknown", status="completed"),
         ),
     )
 
     assert (state["key"], state["primary_action"], state["failure"]) == ("needs_help", "check_computer", "containment_unproven")
     assert state["needs_you"]
+
+
+@pytest.mark.parametrize("error", [
+    "Some other part's words.",
+    "conflicts with the configured quality floor (target_band_violates_quality_floor)",
+])
+def test_a_season_with_a_held_file_offers_a_retry_when_another_file_can_retry(error: str) -> None:
+    state = _decide(
+        workflow=_workflow("attention", "needs_attention", job_id="encode-old"),
+        encode_job={**_encode("needs_attention", error), "job_kind": "folder"},
+        encode_children=(_stopped_part("unknown"), _stopped_part("containment_unproven")),
+    )
+
+    assert (state["primary_action"], state["failure"]) == ("retry_encode", "containment_unproven")
 
 
 def test_a_season_shows_a_recorded_reason_and_keeps_a_safe_retry() -> None:
