@@ -39,6 +39,13 @@ def is_storage_io_failure(message: str) -> bool:
     return any(marker in lowered for marker in STORAGE_IO_FAILURE_MARKERS)
 
 
+FFMPEG_STOP_SIGNAL_EXIT_MARKER = "exiting normally, received signal 15"
+
+
+def is_stop_signal_exit(message: str) -> bool:
+    return FFMPEG_STOP_SIGNAL_EXIT_MARKER in message.lower()
+
+
 VMAF_MODEL_MISSING_ISSUE = (
     "ffmpeg lists libvmaf but cannot run a VMAF measurement on this computer, usually because libvmaf "
     "was built without its built-in models (that build step needs xxd). Rebuild or reinstall libvmaf with "
@@ -110,6 +117,7 @@ __all__ = [
     "SOURCE_ROOT_READ_MISSING_ISSUE",
     "STAGING_ROOT_WRITE_MISSING_ISSUE",
     "VMAF_MODEL_MISSING_ISSUE",
+    "is_stop_signal_exit",
     "is_storage_io_failure",
     "is_vmaf_model_load_failure",
 ]
