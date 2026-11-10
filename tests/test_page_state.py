@@ -330,6 +330,20 @@ def test_a_season_with_only_a_file_held_for_an_unconfirmed_stop_offers_no_retry(
     assert state["needs_you"]
 
 
+@pytest.mark.parametrize("children", [
+    (_stopped_part("containment_unproven", status="stopped"),),
+    (_stopped_part("containment_unproven", status="stopped"), {**_stopped_part("containment_unproven"), "job_id": "part-2"}),
+])
+def test_a_held_file_that_was_then_stopped_is_not_something_safe_to_retry(children: tuple[dict[str, Any], ...]) -> None:
+    state = _decide(
+        workflow=_workflow("attention", "stopped", job_id="encode-old"),
+        encode_job={**_encode("stopped", "Stopped."), "job_kind": "folder"},
+        encode_children=children,
+    )
+
+    assert (state["primary_action"], state["failure"]) == ("check_computer", "containment_unproven")
+
+
 @pytest.mark.parametrize("error", [
     "Some other part's words.",
     "conflicts with the configured quality floor (target_band_violates_quality_floor)",

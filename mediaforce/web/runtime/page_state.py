@@ -91,7 +91,6 @@ SAMPLE_FAILED_STATUSES = frozenset({"failed", "stopped", "needs_attention"})
 # A size goal that cannot be met stops the same way on every retry; the owner chooses another size.
 SIZE_GOAL_FAILURES: frozenset[FailureKind] = frozenset({"arithmetic_infeasible", "bound_exhausted", "quality_conflict"})
 _RECORDED_STOP_REASONS: tuple[RecordedStopReason, ...] = get_args(RecordedStopReason)
-_LEFT_OUT_OF_A_SEASON_RETRY = frozenset({CONTAINMENT_UNPROVEN_FAILURE_KIND, "final_size_target_miss"})
 _SAMPLE_TARGET_FAILURES: dict[str, FailureKind] = {
     "infeasible": "arithmetic_infeasible",
     "bound_exhausted": "bound_exhausted",
@@ -588,14 +587,20 @@ def _stopped_season_action(failure: FailureKind, children: Sequence[Mapping[str,
 
 
 def _season_retry_would_remake_a_file(children: Sequence[Mapping[str, Any]]) -> bool:
-    stopped = (unfinished_child_reason(run) for run in children if run.get("status") in OWNER_CHILD_STATUSES)
-    return any(needs_owner and reason not in _LEFT_OUT_OF_A_SEASON_RETRY for reason, _label, needs_owner in stopped)
+    retryable = (unfinished_child_reason(run) for run in children
+                 if run.get("status") in OWNER_CHILD_STATUSES and not _held_for_an_unconfirmed_stop(run))
+    return any(needs_owner and reason != "final_size_target_miss" for reason, _label, needs_owner in retryable)
+
+
+def _held_for_an_unconfirmed_stop(run: Mapping[str, Any]) -> bool:
+    return run.get("status") in OWNER_CHILD_STATUSES and run.get("last_failure_kind") == CONTAINMENT_UNPROVEN_FAILURE_KIND
 
 
 def _encode_failure(job: Mapping[str, Any], children: Sequence[Mapping[str, Any]]) -> FailureKind:
-    recorded = {unfinished_child_reason(run)[0] for run in children or [job] if run.get("status") in OWNER_CHILD_STATUSES}
-    if "containment_unproven" in recorded:
+    runs = children or [job]
+    if any(map(_held_for_an_unconfirmed_stop, runs)):
         return "containment_unproven"
+    recorded = {unfinished_child_reason(run)[0] for run in runs if run.get("status") in OWNER_CHILD_STATUSES}
     error = str(job.get("error") or "")
     if any(reason in error for reason in _ENCODE_QUALITY_FLOOR_REASONS):
         return "quality_conflict"

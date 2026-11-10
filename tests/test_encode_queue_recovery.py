@@ -28580,6 +28580,8 @@ raise SystemExit(0)
             return state.primary_lane, state.source_job_id
 
         with open_db(self.config.paths.db_path) as connection:
+            while_retrying = build_folder_workflow_state(connection, "tv/show/Season 1", library_types=queue_config.library_type_map)
+            self.assertEqual((while_retrying.primary_lane, while_retrying.needs_owner), ("processing", True))
             part = next(str(job_id) for job_id in connection.execute(select(encode_jobs.c.job_id).where(
                 encode_jobs.c.status == "queued", encode_jobs.c.job_kind == "shard")).scalars())
             retried = self._existing_job(connection, part)

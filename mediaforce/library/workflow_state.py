@@ -65,6 +65,7 @@ _PROCESSING_JOB_DETAILS = {
     "running": "Compressing now.",
     "retry_backoff": "Trying again soon.",
 }
+_FILE_HELD_DETAIL = "Needs you: waiting for a computer to be checked."
 JOB_STATUSES_FOR_WORKFLOW = PROCESSING_JOB_STATUSES | ATTENTION_JOB_STATUSES | {"completed"}
 UNFINISHED_JOB_STATUSES = PROCESSING_JOB_STATUSES | ATTENTION_JOB_STATUSES
 PREFIX_QUERY_BATCH_SIZE = 200
@@ -1002,7 +1003,12 @@ def _encode_job_workflow_state(
         owner_groups = owner_groups_for_scope(latest, groups) if latest is not None else []
         if owner_groups:
             detail = f"{detail} Needs you: {unfinished_breakdown_summary(owner_groups)}."
-        return ScopeJobLane("processing", detail, str(active["parent_job_id"] or active["job_id"]), bool(owner_groups))
+        elif run_holding_a_file is not None:
+            detail = f"{detail} {_FILE_HELD_DETAIL}"
+        return ScopeJobLane(
+            "processing", detail, str(active["parent_job_id"] or active["job_id"]),
+            bool(owner_groups) or run_holding_a_file is not None,
+        )
     if latest is not None and latest["status"] in ATTENTION_JOB_STATUSES:
         run = attention_for_scope(latest)
         if run is None:
@@ -1016,5 +1022,5 @@ def _encode_job_workflow_state(
         )
         return ScopeJobLane("attention", detail, str(run["job_id"]), True)
     if run_holding_a_file is not None:
-        return ScopeJobLane("attention", "Needs you: waiting for a computer to be checked.", str(run_holding_a_file["job_id"]), True)
+        return ScopeJobLane("attention", _FILE_HELD_DETAIL, str(run_holding_a_file["job_id"]), True)
     return None
