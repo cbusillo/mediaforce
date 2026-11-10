@@ -2,7 +2,7 @@ import json
 import math
 from collections import Counter
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 import uuid
 from pathlib import Path
@@ -41,10 +41,12 @@ from mediaforce.tuning.compression_intent import compression_intent_from_item, c
 from mediaforce.tuning.content_intent_observations import record_visual_content_intent_observation
 from mediaforce.tuning.calibration_jobs import resolve_pending_review_job
 from mediaforce.tuning.size_goals import operator_intent_from_policy
+from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND
 from mediaforce.web.runtime.job_runtime import sample_target_size_failure
 from mediaforce.web.runtime.manifest_reads import ManifestReader, read_manifest
 from mediaforce.web.runtime.decision_evidence import CadenceSafetyPartition, cadence_queue_partition, \
     cadence_safety_partition, older_season_cadence_payload
+from mediaforce.web.runtime.file_encode_outcomes import file_encode_outcomes
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 from mediaforce.web.runtime.production_holds import queue_mode, record_holds, release_holds
 from mediaforce.web.runtime.production_approval import NEARER_APPROVAL_CODE, approval_needs_fresh_sample_response, \
@@ -73,12 +75,12 @@ ManifestPayload: TypeAlias = dict[str, Any]
 
 
 NowIsoFn: TypeAlias = Callable[[], str]
+ClearTerminalEncodeJobsFn: TypeAlias = Callable[[DBClient, str, Collection[str]], None]
 LoadJobStateFn: TypeAlias = Callable[[DBClient, MediaforceConfig, str], JobPayload | None]
 LoadCalibrationStateFn: TypeAlias = Callable[[MediaforceConfig, str], ActionPayload | None]
 ReviewGateFn: TypeAlias = Callable[[ActionPayload | None], ActionPayload]
 UpsertOverrideFn: TypeAlias = Callable[[Path, str, ActionPayload], None]
 LoadActiveEncodeJobFn: TypeAlias = Callable[[DBClient, str], JobPayload | None]
-ClearTerminalEncodeJobsFn: TypeAlias = Callable[[DBClient, str], None]
 PrepareTerminalEncodeJobForRequeueFn: TypeAlias = Callable[[DBClient, JobPayload], None]
 SaveEncodeJobFn: TypeAlias = Callable[[DBClient, JobPayload], None]
 CalibrationDraftHashFn: TypeAlias = Callable[[ActionPayload], str]
@@ -133,6 +135,9 @@ _FINAL_SIZE_POSSIBLY_MISSED_REASON = (
     "Part of its run missed the approved final size, and Mediaforce cannot tell which file. "
     "Approve a fresh test with a changed goal before retrying it."
 )
+
+
+_UNCONFIRMED_STOP_REASON = "Mediaforce couldn't confirm its last picture check ended. It stays on hold until that's confirmed."
 
 
 def _terminal_production_approval_contract(
@@ -914,6 +919,7 @@ def queue_folder_encode_action(
         if queued_contract is None:
             # Publishing could never accept files made under it, so the supported way on is a fresh sample.
             return approval_needs_fresh_sample_response()
+        unconfirmed_stops = _unconfirmed_stop_holds(connection, config, scope)
         if joining_held_files:
             # Held files join as their own run beside the scope's running one, minus any it is making.
             busy_item_ids = active_encode_library_item_ids(connection, normalized_prefix)
@@ -945,6 +951,7 @@ def queue_folder_encode_action(
                         scope,
                         active_encode_job,
                         recovery_plan,
+                        unconfirmed_stops,
                     )
                     recovery_left_out.extend(partition_left_out)
                     if recovery_plan is None:
@@ -1274,6 +1281,7 @@ def queue_folder_encode_action(
             return admission_refusal
         left_out_ids = {file.library_item_id for file in left_out}
         left_out.extend(file for file in refused if file.library_item_id not in left_out_ids)
+        left_out = _with_unconfirmed_stops_left_out(left_out, manifest["items"], unconfirmed_stops)
         selection = object_dict(manifest.get("selection"))
         # Files accepted later can join this run under the same mode; see ambiguous_motion.
         selection["queue_mode"] = hold_mode
@@ -1353,7 +1361,8 @@ def queue_folder_encode_action(
             waiting_for_computer = _prepare_terminal_job_except(
                 connection,
                 latest_encode_job,
-                set(retry_outside_policy) | set(final_size_miss_indexes),
+                set(retry_outside_policy) | set(final_size_miss_indexes)
+                | _manifest_indexes_of(latest_encode_job, unconfirmed_stops.files.keys()),
                 prepare_terminal_encode_job_for_requeue_fn,
             )
             queued_item_ids = {int(item.get("library_item_id") or 0) for item in manifest["items"]}
@@ -1362,7 +1371,7 @@ def queue_folder_encode_action(
                 raise EncodeRetryWaitsForComputerError(waiting_for_computer[min(unplanned)])
             # A file waiting for its computer keeps its unfinished file until that computer confirms it.
             _reset_stale_prefix_encoding_items_for_requeue(connection, config, normalized_prefix, now_iso=now_iso,
-                                                           keep_item_ids=waiting_for_computer.keys())
+                                                           keep_item_ids=waiting_for_computer.keys() | unconfirmed_stops.files.keys())
         attach_target_lineage(
             connection, manifest=manifest, calibration=calibration_payload,
             advice_state=advice_state, approval_contract=queued_contract,
@@ -1374,7 +1383,7 @@ def queue_folder_encode_action(
         if manifest_path is None:
             manifest_path = write_manifest(connection, refreshed_config, manifest)
         if not joining_held_files:
-            clear_terminal_encode_jobs_for_prefix_fn(connection, normalized_prefix)
+            clear_terminal_encode_jobs_for_prefix_fn(connection, normalized_prefix, unconfirmed_stops.job_ids)
         created_at = now_iso()
         parent_job_id = uuid.uuid4().hex[:12]
         queue_job: JobPayload = {
@@ -2166,6 +2175,49 @@ def _recover_active_folder_encode_job(
     }
 
 
+@dataclass(frozen=True, slots=True)
+class _UnconfirmedStopHolds:
+    files: dict[int, LeftOutFile]
+    job_ids: frozenset[str]
+
+
+def _unconfirmed_stop_holds(connection: DBClient, config: MediaforceConfig, scope: MediaScope) -> _UnconfirmedStopHolds:
+    if scope.kind == "media_file":
+        return _UnconfirmedStopHolds({}, frozenset())
+    rel_paths = {
+        int(row["id"]): str(row["rel_path"])
+        for row in connection.execute(
+            select(library_items.c.id, library_items.c.rel_path).where(scope_rel_path_filter(library_items.c.rel_path, scope))
+        ).mappings()
+    }
+    files: dict[int, LeftOutFile] = {}
+    job_ids: set[str] = set()
+    for item_id, outcome in file_encode_outcomes(connection, rel_paths, config=config).items():
+        holds = [job for job in outcome.hold_jobs if job.get("last_failure_kind") == CONTAINMENT_UNPROVEN_FAILURE_KIND]
+        if not holds:
+            continue
+        files[item_id] = LeftOutFile(item_id, rel_paths[item_id], CONTAINMENT_UNPROVEN_FAILURE_KIND, _UNCONFIRMED_STOP_REASON)
+        job_ids.update(str(job_id) for job in holds for job_id in (job["job_id"], job["parent_job_id"]) if job_id)
+    return _UnconfirmedStopHolds(files, frozenset(job_ids))
+
+
+def _with_unconfirmed_stops_left_out(
+        left_out: list[LeftOutFile],
+        items: list[FolderItem],
+        unconfirmed_stops: _UnconfirmedStopHolds,
+) -> list[LeftOutFile]:
+    item_ids = {int(item.get("library_item_id") or 0) for item in items}
+    held = [file for item_id, file in unconfirmed_stops.files.items() if item_id in item_ids]
+    return [*(file for file in left_out if file.library_item_id not in unconfirmed_stops.files), *held]
+
+
+def _manifest_indexes_of(job: JobPayload, library_item_ids: Collection[int]) -> set[int]:
+    return {
+        index for index, item in enumerate(_manifest_items(job))
+        if int(item.get("library_item_id") or 0) in library_item_ids
+    }
+
+
 def _prepare_terminal_job_except(
         connection: DBClient,
         job: JobPayload,
@@ -2213,6 +2265,7 @@ def _partition_active_recovery_plan(
         scope: MediaScope,
         active_encode_job: JobPayload,
         recovery_plan: tuple[list[JobPayload], list[int]],
+        unconfirmed_stops: "_UnconfirmedStopHolds",
 ) -> tuple[tuple[list[JobPayload], list[int]] | None, list[LeftOutFile]]:
     """Recover the failed children that pass; leave each other child failed with its reason."""
     children, indexes = recovery_plan
@@ -2231,6 +2284,9 @@ def _partition_active_recovery_plan(
                 "manifest_item_unknown",
                 "The folder's saved plan does not say which file this is. Prepare the folder again to retry it.",
             )
+    for index, item_id in item_id_by_index.items():
+        if item_id in unconfirmed_stops.files:
+            left_out_by_index[index] = unconfirmed_stops.files[item_id]
     cadence_ids = [
         item_id
         for index, item_id in item_id_by_index.items()

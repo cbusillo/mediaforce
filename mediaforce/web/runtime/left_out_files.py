@@ -40,6 +40,7 @@ _SUMMARY_PHRASES: dict[str, tuple[str, str]] = {
         "wait for the new settings until the rest of the folder finishes",
     ),
     "movie_title_policy": ("is outside the movie title policy", "are outside the movie title policy"),
+    "containment_unproven": ("is on hold until a computer is checked", "are on hold until a computer is checked"),
     "manifest_item_unknown": (
         "is not named in the folder's saved plan",
         "are not named in the folder's saved plan",

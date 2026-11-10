@@ -13,6 +13,7 @@ from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.encoding.encode_queue import DISPLAY_ENCODE_JOB_KINDS, encode_run_manifest_rel_paths, \
     unfinished_breakdown_groups, unfinished_breakdown_summary
 from mediaforce.encoding.plain_failure import plain_failure_summary
+from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND
 from mediaforce.library.item_presence import library_item_is_missing
 from mediaforce.library.motion_keep_state import kept_original_clause
 from mediaforce.library.media_scopes import MediaScope, MediaScopeConflict, media_scope_from_prefix, normalize_scope_prefix, \
@@ -64,6 +65,7 @@ _PROCESSING_JOB_DETAILS = {
     "running": "Compressing now.",
     "retry_backoff": "Trying again soon.",
 }
+_FILE_HELD_DETAIL = "Needs you: waiting for a computer to be checked."
 JOB_STATUSES_FOR_WORKFLOW = PROCESSING_JOB_STATUSES | ATTENTION_JOB_STATUSES | {"completed"}
 UNFINISHED_JOB_STATUSES = PROCESSING_JOB_STATUSES | ATTENTION_JOB_STATUSES
 PREFIX_QUERY_BATCH_SIZE = 200
@@ -766,11 +768,13 @@ def _scope_job_states(
             counts_for_scope=_wider_run_filter(scope, overlapping_rows, part_files),
             attention_for_scope=_wider_run_attention(scope, overlapping_rows, part_files, settled_paths),
             owner_groups_for_scope=_scoped_owner_groups(scope, overlapping_rows, part_files, settled_paths),
+            run_holding_a_file=_run_holding_a_file(scope, overlapping_rows, part_files, settled_paths),
         ),
         own=_encode_job_workflow_state(
             own_rows,
             attention_for_scope=_wider_run_attention(scope, own_rows, part_files, settled_paths),
             owner_groups_for_scope=_scoped_owner_groups(scope, own_rows, part_files, settled_paths),
+            run_holding_a_file=_run_holding_a_file(scope, own_rows, part_files, settled_paths),
         ),
     )
 
@@ -882,6 +886,21 @@ def _current_file_problems(
     }
 
 
+def _run_holding_a_file(
+        scope: MediaScope,
+        overlapping_rows: list[DBRow],
+        part_files: Callable[[DBRow], tuple[str, ...]],
+        settled_paths: frozenset[str],
+) -> DBRow | None:
+    held_parts = [row for row in overlapping_rows if row["job_kind"] != "folder" and row["status"] in ATTENTION_JOB_STATUSES
+                  and row["last_failure_kind"] == CONTAINMENT_UNPROVEN_FAILURE_KIND]
+    if not held_parts:
+        return None
+    problems = _current_file_problems(scope, overlapping_rows, part_files) or {}
+    return next((problems[path][1] for part in held_parts for path in part_files(part)
+                 if path in problems and path not in settled_paths), None)
+
+
 def _wider_run_attention(
         scope: MediaScope,
         overlapping_rows: list[DBRow],
@@ -939,6 +958,7 @@ def _workflow_encode_job_rows(connection: DBClient, *, scopes: list[MediaScope] 
             encode_jobs.c.progress_json,
             encode_jobs.c.manifest_path,
             encode_jobs.c.manifest_indexes_json,
+            encode_jobs.c.last_failure_kind,
         )
         .where(encode_jobs.c.status.in_(JOB_STATUSES_FOR_WORKFLOW))
         .order_by(encode_jobs.c.created_at.desc(), literal_column("rowid").desc())
@@ -956,6 +976,7 @@ def _encode_job_workflow_state(
         owner_groups_for_scope: Callable[[DBRow, list[dict[str, Any]]], list[dict[str, Any]]] = (
             lambda _run, groups: [group for group in groups if group.get("needs_owner")]
         ),
+        run_holding_a_file: DBRow | None = None,
 ) -> ScopeJobLane | None:
     """The scope's encode lane, naming every reason its files are not finished.
 
@@ -982,7 +1003,12 @@ def _encode_job_workflow_state(
         owner_groups = owner_groups_for_scope(latest, groups) if latest is not None else []
         if owner_groups:
             detail = f"{detail} Needs you: {unfinished_breakdown_summary(owner_groups)}."
-        return ScopeJobLane("processing", detail, str(active["parent_job_id"] or active["job_id"]), bool(owner_groups))
+        elif run_holding_a_file is not None:
+            detail = f"{detail} {_FILE_HELD_DETAIL}"
+        return ScopeJobLane(
+            "processing", detail, str(active["parent_job_id"] or active["job_id"]),
+            bool(owner_groups) or run_holding_a_file is not None,
+        )
     if latest is not None and latest["status"] in ATTENTION_JOB_STATUSES:
         run = attention_for_scope(latest)
         if run is None:
@@ -995,4 +1021,6 @@ def _encode_job_workflow_state(
             else plain_failure_summary(run["error"]) or "This needs you to take a look."
         )
         return ScopeJobLane("attention", detail, str(run["job_id"]), True)
+    if run_holding_a_file is not None:
+        return ScopeJobLane("attention", _FILE_HELD_DETAIL, str(run_holding_a_file["job_id"]), True)
     return None

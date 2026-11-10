@@ -211,7 +211,7 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
             "needs_help",
             "attention",
             recovery_kind="season",
-            primary_action=_stopped_season_action(failure),
+            primary_action=_stopped_season_action(failure, facts.encode_children),
             failure=failure,
             source_job=_source_job(encode_job, "encode"),
         )
@@ -578,17 +578,29 @@ def _sample_failure(job: Mapping[str, Any]) -> FailureKind:
     return _failure_from_error(job.get("error"))
 
 
-def _stopped_season_action(failure: FailureKind) -> PageAction:
+def _stopped_season_action(failure: FailureKind, children: Sequence[Mapping[str, Any]]) -> PageAction:
     if failure in SIZE_GOAL_FAILURES:
         return "choose_size"
-    # A season retry remakes every stopped file, so one this hold covers would be remade with the rest.
-    return "check_computer" if failure == CONTAINMENT_UNPROVEN_FAILURE_KIND else "retry_encode"
+    if failure == CONTAINMENT_UNPROVEN_FAILURE_KIND and not _season_retry_would_remake_a_file(children):
+        return "check_computer"
+    return "retry_encode"
+
+
+def _season_retry_would_remake_a_file(children: Sequence[Mapping[str, Any]]) -> bool:
+    retryable = (unfinished_child_reason(run) for run in children
+                 if run.get("status") in OWNER_CHILD_STATUSES and not _held_for_an_unconfirmed_stop(run))
+    return any(needs_owner and reason != "final_size_target_miss" for reason, _label, needs_owner in retryable)
+
+
+def _held_for_an_unconfirmed_stop(run: Mapping[str, Any]) -> bool:
+    return run.get("status") in OWNER_CHILD_STATUSES and run.get("last_failure_kind") == CONTAINMENT_UNPROVEN_FAILURE_KIND
 
 
 def _encode_failure(job: Mapping[str, Any], children: Sequence[Mapping[str, Any]]) -> FailureKind:
-    recorded = {unfinished_child_reason(run)[0] for run in children or [job] if run.get("status") in OWNER_CHILD_STATUSES}
-    if "containment_unproven" in recorded:
+    runs = children or [job]
+    if any(map(_held_for_an_unconfirmed_stop, runs)):
         return "containment_unproven"
+    recorded = {unfinished_child_reason(run)[0] for run in runs if run.get("status") in OWNER_CHILD_STATUSES}
     error = str(job.get("error") or "")
     if any(reason in error for reason in _ENCODE_QUALITY_FLOOR_REASONS):
         return "quality_conflict"

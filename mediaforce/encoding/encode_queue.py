@@ -1,7 +1,7 @@
 import json
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Mapping, NamedTuple
+from typing import Any, Collection, Mapping, NamedTuple
 
 from sqlalchemy import delete
 from sqlalchemy import func
@@ -305,11 +305,12 @@ def load_active_encode_jobs_for_prefix(connection: DBClient, prefix: str) -> lis
 def _prefix_overlap_filter(scope: MediaScope) -> Any:
     return scope_prefix_overlap_filter(encode_jobs.c.prefix, scope)
 
-def clear_terminal_encode_jobs_for_prefix(connection: DBClient, prefix: str) -> None:
+def clear_terminal_encode_jobs_for_prefix(connection: DBClient, prefix: str, keep_job_ids: Collection[str] = ()) -> None:
     """Remove a prefix's ended jobs before it is planned again; never work that is queued or running."""
     connection.execute(
         delete(encode_jobs)
         .where(encode_jobs.c.prefix == prefix)
+        .where(encode_jobs.c.job_id.not_in(list(keep_job_ids)))
         .where(encode_jobs.c.status.not_in(ACTIVE_ENCODE_JOB_STATUSES))
         .where(or_(encode_jobs.c.job_kind != "shard", encode_jobs.c.status != "completed"))
         .where(
