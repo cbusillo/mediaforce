@@ -57,7 +57,7 @@ from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND, CONTA
     analyze_quality_policy_failure, quality_error_message, stop_timed_out_remote_quality_run
 from mediaforce.encoding.staged_host import StagedScratchError, host_scratch_root, measure_scratch_free_bytes, \
     required_scratch_bytes
-from mediaforce.hosts.types import is_storage_io_failure, is_vmaf_model_load_failure
+from mediaforce.hosts.types import is_stop_signal_exit, is_storage_io_failure, is_vmaf_model_load_failure
 from mediaforce.encoding.cadence import CadenceResolutionError
 from mediaforce.encoding.free_space import ReserveInputError
 from mediaforce.encoding.staging import EncodeConnectionLostError, FinishedOutputNotVisibleError, \
@@ -2170,6 +2170,7 @@ def transition_encode_job_failure(
     assigned_host = object_dict(job.get("host"))
     previous_last_host = object_dict(job.get("last_host"))
     attempt_count = int_value(job.get("attempt_count"))
+    failure_kind = _storage_stop_kind_for_stop_signal(config, failure_kind, error_message, assigned_host)
     failure_analysis = _encode_failure_analysis(job, failure_kind=failure_kind, error_message=error_message)
     auto_policy_retry = _apply_auto_quality_policy_retry(job, failure_analysis)
     waits_for_quality_run = _record_quality_containment(
@@ -2281,18 +2282,35 @@ def transition_encode_job_failure(
     )
     _attach_failure_analysis_to_progress(job, failure_analysis)
     _attach_unknown_failure_detail(job, failure_kind, error_message)
-    if failure_kind in OUTAGE_STOP_KINDS:
+    if failure_kind in OUTAGE_STOP_KINDS or is_stop_signal_exit(error_message):
         job["progress"] = {**object_dict(job.get("progress")), OUTAGE_CHECKED_AT_STOP_KEY: True}
     save_encode_job(connection, job)
     sync_encode_job_parent(connection, job, deps)
     connection.commit()
 
 
-def _storage_outage_explains_failure(config: MediaforceConfig, failure_kind: str, host: dict[str, Any]) -> bool:
-    if failure_kind not in STORAGE_FAILURE_KINDS_NEEDING_EVIDENCE:
-        return False
+def _storage_outage_confirmed(config: MediaforceConfig, host: dict[str, Any]) -> bool:
     admission = controller_storage_admission(config, host)
     return bool(admission["issue"]) and bool(admission["checked"])
+
+
+def _storage_outage_explains_failure(config: MediaforceConfig, failure_kind: str, host: dict[str, Any]) -> bool:
+    return failure_kind in STORAGE_FAILURE_KINDS_NEEDING_EVIDENCE and _storage_outage_confirmed(config, host)
+
+
+def _storage_stop_kind_for_stop_signal(
+        config: MediaforceConfig, failure_kind: str, error_message: str, host: dict[str, Any],
+) -> str:
+    if failure_kind == "unknown" and is_stop_signal_exit(error_message) and _storage_outage_confirmed(config, host):
+        return "storage_io"
+    return failure_kind
+
+
+def _outage_may_have_stranded(job: Mapping[str, Any]) -> bool:
+    progress = object_dict(job.get("progress"))
+    if progress.get(OUTAGE_CHECKED_AT_STOP_KEY):
+        return False
+    return job.get("last_failure_kind") in OUTAGE_STOP_KINDS or is_stop_signal_exit(str(progress.get("failure_detail") or ""))
 
 
 def _release_jobs_stranded_by_an_outage(connection: DBClient, deps: EncodeQueueRuntimeDeps) -> None:
@@ -2300,11 +2318,11 @@ def _release_jobs_stranded_by_an_outage(connection: DBClient, deps: EncodeQueueR
         select(encode_jobs.c.job_id)
         .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
         .where(encode_jobs.c.status == "needs_attention")
-        .where(encode_jobs.c.last_failure_kind.in_(OUTAGE_STOP_KINDS))
+        .where(encode_jobs.c.last_failure_kind.in_(OUTAGE_STOP_KINDS | {"unknown"}))
     ).mappings().fetchall()
     for row in rows:
         job = load_encode_job(connection, str(row["job_id"]))
-        if job is None or object_dict(job.get("progress")).get(OUTAGE_CHECKED_AT_STOP_KEY):
+        if job is None or not _outage_may_have_stranded(job):
             continue
         snapshot = stable_json_hash(job)
         _requeue_restart_stopped_job(job, deps)

@@ -137,6 +137,9 @@ def _remote_cleanup_succeeds(_host: dict[str, Any], command: list[str], **_kwarg
     return subprocess.CompletedProcess(command, 0, "", "")
 
 
+FFMPEG_STOP_SIGNAL_LOG = "frame=40795 fps=15\nprogress=end\nExiting normally, received signal 15."
+
+
 def _remote_host_unreachable(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(["ssh"], 255, "", "ssh: connect to host: Operation timed out")
 
@@ -3592,6 +3595,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
     def _storage_failure_at_the_attempt_cap(
             self, connection: DBClient, name: str, failure_kind: str, *, storage_issue: str | None,
+            error_message: str = "Input/output error",
     ) -> dict[str, Any]:
         source_path = self._create_source_file(f"{name}.mkv")
         item_id = self._insert_library_item(connection, source_path, status="encoding")
@@ -3616,7 +3620,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         with patch.object(encode_runtime, "controller_storage_admission", side_effect=admission_for_host):
             web_app._transition_encode_job_failure(
-                connection, self.config, job, failure_kind=failure_kind, error_message="Input/output error",
+                connection, self.config, job, failure_kind=failure_kind, error_message=error_message,
             )
         updated = load_encode_job(connection, f"job-{name}")
         assert updated is not None
@@ -3648,6 +3652,72 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             }
 
         self.assertEqual(set(statuses.values()), {"needs_attention"})
+
+    def test_stop_signal_during_a_confirmed_outage_is_a_storage_stop_that_gives_the_try_back(self) -> None:
+        max_attempts = web_app._encode_queue_runtime_deps().encode_job_max_attempts
+        with open_db(self.config.paths.db_path) as connection:
+            updated = self._storage_failure_at_the_attempt_cap(
+                connection, "signal-outage", "unknown", storage_issue="Controller storage: unavailable.",
+                error_message=FFMPEG_STOP_SIGNAL_LOG,
+            )
+
+        self.assertEqual(updated["status"], "retry_backoff")
+        self.assertEqual(updated["last_failure_kind"], "storage_io")
+        self.assertEqual(updated["attempt_count"], max_attempts - 1)
+
+    def test_stop_signal_on_healthy_storage_counts_and_is_not_released_on_restart(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            updated = self._storage_failure_at_the_attempt_cap(
+                connection, "signal-healthy", "unknown", storage_issue=None, error_message=FFMPEG_STOP_SIGNAL_LOG,
+            )
+            self.assertEqual(updated["status"], "needs_attention")
+            encode_runtime._release_jobs_stranded_by_an_outage(connection, web_app._encode_queue_runtime_deps())
+            after_restart = load_encode_job(connection, "job-signal-healthy")
+
+        assert after_restart is not None
+        self.assertEqual(after_restart["status"], "needs_attention")
+        self.assertEqual(after_restart["last_failure_kind"], "unknown")
+
+    def test_unrecognised_error_during_an_outage_still_counts(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            updated = self._storage_failure_at_the_attempt_cap(
+                connection, "unrecognised-outage", "unknown", storage_issue="Controller storage: unavailable.",
+                error_message="ffmpeg exited with an error nothing recognises",
+            )
+
+        self.assertEqual(updated["status"], "needs_attention")
+        self.assertEqual(updated["last_failure_kind"], "unknown")
+
+    def test_restart_releases_a_stop_signal_left_stranded_before_outages_were_checked(self) -> None:
+        def stranded(connection: DBClient, name: str, progress: dict[str, Any]) -> None:
+            source_path = self._create_source_file(f"{name}.mkv")
+            item_id = self._insert_library_item(connection, source_path, status="planned")
+            self._write_manifest(
+                f"manifest-{name}.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{name}.mkv"))}],
+            )
+            self._save_job(
+                connection, job_id=name, manifest_name=f"manifest-{name}.json",
+                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"}, status="needs_attention", attempt_count=4,
+            )
+            job = load_encode_job(connection, name)
+            assert job is not None
+            job.update({"terminal_reason": "max_attempts_exhausted", "last_failure_kind": "unknown", "progress": progress})
+            save_encode_job(connection, job)
+
+        with open_db(self.config.paths.db_path) as connection:
+            stranded(connection, "signal", {"failure_detail": FFMPEG_STOP_SIGNAL_LOG})
+            stranded(connection, "checked", {"failure_detail": FFMPEG_STOP_SIGNAL_LOG, "outage_checked_at_stop": True})
+            stranded(connection, "other-error", {"failure_detail": "ffmpeg exited with an error nothing recognises"})
+            encode_runtime._release_jobs_stranded_by_an_outage(connection, web_app._encode_queue_runtime_deps())
+            released = load_encode_job(connection, "signal")
+            statuses = {name: load_encode_job(connection, name)["status"] for name in ("checked", "other-error")}
+
+        assert released is not None
+        self.assertEqual(released["status"], "retry_backoff")
+        self.assertEqual(released["attempt_count"], 4)
+        self.assertIsNone(released["terminal_reason"])
+        self.assertEqual(statuses, {"checked": "needs_attention", "other-error": "needs_attention"})
 
     def test_restart_releases_only_jobs_an_earlier_outage_stranded(self) -> None:
         def stranded(connection: DBClient, name: str, failure_kind: str) -> None:
