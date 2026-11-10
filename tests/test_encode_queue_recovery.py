@@ -28514,12 +28514,18 @@ raise SystemExit(0)
 
         self._assert_pending_retry_still_waits(killed_during_removal)
 
+    @staticmethod
+    def _existing_job(connection: DBClient, job_id: str) -> dict[str, Any]:
+        job = load_encode_job(connection, job_id)
+        assert job is not None
+        return job
+
     def _season_with_one_unconfirmed_stop(self, queue_config: MediaforceConfig) -> tuple[int, int, Path, Path]:
         host: dict[str, object] = {"key": "mini", "host": "mini.example", "label": "Mac mini", "mode": "ssh"}
         item_ids, partials = self._stopped_season_on_two_computers(queue_config, [host, dict(host)])
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(connection, {
-                **load_encode_job(connection, "stopped-0"), "status": "needs_attention", "error": "Not confirmed stopped.",
+                **self._existing_job(connection, "stopped-0"), "status": "needs_attention", "error": "Not confirmed stopped.",
                 "terminal_reason": "containment_unproven", "last_failure_kind": "containment_unproven",
             })
         held_id, retried_id = item_ids.values()
@@ -28540,7 +28546,7 @@ raise SystemExit(0)
         self.assertTrue(held_partial.exists())
         self.assertFalse(retried_partial.exists())
         with open_db(self.config.paths.db_path) as connection:
-            self.assertEqual(load_encode_job(connection, "stopped-0")["last_failure_kind"], "containment_unproven")
+            self.assertEqual(self._existing_job(connection, "stopped-0")["last_failure_kind"], "containment_unproven")
             status = connection.execute(select(library_items.c.status).where(library_items.c.id == held_id)).scalar_one()
         self.assertEqual(status, "encoding")
 
@@ -28552,9 +28558,9 @@ raise SystemExit(0)
             with open_db(self.config.paths.db_path) as connection:
                 part = next(job for job in connection.execute(select(encode_jobs.c.job_id).where(
                     encode_jobs.c.status == "queued", encode_jobs.c.job_kind == "shard")).scalars())
-                retried = load_encode_job(connection, str(part))
+                retried = self._existing_job(connection, str(part))
                 save_encode_job(connection, {**retried, "status": "stopped"})
-                folder = load_encode_job(connection, retried["parent_job_id"])
+                folder = self._existing_job(connection, retried["parent_job_id"])
                 save_encode_job(connection, {**folder, "status": "stopped"})
             result = self._retry_stopped_season(queue_config)
 
@@ -28569,16 +28575,16 @@ raise SystemExit(0)
         with patch.object(encode_runtime, "run_remote_command", new=_SleepingComputer("none").run_remote_command):
             self.assertTrue(self._retry_stopped_season(queue_config)["ok"])
 
-        def season_lane(connection: DBClient) -> tuple[str, str | None]:
-            state = build_folder_workflow_state(connection, "tv/show/Season 1", library_types=queue_config.library_type_map)
+        def season_lane(db: DBClient) -> tuple[str, str | None]:
+            state = build_folder_workflow_state(db, "tv/show/Season 1", library_types=queue_config.library_type_map)
             return state.primary_lane, state.source_job_id
 
         with open_db(self.config.paths.db_path) as connection:
             part = next(str(job_id) for job_id in connection.execute(select(encode_jobs.c.job_id).where(
                 encode_jobs.c.status == "queued", encode_jobs.c.job_kind == "shard")).scalars())
-            retried = load_encode_job(connection, part)
+            retried = self._existing_job(connection, part)
             save_encode_job(connection, {**retried, "status": "completed"})
-            save_encode_job(connection, {**load_encode_job(connection, retried["parent_job_id"]), "status": "completed"})
+            save_encode_job(connection, {**self._existing_job(connection, retried["parent_job_id"]), "status": "completed"})
             connection.execute(update(library_items).where(library_items.c.id == retried_id).values(status="promoted"))
             self.assertEqual(season_lane(connection), ("attention", "stopped-season"))
 
@@ -28587,7 +28593,7 @@ raise SystemExit(0)
             }])
             self._save_job(connection, job_id="exact-retry", manifest_name=exact.name, host={}, status="completed", attempt_count=1)
             save_encode_job(connection, {
-                **load_encode_job(connection, "exact-retry"), "prefix": "tv/show/Season 1/Episode 1.mkv", "job_kind": "single",
+                **self._existing_job(connection, "exact-retry"), "prefix": "tv/show/Season 1/Episode 1.mkv", "job_kind": "single",
             })
             self.assertNotEqual(season_lane(connection)[0], "attention")
 
@@ -28622,7 +28628,7 @@ raise SystemExit(0)
         self.assertEqual([file["library_item_id"] for file in result["left_out"]], [held_id])
         self.assertTrue(held_partial.exists())
         with open_db(self.config.paths.db_path) as connection:
-            self.assertEqual(load_encode_job(connection, "stopped-0")["status"], "needs_attention")
+            self.assertEqual(self._existing_job(connection, "stopped-0")["status"], "needs_attention")
 
     def test_retry_into_a_running_season_leaves_a_held_file_out(self) -> None:
         queue_config = self._complete_queue_config()
@@ -28630,9 +28636,9 @@ raise SystemExit(0)
         item_ids, partials = self._stopped_season_on_two_computers(queue_config, [host, dict(host), dict(host)])
         held_id = list(item_ids.values())[1]
         with open_db(self.config.paths.db_path) as connection:
-            save_encode_job(connection, {**load_encode_job(connection, "stopped-0"), "status": "queued", "host": {}})
+            save_encode_job(connection, {**self._existing_job(connection, "stopped-0"), "status": "queued", "host": {}})
             save_encode_job(connection, {
-                **load_encode_job(connection, "stopped-1"), "status": "needs_attention", "error": "Not confirmed stopped.",
+                **self._existing_job(connection, "stopped-1"), "status": "needs_attention", "error": "Not confirmed stopped.",
                 "terminal_reason": "containment_unproven", "last_failure_kind": "containment_unproven",
             })
 
@@ -28643,7 +28649,7 @@ raise SystemExit(0)
         self.assertEqual([file["library_item_id"] for file in result["left_out"]], [held_id])
         self.assertTrue(partials["Episode 2.mkv"].exists())
         with open_db(self.config.paths.db_path) as connection:
-            self.assertEqual(load_encode_job(connection, "stopped-1")["status"], "needs_attention")
+            self.assertEqual(self._existing_job(connection, "stopped-1")["status"], "needs_attention")
 
     def test_retry_into_a_running_season_waits_for_a_sleeping_computer(self) -> None:
         queue_config = self._complete_queue_config()
