@@ -3689,21 +3689,21 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(updated["last_failure_kind"], "unknown")
 
     def test_restart_releases_a_stop_signal_left_stranded_before_outages_were_checked(self) -> None:
-        def stranded(connection: DBClient, name: str, progress: dict[str, Any]) -> None:
+        def stranded(db: DBClient, name: str, progress: dict[str, Any]) -> None:
             source_path = self._create_source_file(f"{name}.mkv")
-            item_id = self._insert_library_item(connection, source_path, status="planned")
+            item_id = self._insert_library_item(db, source_path, status="planned")
             self._write_manifest(
                 f"manifest-{name}.json",
                 [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{name}.mkv"))}],
             )
             self._save_job(
-                connection, job_id=name, manifest_name=f"manifest-{name}.json",
+                db, job_id=name, manifest_name=f"manifest-{name}.json",
                 host={"key": "remote-a", "label": "Remote A", "mode": "ssh"}, status="needs_attention", attempt_count=4,
             )
-            job = load_encode_job(connection, name)
+            job = load_encode_job(db, name)
             assert job is not None
             job.update({"terminal_reason": "max_attempts_exhausted", "last_failure_kind": "unknown", "progress": progress})
-            save_encode_job(connection, job)
+            save_encode_job(db, job)
 
         with open_db(self.config.paths.db_path) as connection:
             stranded(connection, "signal", {"failure_detail": FFMPEG_STOP_SIGNAL_LOG})
@@ -3711,13 +3711,15 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             stranded(connection, "other-error", {"failure_detail": "ffmpeg exited with an error nothing recognises"})
             encode_runtime._release_jobs_stranded_by_an_outage(connection, web_app._encode_queue_runtime_deps())
             released = load_encode_job(connection, "signal")
-            statuses = {name: load_encode_job(connection, name)["status"] for name in ("checked", "other-error")}
+            already_checked = load_encode_job(connection, "checked")
+            other_error = load_encode_job(connection, "other-error")
 
-        assert released is not None
+        assert released is not None and already_checked is not None and other_error is not None
         self.assertEqual(released["status"], "retry_backoff")
         self.assertEqual(released["attempt_count"], 4)
         self.assertIsNone(released["terminal_reason"])
-        self.assertEqual(statuses, {"checked": "needs_attention", "other-error": "needs_attention"})
+        self.assertEqual(already_checked["status"], "needs_attention")
+        self.assertEqual(other_error["status"], "needs_attention")
 
     def test_restart_releases_only_jobs_an_earlier_outage_stranded(self) -> None:
         def stranded(connection: DBClient, name: str, failure_kind: str) -> None:
