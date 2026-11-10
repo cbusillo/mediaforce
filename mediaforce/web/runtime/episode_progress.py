@@ -14,6 +14,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.hosts.work_window import CONTROLLER_WORK_WINDOW_WAIT, controller_work_schedule
 from mediaforce.core.type_defs import float_value, int_value, object_dict
+from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND
 from mediaforce.library.staged_validation import AUTOMATIC_PUBLISH_ORIGINS, not_remade_blockers, staged_validation_outcome, \
     stopped_publish_state
 from mediaforce.library.workflow_state import ItemWorkflowState
@@ -34,6 +35,7 @@ EPISODE_STAGES = (
     "held",
     "not_started",
 )
+_REASONS_NAMING_THEIR_COMPUTER = frozenset({"restart_stopped", CONTAINMENT_UNPROVEN_FAILURE_KIND})
 _RUNNING_PREPARATION_STATES = frozenset({"starting", "staging_source"})
 _OWNER_RUN_STATUSES = frozenset({"needs_attention", "failed", "stopped"})
 _OWNER_VALIDATIONS = frozenset({"size_held", "failed"})
@@ -244,11 +246,12 @@ def _episode(
 
 
 def _run_wait_reason(reason: str, run: Mapping[str, Any]) -> dict[str, Any]:
-    """The run's reason code, with the computer a restart stopped it on as its own value when the run names one."""
+    """The run's reason code, with the computer the owner has to look at as its own value when the run names one."""
     code = reason.partition(":")[0]
-    if code != "restart_stopped":
+    if code not in _REASONS_NAMING_THEIR_COMPUTER:
         return {"code": code}
-    return {"code": code, "computer": str(object_dict(run.get("host")).get("label") or "").strip() or None}
+    host = object_dict(run.get("host")) or object_dict(run.get("last_host"))
+    return {"code": code, "computer": str(host.get("label") or "").strip() or None}
 
 
 def _staged_rows(connection: DBClient, item_ids: list[int]) -> dict[int, Mapping[str, Any]]:

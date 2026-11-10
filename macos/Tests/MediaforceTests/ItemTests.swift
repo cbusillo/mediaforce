@@ -117,6 +117,20 @@ final class ItemTests: XCTestCase {
         XCTAssertEqual(Set(reason[5...8]).count, 4)
     }
 
+    func testAFileHeldForAnUnconfirmedStopNamesTheComputerToCheck() throws {
+        let computer = "Attic Mini"
+        let season = try facts([
+            file(1, stage: "needs_you", bytes: 1, waitReason: #"{"code": "needs_review"}"#),
+            file(2, stage: "needs_you", bytes: 1, waitReason: #"{"code": "containment_unproven", "computer": "\#(computer)"}"#),
+            file(3, stage: "needs_you", bytes: 1, waitReason: #"{"code": "unknown"}"#),
+        ])
+        let reason = season.files.map(Words.waitingReason)
+
+        XCTAssertTrue(reason[1].contains(computer))
+        XCTAssertNotEqual(Words.fileState(season.files[1]), Words.fileState(season.files[0]))
+        XCTAssertEqual(Set(reason).count, 3)
+    }
+
     func testStoppedPublishingSaysWhyItNeedsAttention() throws {
         let season = try facts([
             file(1, stage: "needs_you", bytes: 100, waitReason: #"{"code": "publish_failed"}"#),

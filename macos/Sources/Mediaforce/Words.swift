@@ -173,6 +173,7 @@ enum Words {
         case ("ready_to_compare", _): "Sample ready"
         case ("needs_help", "choose_size"): "Needs a size decision"
         case ("needs_help", "retry_encode"): "Compressing stopped"
+        case ("needs_help", "check_computer"): "Needs a computer checked"
         case ("needs_help", "review_files"): "Some files need you"
         case ("needs_help", _): "Sample needs making again"
         case ("ready_to_make", _): "Approved"
@@ -288,6 +289,29 @@ extension Words {
         case "missing_clips": "Its comparison clips are gone."
         case "restarted": "It was interrupted by a restart."
         case "stopped": "It was stopped."
+        case "containment_unproven":
+            "Mediaforce couldn't confirm an episode's picture check ended. Make sure the computer that ran it is idle. The episode stays on hold until that's confirmed."
+        default: recordedStop(code)
+        }
+    }
+
+    /// Why a run stopped, as the run recorded it; the same sentence on the file and on its season.
+    private static func recordedStop(_ code: String?) -> String? {
+        switch code {
+        case "unknown": "It stopped on an error Mediaforce didn't recognize, even after several tries."
+        case "controller_database_busy": "Mediaforce was too busy to keep track of it, so it stopped."
+        case "storage_io": "It had trouble reading or writing the media files."
+        case "controller_storage_unavailable", "controller_media_access": "Mediaforce couldn't reach the storage it's on."
+        case "host_unavailable": "The computer compressing it became unavailable."
+        case "ssh_transport": "Mediaforce couldn't connect to the computer compressing it."
+        case "host_configuration": "The computer compressing it has a setup problem."
+        case "host_scratch": "The computer compressing it had trouble with its work folder."
+        case "stale_lease": "The computer compressing it stopped reporting in."
+        case "worker_restart": "Mediaforce restarted while compressing it."
+        case "remote_quality_timeout": "Checking its picture took too long on a computer."
+        case "unreadable_output": "The compressed copy couldn't be read."
+        case "output_not_visible": "This Mac couldn't see the finished copy."
+        case "target_size_needs_review": "The finished copy didn't pass the size check."
         default: nil
         }
     }
@@ -561,6 +585,7 @@ extension Words {
         } ?? "The sample is ready. Watch it next to the original."
         case ("needs_help", "choose_size"): "The sample can't reach the size goal at good quality. Choose another size."
         case ("needs_help", "retry_encode"): "Compressing stopped. Finished episodes are safe; the rest need trying again."
+        case ("needs_help", "check_computer"): "An episode is on hold until a computer is checked."
         case ("needs_help", "review_files"): "Some files need you before the season can go on."
         case ("needs_help", _): "The sample needs making again."
         case ("needs_test", _): "This season has no sample yet."
@@ -1211,11 +1236,8 @@ extension Words {
         case "restart_stopped_last_attempt": "Mediaforce restarted during its last try."
         case "quality_floor_size_conflict": "To look right it needs more space than its size goal."
         case "final_size_target_miss": "The compressed copy didn't come out at its size goal."
-        case "controller_database_busy": "Mediaforce was too busy to keep track of it, so it stopped."
-        case "storage_io": "It had trouble reading or writing the media files."
-        case "host_unavailable": "The computer compressing it became unavailable."
-        case "ssh_transport": "Mediaforce couldn't connect to the computer compressing it."
-        case "remote_quality_timeout": "Checking its picture took too long on a computer."
+        case "containment_unproven":
+            "Mediaforce couldn't confirm its picture check ended on \(computer). Make sure \(computer) is idle. This file stays on hold until that's confirmed."
         case "needs_review": "It ran into a problem Mediaforce couldn't sort out by itself."
         case "schedule_too_short": "It takes longer than every computer's work window. A longer work window lets it run."
         case "plan_rebuild": "Its work needs to be set up again before it can run."
@@ -1223,7 +1245,7 @@ extension Words {
         case "storage_reconnect": "The storage it's on needs to be reconnected."
         case "copy_missing": "Its compressed copy is missing, so there's nothing to check."
         case "settings_block": "Mediaforce can't start it with its library's current settings."
-        default: "It needs a decision from you."
+        case let code: recordedStop(code) ?? "It needs a decision from you."
         }
     }
 
@@ -1238,8 +1260,11 @@ extension Words {
         case "restart_stopped", "restart_stopped_last_attempt": "Stopped by a restart"
         case "quality_floor_size_conflict": "Needs more than its size goal"
         case "final_size_target_miss": "Missed its size goal"
+        case "containment_unproven": "On hold until a computer is checked"
         case "controller_database_busy", "storage_io", "host_unavailable", "ssh_transport", "remote_quality_timeout",
-             "needs_review": "Couldn't finish"
+             "needs_review", "unknown", "controller_storage_unavailable", "controller_media_access", "host_configuration",
+             "host_scratch", "stale_lease", "worker_restart", "unreadable_output", "output_not_visible",
+             "target_size_needs_review": "Couldn't finish"
         case "schedule_too_short": "Longer than every work window"
         case "plan_rebuild": "Needs to be set up again"
         case "storage_repair": "Storage needs a repair"

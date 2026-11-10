@@ -308,6 +308,39 @@ def test_a_sample_in_progress_leads_over_checking_finishing_and_finished(lane: s
     )
 
 
+def _stopped_part(failure_kind: str, status: str = "needs_attention") -> dict[str, Any]:
+    return {"job_id": f"part-{failure_kind}", "status": status, "progress": {}, "last_failure_kind": failure_kind}
+
+
+@pytest.mark.parametrize("encode_job", [
+    {**_encode("needs_attention", "The run was not confirmed stopped."), **_stopped_part("containment_unproven")},
+    {**_encode("needs_attention", "Some other part's words."), "job_kind": "folder"},
+    {**_encode("needs_attention", "conflicts with the configured quality floor (target_band_violates_quality_floor)"),
+     "job_kind": "folder"},
+])
+def test_a_season_with_a_file_held_for_an_unconfirmed_stop_offers_no_retry(encode_job: dict[str, Any]) -> None:
+    state = _decide(
+        workflow=_workflow("attention", "needs_attention", job_id="encode-old"),
+        encode_job=encode_job,
+        encode_children=() if encode_job.get("last_failure_kind") else (
+            _stopped_part("unknown"), _stopped_part("containment_unproven"),
+        ),
+    )
+
+    assert (state["key"], state["primary_action"], state["failure"]) == ("needs_help", "check_computer", "containment_unproven")
+    assert state["needs_you"]
+
+
+def test_a_season_shows_a_recorded_reason_and_keeps_a_safe_retry() -> None:
+    state = _decide(
+        workflow=_workflow("attention", "needs_attention", job_id="encode-old"),
+        encode_job=_encode("needs_attention", "Copied from a part."),
+        encode_children=(_stopped_part("unknown"), _stopped_part("containment_unproven", status="completed")),
+    )
+
+    assert (state["primary_action"], state["failure"]) == ("retry_encode", "unknown")
+
+
 @pytest.mark.parametrize(("error", "failure"), [
     ("Final output size missed the approved target band: status=under_target, actual=1, target=2.", "size_under_target"),
     ("Final output size missed the approved target band: status=over_target, actual=3, target=2.", "size_over_target"),
@@ -676,6 +709,19 @@ def test_running_folder_keeps_owner_child_problems_in_its_attention_fact(config:
         state = _page_state(connection, config, SEASON, {})
         assert state["key"] == "making_season"
         assert state["needs_you"] is True
+
+
+def test_a_stopped_folder_run_is_judged_by_its_parts_own_records(config: MediaforceConfig) -> None:
+    with open_db(config.paths.db_path) as connection:
+        _insert_item(connection, EPISODE)
+        _insert_encode_job(connection, "stopped-folder", prefix=SEASON, kind="folder", status="needs_attention")
+        _insert_encode_job(connection, "held-part", prefix=SEASON, kind="shard", status="needs_attention")
+        connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == "held-part").values(
+            parent_job_id="stopped-folder", last_failure_kind="containment_unproven",
+        ))
+        state = _page_state(connection, config, SEASON, {})
+
+    assert (state["primary_action"], state["failure"]) == ("check_computer", "containment_unproven")
 
 
 @pytest.mark.parametrize("still_included", [True, False])

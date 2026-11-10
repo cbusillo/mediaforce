@@ -1,15 +1,17 @@
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.type_defs import object_dict, object_list
-from mediaforce.encoding.encode_queue import load_encode_job
+from mediaforce.encoding.encode_queue import list_child_encode_jobs, load_encode_job
 from mediaforce.encoding.plain_failure import plain_failure_summary
+from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND
 from mediaforce.tuning.calibration_jobs import load_latest_job, load_latest_jobs_for_prefixes
 from mediaforce.tuning.quality_risk import build_quality_risk_contract
+from mediaforce.web.runtime.encode_runtime import OWNER_CHILD_STATUSES, unfinished_child_reason
 from mediaforce.web.runtime.folder_actions import quality_risk_blocks_production
 from mediaforce.web.runtime.folder_tuning_advice import review_gate
 from mediaforce.web.runtime.job_runtime import retryable_saved_sample_job, sample_target_size_failure
@@ -45,8 +47,28 @@ PageAction = Literal[
     "validate_outputs",
     "promote_outputs",
     "decide_motion",
+    "check_computer",
 ]
-FailureKind = Literal[
+# What a stopped run recorded, most urgent first: the first one found is the one a season shows.
+RecordedStopReason = Literal[
+    "containment_unproven",
+    "unknown",
+    "storage_io",
+    "controller_storage_unavailable",
+    "controller_media_access",
+    "host_unavailable",
+    "ssh_transport",
+    "host_configuration",
+    "host_scratch",
+    "stale_lease",
+    "worker_restart",
+    "remote_quality_timeout",
+    "controller_database_busy",
+    "unreadable_output",
+    "output_not_visible",
+    "target_size_needs_review",
+]
+FailureKind = RecordedStopReason | Literal[
     "arithmetic_infeasible",
     "bound_exhausted",
     "quality_conflict",
@@ -68,6 +90,7 @@ SAMPLE_WAITING_STATUSES = frozenset({"queued", "retry_backoff"})
 SAMPLE_FAILED_STATUSES = frozenset({"failed", "stopped", "needs_attention"})
 # A size goal that cannot be met stops the same way on every retry; the owner chooses another size.
 SIZE_GOAL_FAILURES: frozenset[FailureKind] = frozenset({"arithmetic_infeasible", "bound_exhausted", "quality_conflict"})
+_RECORDED_STOP_REASONS: tuple[RecordedStopReason, ...] = get_args(RecordedStopReason)
 _SAMPLE_TARGET_FAILURES: dict[str, FailureKind] = {
     "infeasible": "arithmetic_infeasible",
     "bound_exhausted": "bound_exhausted",
@@ -127,6 +150,8 @@ class PageStateFacts:
     workflow: Mapping[str, Any] | None
     # The encode run the workflow lane came from (its ``source_job_id``).
     encode_job: Mapping[str, Any] | None = None
+    # The parts of a stopped folder run: each one's own reason, not the one its row copied.
+    encode_children: Sequence[Mapping[str, Any]] = ()
     # The newest sample job at exactly this folder.
     sample_job: Mapping[str, Any] | None = None
     # The saved sample at exactly this folder.
@@ -181,12 +206,12 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
     if lane == "processing":
         return PageState("making_season", "active", source_job=_source_job(encode_job, "encode"))
     if lane == "attention" and not _sample_answers_stop(sample_job, encode_job):
-        failure = _encode_failure(encode_job)
+        failure = _encode_failure(encode_job, facts.encode_children)
         return PageState(
             "needs_help",
             "attention",
             recovery_kind="season",
-            primary_action="choose_size" if failure in SIZE_GOAL_FAILURES else "retry_encode",
+            primary_action=_stopped_season_action(failure),
             failure=failure,
             source_job=_source_job(encode_job, "encode"),
         )
@@ -351,6 +376,7 @@ def _facts(
         lifecycle: Mapping[str, Any] | None = None,
 ) -> PageStateFacts:
     source_job_id = str(object_dict(workflow).get("source_job_id") or "")
+    encode_job = load_encode_job(connection, source_job_id) if source_job_id else None
     approval = effective_production_approval(config, prefix, load_calibration)
     calibration = load_calibration(config, prefix)
     wait = None
@@ -364,7 +390,13 @@ def _facts(
     return PageStateFacts(
         prefix=prefix,
         workflow=workflow,
-        encode_job=load_encode_job(connection, source_job_id) if source_job_id else None,
+        encode_job=encode_job,
+        encode_children=(
+            list_child_encode_jobs(connection, source_job_id)
+            if encode_job is not None and encode_job.get("job_kind") == "folder"
+            and object_dict(workflow).get("primary_lane") == "attention"
+            else ()
+        ),
         sample_job=sample_job if _is_sample_job(sample_job) else None,
         calibration=calibration,
         approval=approval,
@@ -546,10 +578,23 @@ def _sample_failure(job: Mapping[str, Any]) -> FailureKind:
     return _failure_from_error(job.get("error"))
 
 
-def _encode_failure(job: Mapping[str, Any]) -> FailureKind:
+def _stopped_season_action(failure: FailureKind) -> PageAction:
+    if failure in SIZE_GOAL_FAILURES:
+        return "choose_size"
+    # A season retry remakes every stopped file, so one this hold covers would be remade with the rest.
+    return "check_computer" if failure == CONTAINMENT_UNPROVEN_FAILURE_KIND else "retry_encode"
+
+
+def _encode_failure(job: Mapping[str, Any], children: Sequence[Mapping[str, Any]]) -> FailureKind:
+    recorded = {unfinished_child_reason(run)[0] for run in children or [job] if run.get("status") in OWNER_CHILD_STATUSES}
+    if "containment_unproven" in recorded:
+        return "containment_unproven"
     error = str(job.get("error") or "")
     if any(reason in error for reason in _ENCODE_QUALITY_FLOOR_REASONS):
         return "quality_conflict"
+    for reason in _RECORDED_STOP_REASONS:
+        if reason in recorded:
+            return reason
     return _failure_from_error(error)
 
 
