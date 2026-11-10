@@ -89,6 +89,13 @@ final class TVShowsTests: XCTestCase {
         XCTAssertFalse(decoded.filter(\.opensSample).contains { Words.seasonButton($0) == Words.openItem })
     }
 
+    func testASeasonHeldForAComputerCheckSaysWhatItWaitsOn() {
+        XCTAssertNotEqual(Words.seasonState("needs_help", "check_computer"), Words.seasonState("needs_help", "retry_encode"))
+        XCTAssertNotEqual(Words.seasonState("needs_help", "check_computer"), Words.seasonState("needs_help", "make_sample"))
+        XCTAssertNotNil(Words.sampleFailure("containment_unproven"))
+        XCTAssertNotNil(Words.sampleFailure("unknown"))
+    }
+
     func testCompressingWithFilesThatNeedYouAndMotionChecksFirstAreSaid() throws {
         func flagged(_ json: String, _ flag: String) throws -> String {
             var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])

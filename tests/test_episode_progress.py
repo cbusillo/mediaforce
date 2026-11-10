@@ -226,6 +226,25 @@ class SeasonEpisodeProgressTests(unittest.TestCase):
             "Episode 08.mkv": {"code": "settings_block"},
         })
 
+    def test_a_stopped_file_shows_the_reason_its_run_recorded(self) -> None:
+        held, unrecognized, offline = (_item(number) for number in range(1, 4))
+        runs = {
+            held.rel_path: _run("needs_attention", last_failure_kind="containment_unproven", last_host={"label": "Attic Mini"}),
+            unrecognized.rel_path: _run("needs_attention", last_failure_kind="unknown"),
+            offline.rel_path: _run("needs_attention", last_failure_kind="controller_storage_unavailable"),
+        }
+
+        episodes = season_episode_progress([held, unrecognized, offline], runs, {})
+
+        self.assertEqual(
+            [episode["wait_reason"] for episode in episodes],
+            [
+                {"code": "containment_unproven", "computer": "Attic Mini"},
+                {"code": "unknown"},
+                {"code": "controller_storage_unavailable"},
+            ],
+        )
+
     def test_a_checked_copy_says_more_than_the_run_that_left_it(self) -> None:
         missed_size, stopped, waiting_on_owner, running = (_item(number, "ready_to_validate") for number in range(1, 5))
         runs = {

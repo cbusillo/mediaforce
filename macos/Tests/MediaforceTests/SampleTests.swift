@@ -47,7 +47,7 @@ final class SampleTests: XCTestCase {
             ("ready_to_finish", "promote_outputs", .replaceOriginals), ("motion_held", "decide_motion", .decideMotion),
         ]
         let noNativeStep: [(String, String?)] = [
-            ("finish_blocked", nil), ("ready_to_check", nil), ("ready_to_finish", nil),
+            ("finish_blocked", nil), ("ready_to_check", nil), ("ready_to_finish", nil), ("needs_help", "check_computer"),
         ]
         let makeSampleHeadline = Words.sampleHeadline(try decode(Self.facts(state: "needs_help", action: "make_sample")))
         for (state, action, expected) in laterStages.map({ ($0.0, $0.1, [$0.2]) }) + noNativeStep.map({ ($0.0, $0.1, []) }) {

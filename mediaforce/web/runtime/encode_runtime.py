@@ -1729,6 +1729,17 @@ _UNFINISHED_REASON_LABELS = {
     "host_unavailable": "computer unavailable",
     "ssh_transport": "couldn't connect to a computer",
     REMOTE_QUALITY_TIMEOUT_FAILURE_KIND: "measuring quality ran too long on a computer",
+    CONTAINMENT_UNPROVEN_FAILURE_KIND: "waiting for a computer to be checked",
+    "unknown": "stopped on an error Mediaforce didn't recognize",
+    "controller_storage_unavailable": "couldn't reach its storage",
+    "controller_media_access": "couldn't reach its storage",
+    "host_configuration": "a computer had a setup problem",
+    "host_scratch": "a computer had trouble with its work folder",
+    "stale_lease": "a computer stopped reporting in",
+    "worker_restart": "Mediaforce restarted",
+    "unreadable_output": "the compressed copy couldn't be read",
+    OUTPUT_NOT_VISIBLE_FAILURE_KIND: "this Mac couldn't see the finished copy",
+    "target_size_needs_review": "didn't pass the size check",
     "needs_review": "waiting for you to take a look",
 }
 # Queued files wait for the scheduler; group its sentences under short plain labels, first match
@@ -1749,7 +1760,7 @@ _WAITING_REASON_PATTERNS: tuple[tuple[str, str, bool, tuple[str, ...]], ...] = (
     )),
     ("waiting_cleanup", "waiting to clean up a failed attempt", False, ("header-only output", "unfinished file it left")),
 )
-_OWNER_CHILD_STATUSES = frozenset({"needs_attention", "failed", "stopped"})
+OWNER_CHILD_STATUSES = frozenset({"needs_attention", "failed", "stopped"})
 _UNFINISHED_BREAKDOWN_ITEM_LIMIT = 5
 
 
@@ -1847,7 +1858,7 @@ def _unfinished_child_breakdown(children: list[dict[str, Any]]) -> list[dict[str
     groups: dict[str, dict[str, Any]] = {}
     for child in children:
         status = str(child.get("status") or "")
-        if status not in _OWNER_CHILD_STATUSES | {"retry_backoff", "queued"}:
+        if status not in OWNER_CHILD_STATUSES | {"retry_backoff", "queued"}:
             continue
         reason, label, needs_owner = unfinished_child_reason(child)
         group = groups.setdefault(
