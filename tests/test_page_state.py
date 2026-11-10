@@ -315,6 +315,8 @@ def _stopped_part(failure_kind: str, status: str = "needs_attention") -> dict[st
 @pytest.mark.parametrize("encode_job", [
     {**_encode("needs_attention", "The run was not confirmed stopped."), **_stopped_part("containment_unproven")},
     {**_encode("needs_attention", "Some other part's words."), "job_kind": "folder"},
+    {**_encode("needs_attention", "conflicts with the configured quality floor (target_band_violates_quality_floor)"),
+     "job_kind": "folder"},
 ])
 def test_a_season_with_a_file_held_for_an_unconfirmed_stop_offers_no_retry(encode_job: dict[str, Any]) -> None:
     state = _decide(

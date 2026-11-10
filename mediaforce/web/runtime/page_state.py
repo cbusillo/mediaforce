@@ -586,10 +586,12 @@ def _stopped_season_action(failure: FailureKind) -> PageAction:
 
 
 def _encode_failure(job: Mapping[str, Any], children: Sequence[Mapping[str, Any]]) -> FailureKind:
+    recorded = {unfinished_child_reason(run)[0] for run in children or [job] if run.get("status") in OWNER_CHILD_STATUSES}
+    if "containment_unproven" in recorded:
+        return "containment_unproven"
     error = str(job.get("error") or "")
     if any(reason in error for reason in _ENCODE_QUALITY_FLOOR_REASONS):
         return "quality_conflict"
-    recorded = {unfinished_child_reason(run)[0] for run in children or [job] if run.get("status") in OWNER_CHILD_STATUSES}
     for reason in _RECORDED_STOP_REASONS:
         if reason in recorded:
             return reason

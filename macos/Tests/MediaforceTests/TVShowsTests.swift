@@ -89,7 +89,7 @@ final class TVShowsTests: XCTestCase {
         XCTAssertFalse(decoded.filter(\.opensSample).contains { Words.seasonButton($0) == Words.openItem })
     }
 
-    func testASeasonHeldForAComputerCheckSaysWhatItWaitsOn() {
+    func testASeasonHeldForAComputerCheckIsNotWordedAsARetryOrASample() {
         XCTAssertNotEqual(Words.seasonState("needs_help", "check_computer"), Words.seasonState("needs_help", "retry_encode"))
         XCTAssertNotEqual(Words.seasonState("needs_help", "check_computer"), Words.seasonState("needs_help", "make_sample"))
         XCTAssertNotNil(Words.sampleFailure("containment_unproven"))
