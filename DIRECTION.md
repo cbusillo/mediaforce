@@ -73,15 +73,6 @@ Whatever blocks that journey is the next piece of work.
 
 ## Milestones
 
-- `Unattended show production` proves an approved show finishes and
-  publishes every eligible episode one at a time, with each per-episode
-  problem handled or listed in plain words while the rest continue; ends if
-  a run still needs the Director to rescue episodes that measured evidence
-  could have handled.
-- `One approval covers many shows` proves one decision about a kind of
-  content converts shows Mediaforce never sampled for the Director, asking
-  only when a show measurably does not fit; ends if most shows still need
-  their own sample approval.
 - `Plain and beautiful Mediaforce` proves the Director can say what every
   screen means and what is theirs to do, without jargon, and likes using
   it; ends if a redesign pass leaves the Director still decoding terms.
