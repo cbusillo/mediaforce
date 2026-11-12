@@ -203,9 +203,9 @@ def backup_database(database: Path, destination: Path, *, pause_queue: bool = Fa
                 raise RuntimeError("database backup failed quick_check")
 
 
-def require_stopped_idle_controller(config: MediaforceConfig) -> bool:
+def require_stopped_idle_controller(config: MediaforceConfig, *, port: int = 8777) -> bool:
     """Verify stopped custody and return whether the queue was already paused."""
-    require_closed_listener()
+    require_closed_listener(port)
     with open_readonly_db(config.paths.db_path) as connection:
         counts = [
             connection.exec_driver_sql(statement).scalar_one()
@@ -222,13 +222,13 @@ def require_stopped_idle_controller(config: MediaforceConfig) -> bool:
     return was_paused
 
 
-def require_closed_listener() -> None:
-    if not _listener_is_closed():
-        raise RuntimeError("port 8777 is still listening")
+def require_closed_listener(port: int = 8777) -> None:
+    if not _listener_is_closed(port):
+        raise RuntimeError(f"port {port} is still listening")
 
 
-def _listener_is_closed() -> bool:
-    probe = subprocess.run(["/usr/sbin/lsof", "-tiTCP:8777", "-sTCP:LISTEN"], capture_output=True, check=False)
+def _listener_is_closed(port: int = 8777) -> bool:
+    probe = subprocess.run(["/usr/sbin/lsof", f"-tiTCP:{port}", "-sTCP:LISTEN"], capture_output=True, check=False)
     if probe.returncode == 1 and not probe.stdout and not probe.stderr:
         return True
     if probe.returncode != 0:

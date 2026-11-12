@@ -25,5 +25,12 @@ struct MediaforceApp: App {
         Settings {
             SettingsWindow(model: appDelegate.model)
         }
+        .commands {
+            if Updates.isConfigured {
+                CommandGroup(after: .appInfo) {
+                    Button(Words.checkForUpdates) { Updates.shared.checkForUpdates() }
+                }
+            }
+        }
     }
 }

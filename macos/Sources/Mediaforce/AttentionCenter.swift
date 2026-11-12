@@ -63,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         model.onFacts = { attention.review($0) }
         model.startWatching()
         self.attention = attention
+        Task { await Updates.shared.start() }
     }
 
     nonisolated func userNotificationCenter(

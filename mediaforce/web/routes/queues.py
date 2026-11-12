@@ -17,6 +17,8 @@ def register_queue_routes(
     *,
     pause_encode_queue_action: Callable[[], dict[str, Any]],
     resume_encode_queue_action: Callable[[], dict[str, Any]],
+    fence_for_update_action: Callable[[], dict[str, Any]],
+    release_update_fence_action: Callable[[dict[str, Any]], dict[str, Any]],
 ) -> None:
 
     @app.post("/api/encode-queue/pause")
@@ -26,6 +28,16 @@ def register_queue_routes(
     @app.post("/api/encode-queue/resume")
     def api_resume_encode_queue() -> JSONResponse:
         return JSONResponse(resume_encode_queue_action())
+
+    # The app's update transaction: pause new work before saving the old app and database, then put it back.
+    @app.post("/api/update/fence")
+    def api_fence_for_update() -> JSONResponse:
+        return JSONResponse(fence_for_update_action())
+
+    @app.post("/api/update/release")
+    async def api_release_update_fence(request: Request) -> JSONResponse:
+        body = await _controller_json_body(request)
+        return JSONResponse(await run_in_threadpool(release_update_fence_action, body))
 
 
 def register_child_recovery_routes(

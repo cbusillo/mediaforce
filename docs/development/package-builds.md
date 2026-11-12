@@ -93,6 +93,43 @@ examples and are assembled from the digest-pinned runtime and hashed lockfile.
 Upstream Python tests, development objects and local wheel-origin records are
 omitted from the app.
 Staged native code has debug symbols stripped before signing; qualification
-rejects retained object-file debug maps. Until update support is delivered,
-startup refuses an app replaced in place over a saved service. Restore the
-saved app/configuration and keep using the current controller deployment.
+rejects retained object-file debug maps. Sparkle's framework helpers are
+signed as whole bundles, inside out, with the same team.
+
+## Updates with Sparkle
+
+A bundled app updates through Sparkle's standard windows. A build only checks
+when its Info.plist names a feed (`MEDIAFORCE_UPDATE_FEED`) and the feed's
+public EdDSA key (`MEDIAFORCE_UPDATE_KEY`); source builds leave both empty and
+never contact a feed. Automatic installation is off: Mediaforce gets ready
+first, then the Director accepts the install.
+
+Sparkle owns download, archive verification, replacement and relaunch. The
+app's own server executable owns everything around it, as
+`mediaforce-server --config <saved> service update status|prepare|cancel|finish|rollback`.
+One record, `runtime/update-intent.json` beside the configured database, spans
+app quit, replacement and reboot. While it exists, the encode queue, samples
+and background work admit nothing new, resume is refused, the hourly cleanup
+does not run, and the server starts only as the step names.
+
+1. When Sparkle finds a build, the app refuses it and starts preparation.
+   The server pauses new work and records what was already paused; running
+   files finish. Each minute the app rechecks and shows what is still running.
+2. When nothing runs, preparation copies and verifies the signed old app and
+   its exact launch item into a fresh `deployments/update-<old>-to-<new>-<time>/`
+   stage, stops the service, verifies the port closed and the database's
+   running-work records empty, and saves a checked `before.sqlite`. Only then
+   does the rollback-stage pointer move. A failure here restarts the unchanged
+   old service from its saved launch item and restores the pauses.
+3. Sparkle may now offer and install exactly that build. A dismissed offer
+   that never downloaded restarts the old service; a downloaded or pending
+   install keeps it stopped.
+4. The relaunched app starts its own server through the saved service path,
+   checks its build, API, queued work and storage, records the pair in
+   `candidate.txt`, then restores the pauses so only a previously running
+   queue resumes.
+5. A candidate that fails stays stopped and its build is recorded in
+   `runtime/failed-update-builds.json`; Sparkle never offers it again. `rollback`
+   moves the failed database and app into the stage's `failed/` folder,
+   restores `before.sqlite`, the saved app and the exact saved launch item,
+   and starts the old build. Roll back only before new work was released.

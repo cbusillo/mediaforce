@@ -74,6 +74,14 @@ def relocatable_reference(value: str, image: Path) -> bool:
     return False
 
 
+SPARKLE_PARTS = (
+    ("Versions/B/XPCServices/Installer.xpc", ()),
+    ("Versions/B/XPCServices/Downloader.xpc", ("--preserve-metadata=entitlements",)),
+    ("Versions/B/Autoupdate", ()),
+    ("Versions/B/Updater.app", ()),
+)
+
+
 def signing_identity() -> str:
     identities = re.findall(r'\b([0-9A-F]{40}) "Developer ID Application: [^"\n]+ \(' + MACOS_SIGNING_TEAM + r'\)"',
                             run("security", "find-identity", "-v", "-p", "codesigning"))
@@ -155,11 +163,16 @@ def stage_server(app: Path, cache: Path, identity: str) -> None:
         run("xcrun", "strip", "-S", path)
         if re.search(r"\bOSO\s", run("nm", "-a", path)):
             raise ValueError(f"Native code retains a debug build path: {path}")
+    sparkle = contents / "Frameworks/Sparkle.framework"
     for path in sorted(images, key=lambda image: len(image.parts), reverse=True):
-        if path == contents / "MacOS" / info["CFBundleExecutable"]:
+        if path == contents / "MacOS" / info["CFBundleExecutable"] or path.is_relative_to(sparkle):
             continue
         run("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, path)
     run("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, framework)
+    # Sparkle's helpers are bundles with their own entitlements; sign each as a whole, inside out, as Sparkle documents.
+    for part, preserve in SPARKLE_PARTS:
+        run("codesign", "--force", "--options", "runtime", "--timestamp", *preserve, "--sign", identity, sparkle / part)
+    run("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, sparkle)
     for path in contents.rglob(".DS_Store"):
         path.unlink()
     run("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, app)

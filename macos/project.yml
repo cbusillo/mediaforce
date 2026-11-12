@@ -4,6 +4,10 @@ options:
   bundleIdPrefix: com.shinycomputers
   deploymentTarget:
     macOS: "15.0"
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.9.6
 settings:
   base:
     SWIFT_VERSION: "6.0"
@@ -18,6 +22,8 @@ targets:
     sources:
       - path: Sources/Mediaforce
       - path: Resources/Assets.xcassets
+    dependencies:
+      - package: Sparkle
     info:
       path: Generated/Mediaforce-Info.plist
       properties:
@@ -27,6 +33,12 @@ targets:
         LSApplicationCategoryType: public.app-category.utilities
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        # Release builds name the signed feed and its public key; a source build leaves both empty and never checks.
+        SUFeedURL: $(MEDIAFORCE_UPDATE_FEED)
+        SUPublicEDKey: $(MEDIAFORCE_UPDATE_KEY)
+        SUEnableAutomaticChecks: true
+        # Mediaforce gets ready first, then asks before installing.
+        SUAllowsAutomaticUpdates: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.shinycomputers.mediaforce
@@ -34,6 +46,8 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
+        MEDIAFORCE_UPDATE_FEED: ""
+        MEDIAFORCE_UPDATE_KEY: ""
 
   MediaforceTests:
     type: bundle.unit-test

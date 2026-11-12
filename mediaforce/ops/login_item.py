@@ -473,6 +473,15 @@ def _show_logs(path: Path, *, follow: bool, lines: int) -> int:
 
 
 __all__ = [
+    # Deploy and update transactions share these launchd and file steps.
+    "_atomic_write",
+    "_bootstrap",
+    "_bundle_code_hash",
+    "_launch_domain",
+    "_launch_target",
+    "_require_success",
+    "_run_command",
+    "_verify_signed_bundle",
     "MACOS_SIGNING_TEAM",
     "BOOTOUT_ACCEPTED_EXIT_CODES",
     "LOGIN_ITEM_LABEL",

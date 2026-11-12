@@ -10,8 +10,30 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+UPDATE_INTENT_NAME = "update-intent.json"
+
+
 class RuntimeProtectionError(RuntimeError):
     pass
+
+
+def read_update_intent(support_dir: Path) -> dict | None:
+    """The unfinished app update beside this database, or None. An unreadable record still counts as unfinished."""
+    try:
+        value = json.loads((support_dir / "runtime" / UPDATE_INTENT_NAME).read_text())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return {"phase": "unreadable"}
+    return value if isinstance(value, dict) else {"phase": "unreadable"}
+
+
+def update_hold_reason(support_dir: Path) -> str | None:
+    """Why new work and cleanup wait: an update holds them until it finishes, across quit, replacement and reboot."""
+    intent = read_update_intent(support_dir)
+    if intent is None:
+        return None
+    return f"Mediaforce is updating to build {intent.get('to', 'unknown')}. New work waits until it finishes."
 
 
 def bundled_app_path() -> Path | None:

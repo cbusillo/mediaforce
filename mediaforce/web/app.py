@@ -132,6 +132,7 @@ from mediaforce.web.routes import register_app_window_routes, register_completed
     register_folder_routes, register_host_routes, register_library_settings_routes, \
     register_metadata_settings_routes, register_operator_work_routes, register_queue_routes, register_settings_routes
 from mediaforce.web.routes.releases import register_release_routes
+from mediaforce.web.runtime.queue_actions import fence_for_update_action, release_update_fence_action
 from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.library.metadata_sync import cached_poster, metadata_configuration_status
 from mediaforce.reviewing.clips import review_file_from_url
@@ -2186,6 +2187,12 @@ def create_app(
             now_iso=_now_iso,
         )
 
+    def _fence_for_update_action() -> dict[str, Any]:
+        return fence_for_update_action(connection_factory=lambda: open_db(config.paths.db_path), now_iso=_now_iso)
+
+    def _release_update_fence_action(paused: dict[str, Any]) -> dict[str, Any]:
+        return release_update_fence_action(paused, connection_factory=lambda: open_db(config.paths.db_path), now_iso=_now_iso)
+
     def _save_series_lifecycle_action(normalized_prefix: str, mode: str) -> dict[str, Any]:
         nonlocal config
         normalized_mode = mode.strip().lower()
@@ -2345,6 +2352,8 @@ def create_app(
         app,
         pause_encode_queue_action=_pause_encode_queue_action,
         resume_encode_queue_action=_resume_encode_queue_action,
+        fence_for_update_action=_fence_for_update_action,
+        release_update_fence_action=_release_update_fence_action,
     )
 
     return app
@@ -2393,6 +2402,9 @@ def main(argv: list[str] | None = None) -> None:
 
         verify_bundled_startup(bundle)
         config = load_config(Path(args.config))
+        from mediaforce.ops.bundled_update import require_startup_allowed
+
+        require_startup_allowed(config.paths.db_path.parent, bundle)
         env_path = env_path or config.paths.db_path.parent / ".env"
     if args.credentials is not None:
         with args.credentials.open("rb"):
