@@ -31,6 +31,10 @@ _KEEP_AWAKE_SHELL_LINE = (
 )
 
 
+SSH_ALIVE_CHECK_SECONDS = 15
+SSH_ALIVE_CHECKS_BEFORE_DROP = 4
+
+
 def keep_awake_while_running(script: str) -> str:
     """Keep the computer from idle-sleeping for as long as the shell running ``script`` lives."""
     return f"{_KEEP_AWAKE_SHELL_LINE}\n{script}"
@@ -97,7 +101,13 @@ def _ssh_client_lines(stderr: str | None) -> list[str]:
     return [line for line in lines if line.startswith(_SSH_CLIENT_FAILURE_PREFIXES)]
 
 
-def ssh_client_options(*, batch_mode: bool = True, connect_timeout_seconds: int = 5) -> list[str]:
+def ssh_client_options(
+        *,
+        batch_mode: bool = True,
+        connect_timeout_seconds: int = 5,
+        alive_check_seconds: int = SSH_ALIVE_CHECK_SECONDS,
+        alive_checks_before_drop: int = SSH_ALIVE_CHECKS_BEFORE_DROP,
+) -> list[str]:
     options = [
         "-o",
         "StrictHostKeyChecking=accept-new",
@@ -109,6 +119,7 @@ def ssh_client_options(*, batch_mode: bool = True, connect_timeout_seconds: int 
     if batch_mode:
         options.extend(["-o", "BatchMode=yes"])
     options.extend(["-o", f"ConnectTimeout={connect_timeout_seconds}"])
+    options.extend(["-o", f"ServerAliveInterval={alive_check_seconds}", "-o", f"ServerAliveCountMax={alive_checks_before_drop}"])
     return options
 
 
