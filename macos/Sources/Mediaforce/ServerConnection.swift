@@ -18,5 +18,5 @@ struct ServerProblem: Equatable, Sendable {
 }
 
 enum ServerConnection {
-    static let localServer = URL(string: "http://127.0.0.1:8777")!
+    static let localServer = URL(string: "http://127.0.0.1:\(Bundle.main.object(forInfoDictionaryKey: "MediaforceServerPort") as? String ?? "8777")")!
 }

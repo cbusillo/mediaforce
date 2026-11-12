@@ -16,6 +16,7 @@ import urllib.request
 
 from scripts.verify_package_contents import verify_package_archives
 from mediaforce.ops.login_item import MACOS_SIGNING_TEAM
+from mediaforce.ops.runtime_install import SERVER_PORT, SERVICE_LABEL, bundle_service
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -114,7 +115,16 @@ def prepare_framework(destination: Path, cache: Path) -> None:
         shutil.copytree(Path(scratch) / manifest["framework_source_path"], destination, symlinks=True)
 
 
-def stage_server(app: Path, cache: Path, identity: str) -> None:
+def require_proof_identity(app: Path) -> None:
+    """A proof build must not share the live app's ID, service label or port: it could read or stop the live service."""
+    info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+    release_id = re.search(r"PRODUCT_BUNDLE_IDENTIFIER: (\S+)", (ROOT / "macos/project.yml").read_text())
+    label, port = bundle_service(app)
+    if release_id is None or info["CFBundleIdentifier"] == release_id[1] or label == SERVICE_LABEL or port == SERVER_PORT:
+        raise ValueError(f"Proof build shares the live identity: {info['CFBundleIdentifier']}, {label}, {port}")
+
+
+def stage_server(app: Path, cache: Path, identity: str, *, proof: bool = False) -> None:
     contents = app / "Contents"
     with (contents / "Info.plist").open("rb") as stream:
         info = plistlib.load(stream)
@@ -178,6 +188,8 @@ def stage_server(app: Path, cache: Path, identity: str) -> None:
     run("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, app)
     run("codesign", "--verify", "--deep", "--strict", app)
     verify_package_archives([app], source_defaults=ROOT / "mediaforce/package_defaults/defaults.toml")
+    if proof:
+        require_proof_identity(app)
     print(json.dumps({"app": str(app), "architectures": sorted(architectures), "minimum_os": minimum_os}))
 
 
@@ -186,8 +198,9 @@ def main() -> int:
     parser.add_argument("app", type=Path)
     parser.add_argument("--cache", required=True, type=Path)
     parser.add_argument("--identity")
+    parser.add_argument("--proof", action="store_true", help="refuse unless the app has its own ID, service label and port")
     args = parser.parse_args()
-    stage_server(args.app.resolve(strict=True), args.cache, args.identity or signing_identity())
+    stage_server(args.app.resolve(strict=True), args.cache, args.identity or signing_identity(), proof=args.proof)
     return 0
 
 

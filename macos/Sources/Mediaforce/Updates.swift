@@ -1,45 +1,31 @@
-import Foundation
+import AppKit
 import Sparkle
 
 /// Mediaforce's updates. Sparkle finds, downloads, checks and installs a new app with its standard windows. Before
 /// Sparkle may offer a build, the bundled server gets ready for it: new work waits, running files finish, and the old
 /// app and database are saved. Only that exact prepared build may proceed, and a build that failed is never offered
-/// again. After Sparkle relaunches the new app, it starts and checks its own server before work resumes.
+/// again. Each launch lets the server finish whatever an interrupted update left.
 @MainActor
 final class Updates: NSObject, SPUUpdaterDelegate {
     static let shared = Updates()
 
     private var controller: SPUStandardUpdaterController?
-    /// The build whose old app and database are saved, so Sparkle may install it.
-    private var preparedBuild: String?
-    private var failedBuilds: Set<String> = []
+    private var state = ServerUpdateStep.Answer()
     private var preparing: Task<Void, Never>?
-    /// Why the offered update is waiting, in plain words; empty when nothing waits.
-    private(set) var waiting: [String] = []
 
     /// Release builds name a feed; source builds have none and never check.
     static var isConfigured: Bool {
         !(Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String ?? "").isEmpty
     }
 
-    var canCheck: Bool { controller?.updater.canCheckForUpdates ?? false }
-
-    /// Finishes an update this app was installed by, then lets Sparkle check on its usual schedule.
     func start() async {
         guard Self.isConfigured, controller == nil else { return }
-        if let status = await ServerUpdateStep.run(["status"]) {
-            failedBuilds = Set(status.failedBuilds)
-            if let intent = status.intent, let target = intent.to {
-                if intent.phase == "releasing" || (target == ServerUpdateStep.ownBuild && ["prepared", "starting"].contains(intent.phase)) {
-                    if let problem = await ServerUpdateStep.run(["finish"]).flatMap(\.error) {
-                        waiting = [problem]
-                    }
-                } else if intent.phase == "prepared" {
-                    preparedBuild = target
-                } else if intent.phase == "fenced" {
-                    // Quit or restarted while files were finishing: keep getting ready for the same build.
-                    prepare(target)
-                }
+        state = await ServerUpdateStep.run(["reconcile"])
+        if let intent = state.intent {
+            switch intent.phase {
+            case "fenced": prepare(intent.to)
+            case "failed": offerRollback(intent.to)
+            default: break
             }
         }
         controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
@@ -53,21 +39,22 @@ final class Updates: NSObject, SPUUpdaterDelegate {
     nonisolated func updater(_ updater: SPUUpdater, shouldProceedWithUpdate item: SUAppcastItem, updateCheck: SPUUpdateCheck) throws {
         let build = item.versionString
         try MainActor.assumeIsolated {
-            if failedBuilds.contains(build) {
-                throw UpdateWait(Words.updateFailedBefore(build: item.displayVersionString))
-            }
-            if preparedBuild == build { return }
-            if preparedBuild == nil, preparing == nil { prepare(build) }
-            throw UpdateWait(waiting.isEmpty ? Words.updateGettingReady : Words.updateWaiting(waiting))
+            if state.failedBuilds.contains(build) { throw UpdateWait(Words.updateFailedBefore(build: item.displayVersionString)) }
+            if let intent = state.intent, intent.to == build, intent.phase == "prepared" { return }
+            if preparing == nil, state.intent == nil { prepare(build) }
+            throw UpdateWait(state.error ?? state.intent?.waiting.flatMap { $0.isEmpty ? nil : Words.updateWaiting($0) } ?? Words.updateGettingReady)
         }
     }
 
     nonisolated func updater(
         _ updater: SPUUpdater, userDidMake choice: SPUUserUpdateChoice, forUpdate item: SUAppcastItem, state: SPUUserUpdateState
     ) {
-        // Nothing is downloaded, so nothing can install on quit: the unchanged old server may resume.
+        // Nothing downloaded, so nothing can install on quit: the unchanged old server may resume.
         guard choice != .install, state.stage == .notDownloaded else { return }
-        Task { @MainActor in await self.cancel() }
+        Task { @MainActor in
+            self.preparing?.cancel()
+            self.state = await ServerUpdateStep.run(["cancel"])
+        }
     }
 
     /// Runs the server's preparation until it is done, rechecking every minute while files are still running.
@@ -75,17 +62,9 @@ final class Updates: NSObject, SPUUpdaterDelegate {
         preparing = Task {
             defer { preparing = nil }
             while !Task.isCancelled {
-                guard let answer = await ServerUpdateStep.run(["prepare", "--build", build]) else {
-                    waiting = [Words.updateServerUnavailable]
-                    return
-                }
-                if let problem = answer.error {
-                    waiting = [problem]
-                    return
-                }
-                waiting = answer.intent?.waiting ?? []
-                if answer.intent?.phase == "prepared" {
-                    preparedBuild = build
+                state = await ServerUpdateStep.run(["prepare", "--build", build])
+                guard state.error == nil, let intent = state.intent else { return }
+                if intent.phase == "prepared" {
                     controller?.updater.checkForUpdatesInBackground()
                     return
                 }
@@ -94,15 +73,15 @@ final class Updates: NSObject, SPUUpdaterDelegate {
         }
     }
 
-    private func cancel() async {
-        guard preparedBuild != nil || preparing != nil else { return }
-        preparing?.cancel()
-        if let problem = await ServerUpdateStep.run(["cancel"]).flatMap(\.error) {
-            waiting = [problem]
-            return
-        }
-        preparedBuild = nil
-        waiting = []
+    /// A new version that failed its checks stays stopped; going back is the Director's call, offered here.
+    private func offerRollback(_ build: String) {
+        let alert = NSAlert()
+        alert.messageText = Words.updateFailedTitle
+        alert.informativeText = Words.updateFailedBefore(build: build)
+        alert.addButton(withTitle: Words.updateGoBack)
+        alert.addButton(withTitle: Words.updateNotNow)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        Task { state = await ServerUpdateStep.run(["rollback"]) }
     }
 }
 
@@ -115,48 +94,20 @@ struct UpdateWait: LocalizedError {
 enum ServerUpdateStep {
     struct Intent: Decodable {
         let phase: String
-        let to: String?
+        let to: String
         let waiting: [String]?
     }
 
     struct Answer: Decodable {
-        let error: String?
-        let intent: Intent?
-        let failedBuilds: [String]
+        var error: String?
+        var intent: Intent?
+        var failedBuilds: [String] = []
 
-        private enum Keys: String, CodingKey { case error, result }
-        private enum ResultKeys: String, CodingKey { case intent, failedBuilds = "failed_builds", phase }
-
-        init(from decoder: Decoder) throws {
-            let outer = try decoder.container(keyedBy: Keys.self)
-            error = try outer.decodeIfPresent(String.self, forKey: .error)
-            guard let result = try? outer.nestedContainer(keyedBy: ResultKeys.self, forKey: .result) else {
-                intent = nil
-                failedBuilds = []
-                return
-            }
-            failedBuilds = try result.decodeIfPresent([String].self, forKey: .failedBuilds) ?? []
-            // `status` nests the intent; `prepare` and `finish` answer with the intent itself.
-            intent = result.contains(.phase)
-                ? try outer.decode(Intent.self, forKey: .result)
-                : try result.decodeIfPresent(Intent.self, forKey: .intent)
-        }
+        enum CodingKeys: String, CodingKey { case error, intent, failedBuilds = "failed_builds" }
     }
 
-    static var ownBuild: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "" }
-
-    /// The saved service's config, so each step addresses the same database the server uses.
-    static var savedConfig: String? {
-        guard let data = try? Data(contentsOf: BackgroundService.plist),
-              let item = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-              let arguments = item["ProgramArguments"] as? [String],
-              let index = arguments.firstIndex(of: "--config"), index + 1 < arguments.count
-        else { return nil }
-        return arguments[index + 1]
-    }
-
-    static func run(_ step: [String]) async -> Answer? {
-        guard let config = savedConfig else { return nil }
+    static func run(_ step: [String]) async -> Answer {
+        guard let config = BackgroundService.savedConfig else { return Answer(error: Words.updateServerUnavailable) }
         let server = Bundle.main.bundleURL.appending(path: "Contents/MacOS/mediaforce-server")
         return await Task.detached {
             let process = Process()
@@ -164,15 +115,11 @@ enum ServerUpdateStep {
             process.executableURL = server
             process.arguments = ["--config", config, "service", "update"] + step
             process.standardOutput = pipe
-            do {
-                try process.run()
-            } catch {
-                return nil
-            }
+            guard (try? process.run()) != nil else { return Answer(error: Words.updateServerUnavailable) }
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
             let line = String(decoding: data, as: UTF8.self).split(separator: "\n").last.map(String.init) ?? ""
-            return try? JSONDecoder().decode(Answer.self, from: Data(line.utf8))
+            return (try? JSONDecoder().decode(Answer.self, from: Data(line.utf8))) ?? Answer(error: Words.updateServerUnavailable)
         }.value
     }
 }

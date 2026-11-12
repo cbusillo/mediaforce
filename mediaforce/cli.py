@@ -71,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
         service_actions.add_parser(action)
     if bundled_app_path() is not None:
         update_parser = service_actions.add_parser("update", help="This app's update steps around Sparkle")
-        update_parser.add_argument("step", choices=("status", "prepare", "cancel", "finish", "rollback"))
+        update_parser.add_argument("step", choices=("reconcile", "prepare", "cancel", "rollback"))
         update_parser.add_argument("--build", help="The exact build Sparkle offers")
     service_logs_parser = service_actions.add_parser("logs", help="Show the login item's durable logs")
     service_logs_parser.add_argument("-f", "--follow", action="store_true", help="Follow new log output")
@@ -292,7 +292,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         bundle = bundled_app_path()
         if bundle is not None and args.service_action == "update":
-            from mediaforce.ops.bundled_update import run_update_step
+            from mediaforce.ops.controller_deploy import run_update_step
 
             return run_update_step(str(args.step), bundle, args.config, args.build)
         if bundle is not None:

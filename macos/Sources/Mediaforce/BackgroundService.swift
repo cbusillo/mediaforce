@@ -3,7 +3,21 @@ import Foundation
 /// Mediaforce's background service on this Mac: the `com.mediaforce.web` login item that `mediaforce service install`
 /// writes. The app starts or restarts it through launchctl, as the service command does, and never installs it.
 enum BackgroundService {
-    static let label = "com.mediaforce.web"
+    static let liveLabel = "com.mediaforce.web"
+    /// A proof build names its own service, so it can never start, stop or read the live one.
+    static let label = Bundle.main.object(forInfoDictionaryKey: "MediaforceServiceLabel") as? String ?? liveLabel
+
+    static var isProof: Bool { label != liveLabel }
+
+    /// The saved service's config, so update steps address the same database the server uses.
+    static var savedConfig: String? {
+        guard let data = try? Data(contentsOf: plist),
+              let item = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let arguments = item["ProgramArguments"] as? [String],
+              let index = arguments.firstIndex(of: "--config"), index + 1 < arguments.count
+        else { return nil }
+        return arguments[index + 1]
+    }
 
     static var plist: URL {
         FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/LaunchAgents/\(label).plist")

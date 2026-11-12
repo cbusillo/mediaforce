@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import plistlib
 import sys
 import time
 from collections.abc import Iterator
@@ -11,6 +12,9 @@ from pathlib import Path
 
 
 UPDATE_INTENT_NAME = "update-intent.json"
+# The live service. A proof build names its own label and port in its Info.plist so it can never address this one.
+SERVICE_LABEL = "com.mediaforce.web"
+SERVER_PORT = 8777
 
 
 class RuntimeProtectionError(RuntimeError):
@@ -41,6 +45,19 @@ def bundled_app_path() -> Path | None:
     if executable.name == "mediaforce-server" and executable.parent.name == "MacOS" and executable.parents[1].name == "Contents":
         return executable.parents[2]
     return None
+
+
+def bundle_service(app: Path | None) -> tuple[str, int]:
+    """The launchd label and local port this app's server uses: the live service's unless the build names others."""
+    try:
+        info = plistlib.loads((app / "Contents/Info.plist").read_bytes()) if app else {}
+    except FileNotFoundError:
+        info = {}
+    return str(info.get("MediaforceServiceLabel") or SERVICE_LABEL), int(info.get("MediaforceServerPort") or SERVER_PORT)
+
+
+def bundle_build(app: Path | None) -> str | None:
+    return str(plistlib.loads((app / "Contents/Info.plist").read_bytes())["CFBundleVersion"]) if app else None
 
 
 def runtime_directory(home: Path) -> Path:

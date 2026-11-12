@@ -1186,7 +1186,11 @@ def create_app(
         }
 
     def _release_work_snapshot() -> ReleaseWorkSnapshot:
-        return release_work_payload(config.paths.db_path)
+        from mediaforce.ops.runtime_install import bundle_build, bundled_app_path
+
+        # An update checks that this answer comes from the exact build and database it started.
+        return {**release_work_payload(config.paths.db_path),
+                "server": {"build": bundle_build(bundled_app_path()), "database": str(config.paths.db_path.resolve())}}
 
     register_release_routes(app, work_snapshot=_release_work_snapshot)
 
@@ -2404,9 +2408,12 @@ def main(argv: list[str] | None = None) -> None:
 
         verify_bundled_startup(bundle)
         config = load_config(Path(args.config))
-        from mediaforce.ops.bundled_update import require_startup_allowed
+        from mediaforce.ops.controller_deploy import require_update_startup_allowed
+        from mediaforce.ops.runtime_install import bundle_service
 
-        require_startup_allowed(config.paths.db_path.parent, bundle)
+        require_update_startup_allowed(config.paths.db_path.parent, bundle)
+        if args.port is None:
+            args.port = bundle_service(bundle)[1]
         env_path = env_path or config.paths.db_path.parent / ".env"
     if args.credentials is not None:
         with args.credentials.open("rb"):

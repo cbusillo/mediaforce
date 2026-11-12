@@ -39,6 +39,9 @@ targets:
         SUEnableAutomaticChecks: true
         # Mediaforce gets ready first, then asks before installing.
         SUAllowsAutomaticUpdates: false
+        # The background service this app runs; only a proof build names another.
+        MediaforceServiceLabel: $(MEDIAFORCE_SERVICE_LABEL)
+        MediaforceServerPort: $(MEDIAFORCE_SERVER_PORT)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.shinycomputers.mediaforce
@@ -48,6 +51,8 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         MEDIAFORCE_UPDATE_FEED: ""
         MEDIAFORCE_UPDATE_KEY: ""
+        MEDIAFORCE_SERVICE_LABEL: com.mediaforce.web
+        MEDIAFORCE_SERVER_PORT: "8777"
 
   MediaforceTests:
     type: bundle.unit-test

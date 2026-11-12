@@ -57,13 +57,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if Bundle.main.bundleURL.path.hasPrefix("/Applications/") {
             try? SMAppService.mainApp.register()
         }
+        Task { await Updates.shared.start() }
+        // A proof copy never asks for notifications or posts them; they belong to the live app.
+        guard !BackgroundService.isProof else {
+            model.startWatching()
+            return
+        }
         UNUserNotificationCenter.current().delegate = self
         let attention = AttentionCenter()
         attention.requestPermission()
         model.onFacts = { attention.review($0) }
         model.startWatching()
         self.attention = attention
-        Task { await Updates.shared.start() }
     }
 
     nonisolated func userNotificationCenter(

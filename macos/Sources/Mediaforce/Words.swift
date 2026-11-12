@@ -10,8 +10,12 @@ enum Words {
         "Mediaforce will offer the update when these finish: \(reasons.joined(separator: "; "))."
     }
 
+    static let updateFailedTitle = "The new version didn't start correctly"
+    static let updateGoBack = "Go Back to the Earlier Version"
+    static let updateNotNow = "Not Now"
+
     static func updateFailedBefore(build: String) -> String {
-        "Version \(build) didn't start correctly on this Mac before, so Mediaforce went back to this version. It waits for a newer one."
+        "Version \(build) didn't start correctly on this Mac, so Mediaforce stopped it and waits for a newer one. Going back restores the version and library from just before the update."
     }
     static let library = "Library"
 
