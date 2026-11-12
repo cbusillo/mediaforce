@@ -293,6 +293,9 @@ private final class BlockedFilesRenderServer: RenderFixtureServer, @unchecked Se
              "episode": 1, "stage": "kept_original", "kept_reason": "check_failed", "bytes": 900000000, "original_backup": false],
             ["library_item_id": 2, "name": "Lucifer.S02E02.mkv", "rel_path": "tv/Lucifer/Season 2/Lucifer.S02E02.mkv",
              "episode": 2, "stage": "needs_you", "validation": "size_held", "bytes": 900000000, "original_backup": false],
+            ["library_item_id": 3, "name": "Lucifer.S02E03.mkv", "rel_path": "tv/Lucifer/Season 2/Lucifer.S02E03.mkv",
+             "episode": 3, "stage": "needs_you", "wait_reason": ["code": "containment_unproven", "computer": "Attic Mini"],
+             "bytes": 900000000, "original_backup": false],
         ]
         return (try? JSONSerialization.data(withJSONObject: item)).map { String(decoding: $0, as: UTF8.self) }
     }

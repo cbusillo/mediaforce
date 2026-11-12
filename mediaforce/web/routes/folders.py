@@ -40,7 +40,7 @@ def register_folder_routes(
     save_series_lifecycle_action: Callable[[str, str], dict[str, Any]],
     save_audio_preset_action: Callable[[str, str], dict[str, Any]],
     dismiss_audio_preset_suggestion_action: Callable[[str], dict[str, Any]],
-    queue_folder_encode_action: Callable[[str, str, bool, bool, str], dict[str, Any]],
+    queue_folder_encode_action: Callable[[str, str, bool, bool, str, bool], dict[str, Any]],
     validate_folder_outputs_action: Callable[[str, str], dict[str, Any]],
     promote_folder_outputs_action: Callable[[str, str], dict[str, Any]],
     accept_ambiguous_motion_action: Callable[[str], dict[str, Any]] | None = None,
@@ -84,6 +84,7 @@ def register_folder_routes(
             _request_flag(body, "bypass_schedule"),
             _request_flag(body, "override_policy_holds"),
             str(body.get("scope_membership_token", "")),
+            _request_flag(body, "release_hold"),
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 

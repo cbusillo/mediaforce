@@ -28283,11 +28283,13 @@ raise SystemExit(0)
         calibration["draft_hash"] = "approved-draft"
         return calibration
 
-    def _retry_stopped_season(self, queue_config: MediaforceConfig) -> folder_actions_runtime.ActionPayload:
+    def _retry_stopped_season(
+            self, queue_config: MediaforceConfig, prefix: str = "tv/show/Season 1", *, release_hold: bool = False,
+    ) -> folder_actions_runtime.ActionPayload:
         calibration = self._season_calibration(queue_config)
         with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
             return self._queue_folder_encode(
-                queue_config, "tv/show/Season 1", "", False, True,
+                queue_config, prefix, "", False, True, release_hold=release_hold,
                 load_calibration_state=lambda *_args, **_kwargs: calibration,
                 prepare_terminal_encode_job_for_requeue_fn=lambda connection, job: (
                     encode_runtime.prepare_terminal_encode_job_for_requeue(
@@ -28599,22 +28601,20 @@ raise SystemExit(0)
             })
             self.assertNotEqual(season_lane(connection)[0], "attention")
 
-    def test_retrying_exactly_the_held_file_is_not_refused_for_its_hold(self) -> None:
+    def test_retrying_exactly_the_held_file_without_the_owners_release_changes_nothing(self) -> None:
         queue_config = self._complete_queue_config()
-        held_id, _retried_id, _held_partial, _retried_partial = self._season_with_one_unconfirmed_stop(queue_config)
-        calibration = self._season_calibration(queue_config)
+        _held_id, _other_id, held_partial, _other_partial = self._season_with_one_unconfirmed_stop(queue_config)
         with open_db(self.config.paths.db_path) as connection:
-            connection.execute(update(library_items).where(library_items.c.id == held_id).values(status="planned"))
+            jobs_before = connection.execute(select(func.count()).select_from(encode_jobs)).scalar_one()
 
-        with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
-            result = self._queue_folder_encode(
-                queue_config, "tv/show/Season 1/Episode 1.mkv", "", False, True,
-                load_calibration_state=lambda *_args, **_kwargs: calibration,
-                reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
-            )
+        with patch.object(encode_runtime, "run_remote_command", new=_SleepingComputer("none").run_remote_command):
+            result = self._retry_stopped_season(queue_config, "tv/show/Season 1/Episode 1.mkv")
 
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(result["queued_library_item_ids"], [held_id])
+        self.assertEqual(result["code"], "containment_unproven", result)
+        self.assertTrue(held_partial.exists())
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertEqual(self._existing_job(connection, "stopped-0")["status"], "needs_attention")
+            self.assertEqual(connection.execute(select(func.count()).select_from(encode_jobs)).scalar_one(), jobs_before)
 
     def test_season_retry_of_only_a_held_file_queues_nothing(self) -> None:
         queue_config = self._complete_queue_config()
@@ -28631,6 +28631,45 @@ raise SystemExit(0)
         self.assertTrue(held_partial.exists())
         with open_db(self.config.paths.db_path) as connection:
             self.assertEqual(self._existing_job(connection, "stopped-0")["status"], "needs_attention")
+
+    def test_releasing_a_held_file_cleans_up_and_retries_only_that_file_and_records_it(self) -> None:
+        queue_config = self._complete_queue_config()
+        held_id, other_id, held_partial, other_partial = self._season_with_one_unconfirmed_stop(queue_config)
+
+        with patch.object(encode_runtime, "run_remote_command", new=_SleepingComputer("none").run_remote_command):
+            result = self._retry_stopped_season(queue_config, "tv/show/Season 1/Episode 1.mkv", release_hold=True)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["queued_library_item_ids"], [held_id])
+        self.assertFalse(held_partial.exists())
+        self.assertTrue(other_partial.exists())
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertEqual(self._existing_job(connection, "stopped-1")["status"], "stopped")
+            other_status = connection.execute(select(library_items.c.status).where(library_items.c.id == other_id)).scalar_one()
+            released = connection.execute(select(item_events).where(
+                item_events.c.event_type == folder_actions_runtime.OWNER_RELEASED_HOLD_EVENT)).mappings().all()
+            season = build_folder_workflow_state(connection, "tv/show/Season 1", library_types=queue_config.library_type_map)
+        self.assertEqual(other_status, "encoding")
+        self.assertEqual([row["library_item_id"] for row in released], [held_id])
+        self.assertEqual(json.loads(released[0]["details_json"])["released_by"], "owner")
+        self.assertEqual(released[0]["created_at"], result["job"]["created_at"])
+        self.assertEqual(season.primary_lane, "processing")
+
+    def test_releasing_a_file_that_is_not_held_changes_nothing(self) -> None:
+        queue_config = self._complete_queue_config()
+        _held_id, _other_id, held_partial, other_partial = self._season_with_one_unconfirmed_stop(queue_config)
+
+        with patch.object(encode_runtime, "run_remote_command", new=_SleepingComputer("none").run_remote_command):
+            for prefix in ("tv/show/Season 1/Episode 2.mkv", "tv/show/Season 1"):
+                with self.subTest(prefix=prefix):
+                    self.assertEqual(self._retry_stopped_season(queue_config, prefix, release_hold=True)["code"], "not_held")
+
+        self.assertTrue(held_partial.exists())
+        self.assertTrue(other_partial.exists())
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertEqual(self._existing_job(connection, "stopped-0")["status"], "needs_attention")
+            self.assertEqual(self._existing_job(connection, "stopped-1")["status"], "stopped")
+            self.assertEqual(connection.execute(select(func.count()).select_from(item_events)).scalar_one(), 0)
 
     def test_retry_into_a_running_season_leaves_a_held_file_out(self) -> None:
         queue_config = self._complete_queue_config()

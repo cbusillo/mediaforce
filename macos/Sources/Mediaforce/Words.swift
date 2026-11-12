@@ -1162,6 +1162,7 @@ extension Words {
     static let keepThisCopy = "Keep this copy"
     static let makeItAgain = "Make it again"
     static let putOriginalBack = "Put original back…"
+    static let tryHeldFileAgain = "Try again…"
     static let compressed = "Compressed"
     static let soundLabel = "Sound"
     static let stillAiringLabel = "Still airing"
@@ -1331,6 +1332,7 @@ extension Words {
         case .putOriginalBack: "The original was not put back"
         case .allowLarger: "The larger size was not allowed"
         case .keepOriginal: "Not kept original"
+        case .releaseHold: "Not tried again"
         }
     }
 
@@ -1341,6 +1343,7 @@ extension Words {
         case "busy": "This file is being worked on right now. Try again when that finishes."
         case "occupied": "Another file is already in the way. Nothing was moved."
         case "unsafe": "It stopped partway and Mediaforce could not put the files back. Check the library and the original backups folder."
+        case "not_held": "It isn't on hold any more, so nothing was changed."
         default: message ?? "Mediaforce left everything as it was."
         }
     }
@@ -1366,6 +1369,21 @@ extension Words {
         }
         if file.compressed { return "\(fileName(file)): \(size(file.bytes)). Its original backup is deleted." }
         return "\(fileName(file)): \(size(file.bytes)), as it is now."
+    }
+
+    static func releaseHoldQuestion(_ file: ItemFacts.File) -> String {
+        "Is the earlier run of \(fileName(file)) gone?"
+    }
+
+    static func releaseHoldButton(_ file: ItemFacts.File) -> String {
+        "Try \(fileName(file)) again"
+    }
+
+    static func releaseHoldWarning(_ file: ItemFacts.File) -> String {
+        let computer = file.unconfirmedStop?.computer ?? "the computer that ran it"
+        return "Mediaforce couldn't confirm that its last picture check on \(computer) ended. If that check is still running, "
+            + "it could spoil the new copy. Try again only if you're sure it stopped, for example because \(computer) has "
+            + "restarted since. Mediaforce cleans up the unfinished copy and checks the new one as usual. Nothing else changes."
     }
 
     static func putOriginalBackQuestion(_ file: ItemFacts.File) -> String {

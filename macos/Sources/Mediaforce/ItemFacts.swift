@@ -41,13 +41,18 @@ struct ItemFacts: Decodable, Sendable {
         }
 
         var compressed: Bool { stage == "published" }
+        /// Held because Mediaforce couldn't confirm its last run ended; only the Director can release it.
+        var unconfirmedStop: WaitReason? {
+            ([waitReason].compactMap { $0 } + (additionalWaitReasons ?? [])).first { $0.code == "containment_unproven" }
+        }
+        var heldForUnconfirmedStop: Bool { unconfirmedStop != nil }
         var needsYou: Bool { stage == "needs_you" || !(additionalWaitReasons ?? []).isEmpty }
     }
 
     /// Why a file waits on the Director, as a code with any values its words need.
     struct WaitReason: Decodable, Sendable, Equatable {
         let code: String
-        /// The computer a restart stopped it on.
+        /// The computer a restart stopped it on, or the one to check before a held file is tried again.
         let computer: String?
         /// Why a failed copy could not be made again.
         let blockers: [String]?
@@ -178,6 +183,11 @@ extension MediaforceClient {
 
     func replaceOriginals(_ prefix: String) async throws -> ItemActionResult {
         try await folderAction(prefix, "promote-outputs", body: [:])
+    }
+
+    /// The Director's confirmed release of one held file: it is cleaned up and tried again like any retry.
+    func releaseHold(_ file: ItemFacts.File) async throws -> ItemActionResult {
+        try await folderAction(file.relPath, "queue-encode", body: ["release_hold": true, "bypass_schedule": false])
     }
 
     func retryUnfinished(_ prefix: String) async throws -> ItemActionResult {

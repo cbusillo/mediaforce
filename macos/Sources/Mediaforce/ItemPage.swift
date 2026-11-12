@@ -182,6 +182,7 @@ struct ItemPage: View {
             case .putOriginalBack: try await client.putOriginalBack(prefix, file.libraryItemId)
             case .allowLarger: try await client.decideSize(file.sizeQuestion?.jobId ?? "", allow: true)
             case .keepOriginal: try await client.decideSize(file.sizeQuestion?.jobId ?? "", allow: false)
+            case .releaseHold: try await client.releaseHold(file)
             }
             if !result.ok {
                 notice = ActionNotice(title: Words.actionRefused(action), message: Words.actionRefusal(result.code, result.message))
@@ -207,7 +208,7 @@ struct ItemPage: View {
 }
 
 enum ItemAction {
-    case makeAgain, keepThisCopy, putOriginalBack, allowLarger, keepOriginal
+    case makeAgain, keepThisCopy, putOriginalBack, allowLarger, keepOriginal, releaseHold
 }
 
 /// A step on the whole season or title, as its page state offers it.
@@ -293,6 +294,7 @@ struct WaitingMark: View {
 struct WaitingFiles: View {
     let files: [ItemFacts.File]
     let act: (ItemFacts.File, ItemAction) -> Void
+    @State private var releasing: ItemFacts.File?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -310,8 +312,22 @@ struct WaitingFiles: View {
                         Button(Words.keepThisCopy) { act(file, .keepThisCopy) }
                         Button(Words.makeItAgain) { act(file, .makeAgain) }
                     }
+                    if file.heldForUnconfirmedStop {
+                        Button(Words.tryHeldFileAgain) { releasing = file }
+                    }
                 }
             }
+        }
+        // Releasing a hold is the Director's word that the earlier run is gone, so it is asked first.
+        .confirmationDialog(
+            releasing.map(Words.releaseHoldQuestion) ?? "",
+            isPresented: Binding(get: { releasing != nil }, set: { if !$0 { releasing = nil } }),
+            presenting: releasing
+        ) { file in
+            Button(Words.releaseHoldButton(file)) { act(file, .releaseHold) }
+            Button(Words.cancel, role: .cancel) {}
+        } message: { file in
+            Text(Words.releaseHoldWarning(file))
         }
     }
 }
