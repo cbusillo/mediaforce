@@ -276,7 +276,7 @@ class RemoteKeepAwakeTests(unittest.TestCase):
             return subprocess.run(["/bin/sh", "-c", command[-1]], env=self.env, capture_output=True, text=True)
 
         def local_ssh(argv: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
-            is_keeper = "ServerAliveInterval=30" in argv
+            is_keeper = argv[-1].startswith("sh -c ")
             script = _shell_script(argv[-1]) if is_keeper else argv[-1]
             # Staging opens its connections in binary mode.
             process = cast(subprocess.Popen[bytes], subprocess.Popen(["/bin/sh", "-c", script], env=self.env, **kwargs))

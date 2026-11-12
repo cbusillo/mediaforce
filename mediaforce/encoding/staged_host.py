@@ -221,7 +221,7 @@ def staged_job(
         output_path=scratch_dir / f"{STAGED_OUTPUT_STEM}{output_suffix}",
     )
     keeper = popen(
-        ["ssh", *ssh_options, "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=4", ssh_target,
+        ["ssh", *ssh_options, ssh_target,
          f"sh -c {shlex.quote(keep_awake_while_running(keeper_script(scratch_dir)))}"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
