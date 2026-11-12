@@ -6,18 +6,29 @@ from mediaforce.encoding.duration_estimate import EncodeDurationEstimate, Encode
 
 
 class EncodeDurationEstimateTests(TestCase):
-    def test_sparse_host_history_is_more_conservative_than_well_sampled_history(self) -> None:
-        item = _item(duration_seconds=2_700.0)
-        known_host = {"key": "known"}
-        new_host = {"key": "new"}
-        samples = tuple(_sample("known", ratio=1.0, overhead=300.0) for _ in range(12))
+    def test_estimate_is_the_typical_time_without_added_margins(self) -> None:
+        samples = tuple(_sample("worker", ratio=ratio, overhead=300.0) for ratio in (0.8, 1.0, 1.2))
 
-        known = estimate_encode_duration(item, known_host, samples)
-        sparse = estimate_encode_duration(item, new_host, samples)
+        estimate = estimate_encode_duration(_item(duration_seconds=3_600.0), {"key": "worker"}, samples)
 
-        self.assertEqual(known.confidence, "high")
-        self.assertEqual(sparse.confidence, "limited")
-        self.assertGreater(sparse.total_seconds, known.total_seconds)
+        self.assertEqual(estimate.total_seconds, 3_600 + 300)
+
+    def test_file_is_judged_by_history_at_its_own_resolution(self) -> None:
+        samples = tuple(
+            [*(_sample("worker", ratio=3.0, overhead=600.0, resolution="1080p") for _ in range(10)),
+             *(_sample("worker", ratio=1.2, overhead=300.0, resolution="720p") for _ in range(5))]
+        )
+
+        estimate = estimate_encode_duration(_item(duration_seconds=3_600.0, height=720), {"key": "worker"}, samples)
+
+        self.assertEqual(estimate.encode_seconds, 3_600 * 1.2)
+
+    def test_new_computer_borrows_other_computers_history_without_claiming_its_own(self) -> None:
+        samples = tuple(_sample("known", ratio=2.0, overhead=300.0) for _ in range(5))
+
+        estimate = estimate_encode_duration(_item(duration_seconds=3_600.0), {"key": "new"}, samples)
+
+        self.assertEqual((estimate.encode_seconds, estimate.host_sample_size), (7_200, 0))
 
     def test_percentile_estimate_resists_one_extreme_outlier(self) -> None:
         item = _item(duration_seconds=2_700.0)
@@ -93,9 +104,10 @@ class EncodeDurationEstimateTests(TestCase):
         self.assertTrue(estimate_fits_before_schedule_close(estimate, {}, now=now))
 
 
-def _item(*, duration_seconds: float, thorough: bool = True) -> dict[str, object]:
+def _item(*, duration_seconds: float, thorough: bool = True, height: int | None = None) -> dict[str, object]:
     return {
         "duration_seconds": duration_seconds,
+        "height": height,
         "resolved_policy": {
             "video": {
                 "sample_every": "8m",
@@ -106,10 +118,11 @@ def _item(*, duration_seconds: float, thorough: bool = True) -> dict[str, object
     }
 
 
-def _sample(host_key: str, *, ratio: float, overhead: float) -> EncodeDurationSample:
+def _sample(host_key: str, *, ratio: float, overhead: float, resolution: str | None = None) -> EncodeDurationSample:
     return EncodeDurationSample(
         host_key=host_key,
         host_label=host_key,
         encode_realtime_factor=ratio,
         quality_overhead_seconds=overhead,
+        resolution_class=resolution,
     )

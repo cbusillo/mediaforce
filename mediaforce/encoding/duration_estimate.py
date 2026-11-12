@@ -10,19 +10,19 @@ from typing import Any
 from sqlalchemy import func, select
 
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import encode_jobs, staged_artifacts
+from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifacts
 from mediaforce.core.schedule_deadline import parse_schedule_close_deadline
 from mediaforce.core.type_defs import float_value, object_dict
 
 
 MAX_HISTORY_ROWS = 1_000
-MAX_SAMPLES_PER_HOST = 30
+MAX_SAMPLES_PER_HOST_RESOLUTION = 30
 DEFAULT_SOURCE_DURATION_SECONDS = 3_600.0
 DEFAULT_ENCODE_REALTIME_FACTOR = 3.0
 DEFAULT_QUALITY_OVERHEAD_SECONDS = 1_800.0
-FIXED_ADMISSION_SLACK_SECONDS = 300.0
-MINIMUM_ADMISSION_SECONDS = 900
+MINIMUM_TYPICAL_SAMPLES = 3
 MAX_SAMPLE_COUNT = 12
+RESOLUTION_CLASS_HEIGHTS = ((600, "sd"), (800, "720p"), (1_500, "1080p"))
 DURATION_SAMPLE_CACHE_SECONDS = 60.0
 MAX_CACHED_DATABASES = 8
 _DURATION_TEXT_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h)?\s*$", re.IGNORECASE)
@@ -36,6 +36,7 @@ class EncodeDurationSample:
     host_label: str
     encode_realtime_factor: float
     quality_overhead_seconds: float | None
+    resolution_class: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,11 +76,15 @@ def _query_encode_duration_samples(connection: DBClient) -> tuple[EncodeDuration
             staged_artifacts.c.encode_duration_seconds,
             staged_artifacts.c.encode_started_at,
             encode_jobs.c.started_at.label("job_started_at"),
+            library_items.c.height,
         )
         .select_from(
             staged_artifacts.outerjoin(
                 encode_jobs,
                 encode_jobs.c.job_id == staged_artifacts.c.encode_job_id,
+            ).outerjoin(
+                library_items,
+                library_items.c.id == staged_artifacts.c.library_item_id,
             )
         )
         .where(staged_artifacts.c.source_duration_seconds > 0)
@@ -103,12 +108,14 @@ def _query_encode_duration_samples(connection: DBClient) -> tuple[EncodeDuration
         if earliest is None or encode_started < earliest:
             first_encode_started_by_job[job_id] = encode_started
     samples: list[EncodeDurationSample] = []
-    samples_per_host: dict[str, int] = {}
+    samples_per_host: dict[tuple[str, str | None], int] = {}
     for row in rows:
         host_key = str(row["encode_host_key"] or "").strip()
         host_label = str(row["encode_host_label"] or "").strip()
         identity = (host_key or host_label).casefold()
-        if not identity or samples_per_host.get(identity, 0) >= MAX_SAMPLES_PER_HOST:
+        sample_resolution = resolution_class(row["height"])
+        cap_key = (identity, sample_resolution)
+        if not identity or samples_per_host.get(cap_key, 0) >= MAX_SAMPLES_PER_HOST_RESOLUTION:
             continue
         source_duration_seconds = float_value(row["source_duration_seconds"])
         encode_duration_seconds = float_value(row["encode_duration_seconds"])
@@ -134,9 +141,10 @@ def _query_encode_duration_samples(connection: DBClient) -> tuple[EncodeDuration
                 host_label=host_label,
                 encode_realtime_factor=encode_realtime_factor,
                 quality_overhead_seconds=quality_overhead_seconds,
+                resolution_class=sample_resolution,
             )
         )
-        samples_per_host[identity] = samples_per_host.get(identity, 0) + 1
+        samples_per_host[cap_key] = samples_per_host.get(cap_key, 0) + 1
     return tuple(samples)
 
 
@@ -148,54 +156,55 @@ def estimate_encode_duration(
     source_duration_seconds = float_value(item.get("duration_seconds")) or DEFAULT_SOURCE_DURATION_SECONDS
     host_tokens = _host_identity_tokens(host)
     host_samples = [sample for sample in samples if _sample_matches_host(sample, host_tokens)]
-    host_ratios = [sample.encode_realtime_factor for sample in host_samples]
-    global_ratios = [sample.encode_realtime_factor for sample in samples]
-    encode_realtime_factor = _conservative_history_value(
-        host_ratios,
-        global_ratios,
-        default=DEFAULT_ENCODE_REALTIME_FACTOR,
-    )
-    uncertainty_multiplier = _uncertainty_multiplier(len(host_ratios))
-    encode_seconds = source_duration_seconds * encode_realtime_factor * uncertainty_multiplier
-
-    host_overheads = [
-        sample.quality_overhead_seconds
-        for sample in host_samples
-        if sample.quality_overhead_seconds is not None
-    ]
-    global_overheads = [
-        sample.quality_overhead_seconds
-        for sample in samples
-        if sample.quality_overhead_seconds is not None
-    ]
-    modeled_quality_seconds = _modeled_quality_search_seconds(
-        item,
-        source_duration_seconds=source_duration_seconds,
-        encode_realtime_factor=encode_realtime_factor,
-    )
-    if host_overheads:
-        quality_overhead = _conservative_history_value(
-            host_overheads,
-            global_overheads,
-            default=modeled_quality_seconds,
-        )
-    elif global_overheads:
-        quality_overhead = max(_percentile(global_overheads, 0.80), modeled_quality_seconds)
-    else:
-        quality_overhead = max(DEFAULT_QUALITY_OVERHEAD_SECONDS, modeled_quality_seconds)
-    quality_search_seconds = quality_overhead * uncertainty_multiplier
-    total_seconds = max(
-        MINIMUM_ADMISSION_SECONDS,
-        math.ceil(encode_seconds + quality_search_seconds + FIXED_ADMISSION_SLACK_SECONDS),
+    comparable = _closest_sample_groups(host_samples, samples, resolution_class(item.get("height")))
+    speeds = [[sample.encode_realtime_factor for sample in group] for group in comparable]
+    encode_realtime_factor = _typical_value(speeds, default=DEFAULT_ENCODE_REALTIME_FACTOR)
+    encode_seconds = source_duration_seconds * encode_realtime_factor
+    quality_search_seconds = _typical_value(
+        [[sample.quality_overhead_seconds for sample in group if sample.quality_overhead_seconds is not None]
+         for group in comparable],
+        default=_modeled_quality_search_seconds(
+            item,
+            source_duration_seconds=source_duration_seconds,
+            encode_realtime_factor=encode_realtime_factor,
+        ),
     )
     return EncodeDurationEstimate(
-        total_seconds=total_seconds,
+        total_seconds=math.ceil(encode_seconds + quality_search_seconds),
         encode_seconds=math.ceil(encode_seconds),
         quality_search_seconds=math.ceil(quality_search_seconds),
         source_duration_seconds=source_duration_seconds,
-        host_sample_size=len(host_ratios),
-        confidence=_estimate_confidence(len(host_ratios)),
+        host_sample_size=len(host_samples),
+        confidence=_estimate_confidence(len(host_samples)),
     )
+
+
+def resolution_class(height: Any) -> str | None:
+    pixels_high = float_value(height)
+    if pixels_high <= 0:
+        return None
+    return next((label for limit, label in RESOLUTION_CLASS_HEIGHTS if pixels_high <= limit), "2160p")
+
+
+def _closest_sample_groups(
+        host_samples: list[EncodeDurationSample],
+        all_samples: tuple[EncodeDurationSample, ...],
+        item_resolution: str | None,
+) -> list[list[EncodeDurationSample]]:
+    def same_resolution(group: list[EncodeDurationSample]) -> list[EncodeDurationSample]:
+        return [sample for sample in group if item_resolution and sample.resolution_class == item_resolution]
+
+    return [same_resolution(host_samples), host_samples, same_resolution(list(all_samples)), list(all_samples)]
+
+
+def _typical_value(groups: list[list[float]], *, default: float) -> float:
+    values = _first_usable_group(groups)
+    return _percentile(values, 0.50) if values else default
+
+
+def _first_usable_group(groups: list[list[float]]) -> list[float] | None:
+    well_sampled = next((values for values in groups if len(values) >= MINIMUM_TYPICAL_SAMPLES), None)
+    return well_sampled or next((values for values in groups if values), None)
 
 
 def estimate_encode_job_duration(
@@ -228,35 +237,6 @@ def estimate_fits_before_schedule_close(
     if closes_at is None:
         return True
     return estimate.total_seconds <= max((closes_at - now.astimezone(UTC)).total_seconds(), 0.0)
-
-
-def _conservative_history_value(
-        host_values: list[float],
-        global_values: list[float],
-        *,
-        default: float,
-) -> float:
-    if len(host_values) >= 8:
-        return _percentile(host_values, 0.80)
-    if len(host_values) >= 3:
-        global_floor = _percentile(global_values, 0.60) if global_values else default
-        return max(_percentile(host_values, 0.80), global_floor)
-    if host_values:
-        global_floor = _percentile(global_values, 0.80) if global_values else default
-        return max(max(host_values), global_floor)
-    if global_values:
-        return _percentile(global_values, 0.80)
-    return default
-
-
-def _uncertainty_multiplier(sample_size: int) -> float:
-    if sample_size >= 10:
-        return 1.10
-    if sample_size >= 4:
-        return 1.20
-    if sample_size > 0:
-        return 1.35
-    return 1.50
 
 
 def _estimate_confidence(sample_size: int) -> str:

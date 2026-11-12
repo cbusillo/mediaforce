@@ -20278,7 +20278,7 @@ raise SystemExit(0)
         tight_host = self._encode_host_row("tight", schedule_closes_at=tight_close, priority=1)
 
         with open_db(self.config.paths.db_path) as connection:
-            self._write_manifest("manifest-host-fit-blocked.json", [self._estimate_manifest_item(20_000.0)])
+            self._write_manifest("manifest-host-fit-blocked.json", [self._estimate_manifest_item(30_000.0)])
             self._write_manifest("manifest-host-fit-medium.json", [self._estimate_manifest_item(5_400.0)])
             self._save_job(
                 connection,
