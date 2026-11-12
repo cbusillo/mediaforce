@@ -19,15 +19,17 @@ final class Updates: NSObject, SPUUpdaterDelegate {
     }
 
     func start() async {
-        guard Self.isConfigured, controller == nil else { return }
+        // Recovery runs on every launch, even in a build that no longer names a feed.
         state = await ServerUpdateStep.run(["reconcile"])
         if let intent = state.intent {
             switch intent.phase {
             case "fenced": prepare(intent.to)
             case "failed": offerRollback(intent.to)
+            case "prepared" where !Self.isConfigured: state = await ServerUpdateStep.run(["cancel"])
             default: break
             }
         }
+        guard Self.isConfigured, controller == nil else { return }
         controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
     }
 
@@ -54,6 +56,13 @@ final class Updates: NSObject, SPUUpdaterDelegate {
         Task { @MainActor in
             self.preparing?.cancel()
             self.state = await ServerUpdateStep.run(["cancel"])
+        }
+    }
+
+    // The feed no longer offers the prepared build and nothing was downloaded: the unchanged old server resumes.
+    nonisolated func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
+        Task { @MainActor in
+            if self.state.intent?.phase == "prepared" { self.state = await ServerUpdateStep.run(["cancel"]) }
         }
     }
 

@@ -313,6 +313,11 @@ def _atomic_write(path: Path, payload: bytes, *, mode: int = 0o644) -> None:
 
 
 def _require_bundled_install(paths: LoginItemPaths) -> None:
+    from mediaforce.core.config import load_config
+    from mediaforce.ops.runtime_install import require_own_support
+
+    if paths.config_path is not None:
+        require_own_support(paths.project_root, load_config(paths.config_path).paths.db_path, paths.home)
     if "AppTranslocation" in paths.project_root.parts:
         raise LoginItemError("move Mediaforce to its permanent location before setting up the background service")
     _verify_signed_bundle(paths.project_root)

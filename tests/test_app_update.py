@@ -13,7 +13,6 @@ from unittest.mock import patch
 
 import pytest
 
-from mediaforce.core.config import load_config
 from mediaforce.core.db import open_db
 from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
 from mediaforce.library.background_work import background_work_is_paused
@@ -98,6 +97,12 @@ def _install(update: deploy.AppUpdate, *, build: str) -> None:
     _app(update.app, build=build, code=b"new app")
 
 
+def _intent(update: deploy.AppUpdate) -> dict[str, Any]:
+    intent = read_update_intent(update.support)
+    assert intent is not None
+    return intent
+
+
 def _phase(update: deploy.AppUpdate) -> str | None:
     intent = read_update_intent(update.support)
     return None if intent is None else str(intent["phase"])
@@ -112,7 +117,7 @@ def test_busy_server_keeps_running_with_new_work_held_until_files_finish(update:
     app_update, server = update
     server.running.update(encode=1, sample=1)
     deploy.prepare_update(app_update, "2")
-    assert _phase(app_update) == "fenced" and len(read_update_intent(app_update.support)["waiting"]) == 2
+    assert _phase(app_update) == "fenced" and len(_intent(app_update)["waiting"]) == 2
     assert server.launchctl == [] and _paused(app_update) == (True, True)
     assert server.post(app_update, "/api/update/release", {"encode": False, "background": False})["ok"] is False
     with pytest.raises(deploy.UpdateRefused):
@@ -135,7 +140,7 @@ def test_publication_holding_its_lock_keeps_the_old_server_running(update: Updat
 def test_idle_server_saves_complete_old_pair_before_sparkle_may_install(update: Update) -> None:
     app_update, server = update
     deploy.prepare_update(app_update, "2")
-    stage = Path(read_update_intent(app_update.support)["stage"])
+    stage = Path(_intent(app_update)["stage"])
     assert (stage / "Mediaforce.app/Contents/MacOS/Mediaforce").read_bytes() == b"old app"
     assert (stage / "launch-item.before.plist").read_bytes() == app_update.paths.plist.read_bytes()
     with sqlite3.connect(stage / "before.sqlite") as saved:
@@ -183,7 +188,9 @@ def test_failed_candidate_stays_stopped_and_rolls_back_to_matching_old_pair(upda
     assert app_update.paths.plist.read_bytes() == saved_plist
     with sqlite3.connect(app_update.config.paths.db_path) as restored:
         assert not restored.execute("select name from sqlite_master where name = 'candidate_migration'").fetchall()
-    failed, = retained_deploy_stage(app_update.support).glob("failed-*")
+    stage = retained_deploy_stage(app_update.support)
+    assert stage is not None
+    failed, = stage.glob("failed-*")
     assert (failed / "Mediaforce.app/Contents/MacOS/Mediaforce").read_bytes() == b"new app"
     assert _paused(app_update) == (False, False) and _phase(app_update) is None
     with pytest.raises(deploy.UpdateRefused):
@@ -196,7 +203,7 @@ def test_verified_candidate_keeps_launch_item_and_resumes_only_a_running_queue(u
         save_queue_state(connection, {**load_queue_state(connection), "is_paused": True, "updated_at": "then"})
     saved = plistlib.loads(app_update.paths.plist.read_bytes())
     deploy.prepare_update(app_update, "2")
-    stage = Path(read_update_intent(app_update.support)["stage"])
+    stage = Path(_intent(app_update)["stage"])
     _install(app_update, build="2")
     deploy.reconcile_update(app_update)
     candidate = plistlib.loads(app_update.paths.plist.read_bytes())
@@ -235,3 +242,28 @@ def test_proof_build_gate_refuses_an_app_that_shares_the_live_identity(tmp_path:
     proof = _app(tmp_path / "Proof.app", build="1", code=b"", CFBundleIdentifier="com.shinycomputers.mediaforce.proof",
                  MediaforceServiceLabel="com.mediaforce.web.proof", MediaforceServerPort="8787")
     require_proof_identity(proof)
+
+
+def test_interrupted_rollback_finishes_from_the_saved_pair_on_next_launch(update: Update) -> None:
+    app_update, server = update
+    deploy.prepare_update(app_update, "2")
+    _install(app_update, build="2")
+    server.healthy = False
+    with patch.object(deploy, "DEFAULT_STARTUP_TIMEOUT", 0), pytest.raises(RuntimeError):
+        deploy.reconcile_update(app_update)
+    server.healthy = True
+    with patch.object(deploy, "_copy_app", side_effect=KeyboardInterrupt), pytest.raises(KeyboardInterrupt):
+        deploy.rollback_update(app_update)
+    assert _phase(app_update) == "rolling-back"
+    deploy.reconcile_update(app_update)
+    assert (app_update.app / "Contents/MacOS/Mediaforce").read_bytes() == b"old app" and _phase(app_update) is None
+
+
+def test_proof_build_refuses_the_live_support_folder(tmp_path: Path) -> None:
+    from mediaforce.ops.runtime_install import RuntimeProtectionError, require_own_support
+
+    proof = _app(tmp_path / "Proof.app", build="1", code=b"", MediaforceServiceLabel="com.mediaforce.web.proof")
+    live_database = tmp_path / "Library/Application Support/mediaforce/library.sqlite3"
+    with pytest.raises(RuntimeProtectionError):
+        require_own_support(proof, live_database, tmp_path)
+    require_own_support(proof, tmp_path / "proof/library.sqlite3", tmp_path)

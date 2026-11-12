@@ -16,6 +16,7 @@ import sqlite3
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -28,7 +29,7 @@ from mediaforce.ops.login_item import (
     _require_success, _run_command, _verify_signed_bundle, disable_login_item, enable_login_item,
 )
 from mediaforce.ops.runtime_install import (
-    UPDATE_INTENT_NAME, bundle_build, bundle_service, read_update_intent, register_runtime_roots,
+    UPDATE_INTENT_NAME, bundle_build, bundle_service, read_update_intent, register_runtime_roots, require_own_support,
     require_release_directory, retain_deploy_stage, retained_deploy_stage, runtime_activity, runtime_directory,
 )
 from mediaforce.web.runtime.controller_storage_recovery import READY_FRESHNESS_SECONDS
@@ -418,6 +419,7 @@ def run_update_step(step: str, app: Path, config_path: Path | None, build: str |
     update = AppUpdate(config_path.expanduser().resolve(), app, Path.home())
     error = None
     try:
+        require_own_support(app, update.config.paths.db_path, update.home)
         with runtime_activity(update.support, wait_seconds=DEPLOY_LOCK_WAIT_SECONDS) as acquired:
             if not acquired:
                 raise UpdateRefused("cleanup or another update stayed active; try again after it finishes")
@@ -440,15 +442,17 @@ def prepare_update(update: AppUpdate, build: str) -> None:
     Phase "prepared" lets Sparkle install exactly `build`; anything still running is listed under "waiting"."""
     if build in _failed(update):
         raise UpdateRefused(f"build {build} failed before; it is not offered again")
-    intent = read_update_intent(update.support)
-    if intent is None:
-        intent = {"from": bundle_build(update.app), "to": build, "phase": "fenced", "app": str(update.app)}
+    existing = read_update_intent(update.support)
+    intent: dict[str, Any] = existing or {"from": bundle_build(update.app), "to": build, "phase": "fenced", "app": str(update.app)}
+    if existing is None:
         _save_intent(update, intent)
-        intent["paused"] = _post(update, "/api/update/fence", {})["paused"]
     elif intent.get("to") != build or intent["phase"] not in {"fenced", "prepared"}:
         raise UpdateRefused(f"the update to build {intent.get('to')} is {intent['phase']}; finish or cancel it first")
     if intent["phase"] == "prepared":
         return
+    # Re-asserted on every pass; the first answer is the earlier state. A lost first answer keeps work paused.
+    paused = _post(update, "/api/update/fence", {})["paused"]
+    intent.setdefault("paused", paused)
     intent["waiting"] = _running_work(update)
     _save_intent(update, intent)
     if intent["waiting"]:
@@ -490,6 +494,8 @@ def reconcile_update(update: AppUpdate) -> None:
     installed = bundle_build(update.app)
     if intent["phase"] == "releasing":
         _release(update, intent)
+    elif intent["phase"] == "rolling-back":
+        rollback_update(update)
     elif installed == intent["to"] and intent["phase"] in {"prepared", "starting"}:
         _finish(update, intent)
     elif installed == intent["from"] and intent["phase"] in {"saving", "restoring"}:
@@ -547,8 +553,11 @@ def rollback_update(update: AppUpdate) -> None:
     """Restore the saved database, app and exact launch item of a failed candidate, keeping each attempt's failed
     copies. Only before new work was released: once the candidate published files, reconcile those first."""
     intent = _require_intent(update)
-    if intent["phase"] not in {"starting", "failed"}:
+    if intent["phase"] not in {"starting", "failed", "rolling-back"}:
         raise UpdateRefused("nothing ran on the new build; cancel the update instead")
+    # Every step below is repeatable from the saved pair; an interrupted rollback is run again, from either app copy.
+    intent["phase"] = "rolling-back"
+    _save_intent(update, intent)
     stage = Path(intent["stage"])
     installed = Path(intent["app"])
     disable_login_item(LoginItemPaths(installed, update.home))

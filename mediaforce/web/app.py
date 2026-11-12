@@ -1188,9 +1188,10 @@ def create_app(
     def _release_work_snapshot() -> ReleaseWorkSnapshot:
         from mediaforce.ops.runtime_install import bundle_build, bundled_app_path
 
+        snapshot = release_work_payload(config.paths.db_path)
         # An update checks that this answer comes from the exact build and database it started.
-        return {**release_work_payload(config.paths.db_path),
-                "server": {"build": bundle_build(bundled_app_path()), "database": str(config.paths.db_path.resolve())}}
+        snapshot["server"] = {"build": bundle_build(bundled_app_path()), "database": str(config.paths.db_path.resolve())}
+        return snapshot
 
     register_release_routes(app, work_snapshot=_release_work_snapshot)
 
@@ -2409,11 +2410,14 @@ def main(argv: list[str] | None = None) -> None:
         verify_bundled_startup(bundle)
         config = load_config(Path(args.config))
         from mediaforce.ops.controller_deploy import require_update_startup_allowed
-        from mediaforce.ops.runtime_install import bundle_service
+        from mediaforce.ops.runtime_install import bundle_service, require_own_support
 
+        require_own_support(bundle, config.paths.db_path, Path.home())
         require_update_startup_allowed(config.paths.db_path.parent, bundle)
-        if args.port is None:
-            args.port = bundle_service(bundle)[1]
+        port = bundle_service(bundle)[1]
+        if args.port is not None and args.port != port:
+            raise SystemExit(f"this app's server uses port {port}")
+        args.port = port
         env_path = env_path or config.paths.db_path.parent / ".env"
     if args.credentials is not None:
         with args.credentials.open("rb"):

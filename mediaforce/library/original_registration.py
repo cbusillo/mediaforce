@@ -19,7 +19,7 @@ from mediaforce.core.utils import file_stat_signature, timestamp
 from mediaforce.library import probe, source_evidence
 from mediaforce.library.source_evidence import current_admission_filter, current_owner_admissions_query, reuse_source_generation, reuse_source_version, append_version, ensure_active_source_version, json_text, load_source_evidence_bulk, load_source_evidence_context, pending_source_operation
 from mediaforce.library.source_intake import assess_readable_source, commit_readable_source, frozen_observed_measurements, _history_present, _matches_scanned_identity
-from mediaforce.ops.runtime_install import runtime_directory
+from mediaforce.ops.runtime_install import support_root
 
 
 class OriginalApprovalWaiting(OSError):
@@ -30,7 +30,7 @@ MISSING_APPROVAL_REASON = "The saved Mac approval is unavailable. Restore it or 
 
 
 def confirmation_directory() -> Path:
-    return runtime_directory(Path.home()).parent / "mac-app" / "original-approvals"
+    return support_root(Path.home()) / "mac-app" / "original-approvals"
 
 
 def original_request_dismissed(preview_id: str, manifest_hash: str, problems: Sequence[Mapping[str, Any]] = ()) -> bool:

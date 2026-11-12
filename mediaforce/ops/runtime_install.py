@@ -60,8 +60,21 @@ def bundle_build(app: Path | None) -> str | None:
     return str(plistlib.loads((app / "Contents/Info.plist").read_bytes())["CFBundleVersion"]) if app else None
 
 
+def support_root(home: Path) -> Path:
+    """Application support for this server: the live folder, or a proof build's own folder named by its label."""
+    label = bundle_service(bundled_app_path())[0]
+    return home.resolve() / "Library" / "Application Support" / ("mediaforce" if label == SERVICE_LABEL else label)
+
+
+def require_own_support(app: Path, database: Path, home: Path) -> None:
+    """A proof build never opens or records anything beside the live service's database."""
+    live = home.resolve() / "Library" / "Application Support" / "mediaforce"
+    if bundle_service(app)[0] != SERVICE_LABEL and database.resolve().is_relative_to(live):
+        raise RuntimeProtectionError(f"a proof build must use its own config and database, not {database}")
+
+
 def runtime_directory(home: Path) -> Path:
-    return home.resolve() / "Library" / "Application Support" / "mediaforce" / "runtime"
+    return support_root(home) / "runtime"
 
 
 def require_release_directory(project_root: Path, home: Path) -> None:

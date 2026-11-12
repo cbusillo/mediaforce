@@ -87,6 +87,8 @@ def publish_checked_files_once(
         with delivery_lock(config.paths.db_path, item_id, blocking=False) as acquired:
             if not acquired:
                 continue
+            if update_hold_reason(config.paths.db_path.parent):
+                break
             with open_db(config.paths.db_path) as connection:
                 _try_publish_file(
                     connection, config, item_id, load_calibration_state, remake_files, stop_event
