@@ -4,20 +4,26 @@ from collections import defaultdict
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from sqlalchemy import select
 
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, motion_keep_decisions, staged_artifacts
-from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, count_pending_encode_work, load_queue_state
+from mediaforce.encoding.duration_estimate import (
+    estimate_encode_job_duration, estimate_fits_before_schedule_close, load_encode_duration_samples,
+)
+from mediaforce.encoding.encode_queue import (
+    RUNNABLE_ENCODE_JOB_KINDS, count_pending_encode_work, list_encode_jobs, load_queue_state,
+)
 from mediaforce.library.candidate_selection import SEASON_PATTERN
 from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.evidence_queue import EVIDENCE_WORK_CLAIMABLE_STATUSES, evidence_queue_summary, original_check_wait_reasons
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_source_sql
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
+from mediaforce.web.runtime.encode_runtime import _encode_job_estimate_items, _encode_job_library_key, _host_allows_library
 from mediaforce.web.runtime.host_runtime import running_encode_counts_by_host
 from mediaforce.web.runtime.host_status import is_awaiting_first_check
 
@@ -106,7 +112,9 @@ def app_window_payload(
                                  if sample["prefix"] not in kind_samples and sample["prefix"] not in remaking_samples]
     finished = _finished_seasons(items, promotions, seasons, kept)
     events = _events(connection)
-    computer_states = [_computer(row) for row in computers]
+    computers = list(computers)
+    short_windows = _computers_whose_window_fits_no_waiting_file(connection, computers, now=observed_at)
+    computer_states = [_computer(row, window_too_short=row.get("key") in short_windows) for row in computers]
     return {
         "schema_version": SCHEMA_VERSION,
         "observed_at": observed_at.isoformat(timespec="seconds"),
@@ -580,8 +588,35 @@ def _running_seasons(connection: DBClient) -> list[dict[str, Any]]:
     return [season_identity(prefix) for prefix in dict.fromkeys(str(prefix) for prefix in prefixes)]
 
 
-def _computer(row: Mapping[str, Any]) -> dict[str, Any]:
-    state = _computer_state(row)
+def _computers_whose_window_fits_no_waiting_file(
+        connection: DBClient, computers: list[Mapping[str, Any]], *, now: datetime,
+) -> set[str]:
+    ready = [dict(row) for row in computers if _computer_state(row) == "ready" and row.get("schedule_closes_at")]
+    if not ready:
+        return set()
+    jobs = list_encode_jobs(
+        connection, statuses=("queued",), limit=count_pending_encode_work(connection), job_kinds=RUNNABLE_ENCODE_JOB_KINDS,
+    )
+    samples = load_encode_duration_samples(connection)
+    manifest_items_cache: dict[Path, list[dict[str, Any]] | None] = {}
+
+    def fits_no_job(host: dict[str, Any]) -> bool:
+        allowed = [job for job in jobs if _host_allows_library(host, _encode_job_library_key(job))]
+        return bool(allowed) and not any(fits_window(job, host) for job in allowed)
+
+    def fits_window(job: dict[str, Any], host: dict[str, Any]) -> bool:
+        if job.get("bypass_schedule"):
+            return True
+        items = _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache)
+        if not items:
+            return True
+        return estimate_fits_before_schedule_close(estimate_encode_job_duration(items, host, samples), host, now=now)
+
+    return {str(host.get("key")) for host in ready if fits_no_job(host)}
+
+
+def _computer(row: Mapping[str, Any], *, window_too_short: bool = False) -> dict[str, Any]:
+    state = "too_little_time" if window_too_short else _computer_state(row)
     attention_reason = (
         (row.get("recovery") or {}).get("reason")
         if not row.get("available") and (row.get("recovery") or {}).get("status") == "action_required" else None
