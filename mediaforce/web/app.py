@@ -1801,6 +1801,7 @@ def create_app(
             only_library_item_ids: Collection[int] | None = None,
             expected_approval_contract: ActionPayload | None = None,
             admission_blocker: Callable[[DBClient, MediaforceConfig], ActionPayload | None] | None = None,
+            release_hold: bool = False,
     ) -> ActionPayload:
         current_config = load_config(config.paths.config_path)
         return queue_folder_encode_action(
@@ -1813,6 +1814,7 @@ def create_app(
             older_seasons_confirmed=older_seasons_confirmed,
             only_library_item_ids=only_library_item_ids,
             expected_approval_contract=expected_approval_contract,
+            release_hold=release_hold,
             now_iso=_now_iso,
             load_job_state=_load_job_state,
             load_calibration_state=_load_calibration_state,
@@ -1926,6 +1928,7 @@ def create_app(
             bypass_schedule: bool,
             override_policy_holds: bool = False,
             scope_membership_token: str = "",
+            release_hold: bool = False,
     ) -> ActionPayload:
         return _queue_encode_action(
             normalized_prefix,
@@ -1933,6 +1936,7 @@ def create_app(
             bypass_schedule,
             override_policy_holds=override_policy_holds,
             scope_membership_token=scope_membership_token,
+            release_hold=release_hold,
         )
 
     def _accept_ambiguous_motion_action(normalized_prefix: str) -> ActionPayload:

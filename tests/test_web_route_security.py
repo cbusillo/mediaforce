@@ -126,7 +126,7 @@ class WebRouteSecurityTests(unittest.TestCase):
             save_series_lifecycle_action=lambda *_args: {},
             save_audio_preset_action=lambda *_args: {},
             dismiss_audio_preset_suggestion_action=lambda *_args: {},
-            queue_folder_encode_action=lambda _prefix, _notes, _bypass, _override, token: capture("queue", token),
+            queue_folder_encode_action=lambda _prefix, _notes, _bypass, _override, token, _release: capture("queue", token),
             validate_folder_outputs_action=lambda _prefix, token: capture("validate", token),
             promote_folder_outputs_action=lambda _prefix, token: capture("promote", token),
         )

@@ -28632,6 +28632,57 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             self.assertEqual(self._existing_job(connection, "stopped-0")["status"], "needs_attention")
 
+    def _release_held_file(self, queue_config: MediaforceConfig, rel_path: str) -> folder_actions_runtime.ActionPayload:
+        calibration = self._season_calibration(queue_config)
+        with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
+            return self._queue_folder_encode(
+                queue_config, rel_path, "", False, True, release_hold=True,
+                load_calibration_state=lambda *_args, **_kwargs: calibration,
+                prepare_terminal_encode_job_for_requeue_fn=lambda connection, job: (
+                    encode_runtime.prepare_terminal_encode_job_for_requeue(
+                        connection, job, deps=web_app._encode_queue_runtime_deps(), config=queue_config)),
+                reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
+            )
+
+    def test_releasing_a_held_file_cleans_up_and_retries_only_that_file_and_records_it(self) -> None:
+        queue_config = self._complete_queue_config()
+        held_id, other_id, held_partial, other_partial = self._season_with_one_unconfirmed_stop(queue_config)
+
+        with patch.object(encode_runtime, "run_remote_command", new=_SleepingComputer("none").run_remote_command):
+            result = self._release_held_file(queue_config, "tv/show/Season 1/Episode 1.mkv")
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["queued_library_item_ids"], [held_id])
+        self.assertFalse(held_partial.exists())
+        self.assertTrue(other_partial.exists())
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertEqual(self._existing_job(connection, "stopped-1")["status"], "stopped")
+            other_status = connection.execute(select(library_items.c.status).where(library_items.c.id == other_id)).scalar_one()
+            released = connection.execute(select(item_events).where(
+                item_events.c.event_type == folder_actions_runtime.OWNER_RELEASED_HOLD_EVENT)).mappings().all()
+            season = build_folder_workflow_state(connection, "tv/show/Season 1", library_types=queue_config.library_type_map)
+        self.assertEqual(other_status, "encoding")
+        self.assertEqual([row["library_item_id"] for row in released], [held_id])
+        self.assertEqual(json.loads(released[0]["details_json"])["released_by"], "owner")
+        self.assertEqual(released[0]["created_at"], result["job"]["created_at"])
+        self.assertEqual(season.primary_lane, "processing")
+
+    def test_releasing_a_file_that_is_not_held_changes_nothing(self) -> None:
+        queue_config = self._complete_queue_config()
+        _held_id, _other_id, held_partial, other_partial = self._season_with_one_unconfirmed_stop(queue_config)
+
+        with patch.object(encode_runtime, "run_remote_command", new=_SleepingComputer("none").run_remote_command):
+            for prefix in ("tv/show/Season 1/Episode 2.mkv", "tv/show/Season 1"):
+                with self.subTest(prefix=prefix):
+                    self.assertEqual(self._release_held_file(queue_config, prefix)["code"], "not_held")
+
+        self.assertTrue(held_partial.exists())
+        self.assertTrue(other_partial.exists())
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertEqual(self._existing_job(connection, "stopped-0")["status"], "needs_attention")
+            self.assertEqual(self._existing_job(connection, "stopped-1")["status"], "stopped")
+            self.assertEqual(connection.execute(select(func.count()).select_from(item_events)).scalar_one(), 0)
+
     def test_retry_into_a_running_season_leaves_a_held_file_out(self) -> None:
         queue_config = self._complete_queue_config()
         host: dict[str, object] = {"key": "mini", "host": "mini.example", "label": "Mac mini", "mode": "ssh"}

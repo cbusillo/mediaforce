@@ -17,7 +17,8 @@ from mediaforce.core.db_tables import encode_jobs, item_events, library_items, s
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.core.utils import filesystem_collision_key
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_child_encode_jobs, \
-    list_terminal_encode_jobs_for_prefix, load_active_encode_jobs_for_prefix, load_latest_terminal_encode_job_for_prefix
+    list_terminal_encode_jobs_for_prefix, load_active_encode_jobs_for_prefix, load_encode_job, \
+    load_latest_terminal_encode_job_for_prefix
 from mediaforce.encoding.free_space import encode_reserve_preflight
 from mediaforce.encoding.staging import partial_output_path
 from mediaforce.execution import HeldFile, PromotionResult
@@ -138,6 +139,8 @@ _FINAL_SIZE_POSSIBLY_MISSED_REASON = (
 
 
 _UNCONFIRMED_STOP_REASON = "Mediaforce couldn't confirm its last picture check ended. It stays on hold until that's confirmed."
+# The owner said the earlier run on a held file is gone and tried that one file again.
+OWNER_RELEASED_HOLD_EVENT = "owner_released_hold"
 
 
 def _terminal_production_approval_contract(
@@ -773,8 +776,13 @@ def queue_folder_encode_action(
         reserve_preflight: Callable[..., Any] = encode_reserve_preflight,
         only_library_item_ids: Collection[int] | None = None,
         expected_approval_contract: ActionPayload | None = None,
+        release_hold: bool = False,
 ) -> ActionPayload:
     """Queue the folder's eligible files, leaving out each file with a problem and saying why.
+
+    With release_hold, the owner has confirmed the earlier run on one file held for an unconfirmed stop
+    is gone: that file's stopped run is cleaned up and the file queued like any retry, and the release
+    is recorded. Nothing else in that run is touched.
 
     With only_library_item_ids, queue just those files as a separate run under the current approval,
     leaving the folder's earlier jobs and their failures untouched; held files join production this way.
@@ -996,6 +1004,11 @@ def queue_folder_encode_action(
                     ),
                 }
         latest_encode_job = load_latest_terminal_encode_job_for_prefix(connection, normalized_prefix)
+        released_run = _unconfirmed_stop_of_file(connection, config, scope) if release_hold else None
+        if release_hold:
+            if released_run is None:
+                return {"ok": False, "code": "not_held", "queued_count": 0}
+            latest_encode_job = released_run
         terminal_job_needs_requeue = not joining_held_files and bool(
             latest_encode_job is not None and str(latest_encode_job.get("status") or "") in {
             "needs_attention",
@@ -1419,6 +1432,8 @@ def queue_folder_encode_action(
             "updated_at": created_at,
         }
         save_encode_job(connection, queue_job)
+        if released_run is not None:
+            _record_hold_release(connection, released_run, manifest["items"], queued_job_id=parent_job_id, now=created_at)
         finish_remake_intents(connection, [int(item["library_item_id"]) for item in manifest["items"]],
                               prefix=normalized_prefix, mode=hold_mode, approval=expected_approval_contract)
         release_holds(connection, [int(item.get("library_item_id") or 0) for item in manifest["items"]])
@@ -2181,24 +2196,66 @@ class _UnconfirmedStopHolds:
     job_ids: frozenset[str]
 
 
-def _unconfirmed_stop_holds(connection: DBClient, config: MediaforceConfig, scope: MediaScope) -> _UnconfirmedStopHolds:
-    if scope.kind == "media_file":
-        return _UnconfirmedStopHolds({}, frozenset())
+def _unconfirmed_stop_jobs(
+        connection: DBClient, config: MediaforceConfig, scope: MediaScope,
+) -> dict[int, tuple[str, list[JobPayload]]]:
+    """Each file in the scope held for an unconfirmed stop, with its path and the runs holding it."""
     rel_paths = {
         int(row["id"]): str(row["rel_path"])
         for row in connection.execute(
             select(library_items.c.id, library_items.c.rel_path).where(scope_rel_path_filter(library_items.c.rel_path, scope))
         ).mappings()
     }
-    files: dict[int, LeftOutFile] = {}
-    job_ids: set[str] = set()
+    held: dict[int, tuple[str, list[JobPayload]]] = {}
     for item_id, outcome in file_encode_outcomes(connection, rel_paths, config=config).items():
         holds = [job for job in outcome.hold_jobs if job.get("last_failure_kind") == CONTAINMENT_UNPROVEN_FAILURE_KIND]
-        if not holds:
-            continue
-        files[item_id] = LeftOutFile(item_id, rel_paths[item_id], CONTAINMENT_UNPROVEN_FAILURE_KIND, _UNCONFIRMED_STOP_REASON)
+        if holds:
+            held[item_id] = (rel_paths[item_id], holds)
+    return held
+
+
+def _unconfirmed_stop_holds(connection: DBClient, config: MediaforceConfig, scope: MediaScope) -> _UnconfirmedStopHolds:
+    if scope.kind == "media_file":
+        return _UnconfirmedStopHolds({}, frozenset())
+    files: dict[int, LeftOutFile] = {}
+    job_ids: set[str] = set()
+    for item_id, (rel_path, holds) in _unconfirmed_stop_jobs(connection, config, scope).items():
+        files[item_id] = LeftOutFile(item_id, rel_path, CONTAINMENT_UNPROVEN_FAILURE_KIND, _UNCONFIRMED_STOP_REASON)
         job_ids.update(str(job_id) for job in holds for job_id in (job["job_id"], job["parent_job_id"]) if job_id)
     return _UnconfirmedStopHolds(files, frozenset(job_ids))
+
+
+def _unconfirmed_stop_of_file(connection: DBClient, config: MediaforceConfig, scope: MediaScope) -> JobPayload | None:
+    """The stopped run holding exactly this one file for an unconfirmed stop, narrowed to that file.
+
+    Retrying it then cleans up and requeues this file alone, the way a season retry narrows a run to
+    the files it retries.
+    """
+    if scope.kind != "media_file":
+        return None
+    for item_id, (_rel_path, holds) in _unconfirmed_stop_jobs(connection, config, scope).items():
+        for hold in holds:
+            job = load_encode_job(connection, str(hold["job_id"]))
+            if job is not None and (indexes := _manifest_indexes_of(job, {item_id})):
+                return {**job, "job_kind": "single", "manifest_indexes": sorted(indexes)}
+    return None
+
+
+def _record_hold_release(
+        connection: DBClient, released_run: JobPayload, items: list[FolderItem], *, queued_job_id: str, now: str,
+) -> None:
+    for item in items:
+        connection.execute(item_events.insert().values(
+            library_item_id=int(item.get("library_item_id") or 0),
+            created_at=now,
+            event_type=OWNER_RELEASED_HOLD_EVENT,
+            details_json=json.dumps({
+                "released_by": "owner",
+                "reason": CONTAINMENT_UNPROVEN_FAILURE_KIND,
+                "held_job_id": released_run["job_id"],
+                "queued_job_id": queued_job_id,
+            }, sort_keys=True),
+        ))
 
 
 def _with_unconfirmed_stops_left_out(

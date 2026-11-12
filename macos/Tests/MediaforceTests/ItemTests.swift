@@ -131,6 +131,24 @@ final class ItemTests: XCTestCase {
         XCTAssertEqual(Set(reason).count, 3)
     }
 
+    func testOnlyTheFileHeldForAnUnconfirmedStopCanBeTriedAgainAfterAWarningNamingItsComputer() throws {
+        let computer = "Attic Mini"
+        let season = try facts([
+            file(1, stage: "needs_you", bytes: 1, waitReason: #"{"code": "needs_review"}"#),
+            file(2, stage: "needs_you", bytes: 1, waitReason: #"{"code": "containment_unproven", "computer": "\#(computer)"}"#),
+            file(3, stage: "needs_you", bytes: 1, waitReason: #"{"code": "restart_stopped", "computer": "\#(computer)"}"#),
+            file(4, stage: "needs_you", bytes: 1, waitReason: #"{"code": "containment_unproven"}"#),
+        ])
+
+        XCTAssertEqual(season.files.filter(\.heldForUnconfirmedStop).map(\.libraryItemId), [2, 4])
+        let held = season.files[1]
+        XCTAssertTrue(Words.releaseHoldWarning(held).contains(computer))
+        XCTAssertTrue(Words.releaseHoldQuestion(held).contains(Words.fileName(held)))
+        XCTAssertTrue(Words.releaseHoldButton(held).contains(Words.fileName(held)))
+        XCTAssertNotEqual(Words.releaseHoldWarning(season.files[3]), Words.releaseHoldWarning(held))
+        XCTAssertNotEqual(Words.actionRefusal("not_held", nil), Words.actionRefusal(nil, nil))
+    }
+
     func testStoppedPublishingSaysWhyItNeedsAttention() throws {
         let season = try facts([
             file(1, stage: "needs_you", bytes: 100, waitReason: #"{"code": "publish_failed"}"#),
