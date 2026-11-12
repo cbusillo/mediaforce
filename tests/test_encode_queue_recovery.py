@@ -28601,22 +28601,20 @@ raise SystemExit(0)
             })
             self.assertNotEqual(season_lane(connection)[0], "attention")
 
-    def test_retrying_exactly_the_held_file_is_not_refused_for_its_hold(self) -> None:
+    def test_retrying_exactly_the_held_file_without_the_owners_release_changes_nothing(self) -> None:
         queue_config = self._complete_queue_config()
-        held_id, _retried_id, _held_partial, _retried_partial = self._season_with_one_unconfirmed_stop(queue_config)
-        calibration = self._season_calibration(queue_config)
+        _held_id, _other_id, held_partial, _other_partial = self._season_with_one_unconfirmed_stop(queue_config)
         with open_db(self.config.paths.db_path) as connection:
-            connection.execute(update(library_items).where(library_items.c.id == held_id).values(status="planned"))
+            jobs_before = connection.execute(select(func.count()).select_from(encode_jobs)).scalar_one()
 
-        with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
-            result = self._queue_folder_encode(
-                queue_config, "tv/show/Season 1/Episode 1.mkv", "", False, True,
-                load_calibration_state=lambda *_args, **_kwargs: calibration,
-                reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
-            )
+        with patch.object(encode_runtime, "run_remote_command", new=_SleepingComputer("none").run_remote_command):
+            result = self._retry_stopped_season(queue_config, "tv/show/Season 1/Episode 1.mkv")
 
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(result["queued_library_item_ids"], [held_id])
+        self.assertEqual(result["code"], "containment_unproven", result)
+        self.assertTrue(held_partial.exists())
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertEqual(self._existing_job(connection, "stopped-0")["status"], "needs_attention")
+            self.assertEqual(connection.execute(select(func.count()).select_from(encode_jobs)).scalar_one(), jobs_before)
 
     def test_season_retry_of_only_a_held_file_queues_nothing(self) -> None:
         queue_config = self._complete_queue_config()

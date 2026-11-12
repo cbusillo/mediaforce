@@ -42,7 +42,10 @@ struct ItemFacts: Decodable, Sendable {
 
         var compressed: Bool { stage == "published" }
         /// Held because Mediaforce couldn't confirm its last run ended; only the Director can release it.
-        var heldForUnconfirmedStop: Bool { waitReason?.code == "containment_unproven" }
+        var unconfirmedStop: WaitReason? {
+            ([waitReason].compactMap { $0 } + (additionalWaitReasons ?? [])).first { $0.code == "containment_unproven" }
+        }
+        var heldForUnconfirmedStop: Bool { unconfirmedStop != nil }
         var needsYou: Bool { stage == "needs_you" || !(additionalWaitReasons ?? []).isEmpty }
     }
 

@@ -311,7 +311,8 @@ struct WaitingFiles: View {
                     } else if file.validation == "size_held" {
                         Button(Words.keepThisCopy) { act(file, .keepThisCopy) }
                         Button(Words.makeItAgain) { act(file, .makeAgain) }
-                    } else if file.heldForUnconfirmedStop {
+                    }
+                    if file.heldForUnconfirmedStop {
                         Button(Words.tryHeldFileAgain) { releasing = file }
                     }
                 }

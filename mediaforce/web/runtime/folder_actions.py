@@ -801,6 +801,13 @@ def queue_folder_encode_action(
             normalized_prefix,
             library_types=config.library_type_map,
         )
+        # Trying a file held for an unconfirmed stop again is the owner's release of that one file, and only that.
+        released_run = _unconfirmed_stop_of_file(connection, config, scope)
+        if release_hold and released_run is None:
+            return {"ok": False, "code": "not_held", "queued_count": 0}
+        if released_run is not None and not release_hold:
+            return {"ok": False, "code": CONTAINMENT_UNPROVEN_FAILURE_KIND, "message": _UNCONFIRMED_STOP_REASON,
+                    "queued_count": 0}
         manual_override_prefix: str | None = None
         if override_policy_holds and override_older_seasons:
             raise HTTPException(status_code=400, detail="Choose one lifecycle override mode.")
@@ -1004,10 +1011,7 @@ def queue_folder_encode_action(
                     ),
                 }
         latest_encode_job = load_latest_terminal_encode_job_for_prefix(connection, normalized_prefix)
-        released_run = _unconfirmed_stop_of_file(connection, config, scope) if release_hold else None
-        if release_hold:
-            if released_run is None:
-                return {"ok": False, "code": "not_held", "queued_count": 0}
+        if released_run is not None:
             latest_encode_job = released_run
         terminal_job_needs_requeue = not joining_held_files and bool(
             latest_encode_job is not None and str(latest_encode_job.get("status") or "") in {

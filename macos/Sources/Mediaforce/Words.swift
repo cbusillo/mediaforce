@@ -1380,7 +1380,7 @@ extension Words {
     }
 
     static func releaseHoldWarning(_ file: ItemFacts.File) -> String {
-        let computer = file.waitReason?.computer ?? "the computer that ran it"
+        let computer = file.unconfirmedStop?.computer ?? "the computer that ran it"
         return "Mediaforce couldn't confirm that its last picture check on \(computer) ended. If that check is still running, "
             + "it could spoil the new copy. Try again only if you're sure it stopped, for example because \(computer) has "
             + "restarted since. Mediaforce cleans up the unfinished copy and checks the new one as usual. Nothing else changes."
