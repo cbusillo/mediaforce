@@ -569,8 +569,8 @@ def _run_remote_status_probe(
     )
 
 
-def ssh_client_options(*, batch_mode: bool = True, connect_timeout_seconds: int = 5) -> list[str]:
-    return _ssh_client_options_impl(batch_mode=batch_mode, connect_timeout_seconds=connect_timeout_seconds)
+def ssh_client_options(*, batch_mode: bool = True, connect_timeout_seconds: int = 5, **alive_checks: int) -> list[str]:
+    return _ssh_client_options_impl(batch_mode=batch_mode, connect_timeout_seconds=connect_timeout_seconds, **alive_checks)
 
 
 def _run_remote_ssh(

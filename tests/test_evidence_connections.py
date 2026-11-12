@@ -9,9 +9,40 @@ from unittest.mock import Mock, patch
 from mediaforce.core.process_control import ManagedProcessController, ProcessDeadlineEnforcementError
 from mediaforce.encoding.remote_media import RemoteMediaCommands, RemoteMediaConnections, RemoteMediaHostUnavailableError
 from mediaforce.hosts.transport import _run_remote_ssh, keep_awake_while_running, run_remote_command
+from mediaforce.remote import ssh_client_options
+
+
+def _seconds_to_notice_dead_link(command: list[str]) -> int:
+    return int(_first_ssh_option(command, "ServerAliveInterval")) * int(_first_ssh_option(command, "ServerAliveCountMax"))
+
+
+def _first_ssh_option(command: list[str], name: str) -> str:
+    return next(arg.split("=", 1)[1] for arg in command if arg.startswith(f"{name}="))
 
 
 class EvidenceConnectionTests(unittest.TestCase):
+    def test_remote_encode_connection_notices_a_dead_link_within_a_minute(self) -> None:
+        self.assertLessEqual(_seconds_to_notice_dead_link(ssh_client_options()), 60)
+
+    def test_measurement_connection_keeps_its_faster_dead_link_check(self) -> None:
+        commands: list[list[str]] = []
+
+        def master_command(command: list[str], *, process_controller: ManagedProcessController) -> None:
+            commands.append(command)
+            Path(_first_ssh_option(command, "ControlPath")).touch()
+            while not process_controller.cancelled:
+                time.sleep(.01)
+            process_controller.throw_if_cancelled()
+
+        with patch('mediaforce.encoding.remote_media.run_command', side_effect=master_command), \
+             patch('mediaforce.encoding.remote_media._ensure_remote_awake_for_ssh'):
+            with RemoteMediaConnections() as pool:
+                runner = pool.runner({'key': 'fixture.invalid'})
+                assert runner.connection is not None
+                runner.connection.ensure_started(ManagedProcessController())
+
+        self.assertLess(_seconds_to_notice_dead_link(commands[0]), _seconds_to_notice_dead_link(ssh_client_options()))
+
     def test_silent_multiplexed_disconnect_is_not_bad_media(self) -> None:
         runner = RemoteMediaCommands({'host': 'fixture.invalid'}, connection=Mock(control_path=Path('/fixture/private/control'), alive=Mock(return_value=False)))
         with patch('mediaforce.encoding.remote_media.run_remote_command', return_value=subprocess.CompletedProcess([], 255, '', '')):

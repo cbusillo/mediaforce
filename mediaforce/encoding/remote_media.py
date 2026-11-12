@@ -149,8 +149,8 @@ class _EvidenceSSHMaster:
     def _run(self) -> None:
         try:
             result = run_command([
-                "ssh", *ssh_client_options(), "-M", "-N", "-n", "-o", "ControlPersist=no", "-o", "ForkAfterAuthentication=no",
-                "-o", "ServerAliveInterval=3", "-o", "ServerAliveCountMax=3",
+                "ssh", *ssh_client_options(alive_check_seconds=3, alive_checks_before_drop=3), "-M", "-N", "-n",
+                "-o", "ControlPersist=no", "-o", "ForkAfterAuthentication=no",
                 "-o", f"ControlPath={self.control_path}", ssh_target_for_host(self.host),
             ], process_controller=self.controller)
             if result.returncode:
