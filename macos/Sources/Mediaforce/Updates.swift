@@ -30,12 +30,15 @@ final class Updates: NSObject, SPUUpdaterDelegate {
         if let status = await ServerUpdateStep.run(["status"]) {
             failedBuilds = Set(status.failedBuilds)
             if let intent = status.intent, let target = intent.to {
-                if target == ServerUpdateStep.ownBuild, ["prepared", "starting"].contains(intent.phase) {
+                if intent.phase == "releasing" || (target == ServerUpdateStep.ownBuild && ["prepared", "starting"].contains(intent.phase)) {
                     if let problem = await ServerUpdateStep.run(["finish"]).flatMap(\.error) {
                         waiting = [problem]
                     }
                 } else if intent.phase == "prepared" {
                     preparedBuild = target
+                } else if intent.phase == "fenced" {
+                    // Quit or restarted while files were finishing: keep getting ready for the same build.
+                    prepare(target)
                 }
             }
         }

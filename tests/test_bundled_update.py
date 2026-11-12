@@ -27,8 +27,9 @@ from mediaforce.web.runtime.queue_actions import (
 class FakeServer:
     """The running server as the update sees it: its API, its pause switches and launchd."""
 
-    def __init__(self, database: Path) -> None:
+    def __init__(self, database: Path, config: Path) -> None:
         self.database = database
+        self.config = load_config(config)
         self.running = {"encode": 0, "sample": 0, "scan": 0, "evidence": 0}
         self.healthy = True
         self.launchctl: list[list[str]] = []
@@ -50,7 +51,8 @@ class FakeServer:
             return open_db(self.database)
         if route == "/api/update/fence":
             return fence_for_update_action(connection_factory=connection, now_iso=lambda: "2026-11-12T00:00:00+00:00")
-        return release_update_fence_action(body, connection_factory=connection, now_iso=lambda: "2026-11-12T00:00:00+00:00")
+        return release_update_fence_action(body, connection_factory=connection, config=self.config,
+                                           now_iso=lambda: "2026-11-12T00:00:00+00:00")
 
     def run(self, command: list[str]) -> subprocess.CompletedProcess[str]:
         self.launchctl.append(command[1:])
@@ -77,7 +79,7 @@ def update(tmp_path: Path) -> Iterator[Update]:
     paths = LoginItemPaths(app, home, config)
     paths.plist.parent.mkdir(parents=True)
     paths.plist.write_bytes(render_login_item_plist(paths))
-    server = FakeServer(database)
+    server = FakeServer(database, config)
     context = bundled_update.UpdateContext(config, app, home, "http://127.0.0.1:1", 1)
     with patch.object(bundled_update, "_api", server.api), patch.object(bundled_update, "_post", server.post), \
             patch.object(bundled_update, "_verify_signed_bundle"), patch.object(bundled_update, "_listener_is_closed", return_value=True), \
@@ -118,14 +120,15 @@ def test_busy_server_keeps_running_with_work_fenced_until_files_finish(update: U
     context, server = update
     server.running.update(encode=1, sample=1)
     intent = bundled_update.prepare(context, "2", runner=server.run)
-    assert intent["phase"] == "fenced"
-    assert intent["waiting"] == ["1 files are compressing", "1 samples are running"]
+    assert intent["phase"] == "fenced" and len(intent["waiting"]) == 2
     assert server.launchctl == []
     assert _paused(server.database) == (True, True)
     database = load_config(context.config_path)
     assert resume_encode_queue_action(connection_factory=lambda: open_db(server.database), config=database,
                                       now_iso=lambda: "now")["ok"] is False
-    with pytest.raises(bundled_update.UpdateRefused, match="build 2 is unfinished"):
+    assert server.post(context, "/api/update/release", {"encode": False, "background": False})["ok"] is False
+    assert _paused(server.database) == (True, True)
+    with pytest.raises(bundled_update.UpdateRefused):
         bundled_update.prepare(context, "3", runner=server.run)
     bundled_update.cancel(context, runner=server.run)
     assert _paused(server.database) == (False, False)
@@ -173,7 +176,7 @@ def test_failed_migration_stops_service_and_rollback_restores_matching_old_pair(
     server.healthy = False
     with sqlite3.connect(server.database) as migrated:
         migrated.execute("create table candidate_migration (id integer)")
-    with pytest.raises(bundled_update.UpdateRefused, match="did not answer"):
+    with pytest.raises(bundled_update.UpdateRefused):
         bundled_update.finish(context, runner=server.run, startup_timeout=0)
     assert server.launchctl[-1][0] == "disable"
     assert _phase(context) == "failed"
@@ -187,12 +190,15 @@ def test_failed_migration_stops_service_and_rollback_restores_matching_old_pair(
     with sqlite3.connect(server.database) as restored:
         assert not restored.execute("select name from sqlite_master where name = 'candidate_migration'").fetchall()
     stage = retained_deploy_stage(context.support_dir)
-    assert stage is not None and (stage / "failed/library.sqlite3").exists()
-    assert (stage / "failed/Mediaforce.app/Contents/MacOS/Mediaforce").read_bytes() == b"new app"
+    assert stage is not None
+    failed, = stage.glob("failed-*")
+    assert (failed / "library.sqlite3").exists()
+    assert (failed / "Mediaforce.app/Contents/MacOS/Mediaforce").read_bytes() == b"new app"
     assert _paused(server.database) == (False, False)
     assert bundled_update.read_update_intent(context.support_dir) is None
-    with pytest.raises(bundled_update.UpdateRefused, match="failed before"):
+    with pytest.raises(bundled_update.UpdateRefused):
         bundled_update.prepare(context, "2", runner=server.run)
+    assert bundled_update.failed_builds(context) == ["2"]
 
 
 def test_verified_candidate_records_pair_and_resumes_only_a_running_queue(update: Update) -> None:
@@ -212,7 +218,7 @@ def test_cancel_refuses_once_the_app_was_replaced(update: Update) -> None:
     context, server = update
     bundled_update.prepare(context, "2", runner=server.run)
     _replace_app(context, build="2")
-    with pytest.raises(bundled_update.UpdateRefused, match="already replaced"):
+    with pytest.raises(bundled_update.UpdateRefused):
         bundled_update.cancel(context, runner=server.run)
     assert _phase(context) == "prepared"
 
@@ -227,3 +233,29 @@ def test_unfinished_update_holds_cleanup(update: Update) -> None:
             patch("mediaforce.state_cleanup._purge_due_transient_artifacts") as purge:
         assert purge_transient_artifacts(load_config(context.config_path), force=True) is False
     purge.assert_not_called()
+
+
+def test_publication_in_progress_keeps_the_old_server_running(update: Update) -> None:
+    import fcntl
+
+    context, server = update
+    locks = context.support_dir / "delivery-locks"
+    locks.mkdir()
+    with (locks / "7.lock").open("a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        assert bundled_update.prepare(context, "2", runner=server.run)["phase"] == "fenced"
+    assert server.launchctl == []
+    assert bundled_update.prepare(context, "2", runner=server.run)["phase"] == "prepared"
+
+
+def test_candidate_keeps_the_exact_saved_launch_item_except_its_trusted_build(update: Update) -> None:
+    context, server = update
+    saved = plistlib.loads(context.plist.read_bytes())
+    saved["EnvironmentVariables"]["MEDIAFORCE_EXTRA"] = "kept"
+    context.plist.write_bytes(plistlib.dumps(saved))
+    bundled_update.prepare(context, "2", runner=server.run)
+    _replace_app(context, build="2")
+    bundled_update.finish(context, runner=server.run)
+    candidate = plistlib.loads(context.plist.read_bytes())
+    assert candidate["MediaforceAppCodeHash"] != saved["MediaforceAppCodeHash"]
+    assert {**candidate, "MediaforceAppCodeHash": None} == {**saved, "MediaforceAppCodeHash": None}

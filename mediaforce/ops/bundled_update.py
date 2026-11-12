@@ -11,6 +11,7 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import fcntl
 import json
 import os
 import plistlib
@@ -30,7 +31,7 @@ from mediaforce.ops.controller_deploy import (
 )
 from mediaforce.ops.login_item import (
     LoginItemPaths, _atomic_write, _bootstrap, _bundle_code_hash, _launch_domain, _launch_target, _require_success,
-    _run_command, _verify_signed_bundle, disable_login_item, render_login_item_plist,
+    _run_command, _verify_signed_bundle, disable_login_item,
 )
 from mediaforce.ops.runtime_install import (
     UPDATE_INTENT_NAME, read_update_intent, retain_deploy_stage, retained_deploy_stage, runtime_activity,
@@ -140,8 +141,7 @@ def cancel(context: UpdateContext, *, runner: Callable[[list[str]], subprocess.C
             _write_intent(context, intent)
             _start_saved_service(Path(intent["stage"]) / "launch-item.before.plist", context, runner)
             _wait_healthy(context)
-        _restore_pause(context, intent.get("paused"))
-        context.intent_path.unlink()
+        _release(context, intent)
 
 
 def finish(context: UpdateContext, *, runner: Callable[[list[str]], subprocess.CompletedProcess[str]] = _run_command,
@@ -150,23 +150,26 @@ def finish(context: UpdateContext, *, runner: Callable[[list[str]], subprocess.C
     A failure leaves the service stopped and records the failed build; it never restarts old code."""
     with _locked(context):
         intent = _require_intent(context)
+        if intent["phase"] == "releasing":
+            _release(context, intent)
+            return intent
         if app_build(context.app) != intent["to"]:
             raise UpdateRefused(f"the installed app is build {app_build(context.app)}, not the prepared build {intent['to']}")
         if intent["phase"] not in {"prepared", "starting"}:
             raise UpdateRefused(f"the update is {intent['phase']}; roll back before trying again")
         stage = Path(intent["stage"])
         _verify_signed_bundle(context.app)
-        before = plistlib.loads((stage / "launch-item.before.plist").read_bytes())
-        arguments = before["ProgramArguments"]
-        credentials = Path(arguments[arguments.index("--credentials") + 1]) if "--credentials" in arguments else None
-        paths = LoginItemPaths(context.app, context.home, context.config_path, credentials)
-        if Path(arguments[0]) != paths.program:
+        saved = plistlib.loads((stage / "launch-item.before.plist").read_bytes())
+        paths = LoginItemPaths(context.app, context.home)
+        if Path(saved["ProgramArguments"][0]) != paths.program:
             raise UpdateRefused("the saved service runs another copy of the app; move this app back to its saved place")
         # From here the candidate may migrate the database; only the saved pair can undo it.
         intent["phase"] = "starting"
         _write_intent(context, intent)
         try:
-            _atomic_write(paths.plist, render_login_item_plist(paths))
+            # The saved launch item stays exactly as it was, except for the build it trusts.
+            candidate = {**saved, "MediaforceAppCodeHash": _bundle_code_hash(context.app)}
+            _atomic_write(paths.plist, plistlib.dumps(candidate, fmt=plistlib.FMT_XML, sort_keys=True))
             started_at = datetime.now(timezone.utc)
             _require_success(runner(["/bin/launchctl", "enable", _launch_target()]), "enable the background service")
             _bootstrap(runner, _launch_domain(), paths.plist)
@@ -183,8 +186,7 @@ def finish(context: UpdateContext, *, runner: Callable[[list[str]], subprocess.C
             raise
         _atomic_write(stage / "candidate.txt", json.dumps(
             {"build": intent["to"], "app": str(context.app), "code_hash": _bundle_code_hash(context.app)}).encode())
-        _restore_pause(context, intent.get("paused"))
-        context.intent_path.unlink()
+        _release(context, intent)
         return intent
 
 
@@ -204,19 +206,26 @@ def rollback(context: UpdateContext, *, runner: Callable[[list[str]], subprocess
         with exclusive_mediaforce_runtime_lock(config, owner_payload={"operation": "update-rollback"}):
             reserve_mediaforce_database_identity(config)
             database = config.paths.db_path
-            failed = stage / "failed"
-            failed.mkdir(exist_ok=True)
+            # Each attempt keeps its own evidence; a retry never overwrites what an earlier one preserved.
+            failed = stage / f"failed-{_stamp()}"
+            failed.mkdir()
+            incoming = database.with_name(f".{database.name}.restoring")
+            incoming.unlink(missing_ok=True)
+            _copy_database(stage / "before.sqlite", incoming)
             for suffix in ("", "-wal", "-shm"):
                 current = database.with_name(database.name + suffix)
                 if current.exists():
                     current.rename(failed / current.name)
-            _copy_database(stage / "before.sqlite", database)
+            incoming.rename(database)
         # The saved service names where the app lives; this command may run from either copy.
         installed_app = Path(intent["app"])
-        failed_app = failed / installed_app.name
-        if installed_app.exists() and not failed_app.exists():
-            shutil.move(installed_app, failed_app)
-        _copy_app(saved_app, installed_app)
+        incoming_app = installed_app.with_name(f".{installed_app.name}.restoring")
+        shutil.rmtree(incoming_app, ignore_errors=True)
+        _copy_app(saved_app, incoming_app)
+        _verify_signed_bundle(incoming_app)
+        if installed_app.exists():
+            shutil.move(installed_app, failed / installed_app.name)
+        incoming_app.rename(installed_app)
         _verify_signed_bundle(installed_app)
         if plistlib.loads(saved_plist).get("MediaforceAppCodeHash") != _bundle_code_hash(installed_app):
             raise UpdateRefused("the restored app does not match its saved service")
@@ -225,15 +234,14 @@ def rollback(context: UpdateContext, *, runner: Callable[[list[str]], subprocess
         _write_intent(context, intent)
         _start_saved_service(stage / "launch-item.before.plist", context, runner)
         _wait_healthy(context)
-        _restore_pause(context, intent.get("paused"))
-        context.intent_path.unlink()
+        _release(context, intent)
 
 
 def require_startup_allowed(support_dir: Path, app: Path) -> None:
     """The server opens the database only when no unfinished update says otherwise: the old build may run while
     work is fenced; once the old pair is saved, only the candidate being started or the old app being restored."""
     intent = read_update_intent(support_dir)
-    if intent is None or intent.get("phase") == "fenced":
+    if intent is None or intent.get("phase") in {"fenced", "releasing"}:
         return
     if (intent.get("phase"), app_build(app)) in {("starting", intent.get("to")), ("restoring", intent.get("from"))}:
         return
@@ -276,9 +284,14 @@ def _fence(context: UpdateContext) -> dict[str, bool]:
     return _post(context, "/api/update/fence", {})["paused"]
 
 
-def _restore_pause(context: UpdateContext, paused: dict[str, bool] | None) -> None:
+def _release(context: UpdateContext, intent: dict[str, Any]) -> None:
+    """The one way an update ends. The record says "releasing" before any pause is lifted, so nothing can roll back
+    under work that already resumed, and a lost answer is finished again from the record instead of replayed."""
+    intent["phase"] = "releasing"
+    _write_intent(context, intent)
     # Unknown earlier state stays paused: resuming work nobody asked for would be wrong.
-    _post(context, "/api/update/release", paused or {"encode": True, "background": True})
+    _post(context, "/api/update/release", intent.get("paused") or {"encode": True, "background": True})
+    context.intent_path.unlink()
 
 
 def _post(context: UpdateContext, route: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -294,6 +307,9 @@ def _active_work(context: UpdateContext) -> list[str]:
     counts = _api(context.base_url, "/api/release/work")["counts"]
     queue, calibration = dashboard["encode_queue"], dashboard["calibration_queue"]
     reasons = []
+    publishing = _publishing_now(context.support_dir)
+    if publishing:
+        reasons.append(f"{publishing} files are being published")
     for count, words in (
         (queue["running_count"], "files are compressing"),
         (calibration["sample"]["running_count"] + calibration["full"]["running_count"], "samples are running"),
@@ -303,6 +319,20 @@ def _active_work(context: UpdateContext) -> list[str]:
         if count:
             reasons.append(f"{count} {words}")
     return reasons
+
+
+def _publishing_now(support_dir: Path) -> int:
+    """Files whose delivery lock someone holds: their publication must finish before the server stops."""
+    held = 0
+    for path in sorted((support_dir / "delivery-locks").glob("*.lock")):
+        with path.open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                held += 1
+            else:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+    return held
 
 
 def _previous_stage(context: UpdateContext) -> str | None:
@@ -337,8 +367,7 @@ def _save_and_stop(context: UpdateContext, intent: dict[str, Any], stage: Path,
         if stopped:
             _start_saved_service(stage / "launch-item.before.plist", context, runner)
             _wait_healthy(context)
-        _restore_pause(context, intent.get("paused"))
-        context.intent_path.unlink()
+        _release(context, intent)
         raise
     retain_deploy_stage(context.support_dir, stage)
 

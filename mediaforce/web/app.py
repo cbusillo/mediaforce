@@ -2191,7 +2191,9 @@ def create_app(
         return fence_for_update_action(connection_factory=lambda: open_db(config.paths.db_path), now_iso=_now_iso)
 
     def _release_update_fence_action(paused: dict[str, Any]) -> dict[str, Any]:
-        return release_update_fence_action(paused, connection_factory=lambda: open_db(config.paths.db_path), now_iso=_now_iso)
+        return release_update_fence_action(
+            paused, connection_factory=lambda: open_db(config.paths.db_path), config=config, now_iso=_now_iso,
+        )
 
     def _save_series_lifecycle_action(normalized_prefix: str, mode: str) -> dict[str, Any]:
         nonlocal config

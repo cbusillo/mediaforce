@@ -108,13 +108,16 @@ Sparkle owns download, archive verification, replacement and relaunch. The
 app's own server executable owns everything around it, as
 `mediaforce-server --config <saved> service update status|prepare|cancel|finish|rollback`.
 One record, `runtime/update-intent.json` beside the configured database, spans
-app quit, replacement and reboot. While it exists, the encode queue, samples
-and background work admit nothing new, resume is refused, the hourly cleanup
-does not run, and the server starts only as the step names.
+app quit, replacement and reboot. While it exists, the encode queue, samples,
+background work and automatic publication admit nothing new, resume is
+refused, the hourly cleanup does not run, and the server starts only as the
+step names. Every ending passes through a `releasing` phase before any pause
+is lifted, so nothing rolls back under work that already resumed.
 
 1. When Sparkle finds a build, the app refuses it and starts preparation.
    The server pauses new work and records what was already paused; running
-   files finish. Each minute the app rechecks and shows what is still running.
+   files finish, including any publication holding its delivery lock. Each
+   minute the app rechecks and shows what is still running.
 2. When nothing runs, preparation copies and verifies the signed old app and
    its exact launch item into a fresh `deployments/update-<old>-to-<new>-<time>/`
    stage, stops the service, verifies the port closed and the database's
@@ -125,11 +128,13 @@ does not run, and the server starts only as the step names.
    that never downloaded restarts the old service; a downloaded or pending
    install keeps it stopped.
 4. The relaunched app starts its own server through the saved service path,
-   checks its build, API, queued work and storage, records the pair in
+   with the exact saved launch item except its trusted build, checks its
+   build, API, queued work and storage, records the pair in
    `candidate.txt`, then restores the pauses so only a previously running
    queue resumes.
 5. A candidate that fails stays stopped and its build is recorded in
    `runtime/failed-update-builds.json`; Sparkle never offers it again. `rollback`
-   moves the failed database and app into the stage's `failed/` folder,
-   restores `before.sqlite`, the saved app and the exact saved launch item,
+   restores `before.sqlite` and the saved app into fresh copies, moves the
+   failed database and app into a new `failed-<time>/` folder in the stage,
+   switches the copies in, restores the exact saved launch item
    and starts the old build. Roll back only before new work was released.

@@ -4,7 +4,7 @@ from typing import Any
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
 from mediaforce.library.background_work import background_work_is_paused, set_background_work_paused
-from mediaforce.ops.runtime_install import update_hold_reason
+from mediaforce.ops.runtime_install import read_update_intent, update_hold_reason
 from mediaforce.library.evidence_queue import resume_evidence_queue
 
 
@@ -57,8 +57,14 @@ def fence_for_update_action(*, connection_factory: Any, now_iso: Any) -> dict[st
     return {"ok": True, "paused": paused}
 
 
-def release_update_fence_action(paused: dict[str, Any], *, connection_factory: Any, now_iso: Any) -> dict[str, Any]:
-    """Put each pause back as it was before the update, so only a previously running queue resumes."""
+def release_update_fence_action(
+        paused: dict[str, Any], *, connection_factory: Any, config: MediaforceConfig, now_iso: Any,
+) -> dict[str, Any]:
+    """Put each pause back as it was before the update, so only a previously running queue resumes. Only an update
+    that is ending may do this; while any other step is unfinished, new work stays held."""
+    intent = read_update_intent(config.paths.db_path.parent)
+    if intent is not None and intent.get("phase") != "releasing":
+        return {"ok": False, "message": update_hold_reason(config.paths.db_path.parent)}
     with connection_factory() as connection:
         updated_at = now_iso()
         connection.commit()

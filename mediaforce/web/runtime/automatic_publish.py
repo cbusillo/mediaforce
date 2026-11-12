@@ -25,6 +25,7 @@ from mediaforce.library.staged_validation import AUTOMATIC_PUBLISH_ORIGINS, NOT_
     missed_only_final_size, missed_only_over_final_size, staged_validation_outcome
 from mediaforce.web.runtime.folder_actions import production_action_blocker
 from mediaforce.hosts.work_window import controller_work_allowed
+from mediaforce.ops.runtime_install import update_hold_reason
 from mediaforce.web.runtime.production_approval import (
     LoadCalibrationState,
     effective_production_approval,
@@ -53,7 +54,8 @@ def publish_checked_files_once(
 
     A copy that fails its check is made again through ``remake_files`` until the attempt limit, then kept original.
     """
-    if not controller_work_allowed(config):
+    if not controller_work_allowed(config) or update_hold_reason(config.paths.db_path.parent):
+        # An unfinished app update holds new publication; one already holding its delivery lock finishes first.
         return
     with open_db(config.paths.db_path) as connection:
         item_ids = list(
@@ -79,7 +81,8 @@ def publish_checked_files_once(
         )
     for item_id in item_ids:
         config = load_config(config.paths.config_path)
-        if (stop_event is not None and stop_event.is_set()) or not controller_work_allowed(config):
+        if (stop_event is not None and stop_event.is_set()) or not controller_work_allowed(config) \
+                or update_hold_reason(config.paths.db_path.parent):
             break
         with delivery_lock(config.paths.db_path, item_id, blocking=False) as acquired:
             if not acquired:
