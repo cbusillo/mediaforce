@@ -61,6 +61,7 @@ enum Words {
         case "schedule_disabled": "Work is turned off for this computer"
         case "checking": "Checking this computer"
         case "outside_schedule": "Waiting for its work window"
+        case "too_little_time": "Not enough time left in this window for the waiting files"
         case "cooling_down": "Resting after repeated failures"
         case "not_encoding": "Makes samples only"
         case "storage_unreachable": "Can't reach shared storage"

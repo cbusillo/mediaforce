@@ -305,6 +305,25 @@ def test_computer_states_are_codes(connection: DBClient) -> None:
     ]
 
 
+def test_ready_computer_says_when_its_window_is_too_short_for_every_waiting_file(
+        connection: DBClient, tmp_path: Path,
+) -> None:
+    _encode_job(connection, "tv/A/Season 1", status="queued")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"items": [{"rel_path": "tv/A/Season 1/episode.mkv", "duration_seconds": 3600}]}))
+    connection.execute(encode_jobs.update().values(manifest_path=str(manifest)))
+    connection.commit()
+
+    computers = _payload(connection, computers=[
+        _computer("short", schedule_closes_at="2026-10-24T14:00:00+00:00"),
+        _computer("long", schedule_closes_at="2026-10-25T06:00:00+00:00"),
+    ])["computers"]
+
+    assert [(computer["key"], computer["state"]) for computer in computers] == [
+        ("short", "too_little_time"), ("long", "ready"),
+    ]
+
+
 def test_computer_attention_excludes_cooldown_but_includes_actionable_states_and_reasons(connection: DBClient) -> None:
     computers = _payload(connection, computers=[
         _computer("cooling", active_flag="cooldown"),
