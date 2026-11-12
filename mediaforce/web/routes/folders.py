@@ -40,7 +40,7 @@ def register_folder_routes(
     save_series_lifecycle_action: Callable[[str, str], dict[str, Any]],
     save_audio_preset_action: Callable[[str, str], dict[str, Any]],
     dismiss_audio_preset_suggestion_action: Callable[[str], dict[str, Any]],
-    queue_folder_encode_action: Callable[..., dict[str, Any]],
+    queue_folder_encode_action: Callable[[str, str, bool, bool, str, bool], dict[str, Any]],
     validate_folder_outputs_action: Callable[[str, str], dict[str, Any]],
     promote_folder_outputs_action: Callable[[str, str], dict[str, Any]],
     accept_ambiguous_motion_action: Callable[[str], dict[str, Any]] | None = None,

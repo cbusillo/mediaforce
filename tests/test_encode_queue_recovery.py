@@ -28283,11 +28283,13 @@ raise SystemExit(0)
         calibration["draft_hash"] = "approved-draft"
         return calibration
 
-    def _retry_stopped_season(self, queue_config: MediaforceConfig) -> folder_actions_runtime.ActionPayload:
+    def _retry_stopped_season(
+            self, queue_config: MediaforceConfig, prefix: str = "tv/show/Season 1", *, release_hold: bool = False,
+    ) -> folder_actions_runtime.ActionPayload:
         calibration = self._season_calibration(queue_config)
         with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
             return self._queue_folder_encode(
-                queue_config, "tv/show/Season 1", "", False, True,
+                queue_config, prefix, "", False, True, release_hold=release_hold,
                 load_calibration_state=lambda *_args, **_kwargs: calibration,
                 prepare_terminal_encode_job_for_requeue_fn=lambda connection, job: (
                     encode_runtime.prepare_terminal_encode_job_for_requeue(
@@ -28632,24 +28634,12 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             self.assertEqual(self._existing_job(connection, "stopped-0")["status"], "needs_attention")
 
-    def _release_held_file(self, queue_config: MediaforceConfig, rel_path: str) -> folder_actions_runtime.ActionPayload:
-        calibration = self._season_calibration(queue_config)
-        with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
-            return self._queue_folder_encode(
-                queue_config, rel_path, "", False, True, release_hold=True,
-                load_calibration_state=lambda *_args, **_kwargs: calibration,
-                prepare_terminal_encode_job_for_requeue_fn=lambda connection, job: (
-                    encode_runtime.prepare_terminal_encode_job_for_requeue(
-                        connection, job, deps=web_app._encode_queue_runtime_deps(), config=queue_config)),
-                reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
-            )
-
     def test_releasing_a_held_file_cleans_up_and_retries_only_that_file_and_records_it(self) -> None:
         queue_config = self._complete_queue_config()
         held_id, other_id, held_partial, other_partial = self._season_with_one_unconfirmed_stop(queue_config)
 
         with patch.object(encode_runtime, "run_remote_command", new=_SleepingComputer("none").run_remote_command):
-            result = self._release_held_file(queue_config, "tv/show/Season 1/Episode 1.mkv")
+            result = self._retry_stopped_season(queue_config, "tv/show/Season 1/Episode 1.mkv", release_hold=True)
 
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["queued_library_item_ids"], [held_id])
@@ -28674,7 +28664,7 @@ raise SystemExit(0)
         with patch.object(encode_runtime, "run_remote_command", new=_SleepingComputer("none").run_remote_command):
             for prefix in ("tv/show/Season 1/Episode 2.mkv", "tv/show/Season 1"):
                 with self.subTest(prefix=prefix):
-                    self.assertEqual(self._release_held_file(queue_config, prefix)["code"], "not_held")
+                    self.assertEqual(self._retry_stopped_season(queue_config, prefix, release_hold=True)["code"], "not_held")
 
         self.assertTrue(held_partial.exists())
         self.assertTrue(other_partial.exists())
