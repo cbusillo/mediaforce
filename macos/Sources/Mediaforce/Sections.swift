@@ -35,7 +35,7 @@ struct StorageBar: View {
     let facts: MainWindowFacts
     let kind: MediaKind
     let listing: MediaListing
-    let open: (Place) -> Void
+    var open: (Place) -> Void = { _ in }
 
     var body: some View {
         HStack(alignment: .top, spacing: 24) {
@@ -57,6 +57,12 @@ struct StorageBar: View {
                 )
                 .accessibilityElement(children: .combine)
                 .help(Words.estimatedTotalSavingsHelp)
+            } else if listing.canCompressAny {
+                // One library's list: what its rows' Can save column adds up to, worded as the Library's estimate.
+                metric(Words.estimatedTotalSavingsValue(listing.estimatedSavedBytes, partial: listing.estimateIsPartial),
+                       label: Words.canSave)
+                    .accessibilityElement(children: .combine)
+                    .help(Words.canSaveHelp)
             }
             Spacer()
         }

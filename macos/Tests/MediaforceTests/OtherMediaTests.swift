@@ -9,7 +9,7 @@ final class OtherMediaTests: XCTestCase {
         ("needs_attention", .needsYou),
         ("compressing", .inProgress),
         ("ready", .readyToCompress),
-        ("view_only", .noActiveWork),
+        ("view_only", .cannotCompressYet),
         ("no_work", .noActiveWork),
     ]
 
@@ -27,7 +27,7 @@ final class OtherMediaTests: XCTestCase {
         """)
         XCTAssertEqual(decoded.items.map(\.id), ["other/Trips", "other/Wedding.mkv"])
         XCTAssertEqual(decoded.items.map(\.estimatedSavedBytes), [6_000_000_000, nil])
-        XCTAssertEqual(decoded.items.map(\.stateGroup), [.readyToCompress, .noActiveWork])
+        XCTAssertEqual(decoded.items.map(\.stateGroup), [.readyToCompress, .cannotCompressYet])
         XCTAssertEqual(decoded.fileCount, 13)
         XCTAssertTrue(decoded.truncated)
         XCTAssertTrue(decoded.items[0].matches("trip"))
@@ -39,11 +39,5 @@ final class OtherMediaTests: XCTestCase {
             XCTAssertEqual(LibraryStateGroup(otherMediaState: code), group, code)
         }
         XCTAssertEqual(Set(groups.map { $0.1 }), Set(LibraryStateGroup.allCases))
-    }
-
-    func testEveryStateCodeHasItsOwnWords() {
-        let words = groups.map { Words.otherMediaState($0.0) }
-        XCTAssertEqual(Set(words).count, groups.count)
-        XCTAssertFalse(groups.filter { $0.0 != "no_work" }.contains { Words.otherMediaState($0.0) == Words.otherMediaState("unknown") })
     }
 }

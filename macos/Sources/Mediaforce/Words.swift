@@ -14,6 +14,7 @@ enum Words {
         "Version \(build) didn't start correctly on this Mac, so Mediaforce went back to the earlier version and waits for a newer one."
     }
     static let library = "Library"
+    static let activity = "Activity"
 
     static func folderName(_ prefix: String) -> String {
         prefix.split(separator: "/").last.map(String.init) ?? prefix
@@ -26,9 +27,8 @@ enum Words {
     static func backTitle(_ place: Place) -> String {
         switch place {
         case .library: library
-        case .libraryKind(let kind): mediaKind(kind)
         case .mediaKind(let kind, _): kind == .everything ? media : mediaKind(kind)
-        case .activity: "Activity"
+        case .activity: activity
         case .needsYou: needsYou
         case .spaceSaved: spaceSaved
         case .media: media
@@ -36,7 +36,7 @@ enum Words {
         case .seasonsWithoutKind: seasonsWithoutKindTitle
         case .item(let prefix): folderName(prefix)
         case .sample(let prefix): sampleTitle(folderName(prefix))
-        case .computer: "Computers"
+        case .computer: computers
         }
     }
 
@@ -282,7 +282,7 @@ extension Words {
                 sentences.append("\(count(work.kindsNeedingYou.count, "kind")) waiting in Needs you.")
             }
             if !work.seasonsNeedingYou.isEmpty {
-                sentences.append("\(count(work.seasonsNeedingYou.count, "season")) waiting for you in Media.")
+                sentences.append("\(count(work.seasonsNeedingYou.count, "season")) waiting for you in \(mediaKind(.tv)).")
             }
         }
         return sentences.isEmpty ? nil : sentences.joined(separator: " ")
@@ -537,7 +537,9 @@ extension Words {
     static func savedSoFar(_ bytes: Int64) -> String { "\(size(bytes)) saved so far" }
     static let savedSoFarLabel = "Saved so far"
     static let estimatedTotalSavings = "Estimated total savings"
-    static let estimatedTotalSavingsHelp = "Space saved so far plus Mediaforce's estimate for everything still original. \"At least\" means some estimates are not available yet, so the total may be higher."
+    static let estimatedTotalSavingsHelp = "Space saved so far plus Mediaforce's estimate for everything still original that it can compress. \"At least\" means some estimates are not available yet, so the total may be higher."
+    static let canSave = "Can save"
+    static let canSaveHelp = "Mediaforce's estimate for everything here still original that it can compress. \"At least\" means some estimates are not available yet, so the total may be higher."
 
     static func estimatedTotalSavingsValue(_ bytes: Int64?, partial: Bool) -> String {
         guard let bytes else { return notKnownYet }
@@ -717,13 +719,19 @@ extension Words {
     static let showColumn = "Show"
     static let seasonsColumn = "Seasons"
     static let sizeColumn = "Size"
-    static let estimatedSavedColumn = "Estimated space saved"
     static let stateColumn = "State"
     static let searchShows = "Search shows or seasons"
     static let allStates = "All"
     static let noMatchingShows = "No shows match."
     static let chooseShow = "Choose a show to see its seasons."
     static let notKnownYet = "Not known yet"
+    static let cannotCompressVRYet = "Mediaforce can't compress VR and 3D video yet, so it leaves these files as they are."
+
+    /// A list row's share of what its list can save: blank where there is nothing to estimate.
+    static func canSave(_ row: MediaRow) -> String {
+        if row.state == .cannotCompressYet || (row.estimateKnown && row.savedBytes == 0) { return "" }
+        return row.estimateKnown ? "About \(size(row.savedBytes))" : notKnownYet
+    }
 
     static func libraryState(_ group: LibraryStateGroup) -> String {
         switch group {
@@ -731,6 +739,7 @@ extension Words {
         case .inProgress: "In progress"
         case .readyToCompress: "Ready to compress"
         case .noActiveWork: "No active work"
+        case .cannotCompressYet: "Can't compress yet"
         }
     }
 
@@ -795,35 +804,8 @@ extension Words {
 }
 
 extension Words {
-    static let otherMedia = "Other media"
     static let nameColumn = "Name"
-    static let searchOtherMedia = "Search folders and files"
-    static let noMatchingOtherMedia = "No folders or files match."
-    static let chooseOtherMedia = "Choose a folder or file to see more about it."
     static let otherMediaTruncated = "This list shows only part of this library. The rest is too big to list here."
-
-    // Counts what the list holds, folders and single files, and the files inside them, which is the sidebar's number.
-    static func otherMediaCount(_ shown: Int, of total: Int, files: Int) -> String {
-        let listed = shown == total ? total.formatted() : "\(shown.formatted()) of \(total.formatted())"
-        return "\(listed) folders and files, \(count(files, "file")) in all"
-    }
-
-    static func otherMediaState(_ code: String) -> String {
-        switch code {
-        case "cannot_start": "Can't start"
-        case "view_only": "View only"
-        case "needs_attention": "Needs attention"
-        case "compressing": "Compressing"
-        case "ready": "Ready to compress"
-        default: "No work needed"
-        }
-    }
-
-    static func otherMediaDetail(_ item: OtherMediaFacts.Item) -> String {
-        let place = item.library.map { " in \($0)" } ?? ""
-        let saved = item.estimatedSavedBytes.map { "About \(size($0)) could be saved." } ?? "No estimate of space saved yet."
-        return "\(otherMediaState(item.state)). \(count(item.fileCount, "file")), \(size(item.bytes))\(place). \(saved)"
-    }
 }
 
 extension Words {
@@ -921,7 +903,7 @@ extension ActionNotice {
 
 extension Words {
     static let computersTab = "Computers"
-    static let computersSection = "Computers"
+    static let computers = "Computers"
     static let noComputers = "No computers yet. Mediaforce works on this Mac only."
     static let addComputer = "Add Computer"
     static let removeComputer = "Remove"
@@ -1552,7 +1534,7 @@ extension Words {
         case .everything: "Everything"
         case .tv: "TV shows"
         case .movies: "Movies"
-        case .other: "Other media"
+        case .other: "VR & 3D"
         }
     }
 }

@@ -81,7 +81,7 @@ actor RenderLoads {
 
 @MainActor
 enum RenderCommand {
-    static let mainPages = ["library", "tv", "movies", "other", "needs-you", "activity", "space-saved", "media",
+    static let mainPages = ["library", "tv", "movies", "other", "needs-you", "activity", "computers", "space-saved", "media",
                             "settings:libraries", "settings:compression", "settings:computers", "settings:metadata"]
 
     @discardableResult
@@ -125,6 +125,7 @@ enum RenderCommand {
         }
         if let movie = try await model.client.movies().movies.first { pages.append("item:\(movie.prefix)") }
         if let other = try await model.client.otherMedia().items.first { pages.append("item:\(other.prefix)") }
+        if let computer = model.facts?.computers.first { pages.append("computer:\(computer.key)") }
         return pages
     }
 
@@ -193,11 +194,12 @@ enum RenderCommand {
         let paths: Set<String>
         switch page {
         case "library": place = .library; paths = libraryPaths
-        case "tv": place = .libraryKind(.tv); paths = ["/api/app/tv-shows"]
-        case "movies": place = .libraryKind(.movies); paths = ["/api/app/movies"]
-        case "other": place = .libraryKind(.other); paths = ["/api/app/other"]
+        case "tv": place = .mediaKind(.tv); paths = ["/api/app/tv-shows"]
+        case "movies": place = .mediaKind(.movies); paths = ["/api/app/movies"]
+        case "other": place = .mediaKind(.other); paths = ["/api/app/other"]
         case "needs-you": place = .needsYou; paths = []
         case "activity": place = .activity; paths = ["/api/app/activity"]
+        case "computers": place = .computer(nil); paths = []
         case "space-saved": place = .spaceSaved; paths = ["/api/completed", "/api/archive-cleanup"]
         case "media": place = .media; paths = libraryPaths
         default:
@@ -205,6 +207,7 @@ enum RenderCommand {
             switch name {
             case "item": place = .item(value); paths = ["/api/app/items/\(value)"]
             case "sample": place = .sample(value); paths = ["/api/app/samples/\(value)"]
+            case "computer": place = .computer(value); paths = ["/api/hosts"]
             case "kind":
                 guard let kinds = model.kinds else { throw RenderFailure("Kinds did not load") }
                 guard kinds.kinds.contains(where: { $0.kind == value }) else {

@@ -6,7 +6,8 @@ final class PageNavigationTests: XCTestCase {
         let show = Place.item("tv/Example")
         let season = Place.item("tv/Example/Season 2")
         let sample = Place.sample("tv/Example/Season 2")
-        for origin in [Place.library, .libraryKind(.movies), .mediaKind(.other), .media, .spaceSaved, .kind("cartoon"), .seasonsWithoutKind] {
+        for origin in [Place.library, .mediaKind(.movies), .mediaKind(.other), .media, .spaceSaved, .computer(nil), .computer("mini"),
+                       .kind("cartoon"), .seasonsWithoutKind] {
             var navigation = PageNavigation()
             navigation.select(origin)
             navigation.open(show)
@@ -38,6 +39,20 @@ final class PageNavigationTests: XCTestCase {
         navigation.open(item)
         navigation.goBack()
         XCTAssertEqual(navigation.place, .spaceSaved)
+    }
+
+    func testEveryNotificationAboutAComputerOpensAPlaceTheSidebarShows() throws {
+        let library = try JSONDecoder.mediaforce.decode(MainWindowFacts.Library.self, from: Data("""
+        {"tv": {"show_count": 1, "season_count": 1, "episode_count": 1, "total_bytes": 1, "original_bytes": 1},
+         "movies": {"title_count": 1, "total_bytes": 1, "original_bytes": 1},
+         "other": {"item_count": 0, "total_bytes": 0, "original_bytes": 0}}
+        """.utf8))
+        let shown = Sidebar.top + Sidebar.libraries(in: library)
+        XCTAssertEqual(Set(shown).count, shown.count)
+        XCTAssertTrue(shown.contains(try XCTUnwrap(Place(notificationValue: Place.computer(nil).notificationValue))))
+        // The library lists are the lists that show what each can save, not a second overview.
+        XCTAssertTrue(shown.contains(.mediaKind(.tv)))
+        XCTAssertFalse(shown.contains(.mediaKind(.other)), "VR & 3D appears only once it holds something")
     }
 
     func testBackUsesTheTitleThePageDisplayedInsteadOfItsFolder() {

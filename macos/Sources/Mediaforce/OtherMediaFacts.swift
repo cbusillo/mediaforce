@@ -27,12 +27,14 @@ struct OtherMediaFacts: Decodable, Sendable {
 }
 
 extension LibraryStateGroup {
-    // Groups the server's Other media state codes into the same four groups as TV shows and Movies.
+    // Groups the server's VR & 3D state codes into the same groups as TV shows and Movies. Mediaforce can't compress
+    // VR and 3D video yet (cbusillo/mediaforce#188), so a view-only item is not waiting work.
     init(otherMediaState code: String) {
         switch code {
         case "cannot_start", "needs_attention": self = .needsYou
         case "compressing": self = .inProgress
         case "ready": self = .readyToCompress
+        case "view_only": self = .cannotCompressYet
         default: self = .noActiveWork
         }
     }

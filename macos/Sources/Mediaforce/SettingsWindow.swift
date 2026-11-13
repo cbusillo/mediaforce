@@ -399,25 +399,9 @@ final class ComputerSettingsModel {
     var notice: ActionNotice?
     var pendingComputerRemoval: ComputerSettingsDraft.ComputerRow?
     var pendingScheduleRemoval: ComputerSettingsDraft.ScheduleRow?
-    /// Each computer's setup facts from the server, by address; empty until they arrive.
-    private(set) var hosts: [String: HostsFacts.Host] = [:]
 
     init(client: MediaforceClient) {
         self.client = client
-    }
-
-    func loadHosts() async {
-        if let facts = try? await client.hosts() {
-            hosts = Dictionary(facts.hosts.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
-        }
-    }
-
-    /// Runs one fix, then reads the computers' state again so the page shows what changed.
-    func act(_ action: ComputerAction, _ address: String, password: String?, main: MainWindowModel) async -> HostActionResult? {
-        let result = try? await client.computerAction(action, address, password: password)
-        await loadHosts()
-        await main.refresh()
-        return result ?? HostActionResult(ok: false, message: ActionNotice.unanswered.message)
     }
 
     var hasChanges: Bool {
@@ -432,7 +416,6 @@ final class ComputerSettingsModel {
         } catch {
             loadFailed = true
         }
-        await loadHosts()
     }
 
     func revert() {
@@ -462,8 +445,6 @@ final class ComputerSettingsModel {
                 // Said before the rows are rebuilt, so the list keeps the chosen computer by its place.
                 justSaved = true
                 if let settings = result.settings { show(settings) } else { await load() }
-                // A new or readdressed computer has its own setup facts.
-                await loadHosts()
             } else if result.code == "settings_changed" {
                 notice = .settingsChangedElsewhere
                 await load()
@@ -515,21 +496,15 @@ struct ComputerSettingsTab: View {
             }
         }
         .task { await model.load() }
-        // Recovery runs by itself in the background, so the fixes on offer can change while the tab is open.
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: MainWindowModel.refreshInterval)
-                await model.loadHosts()
-            }
-        }
         .alert(item: $model.notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
         }
     }
 }
 
-/// Settings › Computers as a list and its detail: each computer with its state on the left, and the chosen one's
-/// state, fixes and settings on the right. Work windows are the last item, since every computer can use them.
+/// Settings › Computers as a list and its detail: each computer on the left, and the chosen one's settings on the
+/// right. Work windows are the last item, since every computer can use them. A computer's state and fixes are on its
+/// page in the main window.
 struct ComputerSettingsForm: View {
     enum Pane: Hashable {
         case computer(ComputerSettingsDraft.ComputerRow.ID)
@@ -551,7 +526,8 @@ struct ComputerSettingsForm: View {
             HStack(spacing: 0) {
                 List(selection: $selection) {
                     ForEach(computers.wrappedValue) { row in
-                        ComputerListRow(name: row.computer.name, state: computer(row)?.state, needsYou: computer(row)?.needsYou ?? false)
+                        Text(row.computer.name.isEmpty ? Words.unnamedComputer : row.computer.name)
+                            .padding(.vertical, 3)
                             .tag(Pane.computer(row.id))
                     }
                     Label(Words.workWindowsItem, systemImage: "calendar")
@@ -639,18 +615,6 @@ struct ComputerSettingsForm: View {
         case .computer(let id):
             if let row = computers.first(where: { $0.id == id }) {
                 Form {
-                    Section {
-                        ComputerStatus(
-                            name: row.wrappedValue.computer.name,
-                            state: computer(row.wrappedValue)?.state,
-                            needsYou: computer(row.wrappedValue)?.needsYou ?? false,
-                            host: model.hosts[savedAddress(row.wrappedValue)]
-                        ) { action, password in
-                            await model.act(action, savedAddress(row.wrappedValue), password: password, main: main)
-                        }
-                        // A different computer starts with no password typed and no earlier result.
-                        .id(row.wrappedValue.id)
-                    }
                     Section(row.wrappedValue.computer.name.isEmpty ? Words.unnamedComputer : row.wrappedValue.computer.name) {
                         ComputerEditor(
                             computer: row.computer,
@@ -701,11 +665,6 @@ struct ComputerSettingsForm: View {
         return facts.computers.first { $0.id == row.computer.id }?.address ?? row.computer.address
     }
 
-    /// The state the main window's facts give this computer, matched by the address the server knows.
-    private func computer(_ row: ComputerSettingsDraft.ComputerRow) -> MainWindowFacts.Computer? {
-        main.facts?.computers.first { $0.key == savedAddress(row) }
-    }
-
     /// Keeps the chosen computer chosen when a load or save rebuilds the rows, else chooses the first.
     private func keepSelection() {
         let rows = computers.wrappedValue
@@ -723,29 +682,6 @@ struct ComputerSettingsForm: View {
 
     private var schedules: Binding<[ComputerSettingsDraft.ScheduleRow]> {
         Binding(get: { model.draft?.schedules ?? [] }, set: { model.draft?.schedules = $0 })
-    }
-}
-
-/// A computer in the list: its name, and its state when the server has said.
-struct ComputerListRow: View {
-    let name: String
-    let state: String?
-    let needsYou: Bool
-
-    var body: some View {
-        HStack(spacing: 8) {
-            WaitingMark()
-                .opacity(needsYou ? 1 : 0)
-                .accessibilityHidden(!needsYou)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(name.isEmpty ? Words.unnamedComputer : name)
-                Text(state.map(Words.computerState) ?? Words.computerNotHeardFrom)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        }
-        .padding(.vertical, 3)
     }
 }
 
