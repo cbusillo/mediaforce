@@ -1,10 +1,12 @@
 import AppKit
 import Sparkle
+import UserNotifications
 
-/// Mediaforce's updates. Sparkle finds, downloads, checks and installs a new app with its standard windows. Before
-/// Sparkle may offer a build, the bundled server gets ready for it: new work waits, running files finish, and the old
-/// app and database are saved. Only that exact prepared build may proceed, and a build that failed is never offered
-/// again. Each launch lets the server finish whatever an interrupted update left.
+/// Mediaforce updates itself between files, with no click (Director decision,
+/// https://github.com/cbusillo/mediaforce/issues/1314#issuecomment-6841277256). Sparkle checks on its schedule but may
+/// download only a build the bundled server has prepared: at once when nothing runs, otherwise after running files that
+/// finish soon. Nothing waits merely because an update exists. Each launch lets the server start and check the new
+/// build, or go back to the saved one on its own.
 @MainActor
 final class Updates: NSObject, SPUUpdaterDelegate {
     static let shared = Updates()
@@ -21,60 +23,49 @@ final class Updates: NSObject, SPUUpdaterDelegate {
     func start() async {
         // Recovery runs on every launch, even in a build that no longer names a feed.
         state = await ServerUpdateStep.run(["reconcile"])
-        if let intent = state.intent {
-            switch intent.phase {
-            case "fenced": prepare(intent.to)
-            case "failed": offerRollback(intent.to)
-            case "prepared" where !Self.isConfigured: state = await ServerUpdateStep.run(["cancel"])
-            default: break
-            }
+        switch state.outcome {
+        case "updated": notify(Words.updated)
+        case "rolled back": return relaunchRestoredApp()
+        default: if let problem = state.error, state.intent != nil { notify(Words.updateNeedsYou(problem)) }
         }
+        if let intent = state.intent, intent.phase == "draining" { prepare(intent.to) }
+        if state.intent?.phase == "prepared", !Self.isConfigured { state = await ServerUpdateStep.run(["cancel"]) }
         guard Self.isConfigured, controller == nil else { return }
         controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
     }
 
-    func checkForUpdates() {
-        controller?.checkForUpdates(nil)
-    }
-
-    // Sparkle calls this before it shows, downloads or installs anything; a thrown error stops all three.
+    // Sparkle calls this before it downloads anything; a thrown error stops the download until the next check.
     nonisolated func updater(_ updater: SPUUpdater, shouldProceedWithUpdate item: SUAppcastItem, updateCheck: SPUUpdateCheck) throws {
         let build = item.versionString
         try MainActor.assumeIsolated {
             if state.failedBuilds.contains(build) { throw UpdateWait(Words.updateFailedBefore(build: item.displayVersionString)) }
             if let intent = state.intent, intent.to == build, intent.phase == "prepared" { return }
-            // A newer build than the prepared one goes through the same preparation, which keeps the saved old pair.
-            if preparing == nil, state.intent.map({ ["fenced", "prepared"].contains($0.phase) }) ?? true { prepare(build) }
-            throw UpdateWait(state.error ?? state.intent?.waiting.flatMap { $0.isEmpty ? nil : Words.updateWaiting($0) } ?? Words.updateGettingReady)
+            if preparing == nil { prepare(build) }
+            throw UpdateWait(Words.updateWaitingForQuietTime)
         }
     }
 
-    nonisolated func updater(
-        _ updater: SPUUpdater, userDidMake choice: SPUUserUpdateChoice, forUpdate item: SUAppcastItem, state: SPUUserUpdateState
-    ) {
-        // Nothing downloaded, so nothing can install on quit: the unchanged old server may resume.
-        guard choice != .install, state.stage == .notDownloaded else { return }
-        Task { @MainActor in
-            self.preparing?.cancel()
-            self.state = await ServerUpdateStep.run(["cancel"])
-        }
+    // The prepared build is downloaded: install it now and relaunch; the server is already stopped and saved.
+    nonisolated func updater(_ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem, immediateInstallationBlock: @escaping () -> Void) -> Bool {
+        immediateInstallationBlock()
+        return true
     }
 
-    // The feed no longer offers the prepared build and nothing was downloaded: the unchanged old server resumes.
+    // The feed no longer offers the prepared build: the unchanged old server resumes.
     nonisolated func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
         Task { @MainActor in
             if self.state.intent?.phase == "prepared" { self.state = await ServerUpdateStep.run(["cancel"]) }
         }
     }
 
-    /// Runs the server's preparation until it is done, rechecking every minute while files are still running.
+    /// Asks the server each minute whether now is the time; once it has prepared, Sparkle checks again and installs.
     private func prepare(_ build: String) {
         preparing = Task {
             defer { preparing = nil }
             while !Task.isCancelled {
                 state = await ServerUpdateStep.run(["prepare", "--build", build])
-                guard state.error == nil, let intent = state.intent else { return }
-                if intent.phase == "prepared" {
+                guard state.error == nil else { return }
+                if state.intent?.phase == "prepared" {
                     controller?.updater.checkForUpdatesInBackground()
                     return
                 }
@@ -83,15 +74,21 @@ final class Updates: NSObject, SPUUpdaterDelegate {
         }
     }
 
-    /// A new version that failed its checks stays stopped; going back is the Director's call, offered here.
-    private func offerRollback(_ build: String) {
-        let alert = NSAlert()
-        alert.messageText = Words.updateFailedTitle
-        alert.informativeText = Words.updateFailedBefore(build: build)
-        alert.addButton(withTitle: Words.updateGoBack)
-        alert.addButton(withTitle: Words.updateNotNow)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        Task { state = await ServerUpdateStep.run(["rollback"]) }
+    /// After going back, this process is the failed build; the restored app at the same place takes over.
+    private func relaunchRestoredApp() {
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: {
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.createsNewApplicationInstance = true
+            return configuration
+        }()) { _, _ in Task { @MainActor in NSApp.terminate(nil) } }
+    }
+
+    private func notify(_ text: String) {
+        guard !BackgroundService.isProof else { return }
+        let content = UNMutableNotificationContent()
+        content.title = Words.appName
+        content.body = text
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "update", content: content, trigger: nil))
     }
 }
 
@@ -105,15 +102,15 @@ enum ServerUpdateStep {
     struct Intent: Decodable {
         let phase: String
         let to: String
-        let waiting: [String]?
     }
 
     struct Answer: Decodable {
         var error: String?
+        var outcome: String?
         var intent: Intent?
         var failedBuilds: [String] = []
 
-        enum CodingKeys: String, CodingKey { case error, intent, failedBuilds = "failed_builds" }
+        enum CodingKeys: String, CodingKey { case error, outcome, intent, failedBuilds = "failed_builds" }
     }
 
     static func run(_ step: [String]) async -> Answer {

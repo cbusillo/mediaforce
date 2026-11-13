@@ -102,11 +102,13 @@ A build checks for updates only when its Info.plist names a feed
 (`MEDIAFORCE_UPDATE_FEED`) and public EdDSA key (`MEDIAFORCE_UPDATE_KEY`);
 source builds leave both empty. The steps around Sparkle are in
 `mediaforce/ops/controller_deploy.py`, run by the app as
-`mediaforce-server service update reconcile|prepare|cancel|rollback`. While
-`runtime/update-intent.json` exists beside the database, it holds new work and
-cleanup; pauses a person set are never changed. A stuck update is recovered by
-running `reconcile` or `rollback` from either the installed app or the stage's
-saved copy.
+`mediaforce-server service update reconcile|prepare|cancel|rollback`. Updates
+install automatically between files: at once when nothing runs, otherwise after
+draining files that finish within 15 minutes. While `runtime/update-intent.json`
+exists beside the database, it holds new work and cleanup; pauses a person set
+are never changed. A failed new build rolls back on its own; a stuck update is
+recovered by running `reconcile` or `rollback` from either the installed app or
+the stage's saved copy.
 
 `scripts/build-mac-app.sh proof OUTPUT CACHE BUILD FEED KEY` builds a copy for
 update proofs with its own app ID, service label, port, support folder and

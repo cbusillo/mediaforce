@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import plistlib
+from datetime import datetime, timedelta, timezone
 import shutil
 import sqlite3
 import subprocess
@@ -28,7 +29,9 @@ class FakeServer:
     def __init__(self, update: deploy.AppUpdate) -> None:
         self.update = update
         self.running = {"encode": 0, "sample": 0}
-        self.healthy = True
+        self.finishes_in: int | None = None
+        self.failing_build: str | None = None
+        self.answering_build: str | None = None
         self.launchctl: list[list[str]] = []
 
     def api(self, _base: str, route: str, *, post: bool = False) -> dict[str, Any]:
@@ -36,9 +39,13 @@ class FakeServer:
         if route.startswith("/api/dashboard?"):
             return {"encode_queue": {"running_count": self.running["encode"]},
                     "calibration_queue": {"sample": {"running_count": self.running["sample"]}, "full": {"running_count": 0}}}
-        if route == "/api/dashboard/scan-job" and not self.healthy:
+        if route == "/api/app/activity":
+            finishes = (datetime.now(timezone.utc) + timedelta(seconds=self.finishes_in)).isoformat() if self.finishes_in else None
+            return {"computers": [{"running": [{"finishes_at": finishes}] * self.running["encode"]}]}
+        build = deploy.bundle_build(self.update.app)
+        if route == "/api/dashboard/scan-job" and build == self.failing_build:
             raise OSError("connection refused")
-        server = {"build": deploy.bundle_build(self.update.app), "database": str(self.update.config.paths.db_path.resolve())}
+        server = {"build": self.answering_build or build, "database": str(self.update.config.paths.db_path.resolve())}
         return {"counts": {"pending_encode": 4, "unfinished_scan_rows": 0, "active_evidence": 0}, "server": server}
 
     def run(self, command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -107,17 +114,24 @@ def _work(update: deploy.AppUpdate) -> tuple[bool, bool, bool]:
                 background_work_is_paused(connection))
 
 
-def test_busy_server_keeps_running_while_the_record_holds_new_work(update: Update) -> None:
+def test_long_running_work_is_not_held_and_short_work_drains_before_the_update(update: Update) -> None:
     app_update, server = update
-    server.running.update(encode=1, sample=1)
+    server.running["encode"] = 1
     deploy.prepare_update(app_update, "2")
-    assert _phase(app_update) == "fenced" and len(_intent(app_update)["waiting"]) == 2 and server.launchctl == []
-    assert _work(app_update) == (True, False, True)
+    # Nothing waits merely because an update exists.
+    assert _phase(app_update) is None and _work(app_update) == (True, False, False) and server.launchctl == []
+    server.finishes_in = 60
+    deploy.prepare_update(app_update, "2")
+    assert _phase(app_update) == "draining" and _work(app_update) == (True, False, True) and server.launchctl == []
     resumed = resume_encode_queue_action(connection_factory=lambda: open_db(app_update.config.paths.db_path),
                                          config=app_update.config, now_iso=lambda: "now")
     assert resumed["ok"] is False
-    deploy.back_out_update(app_update)
-    assert _work(app_update) == (True, False, False) and _phase(app_update) is None
+    server.finishes_in = 3600
+    deploy.prepare_update(app_update, "2")
+    assert _phase(app_update) == "draining"
+    server.running["encode"] = 0
+    deploy.prepare_update(app_update, "2")
+    assert _phase(app_update) == "prepared" and server.launchctl[-1][0] == "disable"
 
 
 def test_publication_holding_its_lock_keeps_the_old_server_running(update: Update) -> None:
@@ -135,14 +149,14 @@ def test_publication_holding_its_lock_keeps_the_old_server_running(update: Updat
     publisher.start()
     holding.wait(10)
     deploy.prepare_update(app_update, "2")
-    assert _phase(app_update) == "fenced" and server.launchctl == []
+    assert _phase(app_update) != "prepared" and server.launchctl == []
     done.set()
     publisher.join()
     deploy.prepare_update(app_update, "2")
     assert _phase(app_update) == "prepared"
 
 
-def test_idle_server_saves_complete_old_pair_before_sparkle_may_install(update: Update) -> None:
+def test_quiet_server_saves_complete_old_pair_before_sparkle_may_install(update: Update) -> None:
     app_update, server = update
     deploy.prepare_update(app_update, "2")
     stage = Path(_intent(app_update)["stage"])
@@ -162,8 +176,7 @@ def test_newer_offer_while_prepared_reuses_the_saved_pair(update: Update) -> Non
     deploy.prepare_update(app_update, "3")
     assert _intent(app_update)["to"] == "3" and _intent(app_update)["stage"] == stage and len(server.launchctl) == calls
     _install(app_update, build="3")
-    deploy.reconcile_update(app_update)
-    assert _phase(app_update) is None
+    assert deploy.reconcile_update(app_update) == "updated" and _phase(app_update) is None
 
 
 @pytest.mark.parametrize("interrupted", [False, True])
@@ -186,28 +199,22 @@ def test_failure_before_replacement_restarts_unchanged_old_service(update: Updat
 
 def test_failed_restart_keeps_the_original_cause(update: Update) -> None:
     app_update, server = update
-    server.healthy = False
+    server.failing_build = "1"
     with patch.object(deploy, "backup_database", side_effect=RuntimeError("disk full")), \
             patch.object(deploy, "DEFAULT_STARTUP_TIMEOUT", 0), pytest.raises(RuntimeError, match="disk full"):
         deploy.prepare_update(app_update, "2")
 
 
-def test_failed_candidate_stays_stopped_and_rolls_back_to_matching_old_pair(update: Update) -> None:
+def test_failed_candidate_rolls_back_on_its_own_to_the_matching_old_pair(update: Update) -> None:
     app_update, server = update
     deploy.prepare_update(app_update, "2")
     saved_plist = app_update.paths.plist.read_bytes()
     _install(app_update, build="2")
-    server.healthy = False
+    server.failing_build = "2"
     with sqlite3.connect(app_update.config.paths.db_path) as migrated:
         migrated.execute("create table candidate_migration (id integer)")
-    with patch.object(deploy, "DEFAULT_STARTUP_TIMEOUT", 0), pytest.raises(RuntimeError):
-        deploy.reconcile_update(app_update)
-    assert server.launchctl[-1][0] == "disable" and _phase(app_update) == "failed"
-    with pytest.raises(deploy.UpdateRefused):
-        deploy.require_update_startup_allowed(app_update.support, app_update.app)
-
-    server.healthy = True
-    deploy.rollback_update(app_update)
+    with patch.object(deploy, "DEFAULT_STARTUP_TIMEOUT", 0):
+        assert deploy.reconcile_update(app_update) == "rolled back"
     assert (app_update.app / "Contents/MacOS/Mediaforce").read_bytes() == b"old app"
     assert app_update.paths.plist.read_bytes() == saved_plist
     with sqlite3.connect(app_update.config.paths.db_path) as restored:
@@ -225,14 +232,12 @@ def test_interrupted_rollback_finishes_from_the_saved_pair_on_next_launch(update
     app_update, server = update
     deploy.prepare_update(app_update, "2")
     _install(app_update, build="2")
-    server.healthy = False
-    with patch.object(deploy, "DEFAULT_STARTUP_TIMEOUT", 0), pytest.raises(RuntimeError):
+    server.failing_build = "2"
+    with patch.object(deploy, "DEFAULT_STARTUP_TIMEOUT", 0), patch.object(deploy, "_copy_app", side_effect=KeyboardInterrupt), \
+            pytest.raises(KeyboardInterrupt):
         deploy.reconcile_update(app_update)
-    server.healthy = True
-    with patch.object(deploy, "_copy_app", side_effect=KeyboardInterrupt), pytest.raises(KeyboardInterrupt):
-        deploy.rollback_update(app_update)
     assert _phase(app_update) == "rolling-back"
-    deploy.reconcile_update(app_update)
+    assert deploy.reconcile_update(app_update) == "rolled back"
     assert (app_update.app / "Contents/MacOS/Mediaforce").read_bytes() == b"old app" and _phase(app_update) is None
 
 
@@ -241,21 +246,20 @@ def test_verified_candidate_keeps_launch_item_and_every_earlier_pause(update: Up
     saved = plistlib.loads(app_update.paths.plist.read_bytes())
     deploy.prepare_update(app_update, "2")
     _install(app_update, build="2")
-    deploy.reconcile_update(app_update)
+    assert deploy.reconcile_update(app_update) == "updated"
     candidate = plistlib.loads(app_update.paths.plist.read_bytes())
     assert candidate["MediaforceAppCodeHash"] != saved["MediaforceAppCodeHash"]
     assert {**candidate, "MediaforceAppCodeHash": None} == {**saved, "MediaforceAppCodeHash": None}
     assert _work(app_update) == (True, False, False) and _phase(app_update) is None
 
 
-def test_candidate_answering_as_another_build_is_not_released(update: Update) -> None:
-    app_update, _server = update
+def test_candidate_answering_as_another_build_is_rolled_back(update: Update) -> None:
+    app_update, server = update
     deploy.prepare_update(app_update, "2")
     _install(app_update, build="2")
-    with patch.object(deploy, "_api", lambda *_a, **_k: {"counts": {"pending_encode": 4}, "server": {"build": "1"}}), \
-            pytest.raises(deploy.UpdateRefused):
-        deploy.reconcile_update(app_update)
-    assert _phase(app_update) == "failed"
+    server.answering_build = "1"
+    assert deploy.reconcile_update(app_update) == "rolled back"
+    assert deploy.bundle_build(app_update.app) == "1" and "2" in deploy._failed(app_update)
 
 
 def test_proof_build_refuses_the_live_support_folder(tmp_path: Path) -> None:

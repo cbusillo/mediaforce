@@ -2,20 +2,16 @@ import Foundation
 
 enum Words {
     static let needsYou = "Needs you"
-    static let checkForUpdates = "Check for Updates…"
-    static let updateGettingReady = "Mediaforce is getting ready to update. New work waits while files that are running finish."
-    static let updateServerUnavailable = "Mediaforce can't get ready to update because its background service isn't set up on this Mac."
+    static let updated = "Mediaforce updated itself between files and is running again."
+    static let updateWaitingForQuietTime = "Mediaforce installs this update between files."
+    static let updateServerUnavailable = "Mediaforce can't update because its background service isn't set up on this Mac."
 
-    static func updateWaiting(_ reasons: [String]) -> String {
-        "Mediaforce will offer the update when these finish: \(reasons.joined(separator: "; "))."
+    static func updateNeedsYou(_ problem: String) -> String {
+        "Mediaforce couldn't finish an update on its own and needs you: \(problem)"
     }
 
-    static let updateFailedTitle = "The new version didn't start correctly"
-    static let updateGoBack = "Go Back to the Earlier Version"
-    static let updateNotNow = "Not Now"
-
     static func updateFailedBefore(build: String) -> String {
-        "Version \(build) didn't start correctly on this Mac, so Mediaforce stopped it and waits for a newer one. Going back restores the version and library from just before the update."
+        "Version \(build) didn't start correctly on this Mac, so Mediaforce went back to the earlier version and waits for a newer one."
     }
     static let library = "Library"
 

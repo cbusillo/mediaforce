@@ -37,8 +37,9 @@ targets:
         SUFeedURL: $(MEDIAFORCE_UPDATE_FEED)
         SUPublicEDKey: $(MEDIAFORCE_UPDATE_KEY)
         SUEnableAutomaticChecks: true
-        # Mediaforce gets ready first, then asks before installing.
-        SUAllowsAutomaticUpdates: false
+        # Mediaforce installs on its own, between files; Sparkle may download only a build the server prepared.
+        SUAllowsAutomaticUpdates: true
+        SUAutomaticallyUpdate: true
         # The background service this app runs; only a proof build names another.
         MediaforceServiceLabel: $(MEDIAFORCE_SERVICE_LABEL)
         MediaforceServerPort: $(MEDIAFORCE_SERVER_PORT)

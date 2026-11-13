@@ -43,6 +43,8 @@ APPLICATIONS = Path("/Applications")
 KEPT_RELEASES = 3
 STORAGE_CHECK_SECONDS = 60
 UPDATE_FAILED_NAME = "failed-update-builds.json"
+# An update drains running files only when every one is expected to finish within this.
+DRAIN_START_SECONDS = 15 * 60
 
 
 def _run(command: list[str], *, cwd: Path | None = None) -> str:
@@ -371,11 +373,12 @@ def _deploy(
         raise RuntimeError(f"controller deployed successfully; release trim failed for stage {stage}: {exc}") from exc
 
 
-# The bundled app's update: the same staged transaction, split around Sparkle's standard installer. Sparkle downloads,
-# verifies, replaces and relaunches the app; these steps own admission, the saved old pair, the candidate check and
-# rollback. The intent record beside the database is itself the hold on new work, so earlier pauses are never changed;
-# it spans quit, replacement and reboot. Phases: fenced -> saving -> prepared -> (Sparkle installs) -> starting -> done,
-# or failed -> rolling-back -> restoring -> done.
+# The bundled app's update: the same staged transaction, run around Sparkle's automatic installer (Director decision,
+# https://github.com/cbusillo/mediaforce/issues/1314#issuecomment-6841277256). Sparkle may download only a prepared
+# build; Mediaforce prepares at once when nothing runs, or drains files that finish soon. Nothing is held merely because
+# an update exists. The intent record beside the database is the hold while it exists, across quit, replacement and
+# reboot. Phases: draining -> saving -> prepared -> (Sparkle installs) -> starting -> done; a candidate that fails its
+# checks rolls back on its own: failed -> rolling-back -> restoring -> done.
 
 
 class UpdateRefused(RuntimeError):
@@ -416,7 +419,7 @@ def run_update_step(step: str, app: Path, build: str | None) -> int:
     """The app runs one step and reads one JSON line back. The config is the one its saved service runs with."""
     arguments = plistlib.loads(LoginItemPaths(app, Path.home()).plist.read_bytes())["ProgramArguments"]
     update = AppUpdate(Path(arguments[arguments.index("--config") + 1]), app, Path.home())
-    error = None
+    error = outcome = None
     try:
         require_own_support(app, update.config.paths.db_path, update.home)
         with runtime_activity(update.support, wait_seconds=DEPLOY_LOCK_WAIT_SECONDS) as acquired:
@@ -429,34 +432,36 @@ def run_update_step(step: str, app: Path, build: str | None) -> int:
             elif step == "rollback":
                 rollback_update(update)
             else:
-                reconcile_update(update)
+                outcome = reconcile_update(update)
     except Exception as exc:
         error = str(exc) or type(exc).__name__
-    print(json.dumps({"error": error, "intent": read_update_intent(update.support), "failed_builds": _failed(update)}))
+    print(json.dumps({"error": error, "outcome": outcome, "intent": read_update_intent(update.support),
+                      "failed_builds": _failed(update)}))
     return 1 if error else 0
 
 
 def prepare_update(update: AppUpdate, build: str) -> None:
-    """Fence new work, wait for running files, then save the old app, launch item and database and stop the server.
-    Phase "prepared" lets Sparkle install exactly `build`; anything still running is listed under "waiting"."""
+    """Get ready to install `build` when the time is right: at once when nothing runs; otherwise, once every running
+    file is expected to finish within DRAIN_START_SECONDS, stop starting new ones and wait for those. Then save the old
+    app, launch item and database and stop the server. Phase "prepared" lets Sparkle install exactly `build`."""
     if build in _failed(update):
         raise UpdateRefused(f"build {build} failed before; it is not offered again")
     existing = read_update_intent(update.support)
-    intent: dict[str, Any] = existing or {"from": bundle_build(update.app), "to": build, "phase": "fenced", "app": str(update.app)}
-    if existing is not None and (intent["phase"] not in {"fenced", "prepared"} or bundle_build(update.app) != intent["from"]):
-        raise UpdateRefused(f"the update to build {intent.get('to')} is {intent['phase']}; finish or roll it back first")
-    # A newer offer reuses the same transaction: the saved old pair and the stopped server are just as right for it.
-    intent["to"] = build
-    _save_intent(update, intent)
-    if intent["phase"] == "prepared":
+    if existing is not None and (existing["phase"] not in {"draining", "prepared"} or bundle_build(update.app) != existing["from"]):
+        raise UpdateRefused(f"the update to build {existing.get('to')} is {existing['phase']}; finish or roll it back first")
+    # A newer build reuses the same transaction: the saved old pair and the stopped server are just as right for it.
+    intent: dict[str, Any] = {**(existing or {"from": bundle_build(update.app), "app": str(update.app)}), "to": build}
+    if intent.get("phase") == "prepared":
+        _save_intent(update, intent)
         return
-    intent["waiting"] = _running_work(update)
-    _save_intent(update, intent)
-    if intent["waiting"]:
+    running = _running_work(update)
+    if running:
+        if intent.get("phase") == "draining" or _finishing_soon(update):
+            _save_intent(update, {**intent, "phase": "draining", "waiting": running})
         return
     stage = update.support / "deployments" / f"update-{intent['from']}-to-{build}-{_utc_now():%Y%m%dT%H%M%SZ}"
     work = _api(update.base_url, "/api/release/work")["counts"]
-    intent.update(phase="saving", stage=str(stage), pending_encode=work["pending_encode"])
+    intent.update(phase="saving", stage=str(stage), pending_encode=work["pending_encode"], waiting=[])
     _save_intent(update, intent)
     try:
         saved = update.paths.plist.read_bytes()
@@ -486,26 +491,38 @@ def prepare_update(update: AppUpdate, build: str) -> None:
     _save_intent(update, intent)
 
 
-def reconcile_update(update: AppUpdate) -> None:
-    """What each app launch runs: finish what the record says was interrupted, or leave it for Sparkle or a person."""
+def reconcile_update(update: AppUpdate) -> str | None:
+    """What each app launch runs: finish the installed candidate, roll back one that fails its checks, or finish
+    whatever an interruption left. Returns "updated" or "rolled back" when it did either."""
     intent = read_update_intent(update.support)
-    if intent is None or intent["phase"] in {"fenced", "failed", "unreadable"}:
-        return
+    if intent is None or intent["phase"] in {"draining", "unreadable"}:
+        return None
     installed = bundle_build(update.app)
-    if intent["phase"] == "rolling-back":
+    if intent["phase"] in {"failed", "rolling-back"}:
         rollback_update(update)
-    elif installed == intent["to"] and intent["phase"] in {"prepared", "starting"}:
-        _finish(update, intent)
-    elif installed == intent["from"] and intent["phase"] in {"saving", "restoring"}:
+        return "rolled back"
+    if installed == intent["to"] and intent["phase"] in {"prepared", "starting"}:
+        try:
+            _finish(update, intent)
+        except Exception as failure:
+            try:
+                rollback_update(update)
+            except Exception as cleanup:
+                failure.add_note(f"going back to build {intent['from']} also failed: {cleanup}")
+                raise failure from None
+            return "rolled back"
+        return "updated"
+    if installed == intent["from"] and intent["phase"] in {"saving", "restoring"}:
         back_out_update(update)
+    return None
 
 
 def back_out_update(update: AppUpdate) -> None:
-    """Return to the unchanged old app. The app asks only when Sparkle proves no install is pending."""
+    """Return to the unchanged old app: after a failed preparation, or when the prepared build is no longer offered."""
     intent = _require_intent(update)
-    if bundle_build(update.app) != intent["from"] or intent["phase"] not in {"fenced", "saving", "prepared", "restoring"}:
+    if bundle_build(update.app) != intent["from"] or intent["phase"] not in {"draining", "saving", "prepared", "restoring"}:
         raise UpdateRefused("the app was already replaced; finish or roll back the update instead")
-    if intent["phase"] != "fenced":
+    if intent["phase"] != "draining":
         intent["phase"] = "restoring"
         _save_intent(update, intent)
         saved = Path(intent["stage"]) / "launch-item.before.plist"
@@ -548,7 +565,7 @@ def _finish(update: AppUpdate, intent: dict) -> None:
 
 def rollback_update(update: AppUpdate) -> None:
     """Restore the saved database, app and exact launch item of a failed candidate, keeping each attempt's failed
-    copies. Only before new work was released: once the candidate published files, reconcile those first."""
+    copies. The candidate never released work, so nothing it did is lost."""
     intent = _require_intent(update)
     if intent["phase"] not in {"starting", "failed", "rolling-back"}:
         raise UpdateRefused("nothing ran on the new build; cancel the update instead")
@@ -590,7 +607,7 @@ def rollback_update(update: AppUpdate) -> None:
 def require_update_startup_allowed(support_dir: Path, app: Path) -> None:
     """The server opens the database only when no unfinished update says otherwise."""
     intent = read_update_intent(support_dir)
-    if intent is None or intent.get("phase") == "fenced":
+    if intent is None or intent.get("phase") == "draining":
         return
     if (intent.get("phase"), bundle_build(app)) in {("starting", intent.get("to")), ("restoring", intent.get("from"))}:
         return
@@ -614,6 +631,15 @@ def _running_work(update: AppUpdate) -> list[str]:
         (_publishing(update.config.paths.db_path), "files are being published"),
     )
     return [f"{count} {words}" for count, words in found if count]
+
+
+def _finishing_soon(update: AppUpdate) -> bool:
+    """Whether every running file is expected to finish within DRAIN_START_SECONDS, from the app's own estimates. Work
+    without an estimate is never cut short: draining waits until one says it is nearly done."""
+    activity = _api(update.base_url, "/api/app/activity")
+    deadline = _utc_now() + timedelta(seconds=DRAIN_START_SECONDS)
+    finishes = [running.get("finishes_at") for computer in activity["computers"] for running in computer["running"]]
+    return all(finish and datetime.fromisoformat(finish) <= deadline for finish in finishes)
 
 
 def _publishing(database: Path) -> int:
