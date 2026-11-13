@@ -1248,6 +1248,13 @@ def create_app(
                 storage_admits_work=controller_storage_admission_issue(config, None) is None,
             )
 
+    def _computers_payload() -> dict[str, Any]:
+        from mediaforce.web.runtime.app_computers import computers_payload
+
+        with open_db(config.paths.db_path) as connection:
+            computers = _host_runtime_rows(connection, config, collect_statuses=_cached_host_statuses)
+            return computers_payload(connection, config, computers, observed_at=datetime.now(UTC))
+
     def _tv_shows_payload() -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection, library_calculations.request(connection), kind_snapshot(connection, config, _load_calibration_state):
             return tv_shows_payload(
@@ -2326,6 +2333,7 @@ def create_app(
         app,
         main_window_payload=_main_window_payload,
         activity_payload=_activity_payload,
+        computers_payload=_computers_payload,
         tv_shows_payload=_tv_shows_payload,
         movies_payload=lambda: movies_payload(_dashboard_movie_library_details_payload()["titles"]),
         other_media_payload=lambda: other_media_payload(_dashboard_other_library_details_payload()),

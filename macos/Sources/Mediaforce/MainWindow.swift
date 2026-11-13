@@ -434,9 +434,9 @@ struct MainPage: View {
             case .mediaKind(let kind, let state):
                 MediaPage(model: model, kind: kind, stateGroup: state) { open(.item($0)) }.id(place)
             case .computer(nil):
-                ComputersPage(facts: facts, model: model) { open(.computer($0)) }
+                ComputersPage(facts: facts, model: model, open: open)
             case .computer(let key?):
-                ComputerPage(key: key, facts: facts, model: model, namePage: { namePage(.computer(key), $0) }).id(key)
+                ComputerPage(key: key, facts: facts, model: model, open: open, namePage: { namePage(.computer(key), $0) }).id(key)
             case .seasonsWithoutKind:
                 MediaPage(model: model, onlySeasons: model.kinds?.leftOut, showEverything: { open(.media) }, kind: .tv) { open(.item($0)) }
             case .kind(let code):

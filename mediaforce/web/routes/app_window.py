@@ -24,6 +24,7 @@ def register_app_window_routes(
         item_payload: Callable[[str], dict[str, Any] | None] | None = None,
         player_source: Callable[[int, str], Path | None] | None = None,
         activity_payload: Callable[[], dict[str, Any]] | None = None,
+        computers_payload: Callable[[], dict[str, Any]] | None = None,
         kinds_payload: Callable[[], dict[str, Any]] | None = None,
         approve_kind_action: Callable[[str, str], dict[str, Any]] | None = None,
         stop_kind_action: Callable[[str], dict[str, Any]] | None = None,
@@ -32,6 +33,13 @@ def register_app_window_routes(
     @app.get("/api/app/main-window")
     def api_app_main_window() -> JSONResponse:
         return JSONResponse(main_window_payload())
+
+    if computers_payload is not None:
+        read_computers = computers_payload
+
+        @app.get("/api/app/computers")
+        def api_app_computers() -> JSONResponse:
+            return JSONResponse(read_computers())
 
     if activity_payload is not None:
         read_activity = activity_payload

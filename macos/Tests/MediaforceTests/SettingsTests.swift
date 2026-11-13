@@ -370,9 +370,46 @@ final class SettingsTests: XCTestCase {
 }
 
 final class ComputerFixTests: XCTestCase {
-    private func host(_ json: String) throws -> HostsFacts.Host {
-        try JSONDecoder.mediaforce.decode(HostsFacts.self, from: Data("{\"hosts\": [\(json)]}".utf8)).hosts[0]
+    /// One computer as `/api/app/computers` sends it, with its setup fields from `json`.
+    static func machine(_ json: String) throws -> ComputersFacts.Machine {
+        let setup = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        var facts = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any])
+        var computers = try XCTUnwrap(facts["computers"] as? [[String: Any]])
+        computers = [computers[0].merging(setup) { _, new in new }]
+        facts["computers"] = computers
+        return try JSONDecoder.mediaforce.decode(ComputersFacts.self, from: JSONSerialization.data(withJSONObject: facts)).computers[0]
     }
+
+    private func host(_ json: String) throws -> HostsFacts.Host {
+        try Self.machine(json).host
+    }
+
+    static let payload = """
+    {"observed_at": "2026-11-13T17:00:00+00:00", "computers": [
+      {"key": "mini", "name": "M1 mini", "model": "Mac mini", "this_mac": false, "platform": "macos",
+       "last_answered_at": "2026-11-13T14:00:00+00:00", "abilities": ["encode_queue", "sample_calibration"],
+       "library_kinds": [], "storage": "connected",
+       "window": {"name": "Evenings", "open": false, "closes_at": null, "opens_at": "2026-11-13T23:00:00+00:00",
+                  "week": [{"starts_at": "2026-11-13T23:00:00+00:00", "ends_at": "2026-11-14T05:00:00+00:00"}]},
+       "running": [], "done": {"today": {"files": 1, "bytes_saved": 4000000000}, "week": {"files": 6, "bytes_saved": 23000000000},
+                               "all": {"files": 170, "bytes_saved": 365000000000}, "since": "2026-04-09T11:08:24+00:00"},
+       "hour_takes_seconds": 15300,
+       "recent": [{"prefix": "tv/Lucifer/Season 2", "show_prefix": "tv/Lucifer", "show": "Lucifer", "season_folder": "Season 2",
+                   "season": 2, "episode": 3, "finished_at": "2026-11-13T13:11:10+00:00", "bytes_saved": 3900000000, "replaced": true}],
+       "available": false, "setup_supported": true, "setup_requires_password": true, "trust_reset_supported": false,
+       "issues": [], "recovery": {"status": "retrying", "reason": null}},
+      {"key": "studio", "name": "M4 Studio", "model": "Mac Studio", "this_mac": true, "platform": "macos",
+       "last_answered_at": null, "abilities": ["encode_queue"], "library_kinds": ["tv"], "storage": "connected",
+       "window": {"name": "Any time", "open": true, "closes_at": null, "opens_at": null, "week": []},
+       "running": [{"id": "job", "prefix": "tv/Lucifer/Season 2", "show_prefix": "tv/Lucifer", "show": "Lucifer",
+                    "season_folder": "Season 2", "season": 2, "episode": 4, "stage": "compressing", "progress": 0.4,
+                    "finishes_at": "2026-11-13T18:00:00+00:00", "file_count": 1}],
+       "done": {"today": {"files": 0, "bytes_saved": 0}, "week": {"files": 0, "bytes_saved": 0},
+                "all": {"files": 0, "bytes_saved": 0}, "since": null},
+       "hour_takes_seconds": null, "recent": [],
+       "available": true, "setup_supported": true, "setup_requires_password": false, "trust_reset_supported": false,
+       "issues": [], "recovery": null}]}
+    """
 
     func testAComputerOffersTheFixesTheServerAllows() throws {
         let unusable = try host("""
@@ -392,6 +429,18 @@ final class ComputerFixTests: XCTestCase {
          "trust_reset_supported": true, "issues": [{"code": "x"}], "recovery": null}
         """)
         XCTAssertEqual(ComputerFix.offered(changed), [.setUp, .trustAgain])
+    }
+
+    func testAComputerInTroubleLeadsWithItsFixesEvenWhenNotWaitingOnYou() throws {
+        func computer(_ state: String, needsYou: Bool) throws -> MainWindowFacts.Computer {
+            try JSONDecoder.mediaforce.decode(MainWindowFacts.Computer.self, from: Data("""
+            {"key": "mini", "state": "\(state)", "running_count": 0, "needs_you": \(needsYou)}
+            """.utf8))
+        }
+        XCTAssertTrue(ComputerFix.inTrouble(try computer("unreachable", needsYou: false)))
+        XCTAssertTrue(ComputerFix.inTrouble(try computer("cooling_down", needsYou: true)))
+        XCTAssertFalse(ComputerFix.inTrouble(try computer("outside_schedule", needsYou: false)))
+        XCTAssertFalse(ComputerFix.inTrouble(try computer("away", needsYou: false)))
     }
 
     func testEachStateLeadsWithItsOwnFix() {
