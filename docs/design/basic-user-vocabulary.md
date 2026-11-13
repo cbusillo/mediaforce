@@ -270,6 +270,10 @@ Keyboard refresh returns focus to the workspace heading.
   `Current size`, `Estimated output`, `Estimated space saved`,
   `Why it has not started`, `What happens next`, `checked file`, and
   `Replace original now` rather than backend workflow nouns.
+- The Other library is named `VR & 3D` wherever the Director sees it. Until
+  Mediaforce can compress VR and 3D video, its items say `Can't compress yet`,
+  never a waiting or ready state. Library lists use `Can save` for estimated
+  savings, `About` or `At least` as the Library's estimate does.
 - Other Library should say `folders and files`, `One file`, `Whole folder`,
   `Files included`, and `Files left untouched`. Keep `work unit`, `semantics`,
   `inference`, and raw workflow labels out of primary copy. Other Studio should

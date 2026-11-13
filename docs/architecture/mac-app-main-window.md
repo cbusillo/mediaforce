@@ -132,6 +132,22 @@ selection rather than silently replacing its goal. It answers
 `409` with `choose_size` when a size must be chosen, `choose_balance` for an
 unavailable balance choice, or `refused`.
 
+## Sidebar and the library lists
+
+The sidebar lists Needs you, Activity, Computers and Space saved, then Library
+with TV shows, Movies and VR & 3D (once it holds something), then How it should
+look with the kinds. Library itself opens the combined overview; its Browse all
+opens Media, every library in one list.
+
+TV shows, Movies and VR & 3D each open their list. Above it sit the library's
+size, how much is still original, and Can save: the rows' estimates added up,
+read "At least" while any row that can still be compressed has no estimate and
+"About" once all do, as the Library's estimated total savings is. The server
+sends 0 both for a finished title and for files not measured yet, so the app
+counts 0 as an estimate only for a row with no active work. Each row's Can save
+column says "About" its estimate, "Not known yet", or nothing where there is
+nothing to estimate.
+
 ## TV shows
 
 The TV shows page lists every show in the library. `GET /api/app/tv-shows`
@@ -163,9 +179,9 @@ the web movie library's state group, checked in its order: `view_only`,
 codes the same way as TV shows (needs you, in progress, ready for you, no
 active work) and opens a movie's item page for anything it does.
 
-## Other media
+## VR & 3D
 
-The Other media page lists the Other library's folders and single files, the
+The VR & 3D page lists the Other library's folders and single files, the
 same work units as the web Other library. `GET /api/app/other` gives its facts,
 built from the web Other library's details and read only while the page is
 open: `items`, biggest first, each with `prefix`, `title`, `library`,
@@ -173,9 +189,12 @@ open: `items`, biggest first, each with `prefix`, `title`, `library`,
 nothing measured it) and one `state` code, plus `truncated`, true when the web
 library's listing cap hid part of the library. `state` is the web Other
 library's state group, checked in its order: `cannot_start`, `view_only`,
-`needs_attention`, `compressing`, `ready` or `no_work`. The sidebar's Other
-media number counts files; the page counts folders and files and names the
-files they hold, which match that number unless `truncated`.
+`needs_attention`, `compressing`, `ready` or `no_work`. The library holds VR
+and 3D video, which Mediaforce can't compress yet (cbusillo/mediaforce#188), so
+the app shows a `view_only` item as "Can't compress yet": not waiting work, with
+no Can save estimate and no Can save total, and it says so once above the list.
+The app starts nothing for these files; the server keeps them view only through
+the library's `availability` setting.
 
 ## One show season, movie or folder
 
@@ -216,6 +235,16 @@ Scrolling over either comparison picture scrolls the page, or pans both pictures
 at actual size; it never scrubs a video. Seeking and frame stepping use the
 shared controls and move both pictures together.
 
+## Computers
+
+The Computers page lists each computer with its state from the main window's
+`computers` facts, and opens a computer's own page. That page shows the
+state, what needs the Director, and the fixes `/api/hosts?compact=1` offers
+(check again, start, set up with the account password, trust again), read again
+every 30 seconds while it is open. Both pages link to Settings › Computers for
+setup. A notification, the menu bar and Needs you open these pages, not
+Settings.
+
 ## Settings
 
 Mediaforce > Settings… (⌘,) opens the Settings window, one tab per section of
@@ -245,7 +274,8 @@ as on the web. A saved library changes kind only with the
 and removing a library asks first. A refusal answers `400` with
 `{"ok": false, "code": ...}` and writes nothing.
 
-The Computers tab is the web page's computers and work windows: each
+The Computers tab is setup only, with each computer's state and fixes on its
+page in the main window: each
 computer's name, address, what it can do, its work window, which libraries it
 works on, how many files at once, its priority and wake address, with the
 technical fields under Connection details; and the custom work windows' days,
