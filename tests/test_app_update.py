@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import fcntl
-import json
 import plistlib
 import shutil
 import sqlite3
 import subprocess
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -14,16 +13,17 @@ from unittest.mock import patch
 import pytest
 
 from mediaforce.core.db import open_db
+from mediaforce.encoding.delivery_lock import delivery_lock
 from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
-from mediaforce.library.background_work import background_work_is_paused
+from mediaforce.library.background_work import background_work_is_paused, load_background_work_state
 from mediaforce.ops import controller_deploy as deploy
 from mediaforce.ops.login_item import LoginItemPaths, render_login_item_plist
-from mediaforce.ops.runtime_install import SERVER_PORT, SERVICE_LABEL, read_update_intent, retain_deploy_stage, retained_deploy_stage
-from mediaforce.web.runtime.queue_actions import fence_for_update_action, release_update_fence_action
+from mediaforce.ops.runtime_install import read_update_intent, retain_deploy_stage, retained_deploy_stage
+from mediaforce.web.runtime.queue_actions import resume_encode_queue_action
 
 
 class FakeServer:
-    """The running server as the update sees it: its API and pause switches, and launchd."""
+    """The running server's API as the update sees it, and launchd."""
 
     def __init__(self, update: deploy.AppUpdate) -> None:
         self.update = update
@@ -36,18 +36,10 @@ class FakeServer:
         if route.startswith("/api/dashboard?"):
             return {"encode_queue": {"running_count": self.running["encode"]},
                     "calibration_queue": {"sample": {"running_count": self.running["sample"]}, "full": {"running_count": 0}}}
-        if not self.healthy:
+        if route == "/api/dashboard/scan-job" and not self.healthy:
             raise OSError("connection refused")
         server = {"build": deploy.bundle_build(self.update.app), "database": str(self.update.config.paths.db_path.resolve())}
         return {"counts": {"pending_encode": 4, "unfinished_scan_rows": 0, "active_evidence": 0}, "server": server}
-
-    def post(self, _update: object, route: str, body: dict[str, Any]) -> dict[str, Any]:
-        config = self.update.config
-        def connection() -> Any:
-            return open_db(config.paths.db_path)
-        if route == "/api/update/fence":
-            return fence_for_update_action(connection_factory=connection, now_iso=lambda: "now")
-        return release_update_fence_action(body, connection_factory=connection, config=config, now_iso=lambda: "now")
 
     def run(self, command: list[str]) -> subprocess.CompletedProcess[str]:
         self.launchctl.append(command[1:])
@@ -67,14 +59,14 @@ def update(tmp_path: Path) -> Iterator[Update]:
     )
     support.mkdir()
     with open_db(support / "library.sqlite3") as connection:
-        save_queue_state(connection, {**load_queue_state(connection), "is_paused": False, "updated_at": "then"})
+        save_queue_state(connection, {**load_queue_state(connection), "is_paused": True, "updated_at": "then"})
     app = _app(tmp_path / "Applications/Mediaforce.app", build="1", code=b"old app")
     item = LoginItemPaths(app, tmp_path / "home", config)
     item.plist.parent.mkdir(parents=True)
     item.plist.write_bytes(render_login_item_plist(item))
     update = deploy.AppUpdate(config, app, tmp_path / "home")
     server = FakeServer(update)
-    with patch.object(deploy, "_api", server.api), patch.object(deploy, "_post", server.post), \
+    with patch.object(deploy, "_api", server.api), \
             patch.object(deploy, "_run_command", server.run), patch("mediaforce.ops.login_item._run_command", server.run), \
             patch.object(deploy, "_verify_signed_bundle"), patch.object(deploy, "_listener_is_closed", return_value=True), \
             patch.object(deploy, "_copy_app", lambda source, target: shutil.copytree(source, target, symlinks=True)), \
@@ -108,31 +100,44 @@ def _phase(update: deploy.AppUpdate) -> str | None:
     return None if intent is None else str(intent["phase"])
 
 
-def _paused(update: deploy.AppUpdate) -> tuple[bool, bool]:
+def _work(update: deploy.AppUpdate) -> tuple[bool, bool, bool]:
+    """The saved encode and background pauses a person set, and whether background work is held now."""
     with open_db(update.config.paths.db_path) as connection:
-        return bool(load_queue_state(connection)["is_paused"]), background_work_is_paused(connection)
+        return (bool(load_queue_state(connection)["is_paused"]), bool(load_background_work_state(connection)["is_paused"]),
+                background_work_is_paused(connection))
 
 
-def test_busy_server_keeps_running_with_new_work_held_until_files_finish(update: Update) -> None:
+def test_busy_server_keeps_running_while_the_record_holds_new_work(update: Update) -> None:
     app_update, server = update
     server.running.update(encode=1, sample=1)
     deploy.prepare_update(app_update, "2")
-    assert _phase(app_update) == "fenced" and len(_intent(app_update)["waiting"]) == 2
-    assert server.launchctl == [] and _paused(app_update) == (True, True)
-    assert server.post(app_update, "/api/update/release", {"encode": False, "background": False})["ok"] is False
-    with pytest.raises(deploy.UpdateRefused):
-        deploy.prepare_update(app_update, "3")
+    assert _phase(app_update) == "fenced" and len(_intent(app_update)["waiting"]) == 2 and server.launchctl == []
+    assert _work(app_update) == (True, False, True)
+    resumed = resume_encode_queue_action(connection_factory=lambda: open_db(app_update.config.paths.db_path),
+                                         config=app_update.config, now_iso=lambda: "now")
+    assert resumed["ok"] is False
     deploy.back_out_update(app_update)
-    assert _paused(app_update) == (False, False) and _phase(app_update) is None
+    assert _work(app_update) == (True, False, False) and _phase(app_update) is None
 
 
 def test_publication_holding_its_lock_keeps_the_old_server_running(update: Update) -> None:
     app_update, server = update
     (app_update.support / "delivery-locks").mkdir()
-    with (app_update.support / "delivery-locks/7.lock").open("a") as held:
-        fcntl.flock(held, fcntl.LOCK_EX)
-        deploy.prepare_update(app_update, "2")
-        assert _phase(app_update) == "fenced" and server.launchctl == []
+    (app_update.support / "delivery-locks/7.lock").touch()
+    holding, done = threading.Event(), threading.Event()
+
+    def publish() -> None:
+        with delivery_lock(app_update.config.paths.db_path, 7):
+            holding.set()
+            done.wait(10)
+
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    holding.wait(10)
+    deploy.prepare_update(app_update, "2")
+    assert _phase(app_update) == "fenced" and server.launchctl == []
+    done.set()
+    publisher.join()
     deploy.prepare_update(app_update, "2")
     assert _phase(app_update) == "prepared"
 
@@ -150,6 +155,17 @@ def test_idle_server_saves_complete_old_pair_before_sparkle_may_install(update: 
         deploy.require_update_startup_allowed(app_update.support, app_update.app)
 
 
+def test_newer_offer_while_prepared_reuses_the_saved_pair(update: Update) -> None:
+    app_update, server = update
+    deploy.prepare_update(app_update, "2")
+    stage, calls = _intent(app_update)["stage"], len(server.launchctl)
+    deploy.prepare_update(app_update, "3")
+    assert _intent(app_update)["to"] == "3" and _intent(app_update)["stage"] == stage and len(server.launchctl) == calls
+    _install(app_update, build="3")
+    deploy.reconcile_update(app_update)
+    assert _phase(app_update) is None
+
+
 @pytest.mark.parametrize("interrupted", [False, True])
 def test_failure_before_replacement_restarts_unchanged_old_service(update: Update, interrupted: bool) -> None:
     app_update, server = update
@@ -165,7 +181,15 @@ def test_failure_before_replacement_restarts_unchanged_old_service(update: Updat
         deploy.reconcile_update(app_update)
     assert retained_deploy_stage(app_update.support) == previous
     assert app_update.paths.plist.read_bytes() == saved_plist and server.launchctl[-1][0] == "kickstart"
-    assert _paused(app_update) == (False, False) and _phase(app_update) is None
+    assert _work(app_update) == (True, False, False) and _phase(app_update) is None
+
+
+def test_failed_restart_keeps_the_original_cause(update: Update) -> None:
+    app_update, server = update
+    server.healthy = False
+    with patch.object(deploy, "backup_database", side_effect=RuntimeError("disk full")), \
+            patch.object(deploy, "DEFAULT_STARTUP_TIMEOUT", 0), pytest.raises(RuntimeError, match="disk full"):
+        deploy.prepare_update(app_update, "2")
 
 
 def test_failed_candidate_stays_stopped_and_rolls_back_to_matching_old_pair(update: Update) -> None:
@@ -192,56 +216,9 @@ def test_failed_candidate_stays_stopped_and_rolls_back_to_matching_old_pair(upda
     assert stage is not None
     failed, = stage.glob("failed-*")
     assert (failed / "Mediaforce.app/Contents/MacOS/Mediaforce").read_bytes() == b"new app"
-    assert _paused(app_update) == (False, False) and _phase(app_update) is None
+    assert _work(app_update) == (True, False, False) and _phase(app_update) is None
     with pytest.raises(deploy.UpdateRefused):
         deploy.prepare_update(app_update, "2")
-
-
-def test_verified_candidate_keeps_launch_item_and_resumes_only_a_running_queue(update: Update) -> None:
-    app_update, _server = update
-    with open_db(app_update.config.paths.db_path) as connection:
-        save_queue_state(connection, {**load_queue_state(connection), "is_paused": True, "updated_at": "then"})
-    saved = plistlib.loads(app_update.paths.plist.read_bytes())
-    deploy.prepare_update(app_update, "2")
-    stage = Path(_intent(app_update)["stage"])
-    _install(app_update, build="2")
-    deploy.reconcile_update(app_update)
-    candidate = plistlib.loads(app_update.paths.plist.read_bytes())
-    assert candidate["MediaforceAppCodeHash"] != saved["MediaforceAppCodeHash"]
-    assert {**candidate, "MediaforceAppCodeHash": None} == {**saved, "MediaforceAppCodeHash": None}
-    assert json.loads((stage / "candidate.txt").read_text())["build"] == "2"
-    assert _paused(app_update) == (True, False) and _phase(app_update) is None
-
-
-def test_candidate_answering_as_another_build_is_not_released(update: Update) -> None:
-    app_update, _server = update
-    deploy.prepare_update(app_update, "2")
-    _install(app_update, build="2")
-    with patch.object(deploy, "_api", lambda *_a, **_k: {"counts": {"pending_encode": 4}, "server": {"build": "1"}}), \
-            pytest.raises(deploy.UpdateRefused):
-        deploy.reconcile_update(app_update)
-    assert _phase(app_update) == "failed"
-
-
-def test_proof_build_addresses_only_its_own_service(tmp_path: Path) -> None:
-    proof = _app(tmp_path / "Proof.app", build="1", code=b"", MediaforceServiceLabel="com.mediaforce.web.proof",
-                 MediaforceServerPort=8787)
-    paths = LoginItemPaths(proof, tmp_path)
-    assert paths.label != SERVICE_LABEL and paths.plist.name != f"{SERVICE_LABEL}.plist"
-    assert deploy.AppUpdate(tmp_path / "config.toml", proof, tmp_path).port != SERVER_PORT
-    live_logs = LoginItemPaths(_app(tmp_path / "Live.app", build="1", code=b""), tmp_path).log_dir
-    assert not paths.stdout_log.is_relative_to(live_logs) and not paths.stderr_log.is_relative_to(live_logs)
-
-
-def test_proof_build_gate_refuses_an_app_that_shares_the_live_identity(tmp_path: Path) -> None:
-    from scripts.bundle_server import require_proof_identity
-
-    live = _app(tmp_path / "Live.app", build="1", code=b"", CFBundleIdentifier="com.shinycomputers.mediaforce.proof")
-    with pytest.raises(ValueError):
-        require_proof_identity(live)
-    proof = _app(tmp_path / "Proof.app", build="1", code=b"", CFBundleIdentifier="com.shinycomputers.mediaforce.proof",
-                 MediaforceServiceLabel="com.mediaforce.web.proof", MediaforceServerPort="8787")
-    require_proof_identity(proof)
 
 
 def test_interrupted_rollback_finishes_from_the_saved_pair_on_next_launch(update: Update) -> None:
@@ -259,6 +236,28 @@ def test_interrupted_rollback_finishes_from_the_saved_pair_on_next_launch(update
     assert (app_update.app / "Contents/MacOS/Mediaforce").read_bytes() == b"old app" and _phase(app_update) is None
 
 
+def test_verified_candidate_keeps_launch_item_and_every_earlier_pause(update: Update) -> None:
+    app_update, _server = update
+    saved = plistlib.loads(app_update.paths.plist.read_bytes())
+    deploy.prepare_update(app_update, "2")
+    _install(app_update, build="2")
+    deploy.reconcile_update(app_update)
+    candidate = plistlib.loads(app_update.paths.plist.read_bytes())
+    assert candidate["MediaforceAppCodeHash"] != saved["MediaforceAppCodeHash"]
+    assert {**candidate, "MediaforceAppCodeHash": None} == {**saved, "MediaforceAppCodeHash": None}
+    assert _work(app_update) == (True, False, False) and _phase(app_update) is None
+
+
+def test_candidate_answering_as_another_build_is_not_released(update: Update) -> None:
+    app_update, _server = update
+    deploy.prepare_update(app_update, "2")
+    _install(app_update, build="2")
+    with patch.object(deploy, "_api", lambda *_a, **_k: {"counts": {"pending_encode": 4}, "server": {"build": "1"}}), \
+            pytest.raises(deploy.UpdateRefused):
+        deploy.reconcile_update(app_update)
+    assert _phase(app_update) == "failed"
+
+
 def test_proof_build_refuses_the_live_support_folder(tmp_path: Path) -> None:
     from mediaforce.ops.runtime_install import RuntimeProtectionError, require_own_support
 
@@ -267,3 +266,11 @@ def test_proof_build_refuses_the_live_support_folder(tmp_path: Path) -> None:
     with pytest.raises(RuntimeProtectionError):
         require_own_support(proof, live_database, tmp_path)
     require_own_support(proof, tmp_path / "proof/library.sqlite3", tmp_path)
+
+
+def test_bundle_without_its_info_never_takes_the_live_identity(tmp_path: Path) -> None:
+    from mediaforce.ops.runtime_install import bundle_service
+
+    (tmp_path / "Broken.app/Contents").mkdir(parents=True)
+    with pytest.raises(FileNotFoundError):
+        bundle_service(tmp_path / "Broken.app")

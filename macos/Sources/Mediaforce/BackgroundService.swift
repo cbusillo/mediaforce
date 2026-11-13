@@ -9,16 +9,6 @@ enum BackgroundService {
 
     static var isProof: Bool { label != liveLabel }
 
-    /// The saved service's config, so update steps address the same database the server uses.
-    static var savedConfig: String? {
-        guard let data = try? Data(contentsOf: plist),
-              let item = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-              let arguments = item["ProgramArguments"] as? [String],
-              let index = arguments.firstIndex(of: "--config"), index + 1 < arguments.count
-        else { return nil }
-        return arguments[index + 1]
-    }
-
     static var plist: URL {
         FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/LaunchAgents/\(label).plist")
     }

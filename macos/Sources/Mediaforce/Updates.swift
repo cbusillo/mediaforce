@@ -43,7 +43,8 @@ final class Updates: NSObject, SPUUpdaterDelegate {
         try MainActor.assumeIsolated {
             if state.failedBuilds.contains(build) { throw UpdateWait(Words.updateFailedBefore(build: item.displayVersionString)) }
             if let intent = state.intent, intent.to == build, intent.phase == "prepared" { return }
-            if preparing == nil, state.intent == nil { prepare(build) }
+            // A newer build than the prepared one goes through the same preparation, which keeps the saved old pair.
+            if preparing == nil, state.intent.map({ ["fenced", "prepared"].contains($0.phase) }) ?? true { prepare(build) }
             throw UpdateWait(state.error ?? state.intent?.waiting.flatMap { $0.isEmpty ? nil : Words.updateWaiting($0) } ?? Words.updateGettingReady)
         }
     }
@@ -116,13 +117,12 @@ enum ServerUpdateStep {
     }
 
     static func run(_ step: [String]) async -> Answer {
-        guard let config = BackgroundService.savedConfig else { return Answer(error: Words.updateServerUnavailable) }
         let server = Bundle.main.bundleURL.appending(path: "Contents/MacOS/mediaforce-server")
         return await Task.detached {
             let process = Process()
             let pipe = Pipe()
             process.executableURL = server
-            process.arguments = ["--config", config, "service", "update"] + step
+            process.arguments = ["service", "update"] + step
             process.standardOutput = pipe
             guard (try? process.run()) != nil else { return Answer(error: Words.updateServerUnavailable) }
             let data = pipe.fileHandleForReading.readDataToEndOfFile()

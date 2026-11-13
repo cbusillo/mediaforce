@@ -49,10 +49,7 @@ def bundled_app_path() -> Path | None:
 
 def bundle_service(app: Path | None) -> tuple[str, int]:
     """The launchd label and local port this app's server uses: the live service's unless the build names others."""
-    try:
-        info = plistlib.loads((app / "Contents/Info.plist").read_bytes()) if app else {}
-    except FileNotFoundError:
-        info = {}
+    info = plistlib.loads((app / "Contents/Info.plist").read_bytes()) if app else {}
     return str(info.get("MediaforceServiceLabel") or SERVICE_LABEL), int(info.get("MediaforceServerPort") or SERVER_PORT)
 
 

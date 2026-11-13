@@ -17,7 +17,7 @@ from mediaforce.ops.runtime_install import (
 
 LOGIN_ITEM_LABEL = SERVICE_LABEL
 MACOS_SIGNING_TEAM = "MM5YXC7T6E"
-BUNDLED_UPDATE_RECOVERY = "Restore the saved app and configuration. Continue using the current Mediaforce installation until bundled updates are available."
+BUNDLED_UPDATE_RECOVERY = "Restore the saved app and configuration; a new build arrives through the app's update."
 BOOTOUT_ACCEPTED_EXIT_CODES = frozenset({0, 3, 36, 113})
 LOGIN_ITEM_LOG_ROTATION_BYTES = 16 * 1024 * 1024
 LOGIN_ITEM_PATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -35,6 +35,8 @@ class LoginItemPaths:
     home: Path
     config_path: Path | None = None
     credentials_path: Path | None = None
+    # The saved service's own label, for commands that address it after its app moved or was removed.
+    saved_label: str | None = None
 
     @property
     def bundled(self) -> bool:
@@ -58,6 +60,8 @@ class LoginItemPaths:
 
     @property
     def label(self) -> str:
+        if self.saved_label:
+            return self.saved_label
         return bundle_service(self.project_root)[0] if self.bundled else LOGIN_ITEM_LABEL
 
     @property
@@ -230,9 +234,11 @@ def run_login_item_command(
         except RuntimeProtectionError:
             root = runtime_directory(home) / "current"
     plist = LoginItemPaths(project_root=root, home=home).plist
+    saved_label = None
     if plist.exists():
         try:
             installed = plistlib.loads(plist.read_bytes())
+            saved_label = installed.get("Label") if isinstance(installed.get("Label"), str) else None
             arguments = installed.get("ProgramArguments", [])
             installed_program = Path(arguments[0])
             installed_root = (
@@ -263,7 +269,8 @@ def run_login_item_command(
         except (OSError, ValueError, KeyError, IndexError, TypeError, plistlib.InvalidFileException, LoginItemError) as exc:
             print(f"login item: cannot identify installed runtime: {exc}")
             return 1
-    paths = LoginItemPaths(project_root=root.resolve(), home=home, config_path=config_path, credentials_path=credentials_path)
+    paths = LoginItemPaths(project_root=root.resolve(), home=home, config_path=config_path, credentials_path=credentials_path,
+                           saved_label=saved_label)
     try:
         if action == "install":
             state = install_login_item(paths)

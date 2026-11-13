@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select, update
@@ -6,6 +7,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import background_work_state
 from mediaforce.core.utils import timestamp
+from mediaforce.ops.runtime_install import update_hold_reason
 
 BACKGROUND_WORK_AREA = "catalog_evidence"
 
@@ -46,7 +48,10 @@ def load_background_work_state(connection: DBClient) -> dict[str, Any]:
 
 
 def background_work_is_paused(connection: DBClient) -> bool:
-    return bool(load_background_work_state(connection)["is_paused"])
+    """Paused by a person, or held while an app update is unfinished; the hold never changes the saved pause."""
+    database = (connection.engine.url.database or "").removeprefix("file:").split("?", 1)[0]
+    held = bool(database) and update_hold_reason(Path(database).parent) is not None
+    return held or bool(load_background_work_state(connection)["is_paused"])
 
 
 def set_background_work_paused(

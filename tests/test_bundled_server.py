@@ -22,6 +22,7 @@ def bundle_paths(tmp_path: Path) -> LoginItemPaths:
     program.write_text("#!/bin/sh\n")
     program.chmod(0o755)
     (program.parent / "Mediaforce").write_bytes(b"signed-app-fixture")
+    (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleVersion": "1"}))
     support = tmp_path / "support"
     config = tmp_path / "config/custom.toml"
     config.parent.mkdir()
@@ -154,12 +155,13 @@ def test_moved_bundle_can_repair_only_the_same_saved_app(bundle_paths: LoginItem
         moved = bundle_paths.project_root.with_name("Moved.app")
         bundle_paths.project_root.rename(moved)
         assert run_login_item_command("install", project_root=moved, home=bundle_paths.home) == 0
-        installed = plistlib.loads(bundle_paths.plist.read_bytes())
+        plist = LoginItemPaths(moved, bundle_paths.home).plist
+        installed = plistlib.loads(plist.read_bytes())
         assert Path(installed["ProgramArguments"][0]).is_relative_to(moved)
-        saved = bundle_paths.plist.read_bytes()
+        saved = plist.read_bytes()
         (moved / "Contents/MacOS/Mediaforce").write_bytes(b"different-build")
         assert run_login_item_command("install", project_root=moved, home=bundle_paths.home) == 1
-        assert bundle_paths.plist.read_bytes() == saved
+        assert plist.read_bytes() == saved
 
 
 def test_conflicting_config_is_refused_and_missing_config_does_not_block_disable(bundle_paths: LoginItemPaths) -> None:

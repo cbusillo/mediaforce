@@ -294,7 +294,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if bundle is not None and args.service_action == "update":
             from mediaforce.ops.controller_deploy import run_update_step
 
-            return run_update_step(str(args.step), bundle, args.config, args.build)
+            return run_update_step(str(args.step), bundle, args.build)
         if bundle is not None:
             return run_login_item_command(
                 str(args.service_action), project_root=bundle,

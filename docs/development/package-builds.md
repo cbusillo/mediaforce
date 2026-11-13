@@ -98,36 +98,17 @@ signed as whole bundles, inside out, with the same team.
 
 ## Updates with Sparkle
 
-A bundled app updates through Sparkle's standard windows, with automatic
-installation off. A build checks only when its Info.plist names a feed
-(`MEDIAFORCE_UPDATE_FEED`) and its public EdDSA key (`MEDIAFORCE_UPDATE_KEY`);
-source builds leave both empty.
-
-Sparkle downloads, verifies, replaces and relaunches the app. The controller
-deploy's staged transaction (`mediaforce/ops/controller_deploy.py`) does the
-rest, split around Sparkle and run as
-`mediaforce-server --config <saved> service update reconcile|prepare|cancel|rollback`.
-`runtime/update-intent.json` beside the database spans quit, replacement and
-reboot. While it exists, encodes, samples, background work and automatic
-publication admit nothing new, resume and cleanup wait, and the server starts
-only in a phase that allows it.
-
-- `prepare` pauses new work and waits for running files, including a
-  publication holding its delivery lock. It then saves the signed old app, its
-  exact launch item and a checked `before.sqlite` in a fresh `deployments/`
-  stage and stops the service. Only then may Sparkle offer that exact build.
-  A failure restarts the unchanged old service.
-- `reconcile`, run at every launch, starts the installed candidate with the
-  saved launch item (only its trusted build changes), checks that the server
-  answering is that build on that database with the same queued work and
-  storage, then restores the earlier pauses. It also finishes an interrupted
-  save or ending.
-- `cancel` restarts the old service when Sparkle shows nothing was downloaded.
-- A failed candidate stays stopped and its build is never offered again. The
-  app offers to go back; `rollback` restores the saved database, app and launch
-  item into fresh copies and keeps the failed ones in the stage.
+A build checks for updates only when its Info.plist names a feed
+(`MEDIAFORCE_UPDATE_FEED`) and public EdDSA key (`MEDIAFORCE_UPDATE_KEY`);
+source builds leave both empty. The steps around Sparkle are in
+`mediaforce/ops/controller_deploy.py`, run by the app as
+`mediaforce-server service update reconcile|prepare|cancel|rollback`. While
+`runtime/update-intent.json` exists beside the database, it holds new work and
+cleanup; pauses a person set are never changed. A stuck update is recovered by
+running `reconcile` or `rollback` from either the installed app or the stage's
+saved copy.
 
 `scripts/build-mac-app.sh proof OUTPUT CACHE BUILD FEED KEY` builds a copy for
-update proofs with its own app ID, service label and port. The build refuses
-an app that shares the live identity; the copy never asks for notifications
-and reaches only a service set up with its own config.
+update proofs with its own app ID, service label, port, support folder and
+logs. Run its service from a folder on the internal drive: a launchd agent
+stalled reading an app on an external volume.

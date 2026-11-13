@@ -6,7 +6,6 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-import fcntl
 import json
 from http.client import HTTPException
 import os
@@ -23,6 +22,7 @@ from uuid import uuid4
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import open_db, open_readonly_db
 from mediaforce.core.utils import timestamp
+from mediaforce.encoding.delivery_lock import delivery_lock
 from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, load_queue_state, save_queue_state
 from mediaforce.ops.login_item import (
     CommandRunner, LoginItemPaths, _atomic_write, _bootstrap, _bundle_code_hash, _launch_domain, _launch_target,
@@ -373,8 +373,9 @@ def _deploy(
 
 # The bundled app's update: the same staged transaction, split around Sparkle's standard installer. Sparkle downloads,
 # verifies, replaces and relaunches the app; these steps own admission, the saved old pair, the candidate check and
-# rollback. One intent record beside the database spans app quit, replacement and reboot. Phases: fenced -> saving ->
-# prepared -> (Sparkle installs) -> starting -> releasing, or failed -> restoring -> releasing.
+# rollback. The intent record beside the database is itself the hold on new work, so earlier pauses are never changed;
+# it spans quit, replacement and reboot. Phases: fenced -> saving -> prepared -> (Sparkle installs) -> starting -> done,
+# or failed -> rolling-back -> restoring -> done.
 
 
 class UpdateRefused(RuntimeError):
@@ -411,12 +412,10 @@ class AppUpdate:
         return self.support / "runtime" / name
 
 
-def run_update_step(step: str, app: Path, config_path: Path | None, build: str | None) -> int:
-    """The app runs one step and reads one JSON line back."""
-    if config_path is None:
-        print(json.dumps({"error": "the bundled app requires --config", "intent": None, "failed_builds": []}))
-        return 1
-    update = AppUpdate(config_path.expanduser().resolve(), app, Path.home())
+def run_update_step(step: str, app: Path, build: str | None) -> int:
+    """The app runs one step and reads one JSON line back. The config is the one its saved service runs with."""
+    arguments = plistlib.loads(LoginItemPaths(app, Path.home()).plist.read_bytes())["ProgramArguments"]
+    update = AppUpdate(Path(arguments[arguments.index("--config") + 1]), app, Path.home())
     error = None
     try:
         require_own_support(app, update.config.paths.db_path, update.home)
@@ -444,15 +443,13 @@ def prepare_update(update: AppUpdate, build: str) -> None:
         raise UpdateRefused(f"build {build} failed before; it is not offered again")
     existing = read_update_intent(update.support)
     intent: dict[str, Any] = existing or {"from": bundle_build(update.app), "to": build, "phase": "fenced", "app": str(update.app)}
-    if existing is None:
-        _save_intent(update, intent)
-    elif intent.get("to") != build or intent["phase"] not in {"fenced", "prepared"}:
-        raise UpdateRefused(f"the update to build {intent.get('to')} is {intent['phase']}; finish or cancel it first")
+    if existing is not None and (intent["phase"] not in {"fenced", "prepared"} or bundle_build(update.app) != intent["from"]):
+        raise UpdateRefused(f"the update to build {intent.get('to')} is {intent['phase']}; finish or roll it back first")
+    # A newer offer reuses the same transaction: the saved old pair and the stopped server are just as right for it.
+    intent["to"] = build
+    _save_intent(update, intent)
     if intent["phase"] == "prepared":
         return
-    # Re-asserted on every pass; the first answer is the earlier state. A lost first answer keeps work paused.
-    paused = _post(update, "/api/update/fence", {})["paused"]
-    intent.setdefault("paused", paused)
     intent["waiting"] = _running_work(update)
     _save_intent(update, intent)
     if intent["waiting"]:
@@ -477,8 +474,11 @@ def prepare_update(update: AppUpdate, build: str) -> None:
             reserve_mediaforce_database_identity(config)
             require_stopped_idle_controller(config, port=update.port)
             backup_database(config.paths.db_path, stage / "before.sqlite")
-    except Exception:
-        back_out_update(update)
+    except Exception as cause:
+        try:
+            back_out_update(update)
+        except Exception as cleanup:
+            cause.add_note(f"restarting the old service also failed: {cleanup}")
         raise
     # Only a verified pair moves the pointer; a partial attempt never displaces the last usable one.
     retain_deploy_stage(update.support, stage)
@@ -492,9 +492,7 @@ def reconcile_update(update: AppUpdate) -> None:
     if intent is None or intent["phase"] in {"fenced", "failed", "unreadable"}:
         return
     installed = bundle_build(update.app)
-    if intent["phase"] == "releasing":
-        _release(update, intent)
-    elif intent["phase"] == "rolling-back":
+    if intent["phase"] == "rolling-back":
         rollback_update(update)
     elif installed == intent["to"] and intent["phase"] in {"prepared", "starting"}:
         _finish(update, intent)
@@ -515,7 +513,7 @@ def back_out_update(update: AppUpdate) -> None:
             _atomic_write(update.paths.plist, saved.read_bytes())
             start_saved_launch_item(update.paths.plist)
         wait_until_healthy(update.base_url, DEFAULT_STARTUP_TIMEOUT)
-    _release(update, intent)
+    _end(update)
 
 
 def _finish(update: AppUpdate, intent: dict) -> None:
@@ -545,8 +543,7 @@ def _finish(update: AppUpdate, intent: dict) -> None:
         _save_intent(update, intent)
         _atomic_write(update.file(UPDATE_FAILED_NAME), json.dumps([*_failed(update), intent["to"]]).encode())
         raise
-    _atomic_write(stage / "candidate.txt", json.dumps({"build": intent["to"], "code_hash": _bundle_code_hash(update.app)}).encode())
-    _release(update, intent)
+    _end(update)
 
 
 def rollback_update(update: AppUpdate) -> None:
@@ -560,7 +557,7 @@ def rollback_update(update: AppUpdate) -> None:
     _save_intent(update, intent)
     stage = Path(intent["stage"])
     installed = Path(intent["app"])
-    disable_login_item(LoginItemPaths(installed, update.home))
+    disable_login_item(update.paths)
     wait_for_closed_listener(update.port)
     failed = stage / f"failed-{_utc_now():%Y%m%dT%H%M%S%fZ}"
     failed.mkdir()
@@ -587,25 +584,21 @@ def rollback_update(update: AppUpdate) -> None:
     _atomic_write(update.paths.plist, (stage / "launch-item.before.plist").read_bytes())
     start_saved_launch_item(update.paths.plist)
     wait_until_healthy(update.base_url, DEFAULT_STARTUP_TIMEOUT)
-    _release(update, intent)
+    _end(update)
 
 
 def require_update_startup_allowed(support_dir: Path, app: Path) -> None:
     """The server opens the database only when no unfinished update says otherwise."""
     intent = read_update_intent(support_dir)
-    if intent is None or intent.get("phase") in {"fenced", "releasing"}:
+    if intent is None or intent.get("phase") == "fenced":
         return
     if (intent.get("phase"), bundle_build(app)) in {("starting", intent.get("to")), ("restoring", intent.get("from"))}:
         return
     raise UpdateRefused(f"an update to build {intent.get('to')} is {intent.get('phase')}; open Mediaforce to finish it")
 
 
-def _release(update: AppUpdate, intent: dict) -> None:
-    """The one way an update ends: "releasing" is saved before any pause lifts, so nothing rolls back under work that
-    already resumed, and an interrupted ending is finished from the record. Unknown earlier pauses stay paused."""
-    intent["phase"] = "releasing"
-    _save_intent(update, intent)
-    _post(update, "/api/update/release", intent.get("paused") or {"encode": True, "background": True})
+def _end(update: AppUpdate) -> None:
+    """Removing the record lifts the hold; every pause a person set was never touched."""
     update.file(UPDATE_INTENT_NAME).unlink()
 
 
@@ -618,20 +611,16 @@ def _running_work(update: AppUpdate) -> list[str]:
         (calibration["sample"]["running_count"] + calibration["full"]["running_count"], "samples are running"),
         (counts["unfinished_scan_rows"], "library checks are running"),
         (counts["active_evidence"], "files are being measured"),
-        (_held_delivery_locks(update.support), "files are being published"),
+        (_publishing(update.config.paths.db_path), "files are being published"),
     )
     return [f"{count} {words}" for count, words in found if count]
 
 
-def _held_delivery_locks(support_dir: Path) -> int:
+def _publishing(database: Path) -> int:
     held = 0
-    for path in (support_dir / "delivery-locks").glob("*.lock"):
-        with path.open("a") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fcntl.flock(lock, fcntl.LOCK_UN)
-            except BlockingIOError:
-                held += 1
+    for path in (database.resolve().parent / "delivery-locks").glob("*.lock"):
+        with delivery_lock(database, int(path.stem), blocking=False) as acquired:
+            held += not acquired
     return held
 
 
@@ -652,13 +641,6 @@ def _failed(update: AppUpdate) -> list[str]:
         return json.loads(update.file(UPDATE_FAILED_NAME).read_text())
     except FileNotFoundError:
         return []
-
-
-def _post(update: AppUpdate, route: str, body: dict) -> dict:
-    request = Request(update.base_url + route, data=json.dumps(body).encode(), method="POST",
-                      headers={"Content-Type": "application/json"})
-    with urlopen(request, timeout=30) as response:
-        return json.load(response)
 
 
 def _copy_app(source: Path, destination: Path) -> None:

@@ -50,7 +50,7 @@ build|bundle|proof)
 	ditto "$derived_data/Build/Products/Release/Mediaforce.app" "$output/Mediaforce.app"
 	if [[ "$1" != build ]]; then
 		uv run --directory "$repo_root" python -m scripts.bundle_server "$output/Mediaforce.app" \
-			--cache "${3:?bundle needs a cache directory}" ${identity[@]+--proof}
+			--cache "${3:?bundle needs a cache directory}"
 	fi
 	codesign --verify --strict "$output/Mediaforce.app"
 	signature="$(codesign -dv "$output/Mediaforce.app" 2>&1)"
