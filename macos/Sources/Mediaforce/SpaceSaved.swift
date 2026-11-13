@@ -1,35 +1,31 @@
 import SwiftUI
 
-/// What compressing has given back, spot-check first: the compare player on an episode whose original backup is still
-/// there, one tile per show that still holds backups, then the library as one storage bar with the one Delete.
+/// What compressing has given back: the library as one storage bar, then the one Delete for the original backups. Comparing
+/// an episode with its original backup is there to open, never asked for.
 struct SpaceSavedPage: View {
-    static let spotCheckID = "spotCheck"
-
     let facts: MainWindowFacts
     let model: MainWindowModel
     let openItem: (String) -> Void
+    @State private var comparing = false
 
     var body: some View {
-        // Around the page, so it reaches the page's own scroll view.
-        ScrollViewReader { proxy in
-            RefreshingPage(title: Words.spaceSaved, subtitle: Words.savedSoFar(facts.spaceSaved.bytes),
-                           load: { try await SpaceSavedFacts.load(model.client) }) { (saved: SpaceSavedFacts) in
-                if saved.shows.isEmpty {
-                    Text(Words.noBackupsToCheck)
-                        .foregroundStyle(.secondary)
-                } else {
-                    SpotCheck(shows: saved.shows, model: model, openItem: openItem)
-                        .id(Self.spotCheckID)
+        RefreshingPage(title: Words.spaceSaved, subtitle: Words.savedSoFar(facts.spaceSaved.bytes),
+                       load: { try await SpaceSavedFacts.load(model.client) }) { (saved: SpaceSavedFacts) in
+            SpaceSavedBar(library: facts.library, savedBytes: facts.spaceSaved.bytes, backupBytes: saved.cleanup.totalSizeBytes)
+            if saved.cleanup.fileCount > 0 {
+                DeleteBackups(count: saved.cleanup.fileCount, bytes: saved.cleanup.totalSizeBytes, model: model)
+            } else {
+                Text(Words.noBackupsWaiting).foregroundStyle(.secondary)
+            }
+            if !saved.shows.isEmpty {
+                DisclosureGroup(Words.compareFirst, isExpanded: $comparing) {
+                    // Built only once opened, so nothing loads or plays until the Director asks.
+                    if comparing {
+                        CompareEpisodes(shows: saved.shows, model: model, openItem: openItem)
+                            .padding(.top, 10)
+                    }
                 }
-                SpaceSavedBar(
-                    library: facts.library, savedBytes: facts.spaceSaved.bytes, backupBytes: saved.cleanup.totalSizeBytes,
-                    // The backups' slice opens the spot-check of what they hold.
-                    openBackups: saved.shows.isEmpty ? nil : { withAnimation { proxy.scrollTo(Self.spotCheckID, anchor: .top) } }
-                )
                 .padding(.top, 8)
-                if saved.cleanup.fileCount > 0 {
-                    DeleteBackups(count: saved.cleanup.fileCount, bytes: saved.cleanup.totalSizeBytes, model: model)
-                }
             }
         }
     }
@@ -82,11 +78,11 @@ struct SpaceSavedFacts: Sendable {
     }
 }
 
-/// The item page's player on one show at a time. "Looks Good" ticks the show and moves on; "Next" moves on without one.
-struct SpotCheck: View {
+/// The item page's player on an episode of the chosen show whose original backup is still there.
+struct CompareEpisodes: View {
     let shows: [SpaceSavedFacts.Show]
     let model: MainWindowModel
-    // Opens the season the episode being checked belongs to.
+    // Opens the season the episode on screen belongs to.
     let openItem: (String) -> Void
     @State private var showPrefix: String?
     @State private var loaded = Loaded.loading
@@ -107,15 +103,10 @@ struct SpotCheck: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(Words.spotCheckFirst).font(.headline)
-                Spacer()
-                if case .episode(_, let season, let file) = loaded {
-                    Button(Words.spotCheckFile(season, file)) { openItem(season) }
-                        .buttonStyle(QuietLinkStyle())
-                }
+            if case .episode(_, let season, let file) = loaded {
+                Button(Words.compareFile(season, file)) { openItem(season) }
+                    .buttonStyle(QuietLinkStyle())
             }
-            .frame(maxWidth: 760)
             switch loaded {
             case .episode(_, let season, let file):
                 FilePlayer(file: file, model: model) {
@@ -127,30 +118,16 @@ struct SpotCheck: View {
                 ProgressView().frame(maxWidth: 760, minHeight: 200)
             case .noBackupEpisode, .failed:
                 VStack(spacing: 10) {
-                    Text(loaded.failedToLoad ? Words.spotCheckUnanswered : Words.spotCheckNoEpisode)
+                    Text(loaded.failedToLoad ? Words.compareUnanswered : Words.compareNoEpisode)
                         .foregroundStyle(.secondary)
-                    // Asking again only helps when Mediaforce didn't answer; a show with no backup to compare moves on with Next.
+                    // Asking again only helps when Mediaforce didn't answer; otherwise another show can be chosen below.
                     if loaded.failedToLoad {
                         Button(Words.tryAgain) { Task { await load() } }
                     }
                 }
                 .frame(maxWidth: 760, minHeight: 200)
             }
-            HStack {
-                Text(Words.spotCheckPrompt).foregroundStyle(.secondary)
-                Spacer()
-                Button(Words.next) { advance() }
-                    .disabled(shows.count < 2)
-                Button(Words.looksGood) {
-                    if case .episode(let show, _, _) = loaded { model.checkedShows.insert(show) }
-                    advance()
-                }
-                .buttonStyle(.borderedProminent)
-                // Only a show whose episode is on screen can be ticked.
-                .disabled(loaded.show == nil || loaded.show != current?.prefix)
-            }
-            .frame(maxWidth: 760)
-            BackupShowTiles(shows: shows, selected: current?.prefix, checked: model.checkedShows, posters: model.posters) {
+            BackupShowTiles(shows: shows, selected: current?.prefix, posters: model.posters) {
                 showPrefix = $0
             }
             .padding(.top, 8)
@@ -159,13 +136,6 @@ struct SpotCheck: View {
         .alert(item: $notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
         }
-    }
-
-    /// The next show not yet ticked, or simply the next one once every show is.
-    private func advance() {
-        guard let current, let index = shows.firstIndex(where: { $0.prefix == current.prefix }) else { return }
-        let after = shows[(index + 1)...] + shows[..<index]
-        showPrefix = (after.first { !model.checkedShows.contains($0.prefix) } ?? after.first)?.prefix
     }
 
     private func load() async {
@@ -202,11 +172,10 @@ struct SpotCheck: View {
     }
 }
 
-/// One poster per show that still holds backups; a tick marks each show checked, and choosing one plays it above.
+/// One poster per show that still holds backups; choosing one plays it above.
 struct BackupShowTiles: View {
     let shows: [SpaceSavedFacts.Show]
     let selected: String?
-    let checked: Set<String>
     let posters: PosterStore
     let choose: (String) -> Void
 
@@ -223,14 +192,6 @@ struct BackupShowTiles: View {
                                     RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Color.accentColor, lineWidth: 3)
                                 }
                             }
-                            .overlay(alignment: .topTrailing) {
-                                if checked.contains(show.prefix) {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.title2)
-                                        .foregroundStyle(.white, Color.accentColor)
-                                        .padding(6)
-                                }
-                            }
                         Text(show.name).font(.callout.weight(.medium)).lineLimit(2)
                         Text(Words.showBackups(show.seasonPrefixes.count, show.backupBytes))
                             .font(.caption)
@@ -239,7 +200,6 @@ struct BackupShowTiles: View {
                     .frame(width: 120, alignment: .leading)
                 }
                 .buttonStyle(.plain)
-                .help(checked.contains(show.prefix) ? Words.showChecked : Words.checkThisShow)
             }
         }
     }
@@ -267,7 +227,6 @@ struct SpaceSavedBar: View {
     let library: MainWindowFacts.Library
     let savedBytes: Int64
     let backupBytes: Int64
-    var openBackups: (() -> Void)?
 
     private var nowBytes: Int64 { MediaKind.everything.totalBytes(in: library) }
     private var stillOriginalBytes: Int64 { MediaKind.everything.originalBytes(in: library) }
@@ -286,10 +245,6 @@ struct SpaceSavedBar: View {
                         if backupBytes > 0 {
                             Rectangle().fill(Color.orange.opacity(0.85))
                                 .frame(width: max(width * Double(backupBytes) / total, Self.smallestBackupSlice))
-                                .contentShape(Rectangle())
-                                .onTapGesture { openBackups?() }
-                                .pointerStyle(openBackups == nil ? nil : .link)
-                                .help(openBackups == nil ? "" : Words.spotCheckBackups)
                         }
                     }
                 }
@@ -366,7 +321,7 @@ struct DeleteBackups: View {
     }
 }
 
-extension SpotCheck.Loaded {
+extension CompareEpisodes.Loaded {
     var show: String? {
         if case .episode(let show, _, _) = self { show } else { nil }
     }

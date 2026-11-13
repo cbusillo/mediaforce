@@ -482,8 +482,6 @@ extension Words {
     static let resume = "Resume"
     static let pausedBar = "Mediaforce is paused. Nothing new starts."
     static let checksPausedBar = "Checks are paused."
-    static let next = "Next"
-    static let looksGood = "Looks Good"
     static let appName = "Mediaforce"
     static let lookForNewFilesNow = "Look for New Files"
     static let openMediaforce = "Open Mediaforce"
@@ -508,19 +506,15 @@ extension Words {
         return Attention.waitingOnYou(facts) > 0 ? waitingForYou : "Up to date"
     }
     static let tryAgain = "Try Again"
-    static let spotCheckNoEpisode = "None of this show's episodes still has its original backup to compare."
-    static let spotCheckUnanswered = "Mediaforce didn't answer, so this show can't play yet."
+    static let compareNoEpisode = "None of this show's episodes still has its original backup to compare."
+    static let compareUnanswered = "Mediaforce didn't answer, so this show can't play yet."
     static let spaceSaved = "Space saved"
-    static let spotCheckFirst = "Spot-check before deleting"
-    static let spotCheckBackups = "Spot-check what these backups hold"
+    static let compareFirst = "Compare a few episodes first"
 
     static func showOnly(_ group: LibraryStateGroup) -> String {
         "Show only \(libraryState(group).lowercased())"
     }
-    static let spotCheckPrompt = "Does it look right? Each show you check gets a tick below."
-    static let noBackupsToCheck = "No original backups are waiting, so there is nothing to spot-check."
-    static let showChecked = "Checked. Choose it to look again."
-    static let checkThisShow = "Play an episode of this show above."
+    static let noBackupsWaiting = "No original backups are waiting."
     static let deleteBackups = "Delete Original Backups…"
     static let deleteAllBackups = "Delete all original backups"
     static let deleteBackupsQuestion = "Delete everything in the Cleanup folder?"
@@ -531,7 +525,7 @@ extension Words {
     static let estimatedTotalSavings = "Estimated total savings"
     static let partialSavingsEstimate = "Partial total; some estimates are unavailable."
 
-    static func spotCheckFile(_ seasonPrefix: String, _ file: ItemFacts.File) -> String {
+    static func compareFile(_ seasonPrefix: String, _ file: ItemFacts.File) -> String {
         let folders = seasonPrefix.split(separator: "/").dropFirst().joined(separator: ", ")
         return file.episode == nil ? folders : "\(folders), \(fileName(file))"
     }

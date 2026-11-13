@@ -29,8 +29,6 @@ final class MainWindowModel {
     var settingsRequest: SettingsRequest?
     // The computer Settings › Computers should show; its list takes it and clears it.
     var requestedComputer: String?
-    // Shows spot-checked on Space saved since the app opened.
-    var checkedShows: Set<String> = []
     let client: MediaforceClient
     let posters: PosterStore
 

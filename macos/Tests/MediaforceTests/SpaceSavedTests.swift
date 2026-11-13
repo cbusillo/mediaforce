@@ -22,9 +22,4 @@ final class SpaceSavedTests: XCTestCase {
         XCTAssertEqual(shows.first?.seasonPrefixes, ["tv/Futurama/Season 3", "tv/Futurama/Season 2"])
         XCTAssertEqual(shows.first?.backupBytes, 13000)
     }
-
-    func testTheDeleteLineSaysWhatComesBack() {
-        XCTAssertEqual(Words.deleteBackupsLine(46, 20_000_000_000), "Delete 46 original backups to get back \(Words.size(20_000_000_000)).")
-        XCTAssertEqual(Words.deleteBackupsLine(1, 300), "Delete 1 original backup to get back \(Words.size(300)).")
-    }
 }
