@@ -35,10 +35,13 @@ test)
 	generate_project
 	# An unsigned build is a new program to macOS every time, so it asks again to read the drive the build is on
 	# and the test runner hangs until someone answers. With the team's certificate one answer lasts.
+	# The team is only looked up when a certificate is here, so CI needs no Python setup to run the tests.
 	identity=()
-	team_id="$(team_id)"
-	if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application: .*($team_id)"; then
-		identity=(CODE_SIGN_IDENTITY="Developer ID Application" DEVELOPMENT_TEAM="$team_id")
+	if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application: "; then
+		team_id="$(team_id)"
+		if security find-identity -v -p codesigning | grep -q "Developer ID Application: .*($team_id)"; then
+			identity=(CODE_SIGN_IDENTITY="Developer ID Application" DEVELOPMENT_TEAM="$team_id")
+		fi
 	fi
 	xcodebuild -project "$project" -scheme Mediaforce -destination 'platform=macOS' \
 		-derivedDataPath "$derived_data" test ${identity[@]+"${identity[@]}"}
