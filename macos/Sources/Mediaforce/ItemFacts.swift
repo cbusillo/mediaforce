@@ -150,7 +150,7 @@ extension MediaforceClient {
     }
 
     func player(_ libraryItemId: Int, _ side: PlayerSide) -> URL {
-        baseURL.appending(path: "api/app/player/\(libraryItemId)/\(side.rawValue)")
+        baseURL.appending(path: "api/app/player/\(libraryItemId)/\(side.rawValue)/index.m3u8")
     }
 
     func putOriginalBack(_ prefix: String, _ libraryItemId: Int) async throws -> ItemActionResult {

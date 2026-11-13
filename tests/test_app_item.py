@@ -1,13 +1,6 @@
 import json
-import os
-import subprocess
-import threading
-import time
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
@@ -15,8 +8,7 @@ from sqlalchemy import select
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
-from mediaforce.web.runtime import app_item
-from mediaforce.web.runtime.app_item import item_payload, player_file
+from mediaforce.web.runtime.app_item import item_payload, player_source
 
 SEASON = "tv/Show/Season 1"
 NOW = "2026-10-25T12:00:00+00:00"
@@ -36,14 +28,6 @@ def config(tmp_path: Path) -> Iterator[MediaforceConfig]:
         ),
     )
     reset_engine_cache()
-
-
-@pytest.fixture(autouse=True)
-def plenty_of_room() -> Iterator[None]:
-    """The host's own free space never decides a test; the no-room test sets its own."""
-    room = SimpleNamespace(total=0, used=0, free=10 ** 15)
-    with patch.object(app_item.shutil, "disk_usage", return_value=room):
-        yield
 
 
 def _episode(connection: DBClient, root: Path, number: int, *, size: int, status: str = "discovered") -> int:
@@ -166,188 +150,21 @@ def test_a_folder_with_no_files_is_not_found(config: MediaforceConfig) -> None:
     assert item_payload(config, SEASON, sound=lambda _connection, _prefix: None) is None
 
 
-def _remux_by_copy(source: Path, target: Path) -> None:
-    target.write_bytes(source.read_bytes())
-
-
 def test_the_player_reads_each_side_from_where_it_is(config: MediaforceConfig, tmp_path: Path) -> None:
     with open_db(config.paths.db_path) as connection:
         replaced = _replaced(connection, tmp_path, 1, size=100, original_size=700)
         untouched = _episode(connection, tmp_path, 2, size=900)
         connection.commit()
 
-    with patch.object(app_item, "_remux", side_effect=_remux_by_copy) as remux:
-        compressed = player_file(config, replaced, "compressed")
-        original = player_file(config, replaced, "original")
-        as_it_is = player_file(config, untouched, "original")
-        again = player_file(config, replaced, "compressed")
+    compressed = player_source(config, replaced, "compressed")
+    original = player_source(config, replaced, "original")
+    as_it_is = player_source(config, untouched, "original")
 
     assert compressed is not None and compressed.read_bytes() == b"N" * 100
     assert original is not None and original.read_bytes() == b"O" * 700
     assert as_it_is is not None and as_it_is.read_bytes() == b"N" * 900
-    # The same file is remuxed once and then served from the cache.
-    assert again == compressed and remux.call_count == 3
-    assert player_file(config, untouched, "compressed") is None
-    assert player_file(config, replaced, "sideways") is None
-
-
-def test_the_player_cache_keeps_only_the_last_few_files(config: MediaforceConfig, tmp_path: Path) -> None:
-    with open_db(config.paths.db_path) as connection:
-        ids = [_episode(connection, tmp_path, number, size=10 + number) for number in range(1, 10)]
-        connection.commit()
-
-    with patch.object(app_item, "_remux", side_effect=_remux_by_copy):
-        played = [player_file(config, item_id, "original") for item_id in ids]
-
-    cached = sorted((config.paths.web_state_dir / "player").glob("*.mp4"))
-    assert len(cached) == app_item.PLAYER_CACHE_KEEP
-    assert played[-1] in cached
-
-
-def test_the_player_refuses_when_there_is_no_room(config: MediaforceConfig, tmp_path: Path) -> None:
-    with open_db(config.paths.db_path) as connection:
-        item_id = _episode(connection, tmp_path, 1, size=100)
-        connection.commit()
-
-    room = SimpleNamespace(total=0, used=0, free=app_item.PLAYER_FREE_MARGIN_BYTES)
-    with patch.object(app_item.shutil, "disk_usage", return_value=room), \
-            patch.object(app_item, "_remux", side_effect=_remux_by_copy) as remux:
-        with pytest.raises(app_item.PlayerUnavailable) as unavailable:
-            player_file(config, item_id, "original")
-
-    assert unavailable.value.code == "no_room"
-    remux.assert_not_called()
-
-
-def test_an_interrupted_preparation_is_cleaned_up_later(config: MediaforceConfig, tmp_path: Path) -> None:
-    with open_db(config.paths.db_path) as connection:
-        item_id = _episode(connection, tmp_path, 1, size=100)
-        connection.commit()
-    cache = config.paths.web_state_dir / "player"
-    cache.mkdir(parents=True)
-    stale = cache / f".old{app_item.PARTIAL_SUFFIX}"
-    stale.write_bytes(b"half")
-    old = time.time() - app_item.PLAYER_REMUX_TIMEOUT_SECONDS - 60
-    os.utime(stale, (old, old))
-    running = cache / f".running{app_item.PARTIAL_SUFFIX}"
-    running.write_bytes(b"half")
-
-    with patch.object(app_item, "_remux", side_effect=_remux_by_copy):
-        assert player_file(config, item_id, "original") is not None
-
-    assert not stale.exists()
-    assert running.exists()
-
-
-def test_a_file_larger_than_the_cache_is_not_prepared(config: MediaforceConfig, tmp_path: Path) -> None:
-    with open_db(config.paths.db_path) as connection:
-        item_id = _episode(connection, tmp_path, 1, size=100)
-        connection.commit()
-
-    with patch.object(app_item, "PLAYER_CACHE_BYTES", 99), patch.object(app_item, "_remux", side_effect=_remux_by_copy) as remux:
-        with pytest.raises(app_item.PlayerUnavailable) as unavailable:
-            player_file(config, item_id, "original")
-
-    assert unavailable.value.code == "too_large"
-    remux.assert_not_called()
-
-
-def test_a_stalled_probe_is_refused_with_a_code(config: MediaforceConfig, tmp_path: Path) -> None:
-    with open_db(config.paths.db_path) as connection:
-        item_id = _episode(connection, tmp_path, 1, size=100)
-        connection.commit()
-
-    with patch.object(app_item.subprocess, "run", side_effect=subprocess.TimeoutExpired("ffprobe", 60)):
-        with pytest.raises(app_item.PlayerUnavailable) as unavailable:
-            player_file(config, item_id, "original")
-
-    assert unavailable.value.code == "too_slow"
-
-
-def test_a_comparison_keeps_both_halves_in_the_cache(config: MediaforceConfig, tmp_path: Path) -> None:
-    with open_db(config.paths.db_path) as connection:
-        replaced = _replaced(connection, tmp_path, 1, size=40, original_size=70)
-        others = [_episode(connection, tmp_path, number, size=10) for number in range(2, 4)]
-        connection.commit()
-
-    with patch.object(app_item, "PLAYER_CACHE_BYTES", 120), patch.object(app_item, "_remux", side_effect=_remux_by_copy):
-        for item_id in others:
-            player_file(config, item_id, "original")
-        compressed = player_file(config, replaced, "compressed")
-        original = player_file(config, replaced, "original")
-
-    assert compressed is not None and compressed.is_file()
-    assert original is not None and original.is_file()
-
-
-def test_a_comparison_too_large_for_the_cache_is_refused(config: MediaforceConfig, tmp_path: Path) -> None:
-    with open_db(config.paths.db_path) as connection:
-        replaced = _replaced(connection, tmp_path, 1, size=40, original_size=70)
-        connection.commit()
-
-    with patch.object(app_item, "PLAYER_CACHE_BYTES", 100), patch.object(app_item, "_remux", side_effect=_remux_by_copy):
-        assert player_file(config, replaced, "compressed") is not None
-        with pytest.raises(app_item.PlayerUnavailable) as unavailable:
-            player_file(config, replaced, "original")
-
-    assert unavailable.value.code == "too_large"
-
-
-def test_an_old_copy_of_the_same_file_is_not_kept_as_its_pair(config: MediaforceConfig, tmp_path: Path) -> None:
-    with open_db(config.paths.db_path) as connection:
-        replaced = _replaced(connection, tmp_path, 1, size=40, original_size=50)
-        connection.commit()
-    cache = config.paths.web_state_dir / "player"
-    cache.mkdir(parents=True)
-    stale = cache / f"{replaced}-original-999-1.mp4"
-    stale.write_bytes(b"S" * 60)
-
-    with patch.object(app_item, "PLAYER_CACHE_BYTES", 100), patch.object(app_item, "_remux", side_effect=_remux_by_copy):
-        assert player_file(config, replaced, "compressed") is not None
-        assert player_file(config, replaced, "original") is not None
-
-    assert not stale.exists()
-
-
-def test_a_comparisons_two_halves_prepare_at_the_same_time(config: MediaforceConfig, tmp_path: Path) -> None:
-    with open_db(config.paths.db_path) as connection:
-        replaced = _replaced(connection, tmp_path, 1, size=40, original_size=70)
-        connection.commit()
-    both_preparing = threading.Barrier(2, timeout=5)
-
-    def remux_alongside_the_other_half(source: Path, target: Path) -> None:
-        both_preparing.wait()
-        _remux_by_copy(source, target)
-
-    with patch.object(app_item, "_remux", side_effect=remux_alongside_the_other_half), ThreadPoolExecutor(2) as pool:
-        halves = [pool.submit(player_file, config, replaced, side) for side in app_item.PLAYER_SIDES]
-        prepared = [half.result() for half in halves]
-
-    assert all(path is not None and path.is_file() for path in prepared)
-
-
-@pytest.mark.parametrize(("sound", "copied"), [("opus", True), ("eac3", True), ("dts", False), ("truehd", False)])
-def test_the_player_copies_sound_the_mac_plays_and_converts_the_rest(tmp_path: Path, sound: str, copied: bool) -> None:
-    source = tmp_path / "episode.mkv"
-    source.write_bytes(b"N")
-    target = tmp_path / "episode.mp4"
-    commands: list[list[str]] = []
-
-    def run(command: list[str], **_options: object) -> SimpleNamespace:
-        commands.append(command)
-        if command[0] == "ffprobe":
-            streams = [{"codec_type": "video", "codec_name": "av1"}, {"codec_type": "audio", "codec_name": sound}]
-            return SimpleNamespace(returncode=0, stdout=json.dumps({"streams": streams}), stderr="")
-        Path(command[-1]).write_bytes(b"M")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    with patch.object(app_item, "ffprobe_binary", return_value="ffprobe"), patch.object(app_item, "ffmpeg_binary", return_value="ffmpeg"), \
-            patch.object(app_item.subprocess, "run", side_effect=run):
-        app_item._remux(source, target)
-
-    remux = commands[-1]
-    assert target.read_bytes() == b"M"
-    assert (remux[remux.index("-c:a") + 1] == "copy") is copied
+    assert player_source(config, untouched, "compressed") is None
+    assert player_source(config, replaced, "sideways") is None
 
 
 def test_a_whole_show_lists_every_season_in_order(config: MediaforceConfig, tmp_path: Path) -> None:

@@ -2,23 +2,16 @@
 
 The page shows every file with where it has got, its size before and after, and whether its original
 backup is still there to compare against. The server sends states and codes; the app words them. The
-player reads each file as MP4, remuxed once and cached, since the app's player cannot open MKV.
+player streams each file a few seconds at a time; see player_stream.
 """
 
-import json
 import re
-import shutil
-import subprocess
-import threading
-import time
 from collections.abc import Callable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
-from uuid import uuid4
 
 from sqlalchemy import select
 
-from mediaforce.core.binaries import ffmpeg_binary, ffprobe_binary
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_readonly_db
 from mediaforce.core.db_tables import library_items, motion_keep_decisions, staged_artifacts
@@ -33,18 +26,6 @@ from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed
 from mediaforce.web.runtime.episode_progress import load_season_episode_progress
 
 PLAYER_SIDES = ("compressed", "original")
-# Each remuxed file is about the size of the one it plays, so only the last few stay, within a byte budget.
-PLAYER_CACHE_KEEP = 6
-PLAYER_CACHE_BYTES = 40 * 1000 ** 3
-PLAYER_FREE_MARGIN_BYTES = 20 * 1000 ** 3
-PLAYER_REMUX_TIMEOUT_SECONDS = 30 * 60
-PARTIAL_SUFFIX = ".partial"
-# Sound the Mac plays as it is, so it is copied instead of converted.
-PLAYER_COPIED_SOUND = frozenset({"aac", "ac3", "eac3", "opus"})
-# The space check and eviction run one at a time; each file prepares under its own lock, so a comparison's two
-# sides prepare together.
-_PLAYER_CACHE = threading.Lock()
-_PLAYER_PREPARING: dict[Path, threading.Lock] = {}
 _EPISODE_NUMBER = re.compile(r"[sS](\d+)[eE](\d+)")
 
 
@@ -167,16 +148,7 @@ def _still_airing(lifecycle: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
-class PlayerUnavailable(RuntimeError):
-    """The file cannot be prepared for playing now; ``code`` says why for the app to word."""
-
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-
-
-def player_file(config: MediaforceConfig, library_item_id: int, side: str) -> Path | None:
-    """The episode as MP4 for the app's player, remuxed on first request; None when that side is not available."""
+def player_source(config: MediaforceConfig, library_item_id: int, side: str) -> Path | None:
     if side not in PLAYER_SIDES:
         return None
     with open_readonly_db(config.paths.db_path) as connection:
@@ -190,41 +162,7 @@ def player_file(config: MediaforceConfig, library_item_id: int, side: str) -> Pa
     if item is None:
         return None
     promoted_at, backup = stage if stage is not None else (None, None)
-    sources = _player_sources(Path(str(item)), Path(str(backup)) if backup else None, replaced=promoted_at is not None)
-    source = sources.get(side)
-    if source is None:
-        return None
-    cache = config.paths.web_state_dir / "player"
-    target = _cached_name(cache, library_item_id, side, source)
-    if target.is_file():
-        return target
-    # A second request for the same file waits here and then reads the cache.
-    with _preparing(target):
-        if not target.is_file():
-            with _PLAYER_CACHE:
-                _make_room(cache, target, source, [
-                    _cached_name(cache, library_item_id, other, other_source)
-                    for other, other_source in sources.items() if other != side
-                ])
-            _remux(source, target)
-    return target
-
-
-def _preparing(target: Path) -> threading.Lock:
-    with _PLAYER_CACHE:
-        return _PLAYER_PREPARING.setdefault(target, threading.Lock())
-
-
-def _make_room(cache: Path, target: Path, source: Path, other_sides: list[Path]) -> None:
-    """Evict older files for this one, keeping the other side of the same file so a comparison keeps both halves."""
-    size = source.stat().st_size
-    cache.mkdir(parents=True, exist_ok=True)
-    pair = [path for path in other_sides if path.is_file()]
-    if size + sum(path.stat().st_size for path in pair) > PLAYER_CACHE_BYTES:
-        raise PlayerUnavailable("too_large", f"{source.name} is too large to prepare for playing.")
-    _trim_cache(cache, keep={target, *pair}, incoming_bytes=size)
-    if shutil.disk_usage(cache).free < size + PLAYER_FREE_MARGIN_BYTES:
-        raise PlayerUnavailable("no_room", f"Not enough free space to prepare {source.name} for playing.")
+    return _player_sources(Path(str(item)), Path(str(backup)) if backup else None, replaced=promoted_at is not None).get(side)
 
 
 def _player_sources(library_file: Path, backup: Path | None, *, replaced: bool) -> dict[str, Path]:
@@ -238,74 +176,3 @@ def _player_sources(library_file: Path, backup: Path | None, *, replaced: bool) 
     return playable
 
 
-def _cached_name(cache: Path, library_item_id: int, side: str, source: Path) -> Path:
-    """Named for the source's size and change time, so a changed file never plays an old copy."""
-    stat = source.stat()
-    return cache / f"{library_item_id}-{side}-{stat.st_size}-{stat.st_mtime_ns}.mp4"
-
-
-def _remux(source: Path, target: Path) -> None:
-    """Copy the picture as it is, and the sound too when the Mac plays it; other sound becomes stereo AC-3."""
-    partial = target.with_name(f".{target.stem}.{uuid4().hex}{PARTIAL_SUFFIX}")
-    video, sound = _first_codecs(source)
-    command = [
-        ffmpeg_binary(), "-nostdin", "-loglevel", "error", *_sound_decoding(sound), "-i", str(source),
-        "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", *_picture_tag(video), *_sound_encoding(sound),
-        "-movflags", "+faststart", "-f", "mp4", str(partial),
-    ]
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=PLAYER_REMUX_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired as error:
-        partial.unlink(missing_ok=True)
-        raise PlayerUnavailable("too_slow", f"Preparing {source.name} for playing took too long.") from error
-    if result.returncode != 0 or not partial.is_file():
-        partial.unlink(missing_ok=True)
-        raise PlayerUnavailable("unreadable", f"Could not prepare {source.name} for playing: {result.stderr.strip()[:300]}")
-    partial.replace(target)
-
-
-def _picture_tag(video: str) -> list[str]:
-    """The app's player takes HEVC only under its hvc1 tag."""
-    return ["-tag:v", "hvc1"] if video == "hevc" else []
-
-
-def _sound_decoding(sound: str) -> list[str]:
-    """A DTS track's lossless extension takes most of the time to decode and adds nothing to a stereo preview."""
-    return ["-core_only", "1"] if sound == "dts" else []
-
-
-def _sound_encoding(sound: str) -> list[str]:
-    if sound in PLAYER_COPIED_SOUND:
-        return ["-c:a", "copy"]
-    return ["-c:a", "ac3", "-ac", "2", "-b:a", "192k"]
-
-
-def _first_codecs(source: Path) -> tuple[str, str]:
-    """The first picture and sound tracks' codecs, empty when a file has none."""
-    try:
-        result = subprocess.run(
-            [ffprobe_binary(), "-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "json", str(source)],
-            capture_output=True, text=True, timeout=60,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise PlayerUnavailable("too_slow", f"Reading {source.name} took too long.") from error
-    streams = json.loads(result.stdout or "{}").get("streams") or []
-    first = {kind: next((str(stream.get("codec_name") or "") for stream in streams if stream.get("codec_type") == kind), "")
-             for kind in ("video", "audio")}
-    return first["video"], first["audio"]
-
-
-def _trim_cache(cache: Path, *, keep: set[Path], incoming_bytes: int) -> None:
-    """Keep the newest few files within the byte budget, leaving room for the one about to be made."""
-    now = time.time()
-    for partial in cache.glob(f"*{PARTIAL_SUFFIX}"):
-        # A preparation still running is younger than its timeout; anything older was interrupted.
-        if now - partial.stat().st_mtime > PLAYER_REMUX_TIMEOUT_SECONDS:
-            partial.unlink(missing_ok=True)
-    files = sorted((path for path in cache.glob("*.mp4") if path not in keep),
-                   key=lambda path: path.stat().st_mtime, reverse=True)
-    total = incoming_bytes + sum(path.stat().st_size for path in keep if path.is_file())
-    for index, path in enumerate(files, start=len(keep)):
-        total += path.stat().st_size
-        if index >= PLAYER_CACHE_KEEP or total > PLAYER_CACHE_BYTES:
-            path.unlink(missing_ok=True)

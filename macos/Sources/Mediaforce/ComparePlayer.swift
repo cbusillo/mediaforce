@@ -429,8 +429,8 @@ final class ComparePlayers {
         position = 0
         duration = 0
         videoSize = .zero
-        main.replaceCurrentItem(with: AVPlayerItem(url: compressed))
-        original.replaceCurrentItem(with: originalURL.map { AVPlayerItem(url: $0) })
+        main.replaceCurrentItem(with: Self.item(compressed))
+        original.replaceCurrentItem(with: originalURL.map(Self.item))
         ready = []
         // Both sides must be ready before either plays, so the two pictures show the same moment.
         readiness = [main, original].compactMap { player in
@@ -450,6 +450,13 @@ final class ComparePlayers {
                 MainActor.assumeIsolated { self?.tick(time) }
             }
         }
+    }
+
+    /// An episode streams from the server a few seconds at a time, so each side reads only what is near.
+    private static func item(_ url: URL) -> AVPlayerItem {
+        let item = AVPlayerItem(url: url)
+        item.preferredForwardBufferDuration = 20
+        return item
     }
 
     func toggle() {

@@ -193,7 +193,7 @@ from mediaforce.encoding.put_back import reconcile_unfinished_put_backs
 from mediaforce.web.runtime.put_back import put_original_back_action
 from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
-from mediaforce.web.runtime.app_item import item_payload, player_file
+from mediaforce.web.runtime.app_item import item_payload, player_source
 from mediaforce.web.runtime.encode_runtime import ControllerShutdownCancelledError, mark_host_cooldowns, \
     release_host_cooldowns, sync_encode_job_parent, sweep_stopped_remote_encodes
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
@@ -2339,7 +2339,7 @@ def create_app(
         make_sample_action=_make_app_sample_action,
         compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=_queue_folder_encode_action),
         item_payload=lambda prefix: item_payload(config, prefix, sound=_show_audio_preset_payload),
-        player_file=lambda library_item_id, side: player_file(config, library_item_id, side),
+        player_source=lambda library_item_id, side: player_source(config, library_item_id, side),
         kinds_payload=_kinds_payload,
         approve_kind_action=_approve_app_kind,
         stop_kind_action=lambda kind: {"ok": True, "stopped": stop_kind_approval(config, kind)},

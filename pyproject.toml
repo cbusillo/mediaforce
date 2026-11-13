@@ -16,6 +16,7 @@ dependencies = [
     "uvicorn",
     "hatchling",
     "truststore>=0.10.4,<0.11",
+    "av>=19.0.2",
 ]
 
 [project.scripts]
