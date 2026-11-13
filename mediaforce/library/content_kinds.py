@@ -3,15 +3,18 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import batched
+from pathlib import PurePosixPath
 from typing import Any, Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_item_evidence_state, library_items, series_metadata, source_admissions, source_measurements, \
     source_transitions, source_versions, source_moves, staged_artifacts, target_production_outcomes, motion_keep_decisions
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.library.candidate_selection import season_identity
+from mediaforce.library.library_settings import normalize_library_type
+from mediaforce.library.movie_workflow import classify_movie_path
 from mediaforce.library.calculation_reuse import reuse_library_calculation
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, SourceEvidence, load_source_evidence_bulk, load_source_evidence_context
@@ -20,6 +23,8 @@ from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, Sourc
 # (Director decision, #517, 2026-10-22). Live action is one look: darkness runs on a smooth scale with no gap, so
 # splitting it left a third of the waiting seasons in no look (Director decision, #1385). 4K is a picture height, not
 # a look: a 4K season takes its look from its other traits, and a look's approval says whether 4K stays 4K.
+# Movies use the live action look; each movie title is grouped like a TV season, through the same code. Movie genres
+# are not stored, so an animated movie cannot be told apart yet and is live action too.
 ContentKind = Literal["live_action", "cartoon"]
 SeasonKind = Literal["live_action", "cartoon", "unmeasured"]
 
@@ -116,23 +121,50 @@ def _present_items(connection: DBClient, season_prefix: str | None = None) -> Se
         library_items.c.size_bytes,
     ).where(library_items.c.missing_since.is_(None))
     if season_prefix is not None:
-        query = query.where(*_in_folder(season_prefix))
+        # A movie that sits directly in its library is its own title.
+        query = query.where(or_(library_items.c.rel_path == season_prefix, and_(*_in_folder(season_prefix))))
     return connection.execute(query).mappings().all()
+
+
+def look_group(library_types: Mapping[str, str], rel_path: str) -> str | None:
+    """The unit a look covers that holds this path: a TV season, or a movie title for a movie's feature file.
+
+    Files sitting directly in a show folder are in no season; a movie's extras and unrecognised nested files are in
+    no title, so a look never covers them.
+    """
+    path = PurePosixPath(str(rel_path or "").strip().strip("/"))
+    if not path.parts:
+        return None
+    root = path.parts[0]
+    library_type = normalize_library_type(library_types.get(root), key=root)
+    if library_type == "movie":
+        membership = classify_movie_path(path.as_posix(), root=root)
+        return membership.title_prefix if membership is not None and membership.role == "feature" else None
+    if len(path.parts) < 3 or (len(path.parts) == 3 and path.suffix):
+        return None
+    identity = season_identity({"rel_path": path.as_posix()}, library_types=library_types)
+    return identity.season_prefix if identity is not None else None
 
 
 def _seasons(
         items: Sequence[Mapping[str, Any]], library_types: Mapping[str, str],
 ) -> tuple[dict[str, list[Mapping[str, Any]]], dict[str, str]]:
-    """Episodes by season, and each season's show; files sitting directly in a show folder are in no season."""
+    """Files by the season or movie title a look covers, and each TV season's show; a movie title has no show."""
     seasons: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     series_of: dict[str, str] = {}
     for item in items:
-        identity = season_identity(dict(item), library_types=library_types)
-        if identity is None or len(str(item["rel_path"]).split("/")) < 4:
+        group = look_group(library_types, str(item["rel_path"]))
+        if group is None:
             continue
-        seasons[identity.season_prefix].append(item)
-        series_of[identity.season_prefix] = identity.series_prefix
+        seasons[group].append(item)
+        if (identity := season_identity(dict(item), library_types=library_types)) is not None:
+            series_of[group] = identity.series_prefix
     return seasons, series_of
+
+
+def _animated(prefix: str, series_of: Mapping[str, str], animation: Mapping[str, bool | None]) -> bool | None:
+    """A TV season is a cartoon by its show's genres; a movie title is never one until movie genres are stored."""
+    return animation.get(series_of[prefix]) if prefix in series_of else False
 
 
 def season_grouping(
@@ -152,8 +184,7 @@ def season_grouping(
     )
     measured = _measured_originals(episodes, admitted, evidence_by_item)
     series = series_of.get(season_prefix)
-    animated = _series_animation(connection, series).get(series) if series else None
-    return season_kind(measured, animated=animated)
+    return season_kind(measured, animated=_animated(season_prefix, series_of, _series_animation(connection, series) if series else {}))
 
 
 def _series_animation(connection: DBClient, series_prefix: str | None = None) -> dict[str, bool | None]:
@@ -231,7 +262,7 @@ def season_kind_report(
             context=context,
         )
         measured_groupings = {prefix: season_kind(_measured_originals(seasons[prefix], admitted, evidence),
-                                         animated=animation.get(series_of[prefix])) for prefix in measured_seasons}
+                                         animated=_animated(prefix, series_of, animation)) for prefix in measured_seasons}
         reasons = {prefix: _measurement_reasons(waiting_by_season[prefix], evidence, {}, measurement_roots)
                    for prefix, measured_grouping in measured_groupings.items() if measured_grouping.reason == "no_measured_original"}
         return reasons, measured_groupings

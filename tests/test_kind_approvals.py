@@ -286,7 +286,7 @@ def _waiting_episode(config: MediaforceConfig, rel_path: str, size_bytes: int, *
     timestamp = datetime.now(tz=UTC).isoformat(timespec="seconds")
     with open_db(config.paths.db_path) as connection:
         result = connection.execute(library_items.insert().values(
-            source_path=f"/media/{rel_path}", rel_path=rel_path, media_root="tv", parent_dir=rel_path.rsplit("/", 1)[0],
+            source_path=f"/media/{rel_path}", rel_path=rel_path, media_root=rel_path.split("/", 1)[0], parent_dir=rel_path.rsplit("/", 1)[0],
             file_name=Path(rel_path).name, container="mkv", size_bytes=size_bytes, mtime_ns=1, fingerprint=rel_path,
             duration_seconds=2_700.0, video_codec="h264", width=1920, height=1080, audio_summary_json="[]",
             subtitle_summary_json="[]", status=status, priority_score=50, recommendation="priority_encode",
@@ -315,6 +315,39 @@ def _next(config: MediaforceConfig, load: KindAwareLoader, *, now: float = 0.0) 
             return next_kind_season(connection, config, load_calibration_state=load, now=now)
     finally:
         reset_engine_cache()
+
+
+@pytest.mark.parametrize("availability", ["production", "browse_only"])
+def test_movies_follow_the_live_action_look_like_waiting_seasons_but_never_extras_or_vr(tmp_path: Path, availability: str) -> None:
+    config = _config(tmp_path)
+    config.raw["media"]["libraries"] += [{"key": "movies", "path": str(tmp_path / "movies"), "type": "movie", "availability": availability},
+                                         {"key": "other", "path": str(tmp_path / "other"), "type": "other", "availability": "production"}]
+    config.raw["media"].update({"staging_root": str(tmp_path / "staging"), "output_container": "mkv"})
+    title, solo = "movies/Heat (1995)", "movies/Solo.mkv"
+    feature = _waiting_episode(config, f"{title}/Heat.mkv", 8_000)
+    _waiting_episode(config, f"{title}/Featurettes/Making of.mkv", 90_000)
+    loose = _waiting_episode(config, solo, 5_000)
+    _waiting_episode(config, "other/VR/clip.mp4", 100_000)
+    load = _loader({}, {title: LIVE_ACTION, solo: LIVE_ACTION, "other/VR": LIVE_ACTION})
+    approve_kind(config, LIVE_ACTION, APPROVED_SEASON, _approved(config), approved_at="now")
+
+    offered = []
+    while (chosen := _next(config, load)) is not None:
+        offered.append((chosen.season, chosen.kind, chosen.files))
+        record_kind_attempt(config, chosen, {"ok": True}, at=0.0)
+
+    # Each movie title is offered like a season, largest first; its extras and VR & 3D never are, and a library that
+    # is not set to compress offers nothing.
+    assert offered == ([(title, LIVE_ACTION, (feature,)), (solo, LIVE_ACTION, (loose,))] if availability == "production" else [])
+    approval = effective_production_approval(config, f"{title}/Heat.mkv", load)
+    assert approval is not None and approval.kind == LIVE_ACTION and approval.prefix == title
+    assert effective_production_approval(config, f"{title}/Featurettes/Making of.mkv", load) is None
+    assert effective_production_approval(config, "other/VR/clip.mp4", load) is None
+    if availability == "production":
+        result, manifests = _queue(config, title, load, only_library_item_ids=[feature])
+        assert result["ok"], result
+        assert manifests[0]["selection"]["production_approval_kind"] == LIVE_ACTION
+        assert [item["library_item_id"] for item in manifests[0]["items"]] == [feature]
 
 
 def test_seasons_a_kind_covers_are_offered_one_at_a_time_largest_first(tmp_path: Path) -> None:

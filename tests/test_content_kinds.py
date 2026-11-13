@@ -69,6 +69,28 @@ def test_every_measured_live_action_season_is_one_look_however_dark_or_repetitiv
                      "tv/Toons/Season 1": ("cartoon", None), "tv/Unknown/Season 1": ("unmeasured", "genres_unknown")}
 
 
+def test_movie_titles_are_live_action_through_the_same_grouping_but_extras_and_vr_never_are(connection: DBClient) -> None:
+    feature = _item(connection, "movies/Heat (1995)/Heat.mkv", status="promoted", codec="av1", current_dark=0.0)
+    _admit_historical_original(connection, feature, dark=0.5)
+    _item(connection, "movies/Heat (1995)/Heat - 4K.mkv", status="discovered", codec="h264", current_dark=0.5)
+    _item(connection, "movies/Heat (1995)/Featurettes/Making of.mkv", status="discovered", codec="h264", current_dark=0.5)
+    loose = _item(connection, "movies/Solo.mkv", status="promoted", codec="av1", current_dark=0.0)
+    _admit_historical_original(connection, loose, dark=0.01)
+    _item(connection, "movies/Solo - Directors Cut.mkv", status="discovered", codec="h264", current_dark=0.5)
+    _item(connection, "movies/Unseen (2020)/Unseen.mkv", status="discovered", codec="h264", current_dark=0.5)
+    _item(connection, "other/VR/clip.mp4", status="discovered", codec="h264", current_dark=0.5)
+
+    report = season_kind_report(connection, library_types={"tv": "tv", "movies": "movie", "other": "other"},
+                                folder_approved=lambda _prefix: False)
+
+    # Movie genres are not stored, so a measured movie is live action and an unmeasured one waits for measuring.
+    assert {row["season"]: (row["kind"], row["episodes"], row["waiting_episodes"]) for row in report["seasons"]} == {
+        "movies/Heat (1995)": ("live_action", 2, 1), "movies/Solo - Directors Cut.mkv": ("unmeasured", 1, 1),
+        "movies/Unseen (2020)": ("unmeasured", 1, 1),
+    }
+    assert {row["reason"] for row in report["seasons"] if row["kind"] == "unmeasured"} == {"no_measured_original"}
+
+
 def test_unmeasured_episodes_do_not_vote() -> None:
     assert season_kind([False, True, False], animated=False).kind == "live_action"
     assert season_kind([False, False], animated=True).kind == "unmeasured"
@@ -77,7 +99,7 @@ def test_unmeasured_episodes_do_not_vote() -> None:
 def _item(connection: DBClient, rel_path: str, *, status: str, codec: str, current_dark: float) -> int:
     now = timestamp()
     result = connection.execute(library_items.insert().values(
-        source_path=f"/media/{rel_path}", rel_path=rel_path, media_root="tv", parent_dir=rel_path.rsplit("/", 1)[0],
+        source_path=f"/media/{rel_path}", rel_path=rel_path, media_root=rel_path.split("/", 1)[0], parent_dir=rel_path.rsplit("/", 1)[0],
         file_name=rel_path.rsplit("/", 1)[1], container=".mkv", size_bytes=1000, mtime_ns=1, fingerprint=rel_path,
         content_version_fingerprint=f"sample-{rel_path}", video_codec=codec, width=1920, height=1080, status=status,
         media_fingerprint_json=json.dumps(_fingerprint(current_dark)), audio_summary_json="[]",

@@ -30,14 +30,14 @@ from mediaforce.core.type_defs import object_dict
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES, derive_item_workflow_state
-from mediaforce.library.content_kinds import season_grouping, season_kind_report
+from mediaforce.library.content_kinds import look_group, season_grouping, season_kind_report
 from mediaforce.tuning.calibration_jobs import load_latest_job, load_latest_jobs_for_prefixes
 from mediaforce.tuning.size_goals import tallest_picture
 from mediaforce.web.runtime.app_samples import sample_moments
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 from mediaforce.web.runtime.production_approval import KEEP_FULL_HEIGHT_FIELD, EffectiveApproval, LoadCalibrationState, \
     SampleWait, approval_prefixes, cached_calibration_loader, effective_production_approval, holds_approval, production_approval_contract, \
-    production_calibration, sample_allows_kind, season_prefix_of, season_prefix_from_types
+    production_calibration, sample_allows_kind, season_prefix_of
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
 from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES
 from mediaforce.web.runtime.production_holds import approval_identity
@@ -261,16 +261,20 @@ def background_queue_blocker(
 
 
 def _waiting_seasons(connection: DBClient, config: MediaforceConfig) -> list[tuple[str, int, tuple[int, ...]]]:
-    """Seasons with files still to compress, largest waiting space first, with those files' ids.
+    """Seasons and movie titles with files still to compress, largest waiting space first, with those files' ids.
 
-    Files the owner chose to keep original are finished, so they never bring a season back.
+    Files the owner chose to keep original are finished, so they never bring a season back. Only libraries set to
+    compress are offered; queueing refuses the rest anyway.
     """
     rows = _waiting_files(connection)
     blocked = _files_waiting_for_owner(connection, rows, config=config)
+    producing = config.source_root_map
     waiting: dict[str, tuple[int, list[int]]] = {}
     for item in rows:
-        season = season_prefix_of(config, str(item["rel_path"]))
-        if season is None or int(item["id"]) in blocked or not str(item["rel_path"]).startswith(f"{season}/"):
+        rel_path = str(item["rel_path"])
+        season = season_prefix_of(config, rel_path)
+        if (season is None or int(item["id"]) in blocked or rel_path.split("/", 1)[0] not in producing
+                or not (rel_path.startswith(f"{season}/") or (rel_path == season and PurePosixPath(rel_path).suffix))):
             continue
         size, ids = waiting.get(season, (0, []))
         waiting[season] = (size + int(item["size_bytes"] or 0), [*ids, int(item["id"])])
@@ -416,8 +420,8 @@ def _tv_episodes(connection: DBClient, config: MediaforceConfig) -> dict[str, li
 
 
 def _read_tv_episodes(connection: DBClient, config: MediaforceConfig) -> dict[str, list[tuple[str, int]]]:
-    """Every TV show's files by path, each with its id when it is published and its original backup is still kept to
-    compare, else 0."""
+    """Every TV show's and movie title's files by path, each with its id when it is published and its original backup is
+    still kept to compare, else 0. A movie title stands as its own show and season."""
     removed = confirmed_originals_removed_item_ids(connection)
     library_types = config.library_type_map
     shows: dict[str, list[tuple[str, int]]] = {}
@@ -427,7 +431,7 @@ def _read_tv_episodes(connection: DBClient, config: MediaforceConfig) -> dict[st
         .where(LIBRARY_ITEM_PRESENT).order_by(library_items.c.rel_path)).mappings()
     for row in rows:
         rel_path = str(row["rel_path"])
-        if season_prefix_from_types(library_types, rel_path) is None:
+        if look_group(library_types, rel_path) is None:
             continue
         watchable = row["promoted_at"] is not None and bool(row["archived_source_path"]) and int(row["id"]) not in removed
         shows.setdefault("/".join(rel_path.split("/")[:2]), []).append((rel_path, int(row["id"]) if watchable else 0))
@@ -454,10 +458,10 @@ def _show_approvals(
 ) -> list[_ShowApproval]:
     """The current folder approvals on a show or its seasons, each with its sample's season and the seasons it governs."""
     library_types = config.library_type_map
-    seasons = {season for rel_path, _ in episodes if (season := season_prefix_from_types(library_types, rel_path)) is not None}
+    seasons = {season for rel_path, _ in episodes if (season := look_group(library_types, rel_path)) is not None}
     found: dict[str, tuple[EffectiveApproval, str]] = {}
     governed: dict[str, list[str]] = {}
-    for folder in [show, *sorted(seasons)]:
+    for folder in dict.fromkeys([show, *sorted(seasons)]):
         approval = effective_production_approval(config, folder, load_calibration_state)
         if approval is None or approval.kind is not None or not approval.current:
             continue
@@ -555,7 +559,7 @@ def _kind_contents(connection: DBClient, config: MediaforceConfig, load_calibrat
     approvals_by_show = {show: found for show, files in episodes.items()
                          if (found := _show_approvals(config, show, files, folders_only))}
     samples = _samples_in_hand(connection, {season for files in episodes.values() for path, _ in files
-                                          if (season := season_prefix_from_types(library_types, path)) is not None})
+                                          if (season := look_group(library_types, path)) is not None})
     report = _kind_report(
         connection, config, folders_only,
         sample_seasons={entry.sample_season for found in approvals_by_show.values() for entry in found}

@@ -37,7 +37,7 @@ from mediaforce.core.audio_presets import PRESET_AUDIO_KEYS, owner_sound_keys
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.type_defs import int_value, object_dict
-from mediaforce.library.candidate_selection import season_identity
+from mediaforce.library.content_kinds import look_group
 from mediaforce.tuning.size_goals import ResolutionIntent, operator_intent_from_policy, resolution_intent_from_policy, \
     tallest_picture
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash, review_gate
@@ -107,15 +107,8 @@ def sample_wait(config: MediaforceConfig, prefix: str, load: LoadCalibrationStat
 
 
 def season_prefix_of(config: MediaforceConfig, rel_path: str) -> str | None:
-    return season_prefix_from_types(config.library_type_map, rel_path)
-
-
-def season_prefix_from_types(library_types: Mapping[str, str], rel_path: str) -> str | None:
-    path = PurePosixPath(str(rel_path or "").strip().strip("/"))
-    if len(path.parts) < 3 or (len(path.parts) == 3 and path.suffix):
-        return None
-    identity = season_identity({"rel_path": path.as_posix()}, library_types=library_types)
-    return identity.season_prefix if identity is not None else None
+    """The TV season or movie title a kind of content covers for this path, if any (see `look_group`)."""
+    return look_group(config.library_type_map, rel_path)
 
 
 def sample_finished_before(job: Mapping[str, Any] | None, boundary: Any) -> bool:
