@@ -191,6 +191,19 @@ class ReadPathPurityTests(unittest.TestCase):
         scan_thread_mock.assert_not_called()
         host_refresh_mock.assert_not_called()
 
+    def test_activity_reuses_the_season_measurements_the_main_window_made(self) -> None:
+        with patch("mediaforce.web.app.load_config", return_value=self.config):
+            app = web_app.create_app(self.config.paths.config_path)
+        main_window_endpoint = self._endpoint(app, "/api/app/main-window", "api_app_main_window")
+        activity_endpoint = self._endpoint(app, "/api/app/activity", "api_app_activity")
+
+        with patch("mediaforce.library.content_kinds.load_source_evidence_bulk", return_value={}) as measure_mock:
+            self.assertEqual(main_window_endpoint().status_code, 200)
+            self.assertEqual(activity_endpoint().status_code, 200)
+            self.assertEqual(activity_endpoint().status_code, 200)
+
+        measure_mock.assert_called_once()
+
     def test_native_resume_clears_saved_background_and_encode_pauses(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             connection.execute(evidence_queue_state.insert().values(

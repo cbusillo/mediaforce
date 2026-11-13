@@ -31,28 +31,42 @@ struct PageFrame<Content: View>: View {
     }
 }
 
+/// What a refreshing page last heard. A page whose store outlives it, like Activity's in the main window's model, shows
+/// that at once when it opens again and refreshes behind it.
+@MainActor
+@Observable
+final class PageFacts<Facts: Sendable> {
+    var facts: Facts?
+    var refreshFailed = false
+    var lastHeard: Date?
+}
+
 // A page that reads its own facts while it is open, refreshing on the main window's interval and keeping what it last heard.
 struct RefreshingPage<Facts: Sendable, Content: View>: View {
     let title: String
-    var subtitle = ""
-    var scrolls = true
-    // A subtitle that counts what the facts hold; the plain subtitle stands until they arrive.
-    var factsSubtitle: ((Facts) -> String)?
+    let subtitle: String
     let load: @MainActor () async throws -> Facts
     @ViewBuilder let content: (Facts) -> Content
-    @State private var facts: Facts?
-    @State private var refreshFailed = false
-    @State private var lastHeard: Date?
+    @State private var heard: PageFacts<Facts>
+
+    init(title: String, subtitle: String, heard: PageFacts<Facts> = PageFacts(), load: @escaping @MainActor () async throws -> Facts,
+         @ViewBuilder content: @escaping (Facts) -> Content) {
+        self.title = title
+        self.subtitle = subtitle
+        self.load = load
+        self.content = content
+        _heard = State(initialValue: heard)
+    }
 
     var body: some View {
-        PageFrame(title: title, subtitle: facts.flatMap { factsSubtitle?($0) } ?? subtitle, scrolls: scrolls) {
-            if let facts {
-                if refreshFailed {
-                    StaleNotice(connection: .failing, lastHeard: lastHeard)
+        PageFrame(title: title, subtitle: subtitle) {
+            if let facts = heard.facts {
+                if heard.refreshFailed {
+                    StaleNotice(connection: .failing, lastHeard: heard.lastHeard)
                         .padding(.horizontal, -34)
                 }
                 content(facts)
-            } else if refreshFailed {
+            } else if heard.refreshFailed {
                 Text(Words.staleNotice(.failing, lastHeard: nil))
                     .foregroundStyle(.secondary)
             } else {
@@ -65,11 +79,11 @@ struct RefreshingPage<Facts: Sendable, Content: View>: View {
     private func watch() async {
         while !Task.isCancelled {
             do {
-                facts = try await load()
-                refreshFailed = false
-                lastHeard = .now
+                heard.facts = try await load()
+                heard.refreshFailed = false
+                heard.lastHeard = .now
             } catch {
-                refreshFailed = true
+                heard.refreshFailed = true
             }
             try? await Task.sleep(for: MainWindowModel.refreshInterval)
         }

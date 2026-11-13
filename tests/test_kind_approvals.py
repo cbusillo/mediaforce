@@ -40,7 +40,7 @@ from mediaforce.web.runtime.kind_approvals import APPROVABLE_KINDS, APPROVAL_NOT
     next_kind_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
 from mediaforce.web.runtime.page_state import PageStateFacts, PageStateSources, card_page_states, decide_page_state
 from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_matches, \
-    production_calibration
+    production_calibration, season_prefix_from_types
 
 APPROVED_SEASON = "tv/Drama/Season 1"
 SEASON = "tv/Thriller/Season 2"
@@ -1567,3 +1567,9 @@ def test_scan_during_refresh_does_not_save_older_membership_under_newer_inputs(t
             fresh = content_kinds.season_kind_report(connection, library_types=config.library_type_map, folder_approved=lambda _: False)
         assert second == fresh
         assert second["seasons"][0]["episodes"] == 2
+
+
+def test_the_same_path_finds_its_season_by_the_library_type_it_is_read_with() -> None:
+    episode = "media/Show/Season 1/e01.mkv"
+    assert [season_prefix_from_types({"media": "tv"}, episode), season_prefix_from_types({"media": "movie"}, episode)] == ["media/Show/Season 1", None]
+    assert [season_prefix_from_types({"media": "movie"}, episode), season_prefix_from_types({"media": "tv"}, episode)] == [None, "media/Show/Season 1"]

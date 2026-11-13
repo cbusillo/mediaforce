@@ -8,7 +8,7 @@ struct ActivityPage: View {
     private let nameWidth: CGFloat = 235
 
     var body: some View {
-        RefreshingPage(title: "Activity", subtitle: "The next 24 hours", load: { try await model.client.activity() }) { activity in
+        RefreshingPage(title: "Activity", subtitle: "The next 24 hours", heard: model.activity, load: { try await model.client.activity() }) { activity in
             WorkStatus(facts: facts, open: open)
             clock(activity)
             ForEach(facts.computers) { computer in
