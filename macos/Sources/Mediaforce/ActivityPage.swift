@@ -21,27 +21,6 @@ struct ActivityPage: View {
                     .buttonStyle(QuietLinkStyle(primary: true))
                     .font(.headline)
             }
-            Text("Held back for you").font(.headline)
-            let waiting = Attention.waitingItems(facts)
-            if waiting.isEmpty {
-                Text("Nothing needs you right now.").foregroundStyle(.secondary)
-            }
-            WaitingItems(items: waiting, posters: posters, open: open)
-            let holds = activity.earlierHolds
-            if !holds.isEmpty {
-                DisclosureGroup("Work still marked as held (\(holds.count))") {
-                    Text("Held back for you above shows the current decisions. These records also include earlier attempts.")
-                        .foregroundStyle(.secondary)
-                    ForEach(holds) { file in
-                        DecisionLine {
-                            Text("\(file.title): \(file.waiting ?? "Its earlier attempt is still marked as held.")")
-                        } buttons: {
-                            Button("Open") { open(.item(file.prefix)) }
-                        }
-                    }
-                }
-            }
-            FinishedShelf(seasons: Array(facts.recentlyFinishedSeasons.prefix(6)), posters: posters, open: open)
         }
     }
 

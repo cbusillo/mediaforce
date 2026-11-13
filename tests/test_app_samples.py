@@ -14,7 +14,7 @@ from mediaforce.tuning.size_goals import DECIMAL_MEGABYTE_BYTES, measured_follow
 from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime import folder_actions
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_sample, make_sample, sample_facts, \
-    kind_sample_candidates, prepare_waiting_samples, samples_to_remake, start_compressing
+    kind_sample_candidates, prepare_waiting_samples, samples_to_remake, start_compressing, with_first_sample_question, SampleStartWait
 
 PREFIX = "tv/Lucifer/Season 2"
 
@@ -512,7 +512,7 @@ def test_first_sample_start_failures_retry_then_ask_and_success_or_settings_clea
     attempted: list[str] = []
 
     def fresh(prefix: str) -> tuple[dict[str, Any], dict[str, Any]]:
-        return {"prefix": prefix}, _status("needs_test", "make_sample")
+        return _folder(prefix=prefix), _status("needs_test", "make_sample")
 
     def make(folder: Mapping[str, Any], _status_payload: Mapping[str, Any]) -> dict[str, Any]:
         attempted.append(folder["prefix"])
@@ -529,6 +529,36 @@ def test_first_sample_start_failures_retry_then_ask_and_success_or_settings_clea
     settled = kind | {"settings": [{"from_prefix": PREFIX}]}
     assert not prepare_waiting_samples(cards, [settled], load_payloads=fresh, failed_in_a_row=lambda _prefix: 0, make=make, previous=second)
     assert len(attempted) == 3
+
+
+@pytest.mark.parametrize("code", ["choose_size", "choose_balance"])
+def test_a_first_sample_choice_the_season_cannot_offer_never_asks_and_retries_like_a_refusal(code: str) -> None:
+    cards = [{"prefix": PREFIX, **_status("needs_test", "make_sample")}]
+    kinds = [{"kind": "bright_live_action", "shows": [{"sample_season": PREFIX}]}]
+
+    def nothing_to_choose(prefix: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        return _folder(prefix=prefix, size_goal_options=[], compression_intent_options=[]), _status("needs_test", "make_sample")
+
+    def make(_folder_payload: Mapping[str, Any], _status_payload: Mapping[str, Any]) -> dict[str, Any]:
+        return {"ok": False, "code": code}
+
+    first = prepare_waiting_samples(cards, kinds, load_payloads=nothing_to_choose, failed_in_a_row=lambda _prefix: 0, make=make)
+    second = prepare_waiting_samples(cards, kinds, load_payloads=nothing_to_choose, failed_in_a_row=lambda _prefix: 0, make=make,
+                                     previous=first)
+    assert (first["bright_live_action"].reason, second["bright_live_action"].reason) == ("retry_backoff", "sample_blocked")
+
+
+@pytest.mark.parametrize(("reason", "asked"), [("choose_size", "choose_size"), ("choose_balance", "make_sample"),
+                                               ("sample_blocked", "make_sample"), ("retry_backoff", None)])
+def test_the_season_a_first_sample_waits_on_asks_that_question_on_its_sample_page(reason: str, asked: str | None) -> None:
+    following = sample_facts(_folder(), _status("waiting_for_kind", None))
+    question = with_first_sample_question(following, [SampleStartWait(PREFIX, reason)])
+    assert question["action"] == asked
+    if asked == "choose_size":
+        assert question["size_choices"]
+    assert with_first_sample_question(following, [SampleStartWait("tv/Other/Season 1", reason)]) == following
+    watching = sample_facts(_folder(), _status())
+    assert with_first_sample_question(watching, [SampleStartWait(PREFIX, reason)]) == watching
 
 
 def test_a_first_sample_that_could_not_be_attempted_stays_quiet_across_sweeps() -> None:

@@ -95,17 +95,8 @@ def activity_payload(
                          computer_key=slot["computer"]["key"], computer_name=slot["computer"].get("label"), waiting=None)
         else:
             entry["waiting"] = plain_failure_summary(waiting_reason=job.get("waiting_reason")) or "Start time and computer are not known yet"
-    earlier_holds = []
-    for job in list_encode_jobs(connection, statuses=("needs_attention",), limit=count, job_kinds=("single", "folder")):
-        files = encode_run_manifest_files(job, strict_indexes=True)
-        earlier_holds.append(
-            {"id": job["job_id"], **season_identity(job["prefix"]), "title": _job_title(job, files),
-             "starts_at": None, "finishes_at": None, "computer_key": None, "computer_name": None,
-             "waiting": plain_failure_summary(job.get("error"), waiting_reason=job.get("waiting_reason"),
-                                              failure_kind=job.get("last_failure_kind"))}
-        )
     return {"starts_at": observed_at.isoformat(), "ends_at": until.isoformat(), "computers": rows,
-            "lined_up": sorted(lined_up, key=lambda file: file["starts_at"] or "9999"), "earlier_holds": earlier_holds, "next_season": season_identity(next_season) if next_season else None}
+            "lined_up": sorted(lined_up, key=lambda file: file["starts_at"] or "9999"), "next_season": season_identity(next_season) if next_season else None}
 
 
 def _windows(computer: dict[str, Any], policy: dict[str, Any], start: datetime, end: datetime) -> list[dict[str, str]]:

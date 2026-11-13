@@ -9,14 +9,15 @@ from mediaforce.core.config import MediaforceConfig, load_runtime_settings, upda
 from mediaforce.hosts.config import host_targets_current_machine
 from mediaforce.hosts.controller_mount import controller_mount_lock
 from mediaforce.remote import (
-    probe_host_status, recover_remote_host_mounts_no_ui,
+    HostStatus, probe_host_status, recover_remote_host_mounts_no_ui,
     remote_mount_recovery_supported,
 )
-from mediaforce.web.runtime.host_status import publish_host_status
+from mediaforce.web.runtime.host_status import checked_host_statuses, publish_host_status
 
 _INITIAL_RETRY_SECONDS = 30
 _MAX_RETRY_SECONDS = 300
 DESKTOP_ABSENCE_GRACE = timedelta(hours=12)
+_NETWORK_ABSENCE = frozenset({"unreachable", "not_found"})
 _UNREADABLE_STATE = "Computer recovery state is unreadable; review it before reconnecting storage."
 
 
@@ -59,6 +60,7 @@ def process_host_recovery_once(
     # computer. Each computer's record is only written under that computer's connection lock.
     state_error = host_recovery_snapshot(config).get("state_error")
     _update_snapshot(config, lambda _hosts: None)
+    latest_checks = {status.key: status for status in checked_host_statuses(config)}
     for host in config.remote_hosts:
         if stop_event is not None and stop_event.is_set():
             break
@@ -70,7 +72,8 @@ def process_host_recovery_once(
                 continue
             previous = host_recovery_snapshot(config)["hosts"].get(key, {})
             retry_at = _parse_time(previous.get("next_retry_at"))
-            if retry_at and timedelta(0) < retry_at - datetime.now(timezone.utc) <= timedelta(seconds=_MAX_RETRY_SECONDS):
+            waiting = retry_at and timedelta(0) < retry_at - datetime.now(timezone.utc) <= timedelta(seconds=_MAX_RETRY_SECONDS)
+            if waiting and not _answered_another_check(previous, latest_checks.get(key)):
                 continue
             _recovery_pass(config, host, key, previous, state_error=state_error, requested=False)
     if state_error:
@@ -142,7 +145,7 @@ def _recovery_pass(
         "retry_paused": False,
     }
     state["computer_model"] = status.computer_model or previous.get("computer_model")
-    state["network_absent"] = status.check_failure in {"unreachable", "not_found"}
+    state["network_absent"] = status.check_failure in _NETWORK_ABSENCE
     state["absent_since"] = (
         previous.get("absent_since") or now.isoformat() if state["network_absent"] else None
     )
@@ -189,6 +192,12 @@ def _recovery_pass(
         state.update(status="action_required", reason=status.message)
     _store_host_state(config, key, state)
     return state
+
+
+def _answered_another_check(record: dict[str, Any], latest: HostStatus | None) -> bool:
+    if latest is None or record.get("status") == "ready":
+        return False
+    return latest.available or (bool(record.get("network_absent")) and latest.check_failure not in _NETWORK_ABSENCE)
 
 
 def _store_host_state(config: MediaforceConfig, key: str, state: dict[str, Any]) -> None:

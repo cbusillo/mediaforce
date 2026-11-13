@@ -864,6 +864,32 @@ def test_absent_computer_uses_last_seen_model_and_desktop_grace(
         assert not [alert for alert in alerts.recovery_alerts(config) if alert["id"].startswith("host:")]
 
 
+def test_a_laptop_that_returns_and_takes_work_is_no_longer_shown_away(
+        config: MediaforceConfig, empty_host_status_cache: None,
+) -> None:
+    away = status()
+    away.check_failure, away.computer_model, away.missing_mounts = "unreachable", "MacBook Pro", []
+    back = status(available=True)
+    back.computer_model = "MacBook Pro"
+    with patch_attr(recovery, "datetime", wraps=datetime) as clock, patch_attr(
+        recovery, "probe_host_status", return_value=away,
+    ) as probe, patch_attr(recovery, "recover_remote_host_mounts_no_ui") as mount:
+        for minutes in range(0, 60, 5):
+            clock.now.return_value = NOW + timedelta(minutes=minutes)
+            recovery.process_host_recovery_once(config)
+        assert _host_cards(config)["user@worker"]["recovery"]["absence_state"] == "away"
+        probe.return_value = back
+        with patch_attr(host_runtime, "collect_host_statuses", return_value=[back]):
+            host_runtime.ensure_sample_host_ready(config, config.raw["remote_hosts"][0])
+        clock.now.return_value += timedelta(seconds=30)
+        recovery.process_host_recovery_once(config)
+    card = _host_cards(config)["user@worker"]
+    assert card["available"]
+    assert card["recovery"]["status"] == "ready"
+    assert card["recovery"]["absence_state"] is None
+    mount.assert_not_called()
+
+
 def test_unknown_result_retries_before_asking_and_keeps_the_warning_during_attempts(config: MediaforceConfig) -> None:
     with patch_attr(recovery, "datetime", wraps=datetime) as clock, patch_attr(
         alerts, "datetime", wraps=datetime,

@@ -56,7 +56,9 @@ choice, its newest sample stays available, even after that season finishes.
 Every unapproved kind with waiting shows appears in Needs you, including while
 its sample is being prepared or needs attention. Mediaforce automatically requests
 a first sample using the existing sample queue and size settings. Needs you
-notifies when the sample is ready to watch or needs a decision. An existing
+notifies when the sample is ready to watch or needs a decision. A size or balance
+choice reaches Needs you only when the season offers one; otherwise the start is
+retried like any other refusal. An existing
 approved setting comes first. An unsuitable sample stays reachable and stops
 automatic sampling of further shows until that kind's choice is settled.
 Cartoons and 4K continue to need
@@ -995,11 +997,9 @@ those stretches. Each working computer shows progress and a finish estimate
 when one is known. The numbered line-up names the file, estimated start and
 computer; unknown starts remain listed. These forecasts use the existing
 computer history and window rules, and may change as computers become free.
-Activity reads its forecast only while the page is open. The next approved season is named below them. “Held back for you” uses the
-same waiting items and links as Needs you, including original-backup cleanup.
-
-Past attempts still marked as held remain available below the current decisions;
-Activity does not clear those records or count them as new decisions.
+Activity reads its forecast only while the page is open. The next approved season is named below them.
+Activity shows only what is running and what comes next. Held work that needs the Director is in Needs you,
+and original-backup cleanup is in Needs you and Space saved.
 
 The main window reuses unchanged library calculations without timed expiry or a
 new background process. Each refresh still reads current work status and sample
