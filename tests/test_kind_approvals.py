@@ -274,6 +274,32 @@ def test_a_kinds_approval_says_once_whether_4k_stays_4k(tmp_path: Path, keep: bo
     assert with_kind_picture_height(calibration["policy"], calibration, config) == calibration["policy"]
 
 
+@pytest.mark.parametrize("sample_height,kept_by_sample", [(2160, True), (2160, False), (1080, True)])
+def test_a_kind_approved_from_a_sample_keeps_4k_only_when_the_watched_sample_did(
+        tmp_path: Path, sample_height: int, kept_by_sample: bool,
+) -> None:
+    config = _config(tmp_path)
+    config.raw["video"].update({"max_height": 1080, "resolution_intent_mode": "max_height"})
+    calibration = _approved_on(config, f"{APPROVED_SEASON}/e01.mkv")
+    calibration["sample_item"]["height"] = sample_height
+    calibration["policy"]["video"].update({"max_height": 0, "resolution_intent_mode": "source"} if kept_by_sample
+                                          else {"max_height": 1080, "resolution_intent_mode": "max_height"})
+    calibration["accepted_policy_hash"] = calibration_policy_hash(calibration)
+    keeps = sample_height == 2160 and kept_by_sample
+
+    assert approve_kind_action(config, LIVE_ACTION, APPROVED_SEASON, load_calibration_state=_loader({APPROVED_SEASON: calibration}, {}),
+                               kind_of=lambda *_args: LIVE_ACTION, approved_at="now")["ok"]
+    result, manifests = _queue(config, SEASON, _loader({}, {SEASON: LIVE_ACTION}))
+    with open_db(config.paths.db_path) as connection:
+        facts = kinds_payload(connection, config, load_calibration_state=_loader({}, {}))
+
+    assert result["ok"], result
+    video = manifests[0]["items"][0]["resolved_policy"]["video"]
+    # Every other season and movie the look covers is made the way the watched sample was, and the look says so.
+    assert video["max_height"] == (0 if keeps else 1080)
+    assert next(kind for kind in facts["kinds"] if kind["kind"] == LIVE_ACTION)["approval"]["keep_full_height"] == keeps
+
+
 def test_a_season_outside_every_approved_kind_is_not_queued(tmp_path: Path) -> None:
     config = _config(tmp_path)
     approve_kind(config, LIVE_ACTION, APPROVED_SEASON, _approved(config), approved_at="now")

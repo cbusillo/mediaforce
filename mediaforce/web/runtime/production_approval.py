@@ -316,6 +316,19 @@ def policy_with_owner_settings(
     return copy.deepcopy(policy)
 
 
+def sample_kept_full_height(calibration: Mapping[str, Any], config: MediaforceConfig) -> bool:
+    """Whether an approved sample was made from an original taller than the library's tallest picture and kept it.
+
+    A kind approved from such a sample keeps 4K, so the look, the sample's own folder and production agree.
+    """
+    limit = tallest_picture(object_dict(config.raw.get("video")))
+    height = int_value(object_dict(calibration.get("sample_item")).get("height"))
+    if limit <= 0 or height <= limit:
+        return False
+    resolution = resolution_intent_from_policy(object_dict(object_dict(calibration.get("policy")).get("video")))
+    return resolution.mode == "source" or (resolution.mode == "max_height" and (resolution.max_height or 0) >= height)
+
+
 def with_kind_picture_height(policy: Mapping[str, Any], calibration: Mapping[str, Any], config: MediaforceConfig) -> dict[str, Any]:
     """The production policy under a kind's approval, with the kind's 4K choice applied.
 

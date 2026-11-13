@@ -37,7 +37,7 @@ from mediaforce.web.runtime.app_samples import sample_moments
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 from mediaforce.web.runtime.production_approval import KEEP_FULL_HEIGHT_FIELD, EffectiveApproval, LoadCalibrationState, \
     SampleWait, approval_prefixes, cached_calibration_loader, effective_production_approval, holds_approval, production_approval_contract, \
-    production_calibration, sample_allows_kind, season_prefix_of
+    production_calibration, sample_allows_kind, sample_kept_full_height, season_prefix_of
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
 from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES
 from mediaforce.web.runtime.production_holds import approval_identity
@@ -104,7 +104,11 @@ def approve_kind(
     refusal = _extension_refusal(EffectiveApproval(from_prefix, payload, production_approval_contract(payload)))
     if refusal is not None:
         return {"ok": False, "code": refusal}
-    _save_kind_approval(config, kind, {**payload, "kind": kind, "from_prefix": from_prefix, "kind_approved_at": approved_at})
+    saved = {key: value for key, value in payload.items() if key != KEEP_FULL_HEIGHT_FIELD}
+    # A sample the Director watched at 4K keeps 4K for the whole kind; any other comes down to the tallest picture.
+    if sample_kept_full_height(payload, config):
+        saved[KEEP_FULL_HEIGHT_FIELD] = True
+    _save_kind_approval(config, kind, {**saved, "kind": kind, "from_prefix": from_prefix, "kind_approved_at": approved_at})
     return {"ok": True, "kind": kind, "from_prefix": from_prefix}
 
 
