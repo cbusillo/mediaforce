@@ -39,7 +39,7 @@ has to look up is a defect.
 
 ## Library modes
 
-- TV, Movies, and Other are three modes of one Library workstation, not three
+- TV shows, Movies, and VR & 3D are three modes of one Library workstation, not three
   independently composed landing pages.
 - Keep the mode navigation, metric summary, current-work summary, notices,
   toolbar, register, and selected-detail expansion in the same order and at the

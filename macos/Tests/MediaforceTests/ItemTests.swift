@@ -259,7 +259,7 @@ final class ItemTests: XCTestCase {
         for place in [Place.item("tv/Futurama/Season 2"), .sample("tv/The Expanse/Season 3"), .library, .spaceSaved, .computer("mini"), .computer(nil)] {
             XCTAssertEqual(Place(notificationValue: place.notificationValue), place)
         }
-        // Notifications sent before Computers moved into Settings still open it.
+        // Notifications sent before Computers moved into Settings still open the Computers page.
         XCTAssertEqual(Place(notificationValue: "computers"), .computer(nil))
         XCTAssertNil(Place(notificationValue: "web:/folders/tv"))
     }

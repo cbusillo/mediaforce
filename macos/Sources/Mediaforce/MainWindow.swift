@@ -25,7 +25,7 @@ final class MainWindowModel {
     var onFacts: ((MainWindowFacts) -> Void)?
     // Whether work was asked to run or pause and the server hasn't confirmed it yet; nil when nothing is pending.
     private(set) var switching: Bool?
-    // Settings › Computers was asked for, from a notification, a page or the menu bar; Settings takes it and clears it.
+    // Settings › Computers was asked for from the Computers page; Settings takes it and clears it.
     var settingsRequest: SettingsRequest?
     // The computer Settings › Computers should show; its list takes it and clears it.
     var requestedComputer: String?
@@ -151,8 +151,8 @@ struct PlaceRequest: Equatable {
 
 enum Place: Hashable {
     case library, needsYou, activity, spaceSaved, media
-    case libraryKind(MediaKind), mediaKind(MediaKind, LibraryStateGroup? = nil)
-    // Settings › Computers, on one computer when it names one.
+    case mediaKind(MediaKind, LibraryStateGroup? = nil)
+    // The Computers page, or one computer's page when it names one.
     case computer(String?)
     case sample(String)
     case item(String)
@@ -185,7 +185,7 @@ enum Place: Hashable {
         case ("needsYou", nil): self = .needsYou
         case ("spaceSaved", nil): self = .spaceSaved
         case ("computer", let key?): self = .computer(key)
-        // "computers" is what notifications sent before Computers moved into Settings carry.
+        // "computers" is what notifications sent before Computers moved into Settings carry; both open the Computers page.
         case ("computer", nil), ("computers", nil): self = .computer(nil)
         default: return nil
         }
@@ -197,7 +197,6 @@ struct MainWindow: View {
 
     let model: MainWindowModel
     @State private var navigation = PageNavigation()
-    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         Group {
@@ -206,7 +205,8 @@ struct MainWindow: View {
                     Sidebar(place: Binding(get: { navigation.place }, set: { navigation.select($0) }), facts: facts, model: model)
                         .navigationSplitViewColumnWidth(214)
                 } detail: {
-                    MainPage(place: navigation.place, facts: facts, model: model, open: go, namePage: { navigation.name($0, $1) })
+                    MainPage(place: navigation.place, facts: facts, model: model, open: { navigation.open($0) },
+                             namePage: { navigation.name($0, $1) })
                 }
                 .toolbar {
                     // First beside the sidebar, so Pause never moves; a page opened from a list adds its back button after it.
@@ -232,22 +232,11 @@ struct MainWindow: View {
         // Initial too: the menu bar may ask for a page while it opens this window.
         .onChange(of: model.placeRequest, initial: true) { _, requested in
             guard let requested else { return }
-            go(requested.place)
+            navigation.open(requested.place)
         }
         .alert(item: Bindable(model).notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
         }
-    }
-
-    /// Opens a place from a link on a page: a page of this window, or Settings › Computers for a computer.
-    private func go(_ requested: Place) {
-        if case .computer(let key) = requested { openComputer(key) } else { navigation.open(requested) }
-    }
-
-    /// Computers live in Settings › Computers; this opens it, on one computer when it names one.
-    private func openComputer(_ key: String?) {
-        model.settingsRequest = SettingsRequest(computer: key)
-        openSettings()
     }
 }
 
@@ -327,27 +316,28 @@ struct Sidebar: View {
     @AppStorage("kindsShown") private var kindsShown = true
     @AppStorage("librariesShown") private var librariesShown = true
 
+    /// The places above the Library, in their order.
+    static let top: [Place] = [.needsYou, .activity, .computer(nil), .spaceSaved]
+
+    /// Each library's own list, under Library; VR & 3D only once it holds something.
+    static func libraries(in library: MainWindowFacts.Library) -> [Place] {
+        MediaKind.libraries(in: library).map { .mediaKind($0) }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             List(selection: $place) {
-                SidebarRow(title: Words.needsYou, symbol: "hand.raised", trailing: "\(Attention.waitingOnYou(facts))")
-                    .tag(Place.needsYou)
-                Label("Activity", systemImage: "clock")
-                    .tag(Place.activity)
+                ForEach(Self.top, id: \.self) { place in
+                    row(place).tag(place)
+                }
                 DisclosureGroup(isExpanded: $librariesShown) {
-                    ForEach(MediaKind.libraries(in: facts.library)) { kind in
-                        Label(Words.mediaKind(kind), systemImage: kind.symbol)
-                            .tag(Place.libraryKind(kind))
+                    ForEach(Self.libraries(in: facts.library), id: \.self) { place in
+                        row(place).tag(place)
                     }
                 } label: {
                     Label(Words.library, systemImage: "books.vertical")
                 }
                 .tag(Place.library)
-                SidebarRow(title: Words.spaceSaved, symbol: "arrow.down.right.and.arrow.up.left", trailing: Words.size(facts.spaceSaved.bytes))
-                    .tag(Place.spaceSaved)
-                // No count: the page counts shows, titles and folders, while the facts count other media by file.
-                Label(Words.media, systemImage: "film.stack")
-                    .tag(Place.media)
                 if let kinds = model.kinds {
                     DisclosureGroup(isExpanded: $kindsShown) {
                         ForEach(kinds.kinds) { kind in
@@ -359,6 +349,24 @@ struct Sidebar: View {
                 }
             }
             .listStyle(.sidebar)
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ place: Place) -> some View {
+        switch place {
+        case .needsYou:
+            SidebarRow(title: Words.needsYou, symbol: "hand.raised", trailing: "\(Attention.waitingOnYou(facts))")
+        case .spaceSaved:
+            SidebarRow(title: Words.spaceSaved, symbol: "arrow.down.right.and.arrow.up.left", trailing: Words.size(facts.spaceSaved.bytes))
+        case .activity:
+            Label(Words.activity, systemImage: "clock")
+        case .computer:
+            Label(Words.computers, systemImage: "desktopcomputer")
+        case .mediaKind(let kind, _):
+            Label(Words.mediaKind(kind), systemImage: kind.symbol)
+        default:
+            EmptyView()
         }
     }
 }
@@ -425,8 +433,10 @@ struct MainPage: View {
             case .media: MediaPage(model: model) { open(.item($0)) }
             case .mediaKind(let kind, let state):
                 MediaPage(model: model, kind: kind, stateGroup: state) { open(.item($0)) }.id(place)
-            case .libraryKind(let kind):
-                LibraryPage(model: model, kind: kind, open: open).id(kind)
+            case .computer(nil):
+                ComputersPage(facts: facts, model: model) { open(.computer($0)) }
+            case .computer(let key?):
+                ComputerPage(key: key, facts: facts, model: model, namePage: { namePage(.computer(key), $0) }).id(key)
             case .seasonsWithoutKind:
                 MediaPage(model: model, onlySeasons: model.kinds?.leftOut, showEverything: { open(.media) }, kind: .tv) { open(.item($0)) }
             case .kind(let code):

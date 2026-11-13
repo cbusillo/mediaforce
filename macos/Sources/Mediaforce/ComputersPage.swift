@@ -64,7 +64,7 @@ enum ComputerFix {
     }
 }
 
-/// A computer's state and its fixes, above its settings. The password is used once and never kept.
+/// A computer's state as one plain line, with its fixes beside it. The password is used once and never kept.
 struct ComputerStatus: View {
     let name: String
     let state: String?
@@ -131,5 +131,111 @@ struct ComputerStatus: View {
         password = ""
         result = await act(action, sent)
         working = nil
+    }
+}
+
+/// Each computer with its state; a computer opens its own page. Adding, removing and changing computers is setup,
+/// in Settings › Computers.
+struct ComputersPage: View {
+    let facts: MainWindowFacts
+    let model: MainWindowModel
+    let open: (String) -> Void
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        PageFrame(title: Words.computers, subtitle: Words.count(facts.computers.count, "computer")) {
+            if facts.computers.isEmpty {
+                Text(Words.noComputers).foregroundStyle(.secondary)
+            }
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 10) {
+                ForEach(facts.computers) { computer in
+                    GridRow {
+                        Image(systemName: Words.computerSymbol(computer))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 22)
+                        Button { open(computer.key) } label: {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(computer.name ?? computer.key)
+                                    .foregroundStyle(.primary)
+                                HStack(spacing: 4) {
+                                    if computer.needsYou { WaitingMark().accessibilityHidden(true) }
+                                    Text(Words.computerState(computer.state))
+                                }
+                                .font(.callout)
+                            }
+                        }
+                        .buttonStyle(QuietLinkStyle())
+                        .help(Words.waitingAction(.computer(computer.key)))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            Button(Words.openInSettings) {
+                model.settingsRequest = SettingsRequest(computer: nil)
+                openSettings()
+            }
+            .buttonStyle(QuietLinkStyle())
+        }
+    }
+}
+
+/// One computer: its state and the fixes the server offers, with a way to its setup. The password a fix needs is
+/// used once and never kept.
+struct ComputerPage: View {
+    let key: String
+    let facts: MainWindowFacts
+    let model: MainWindowModel
+    var namePage: (String) -> Void = { _ in }
+    @State private var hosts = ComputerHosts()
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        let computer = facts.computers.first { $0.key == key }
+        let name = computer?.name ?? key
+        PageFrame(title: name, subtitle: key) {
+            ComputerStatus(name: name, state: computer?.state, needsYou: computer?.needsYou ?? false, host: hosts.byKey[key]) { action, password in
+                await hosts.act(action, key, password: password, main: model)
+            }
+            .frame(maxWidth: 760, alignment: .leading)
+            if let reason = computer?.attentionReason {
+                Text(reason)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Button(Words.openInSettings) {
+                model.settingsRequest = SettingsRequest(computer: key)
+                openSettings()
+            }
+            .buttonStyle(QuietLinkStyle())
+        }
+        .onAppear { namePage(name) }
+        // Recovery runs by itself in the background, so the fixes on offer can change while the page is open.
+        .task {
+            while !Task.isCancelled {
+                await hosts.load(model.client)
+                try? await Task.sleep(for: MainWindowModel.refreshInterval)
+            }
+        }
+    }
+}
+
+/// Each computer's setup facts from the server, by address; empty until they arrive.
+@MainActor
+@Observable
+final class ComputerHosts {
+    private(set) var byKey: [String: HostsFacts.Host] = [:]
+
+    func load(_ client: MediaforceClient) async {
+        if let facts = try? await client.hosts() {
+            byKey = Dictionary(facts.hosts.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+        }
+    }
+
+    /// Runs one fix, then reads the computers' state again so the page shows what changed.
+    func act(_ action: ComputerAction, _ address: String, password: String?, main: MainWindowModel) async -> HostActionResult? {
+        let result = try? await main.client.computerAction(action, address, password: password)
+        await load(main.client)
+        await main.refresh()
+        return result ?? HostActionResult(ok: false, message: ActionNotice.unanswered.message)
     }
 }

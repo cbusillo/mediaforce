@@ -217,8 +217,8 @@ Select specific pages with repeated `--page` options:
 Mediaforce render /path/to/captures --page needs-you --page 'sample:tv/Show/Season 1'
 ```
 
-Other page names are `library`, `tv`, `movies`, `other`, `activity`,
-`space-saved`, `media`, `kind:CODE`, `item:PREFIX`, `settings:libraries`,
+Other page names are `library`, `tv`, `movies`, `other` (VR & 3D), `activity`,
+`computers`, `computer:ADDRESS`, `space-saved`, `media`, `kind:CODE`, `item:PREFIX`, `settings:libraries`,
 `settings:compression`, `settings:computers`, `settings:metadata` and `menu`
 (the menu bar panel, drawn at its own size and only when asked for).
 `--server URL` selects another server; the default is the app's local server.
@@ -248,17 +248,18 @@ On macOS, Mediaforce now prefers Homebrew's `ffmpeg-full` and `ffprobe` from
 changes and normal formula upgrades. You can override either binary with
 `MEDIAFORCE_FFMPEG` or `MEDIAFORCE_FFPROBE`.
 
-Library in the Mac sidebar combines TV, Movies and Other. Expand Library to
-browse TV or Movies on their own; Other appears when it contains media. Each
-uses the same storage summary and state shelves, opening the existing show,
-movie or folder page. TV's finished seasons, approved samples and biggest
-unstarted shows remain available in Library and TV. Browse all opens the
-complete Media list for the selected library, and a shelf heading opens that
-state. The separate Media sidebar entry shows everything. State, search and
-table/poster controls stay in Media, without a second library picker.
-All summaries show current size and how much remains original; the combined
-Library also links to total space saved. Storage totals and computer status
-remain visible when a list cannot load.
+The Mac sidebar lists Needs you, Activity, Computers and Space saved, then
+Library. Library combines TV shows, Movies and VR & 3D: its storage summary,
+finished seasons, approved samples, biggest unstarted shows and state shelves.
+Browse all opens Media, the complete list, and a shelf heading opens that
+state. Under Library, TV shows, Movies and VR & 3D (once it holds something)
+each open their own list with its size, how much remains original and what it
+can save, plus a Can save column. State, search and table/poster controls stay
+in the lists, without a second library picker. Mediaforce can't compress VR and
+3D video yet, so those files say so and are never counted as waiting work.
+Computers lists each computer's state and opens its page with its fixes;
+Settings › Computers holds only their setup. Storage totals remain visible when
+a list cannot load.
 
 The sidebar keeps the last kinds received while retrying an unanswered refresh.
 

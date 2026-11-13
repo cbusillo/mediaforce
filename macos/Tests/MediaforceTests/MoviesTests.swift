@@ -38,7 +38,8 @@ final class MoviesTests: XCTestCase {
         for (code, group) in groups {
             XCTAssertEqual(LibraryStateGroup(movieState: code), group, code)
         }
-        XCTAssertEqual(Set(groups.map { $0.1 }), Set(LibraryStateGroup.allCases))
+        // Only VR & 3D has files Mediaforce can't compress yet.
+        XCTAssertEqual(Set(groups.map { $0.1 }), Set(LibraryStateGroup.allCases).subtracting([.cannotCompressYet]))
     }
 
     func testEveryStateCodeHasItsOwnWords() {

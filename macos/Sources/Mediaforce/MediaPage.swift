@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// Everything in the selected library in one list: TV shows, movies and other media, with a state filter and
-/// search, shown as a table or as poster shelves. Each row opens that show's, movie's or folder's page.
+/// Everything in the selected library in one list: TV shows, movies and VR & 3D, with a state filter and search,
+/// shown as a table or as poster shelves. Each row opens that show's, movie's or folder's page. One library's list
+/// leads with its sizes and what it can save.
 struct MediaPage: View {
     let model: MainWindowModel
     // Only these seasons, one row each, when the page opens from the seasons no kind of content covers.
@@ -20,6 +21,12 @@ struct MediaPage: View {
         PageFrame(title: onlySeasons == nil ? (kind == .everything ? Words.media : Words.mediaKind(kind)) : Words.seasonsWithoutKindTitle,
                   subtitle: listing.hasLoaded ? Words.shown(visible.count, of: rows.count, onlySeasons == nil ? "item" : "season") : "",
                   scrolls: view != .table) {
+            if onlySeasons == nil, kind != .everything, let facts = model.facts {
+                StorageBar(facts: facts, kind: kind, listing: listing)
+            }
+            if rows.contains(where: { $0.state == .cannotCompressYet }) {
+                Text(Words.cannotCompressVRYet).foregroundStyle(.secondary)
+            }
             if listing.loading { ProgressView() }
             ForEach(listing.unavailable) { kind in
                 Text(Words.libraryReadFailure(kind, hasPrevious: listing.hasLoaded(kind)))
@@ -87,7 +94,7 @@ enum MediaKind: String, CaseIterable, Identifiable, Sendable {
         case .everything: "books.vertical"
         case .tv: "tv"
         case .movies: "film"
-        case .other: "rectangle.stack"
+        case .other: "visionpro"
         }
     }
 
@@ -123,6 +130,8 @@ enum MediaKind: String, CaseIterable, Identifiable, Sendable {
 final class MediaListing {
     private static let libraryKinds = MediaKind.allCases.filter { $0 != .everything }
     private var snapshots: [MediaKind: MediaRow.Loaded] = [:]
+    // The libraries this listing reads; an estimate is partial until each has answered.
+    private var expected = libraryKinds
     private(set) var unavailable: [MediaKind] = []
     private(set) var loading = true
 
@@ -133,14 +142,23 @@ final class MediaListing {
         snapshots.values.flatMap(\.rows).sorted { ($0.stateRank, -$0.bytes, $0.id) < ($1.stateRank, -$1.bytes, $1.id) }
     }
 
+    // What Mediaforce can't compress yet saves nothing and needs no estimate.
+    private var compressible: [MediaRow] { rows.filter { $0.state != .cannotCompressYet } }
+    var canCompressAny: Bool { !compressible.isEmpty || !hasLoaded }
+
     var estimateIsPartial: Bool {
-        snapshots.count < Self.libraryKinds.count || !unavailable.isEmpty || truncated || rows.contains { $0.saved == nil }
+        expected.contains { snapshots[$0] == nil } || !unavailable.isEmpty || truncated || compressible.contains { !$0.estimateKnown }
+    }
+
+    /// The estimates of what these libraries can still save, or nil while nothing known adds to it.
+    var estimatedSavedBytes: Int64? {
+        let total = compressible.filter(\.estimateKnown).reduce(0) { $0 + $1.savedBytes }
+        guard total > 0 || !estimateIsPartial else { return nil }
+        return total
     }
 
     func estimatedTotalSavedBytes(savedSoFar: Int64) -> Int64? {
-        let estimates = rows.compactMap(\.saved)
-        guard !estimates.isEmpty || !estimateIsPartial else { return nil }
-        return savedSoFar + estimates.reduce(0, +)
+        estimatedSavedBytes.map { savedSoFar + $0 }
     }
 
     func watch(_ client: MediaforceClient, kind: MediaKind) async {
@@ -152,6 +170,7 @@ final class MediaListing {
 
     func refresh(_ client: MediaforceClient, kind: MediaKind) async {
         let kinds: [MediaKind] = kind == .everything ? Self.libraryKinds : [kind]
+        expected = kinds
         let results = await withTaskGroup(of: Read.self) { group in
             for kind in kinds {
                 group.addTask {
@@ -189,6 +208,9 @@ struct MediaRow: Identifiable, Sendable {
     var posterPrefix: String?
 
     var savedBytes: Int64 { (saved ?? 0) > 0 ? saved ?? 0 : 0 }
+    // The server sends 0 both for a finished title and for files not measured yet, so 0 is an estimate only where
+    // there is no active work.
+    var estimateKnown: Bool { savedBytes > 0 || (saved == 0 && state == .noActiveWork) }
     var stateRank: Int { state.rawValue }
 
     /// One row per season, named with its show, in the show's state, biggest first.
@@ -301,8 +323,8 @@ struct MediaTable: View {
                 Text(Words.size(row.bytes)).monospacedDigit().frame(maxWidth: .infinity, alignment: .trailing)
             }
             .width(70)
-            TableColumn(Words.estimatedSavedColumn, value: \MediaRow.savedBytes) { (row: MediaRow) in
-                Text(row.savedBytes > 0 ? "About \(Words.size(row.savedBytes))" : Words.notKnownYet)
+            TableColumn(Words.canSave, value: \MediaRow.savedBytes) { (row: MediaRow) in
+                Text(Words.canSave(row))
                     .monospacedDigit()
                     .foregroundStyle(row.savedBytes > 0 ? .primary : .secondary)
                     .frame(maxWidth: .infinity, alignment: .trailing)

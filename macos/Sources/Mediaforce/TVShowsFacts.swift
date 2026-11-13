@@ -79,7 +79,8 @@ struct TVShowsFacts: Decodable, Sendable {
 
 // The web library's four state groups, shared by the TV shows and Movies pages.
 enum LibraryStateGroup: Int, CaseIterable, Identifiable {
-    case needsYou, inProgress, readyToCompress, noActiveWork
+    // Last: what Mediaforce can't compress yet is neither waiting for it nor for the Director.
+    case needsYou, inProgress, readyToCompress, noActiveWork, cannotCompressYet
 
     var id: Int { rawValue }
 }

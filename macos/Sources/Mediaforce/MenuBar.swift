@@ -4,7 +4,6 @@ import SwiftUI
 /// The menu bar panel: work status, one link to Needs you, and the app's controls.
 struct MenuBarPanel: View {
     let model: MainWindowModel
-    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -96,12 +95,7 @@ struct MenuBarPanel: View {
     /// Brings the main window forward, on a page when one is named, and closes the panel.
     private func open(_ place: Place) {
         NSApp.keyWindow?.close()
-        if case .computer(let key) = place {
-            model.settingsRequest = SettingsRequest(computer: key)
-            openSettings()
-        } else {
-            model.placeRequest = PlaceRequest(place: place)
-        }
+        model.placeRequest = PlaceRequest(place: place)
         NSApp.activate()
     }
 }

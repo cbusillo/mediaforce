@@ -263,43 +263,6 @@ struct BiggestTable: View {
     }
 }
 
-struct Computers: View {
-    let computers: [MainWindowFacts.Computer]
-    // Opens that computer in Settings › Computers.
-    let open: (String) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Computers")
-                .font(.headline)
-            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 7) {
-                ForEach(computers) { computer in
-                    GridRow {
-                        Image(systemName: Words.computerSymbol(computer))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 22)
-                        Button { open(computer.key) } label: {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(computer.name ?? computer.key)
-                                    .foregroundStyle(.primary)
-                                HStack(spacing: 4) {
-                                    if computer.needsYou { WaitingMark().accessibilityHidden(true) }
-                                    Text(Words.computerState(computer.state))
-                                }
-                                .font(.caption)
-                            }
-                        }
-                        .buttonStyle(QuietLinkStyle())
-                        .help(Words.openInSettings)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-            }
-            .padding(.leading, 6)
-        }
-    }
-}
-
 struct Latest: View {
     let events: [MainWindowFacts.Event]
     let posters: PosterStore
