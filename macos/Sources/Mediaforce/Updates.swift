@@ -32,6 +32,8 @@ final class Updates: NSObject, SPUUpdaterDelegate {
         if state.intent?.phase == "prepared", !Self.isConfigured { state = await ServerUpdateStep.run(["cancel"]) }
         guard Self.isConfigured, controller == nil else { return }
         controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
+        // Quit or restarted after preparing: the server is stopped, so fetch the prepared build now, not on schedule.
+        if state.intent?.phase == "prepared" { controller?.updater.checkForUpdatesInBackground() }
     }
 
     // Sparkle calls this before it downloads anything; a thrown error stops the download until the next check.
