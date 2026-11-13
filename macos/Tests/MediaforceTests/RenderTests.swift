@@ -193,6 +193,7 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
         case "/api/app/settings/library": SettingsTests.serverFacts
         case "/api/app/settings/computers": SettingsTests.computerFacts
         case "/api/app/settings/metadata": SettingsTests.metadataFacts
+        case "/api/app/settings/metadata/connections": SettingsTests.metadataConnections
         case "/api/app/settings/compression": SettingsTests.compressionFacts
         case let path where path.hasPrefix("/api/app/samples/"): SampleTests.facts()
         case let path where path.hasPrefix("/api/app/items/"):

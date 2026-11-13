@@ -133,7 +133,8 @@ from mediaforce.web.routes import register_app_window_routes, register_completed
     register_metadata_settings_routes, register_operator_work_routes, register_queue_routes, register_settings_routes
 from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.routes.posters import register_poster_routes
-from mediaforce.library.metadata_sync import cached_poster, metadata_configuration_status
+from mediaforce.library import service_keys
+from mediaforce.library.metadata_sync import cached_poster, metadata_configuration_status, metadata_connection_states
 from mediaforce.reviewing.clips import review_file_from_url
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, SampleStartWait, approve_sample, make_sample, sample_facts, \
     prepare_waiting_samples, samples_to_remake, start_compressing
@@ -1039,7 +1040,25 @@ def create_app(
     def _metadata_settings_facts() -> dict[str, Any]:
         """The Plex and TMDB tab's connections and revision, both from one stored state."""
         snapshot, revision = _settings_snapshot("metadata")
-        return _metadata_settings_facts_runtime(status=metadata_configuration_status(snapshot), revision=revision)
+        return _metadata_settings_facts_runtime(
+            status=metadata_configuration_status(snapshot, service_keys.system_key_store()), revision=revision,
+        )
+
+    def _metadata_connections() -> dict[str, str]:
+        snapshot, _revision = _settings_snapshot("metadata")
+        return metadata_connection_states(snapshot, service_keys.system_key_store())
+
+    def _save_service_key_action(service: str, key: str) -> dict[str, Any]:
+        """Keep a Plex or TMDB key in the Keychain; the answer says only that it is set, never the key."""
+        if service not in service_keys.SERVICE_KEY_ENVIRONMENT:
+            raise SettingsValidationError("Choose Plex or TMDB.", "service_unknown")
+        if not service_keys.is_valid_service_key(key):
+            raise SettingsValidationError("Paste the whole key.", "key_invalid")
+        try:
+            service_keys.system_key_store().write(service, key)
+        except service_keys.ServiceKeyNotSaved:
+            raise SettingsValidationError("The key could not be kept in the Keychain.", "key_not_saved") from None
+        return {"ok": True, "settings": _metadata_settings_facts()}
 
     def _save_metadata_settings_action(
             *,
@@ -1264,6 +1283,8 @@ def create_app(
         app,
         metadata_settings_facts=_metadata_settings_facts,
         save_metadata_settings_action=_save_metadata_settings_action,
+        metadata_connections=_metadata_connections,
+        save_service_key_action=_save_service_key_action,
     )
     register_compression_settings_routes(
         app,

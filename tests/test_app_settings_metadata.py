@@ -5,7 +5,9 @@ from typing import Any
 
 import pytest
 from fastapi import FastAPI
+from starlette.requests import Request
 
+from mediaforce.library.service_keys import KeyStore
 from test_app_settings_computers import _endpoint
 from test_app_settings_library import _json_request, library_app  # noqa: F401  (`library_app` is the fixture)
 
@@ -110,23 +112,79 @@ def test_key_fields_sent_by_the_app_are_never_stored(
     assert set(stored["plex"]) == {"enabled", "base_url", "token_env", "refresh_interval_hours", "library_roots"}
     assert set(stored["tmdb"]) == {"enabled", "base_url", "token_env", "refresh_interval_hours"}
     assert stored["plex"]["token_env"] == "MEDIAFORCE_PLEX_TOKEN"
-    assert _facts(app)["plex"]["key_found"] is False
+    assert _facts(app)["plex"]["key_set"] is False
 
 
-def test_metadata_facts_name_where_keys_are_read_and_never_carry_one(
-        metadata_app: tuple[FastAPI, Path], monkeypatch: pytest.MonkeyPatch,
+def test_metadata_facts_say_whether_a_key_is_set_and_never_carry_one(
+        metadata_app: tuple[FastAPI, Path], key_store: KeyStore, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, _runtime_settings_path = metadata_app
-    monkeypatch.setenv("MEDIAFORCE_PLEX_TOKEN", "plex-key-value")
+    monkeypatch.setenv("MEDIAFORCE_PLEX_TOKEN", "plex-key-from-env")
+    monkeypatch.delenv("MEDIAFORCE_TMDB_TOKEN", raising=False)
+    key_store.write("plex", "plex-key-from-keychain")
+
+    body = _endpoint(app, PATH, "GET")().body.decode()
+    facts = json.loads(body)
+
+    assert (facts["plex"]["key_set"], facts["tmdb"]["key_set"]) == (True, False)
+    assert "plex-key" not in body
+
+
+def _key_request(body: dict[str, Any], content_type: bytes = b"application/json") -> Request:
+    payload = json.dumps(body).encode()
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": payload, "more_body": False}
+
+    return Request({"type": "http", "method": "POST", "path": "/", "headers": [(b"content-type", content_type)]}, receive)
+
+
+def _save_key(app: FastAPI, body: dict[str, Any], content_type: bytes = b"application/json") -> tuple[int, str]:
+    response = asyncio.run(_endpoint(app, f"{PATH}/key", "POST")(_key_request(body, content_type)))
+    return response.status_code, response.body.decode()
+
+
+def test_a_key_entered_in_settings_is_kept_in_the_key_store_and_nowhere_else(
+        metadata_app: tuple[FastAPI, Path], key_store: KeyStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    app, _runtime_settings_path = metadata_app
     monkeypatch.delenv("MEDIAFORCE_TMDB_TOKEN", raising=False)
 
-    facts = _facts(app)
+    status, answer = _save_key(app, {"service": "tmdb", "key": " eyJ.tmdb-secret_key "})
 
-    assert set(facts) == {"plex", "tmdb", "revision"}
-    assert set(facts["plex"]) == {"enabled", "address", "key_name", "key_found"}
-    assert set(facts["tmdb"]) == {"enabled", "key_name", "key_found"}
-    assert (facts["plex"]["key_found"], facts["tmdb"]["key_found"]) == (True, False)
-    assert facts["plex"]["key_name"] == "MEDIAFORCE_PLEX_TOKEN"
+    assert status == 200
+    assert key_store.read("tmdb") == "eyJ.tmdb-secret_key"
+    assert json.loads(answer)["settings"]["tmdb"]["key_set"] is True
+    assert "tmdb-secret" not in answer
+    stored = [path for path in tmp_path.rglob("*") if path.is_file() and b"tmdb-secret" in path.read_bytes()]
+    assert stored == []
+
+
+@pytest.mark.parametrize(
+    ("body", "code"),
+    [
+        ({"service": "plex", "key": ""}, "key_invalid"),
+        ({"service": "plex", "key": 'a" -A "b'}, "key_invalid"),
+        ({"service": "plex", "key": "two words"}, "key_invalid"),
+        ({"service": "sonarr", "key": "abc"}, "service_unknown"),
+    ],
+)
+def test_refused_key_is_not_kept(
+        metadata_app: tuple[FastAPI, Path], key_store: KeyStore, body: dict[str, Any], code: str,
+) -> None:
+    app, _runtime_settings_path = metadata_app
+
+    assert _save_key(app, body) == (400, json.dumps({"ok": False, "code": code}, separators=(",", ":")))
+    assert key_store.read("plex") is None
+
+
+def test_a_key_posted_as_anything_but_json_is_refused(metadata_app: tuple[FastAPI, Path], key_store: KeyStore) -> None:
+    app, _runtime_settings_path = metadata_app
+
+    status, _answer = _save_key(app, {"service": "plex", "key": "abc"}, content_type=b"text/plain")
+
+    assert status == 415
+    assert key_store.read("plex") is None
 
 
 def test_second_metadata_save_from_the_same_loaded_settings_is_refused(metadata_app: tuple[FastAPI, Path]) -> None:

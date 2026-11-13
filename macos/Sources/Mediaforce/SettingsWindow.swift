@@ -925,6 +925,9 @@ final class MetadataSettingsModel {
     private(set) var justSaved = false
     var draft: MetadataSettingsDraft?
     var notice: ActionNotice?
+    private(set) var connections: MetadataConnections?
+    private(set) var checking = false
+    private(set) var savingKey = false
 
     init(client: MediaforceClient) {
         self.client = client
@@ -933,6 +936,39 @@ final class MetadataSettingsModel {
     var hasChanges: Bool {
         guard let draft, let saved else { return false }
         return draft.saveBody != MetadataSettingsDraft(saved).saveBody
+    }
+
+    func keyState(_ service: String) -> ServiceKeyState {
+        let keySet = service == "plex" ? saved?.plex.keySet : saved?.tmdb.keySet
+        let checked = service == "plex" ? connections?.plex : connections?.tmdb
+        return ServiceKeyState(keySet: keySet ?? false, checking: checking, checked: checked)
+    }
+
+    /// Asks the server to reach Plex and TMDB with the saved keys; until it answers, a set key reads as saved.
+    func checkConnections() async {
+        checking = true
+        defer { checking = false }
+        connections = try? await client.metadataConnections()
+    }
+
+    /// Sends a key once for the server to keep in the Keychain. Unsaved edits to the rest of the tab stay as typed.
+    func saveKey(_ key: String, for service: String) async -> Bool {
+        guard !savingKey else { return false }
+        savingKey = true
+        defer { savingKey = false }
+        do {
+            let result = try await client.saveServiceKey(.init(service: service, key: key))
+            guard result.ok else {
+                notice = .serviceKeyNotSaved(result.code)
+                return false
+            }
+            if let settings = result.settings { saved = settings }
+        } catch {
+            notice = .unanswered
+            return false
+        }
+        await checkConnections()
+        return true
     }
 
     func load() async {
@@ -957,6 +993,7 @@ final class MetadataSettingsModel {
             if result.ok {
                 if let settings = result.settings { show(settings) } else { await load() }
                 justSaved = true
+                await checkConnections()
             } else if result.code == "settings_changed" {
                 notice = .settingsChangedElsewhere
                 await load()
@@ -990,8 +1027,8 @@ struct MetadataSettingsTab: View {
 
     var body: some View {
         Group {
-            if let saved = model.saved, model.draft != nil {
-                MetadataSettingsForm(model: model, facts: saved)
+            if model.saved != nil, model.draft != nil {
+                MetadataSettingsForm(model: model)
             } else if model.loadFailed {
                 SettingsLoadFailure(main: main) {
                     Task { await model.load() }
@@ -1001,7 +1038,10 @@ struct MetadataSettingsTab: View {
                     .frame(maxWidth: .infinity, minHeight: 240)
             }
         }
-        .task { await model.load() }
+        .task {
+            await model.load()
+            await model.checkConnections()
+        }
         .alert(item: $model.notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
         }
@@ -1010,7 +1050,6 @@ struct MetadataSettingsTab: View {
 
 struct MetadataSettingsForm: View {
     @Bindable var model: MetadataSettingsModel
-    let facts: MetadataSettingsFacts
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1021,14 +1060,18 @@ struct MetadataSettingsForm: View {
                         Text(Words.usePlexHelp)
                     }
                     MonospacedField(title: Words.plexAddress, text: plexAddress, prompt: Words.plexAddressPrompt)
-                    AccessKeyStatus(name: facts.plex.keyName, found: facts.plex.keyFound)
+                    ServiceKeyRows(name: Words.plexSection, state: model.keyState("plex"), saving: model.savingKey) {
+                        await model.saveKey($0, for: "plex")
+                    }
                 }
                 Section {
                     Toggle(isOn: tmdbEnabled) {
                         Text(Words.useTMDB)
                         Text(Words.useTMDBHelp)
                     }
-                    AccessKeyStatus(name: facts.tmdb.keyName, found: facts.tmdb.keyFound)
+                    ServiceKeyRows(name: Words.tmdbSection, state: model.keyState("tmdb"), saving: model.savingKey) {
+                        await model.saveKey($0, for: "tmdb")
+                    }
                 } header: {
                     Text(Words.tmdbSection)
                 } footer: {
@@ -1262,30 +1305,60 @@ struct CompressionSettingsForm: View {
     }
 }
 
-/// Says only whether the key is set and where it is read from; the key itself never reaches the app.
-struct AccessKeyStatus: View {
+extension ServiceKeyState {
+    var symbol: String {
+        switch self {
+        case .connected: "checkmark.circle"
+        case .notSet, .rejected, .unreachable: "exclamationmark.triangle"
+        case .checking, .saved: "key"
+        }
+    }
+
+    var color: AnyShapeStyle {
+        switch self {
+        case .connected: AnyShapeStyle(Color.green)
+        case .notSet, .rejected, .unreachable: AnyShapeStyle(Color.orange)
+        case .checking, .saved: AnyShapeStyle(.secondary)
+        }
+    }
+}
+
+/// A service's access key: whether it is set and accepted, and one secure field to enter or replace it. The key
+/// goes to the server once and is never shown again.
+struct ServiceKeyRows: View {
     let name: String
-    let found: Bool
+    let state: ServiceKeyState
+    let saving: Bool
+    let save: (String) async -> Bool
+    @State private var key = ""
 
     var body: some View {
         LabeledContent(Words.accessKey) {
-            if found {
-                Label(Words.accessKeyFound, systemImage: "checkmark.circle")
-                    .foregroundStyle(.green)
-            } else {
-                Text(Words.accessKeyNeeded(name))
-                    .foregroundStyle(.orange)
+            Label(Words.serviceKeyState(state, name: name), systemImage: state.symbol)
+                .foregroundStyle(state.color)
+        }
+        SettingsRow(state == .notSet ? Words.enterKey : Words.replaceKey, help: Words.keyKeptInKeychain) {
+            HStack {
+                SecureField(Words.accessKey, text: $key, prompt: Text(Words.pasteKeyPrompt))
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 220)
+                    .onSubmit(submit)
+                Button(Words.saveKey, action: submit)
+                    .disabled(trimmedKey.isEmpty || saving)
             }
         }
-        DisclosureGroup(Words.accessKeyDetails) {
-            LabeledContent(Words.accessKeyReadFrom) {
-                Text(name)
-                    .font(.body.monospaced())
-                    .textSelection(.enabled)
-            }
-            Text(Words.accessKeyHelp)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+    }
+
+    private var trimmedKey: String {
+        key.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func submit() {
+        let sent = trimmedKey
+        guard !sent.isEmpty, !saving else { return }
+        Task {
+            if await save(sent) { key = "" }
         }
     }
 }

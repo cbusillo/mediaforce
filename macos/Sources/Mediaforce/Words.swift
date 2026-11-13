@@ -1049,14 +1049,30 @@ extension Words {
     static let useTMDB = "Use TMDB"
     static let useTMDBHelp = "TMDB tells Mediaforce whether a show is still airing."
     static let accessKey = "Access key"
-    static let accessKeyFound = "Found"
-    static let accessKeyDetails = "Key details"
-    static let accessKeyReadFrom = "Read from"
-    static let accessKeyHelp = "Mediaforce reads the key from this setting on the Mac that runs it, and sees a change after it restarts. Settings never show or store the key itself."
+    static let enterKey = "Enter key"
+    static let replaceKey = "Replace key"
+    static let pasteKeyPrompt = "Paste the key"
+    static let saveKey = "Save Key"
+    static let keyKeptInKeychain = "Kept in this Mac's Keychain. Settings never show it again."
     static let metadataHelp = "A full library scan refreshes what Plex and TMDB know. What Mediaforce already learned stays available while either can't be reached."
 
-    static func accessKeyNeeded(_ name: String) -> String {
-        "Needed. Set \(name) on the Mac that runs Mediaforce."
+    static func serviceKeyState(_ state: ServiceKeyState, name: String) -> String {
+        switch state {
+        case .notSet: "Not set"
+        case .checking: "Checking…"
+        case .saved: "Saved"
+        case .connected: "Connected"
+        case .rejected: "\(name) didn't accept this key"
+        case .unreachable: "Can't reach \(name)"
+        }
+    }
+
+    static func serviceKeyRefused(_ code: String?) -> String {
+        switch code {
+        case "key_invalid": "That isn't a whole key. Paste the key again, with nothing before or after it."
+        case "key_not_saved": "Mediaforce couldn't keep the key in this Mac's Keychain. Try again."
+        default: "Mediaforce couldn't save the key."
+        }
     }
 
     static func metadataSaveRefused(_ code: String?) -> String {
@@ -1071,6 +1087,10 @@ extension Words {
 extension ActionNotice {
     static func metadataSettingsNotSaved(_ code: String?) -> ActionNotice {
         ActionNotice(title: "Settings not saved", message: Words.metadataSaveRefused(code))
+    }
+
+    static func serviceKeyNotSaved(_ code: String?) -> ActionNotice {
+        ActionNotice(title: "Key not saved", message: Words.serviceKeyRefused(code))
     }
 }
 

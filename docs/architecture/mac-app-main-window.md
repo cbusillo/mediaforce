@@ -266,13 +266,19 @@ saved work window has and no stored computer names, and computers that chose
 it by its placeholder key follow. Hours must be whole hours from 0 to 23.
 
 The Plex and TMDB tab is the web page's metadata panel: Plex on or off and its
-server address, TMDB on or off, and for each whether its access key is set.
+server address, TMDB on or off, and for each its access key.
 `GET /api/app/settings/metadata` gives `plex` (`enabled`, `address`,
-`key_name`, `key_found`), `tmdb` (`enabled`, `key_name`, `key_found`) and
-`revision`, a hash of the stored `metadata` section. Settings never hold a
-key: `key_name` is the environment variable the server reads it from and
-`key_found` only says whether it is set, so no key can reach the app, and
-neither field is accepted back. `POST /api/app/settings/metadata` takes `plex`
+`key_set`), `tmdb` (`enabled`, `key_set`) and `revision`, a hash of the stored
+`metadata` section. A key is entered once: `POST
+/api/app/settings/metadata/key` takes `service` (`plex` or `tmdb`) and `key`
+as JSON only, keeps the key in the login Keychain through Apple's `security`
+tool (on standard input, never its command line) and answers with the facts.
+The server reads a key from the Keychain first, then from the environment or
+`.env` an earlier install used. No key is ever in an answer, the runtime
+settings, the database or a log. `GET /api/app/settings/metadata/connections`
+says for each service `missing`, `not_checked` (turned off, or Plex has no
+address), `connected`, `rejected` (the service refused the key) or
+`unreachable`. `POST /api/app/settings/metadata` takes `plex`
 (`enabled`, `address`), `tmdb` (`enabled`) and `revision`, works as the other
 tabs do, and saves only the runtime settings `metadata` key, normalized as the
 web save does. Key variable names, refresh intervals and the TMDB address carry

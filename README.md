@@ -684,11 +684,14 @@ filesystem modification time as the final fallback. Selection provenance is
 written into the run manifest so retries and recovery do not silently recompute
 membership under newer policy or metadata.
 
-Plex and TMDB credentials are never written through the Settings UI. Set them in
-the launch environment instead:
-
-- `MEDIAFORCE_PLEX_TOKEN`: Plex server token
-- `MEDIAFORCE_TMDB_TOKEN`: TMDB API read-access token
+Enter the Plex token and the TMDB API read-access token once in Settings ›
+Plex and TMDB. The server keeps each in the login Keychain (service
+`Mediaforce`, accounts `plex` and `tmdb`) through Apple's `security` tool, so
+it reads them back on every start without a permission dialog; Settings only
+ever learns whether a key is set and whether the service accepts it. A key
+already set in the launch environment or the `.env` file
+(`MEDIAFORCE_PLEX_TOKEN`, `MEDIAFORCE_TMDB_TOKEN`) keeps working; a key
+entered in Settings takes its place.
 
 The configured SSH account and media paths are unrelated to these credentials.
 Plex path mappings translate the paths reported by Plex to the corresponding

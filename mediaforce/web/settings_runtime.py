@@ -856,8 +856,7 @@ def library_settings_facts(
 def metadata_settings_facts(*, status: dict[str, Any], revision: str) -> dict[str, Any]:
     """The Mac app's Plex and TMDB tab: each connection's on/off, the Plex address and whether its key is set.
 
-    `status` is `metadata_configuration_status`, which names the variable a key is read from and says only
-    whether it is set; no key value is ever part of these facts.
+    `status` is `metadata_configuration_status`; no key value is ever part of these facts.
     """
     plex = status["plex"]
     tmdb = status["tmdb"]
@@ -865,13 +864,11 @@ def metadata_settings_facts(*, status: dict[str, Any], revision: str) -> dict[st
         "plex": {
             "enabled": bool(plex["enabled"]),
             "address": str(plex["base_url"]),
-            "key_name": str(plex["token_env"]),
-            "key_found": bool(plex["token_configured"]),
+            "key_set": bool(plex["token_configured"]),
         },
         "tmdb": {
             "enabled": bool(tmdb["enabled"]),
-            "key_name": str(tmdb["token_env"]),
-            "key_found": bool(tmdb["token_configured"]),
+            "key_set": bool(tmdb["token_configured"]),
         },
         "revision": revision,
     }

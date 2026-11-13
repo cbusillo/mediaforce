@@ -2,7 +2,7 @@ import hashlib
 import json
 import os
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from itertools import chain
@@ -18,8 +18,14 @@ from mediaforce.core.db_tables import library_items, metadata_sync_state, plex_i
     title_posters
 from mediaforce.library.external_metadata import FetchImage, FetchJson, PlexClient, PlexPathMapping, PlexShow, \
     ProviderHttpError, TmdbClient, fetch_image, fetch_json, map_plex_part_path, plex_thumb_path, tmdb_id_from_guids
+from mediaforce.library import service_keys
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.movie_workflow import classify_movie_path
+
+
+TMDB_BASE_URL = "https://api.themoviedb.org/3"
+CONNECTION_CHECK_TIMEOUT_SECONDS = 5.0
+KEY_REFUSED_STATUS_CODES = frozenset({401, 403})
 
 
 @dataclass(slots=True)
@@ -59,17 +65,19 @@ def sync_external_metadata(
         now: datetime | None = None,
         fetch_json_fn: FetchJson = fetch_json,
         fetch_image_fn: FetchImage = fetch_image,
+        key_store: service_keys.KeyStore | None = None,
 ) -> MetadataSyncStats:
     observed_at = (now or datetime.now(tz=UTC)).astimezone(UTC)
     settings = config.metadata
     plex_settings = _mapping(settings.get("plex"))
     tmdb_settings = _mapping(settings.get("tmdb"))
+    store = key_store or service_keys.system_key_store()
     stats = MetadataSyncStats()
 
     plex_base_url = str(plex_settings.get("base_url") or "").strip()
-    plex_token = _environment_secret(plex_settings, "MEDIAFORCE_PLEX_TOKEN")
+    plex_token = service_keys.service_key("plex", plex_settings, store)
     if not bool(plex_settings.get("enabled", True)) or not plex_base_url or not plex_token:
-        stats.plex.message = "Set the Plex server URL and token environment variable to enable metadata sync."
+        stats.plex.message = "Set the Plex server address and access key in Settings to enable metadata sync."
         stats.tmdb.message = "Plex metadata is required before TMDB series status can be resolved."
         return stats
 
@@ -109,15 +117,15 @@ def sync_external_metadata(
     # Posters come from Plex alone, so they are kept even when TMDB isn't set up.
     _cache_posters(connection, config.paths.poster_dir, plex_client, stats=stats.posters)
 
-    tmdb_token = _environment_secret(tmdb_settings, "MEDIAFORCE_TMDB_TOKEN")
+    tmdb_token = service_keys.service_key("tmdb", tmdb_settings, store)
     if not bool(tmdb_settings.get("enabled", True)) or not tmdb_token:
         stats.tmdb.status = "not_configured"
-        stats.tmdb.message = "Set the TMDB token environment variable to resolve current-series status."
+        stats.tmdb.message = "Set the TMDB access key in Settings to resolve current-series status."
         stats.status = "completed_with_warnings"
         return stats
 
     tmdb_client = TmdbClient(
-        base_url=str(tmdb_settings.get("base_url") or "https://api.themoviedb.org/3"),
+        base_url=str(tmdb_settings.get("base_url") or TMDB_BASE_URL),
         token=tmdb_token,
         fetch_json_fn=fetch_json_fn,
     )
@@ -138,7 +146,7 @@ def sync_external_metadata(
     return stats
 
 
-def metadata_configuration_status(config: MediaforceConfig) -> dict[str, Any]:
+def metadata_configuration_status(config: MediaforceConfig, key_store: service_keys.KeyStore) -> dict[str, Any]:
     settings = config.metadata
     plex = _mapping(settings.get("plex"))
     tmdb = _mapping(settings.get("tmdb"))
@@ -147,18 +155,68 @@ def metadata_configuration_status(config: MediaforceConfig) -> dict[str, Any]:
             "enabled": bool(plex.get("enabled", True)),
             "base_url": str(plex.get("base_url") or ""),
             "library_roots": dict(_mapping(plex.get("library_roots"))),
-            "token_env": str(plex.get("token_env") or "MEDIAFORCE_PLEX_TOKEN"),
-            "token_configured": bool(_environment_secret(plex, "MEDIAFORCE_PLEX_TOKEN")),
+            "token_env": str(plex.get("token_env") or service_keys.SERVICE_KEY_ENVIRONMENT["plex"]),
+            "token_configured": bool(service_keys.service_key("plex", plex, key_store)),
             "refresh_interval_hours": _positive_float(plex.get("refresh_interval_hours"), 1.0),
         },
         "tmdb": {
             "enabled": bool(tmdb.get("enabled", True)),
-            "base_url": str(tmdb.get("base_url") or "https://api.themoviedb.org/3"),
-            "token_env": str(tmdb.get("token_env") or "MEDIAFORCE_TMDB_TOKEN"),
-            "token_configured": bool(_environment_secret(tmdb, "MEDIAFORCE_TMDB_TOKEN")),
+            "base_url": str(tmdb.get("base_url") or TMDB_BASE_URL),
+            "token_env": str(tmdb.get("token_env") or service_keys.SERVICE_KEY_ENVIRONMENT["tmdb"]),
+            "token_configured": bool(service_keys.service_key("tmdb", tmdb, key_store)),
             "refresh_interval_hours": _positive_float(tmdb.get("refresh_interval_hours"), 24.0),
         },
     }
+
+
+def metadata_connection_states(
+        config: MediaforceConfig,
+        key_store: service_keys.KeyStore,
+        *,
+        fetch_json_fn: FetchJson = fetch_json,
+) -> dict[str, str]:
+    """Whether Plex and TMDB each answer with the saved key: `missing`, `not_checked`, `connected`, `rejected`
+    or `unreachable`. Only these words leave the server, never a key or a provider's reply."""
+    plex = _mapping(config.metadata.get("plex"))
+    tmdb = _mapping(config.metadata.get("tmdb"))
+    plex_key = service_keys.service_key("plex", plex, key_store)
+    tmdb_key = service_keys.service_key("tmdb", tmdb, key_store)
+    plex_base_url = str(plex.get("base_url") or "").strip()
+    return {
+        "plex": _connection_state(
+            plex_key,
+            checkable=bool(plex.get("enabled", True)) and bool(plex_base_url),
+            check=lambda: PlexClient(
+                base_url=plex_base_url,
+                token=plex_key,
+                client_identifier=f"mediaforce-{uuid.uuid5(uuid.NAMESPACE_URL, str(config.paths.db_path)).hex}",
+                timeout_seconds=CONNECTION_CHECK_TIMEOUT_SECONDS,
+                fetch_json_fn=fetch_json_fn,
+            ).check_access(),
+        ),
+        "tmdb": _connection_state(
+            tmdb_key,
+            checkable=bool(tmdb.get("enabled", True)),
+            check=lambda: TmdbClient(
+                base_url=str(tmdb.get("base_url") or TMDB_BASE_URL),
+                token=tmdb_key,
+                timeout_seconds=CONNECTION_CHECK_TIMEOUT_SECONDS,
+                fetch_json_fn=fetch_json_fn,
+            ).check_access(),
+        ),
+    }
+
+
+def _connection_state(key: str, *, checkable: bool, check: Callable[[], None]) -> str:
+    if not key:
+        return "missing"
+    if not checkable:
+        return "not_checked"
+    try:
+        check()
+    except ProviderHttpError as exc:
+        return "rejected" if exc.status_code in KEY_REFUSED_STATUS_CODES else "unreachable"
+    return "connected"
 
 
 def _sync_plex(
@@ -519,11 +577,6 @@ def _plex_path_mappings(config: MediaforceConfig) -> tuple[PlexPathMapping, ...]
             )
         )
     return tuple(mappings)
-
-
-def _environment_secret(settings: dict[str, Any], default_name: str) -> str:
-    name = str(settings.get("token_env") or default_name).strip()
-    return str(os.environ.get(name) or "").strip()
 
 
 def _provider_last_success(connection: DBClient, provider: str) -> datetime | None:

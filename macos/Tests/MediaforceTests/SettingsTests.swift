@@ -205,19 +205,44 @@ final class SettingsTests: XCTestCase {
     }
 
     static let metadataFacts = """
-    {"plex": {"enabled": true, "address": "http://plex.local:32400", "key_name": "MEDIAFORCE_PLEX_TOKEN",
-              "key_found": true},
-     "tmdb": {"enabled": false, "key_name": "MEDIAFORCE_TMDB_TOKEN", "key_found": false},
+    {"plex": {"enabled": true, "address": "http://plex.local:32400", "key_set": true},
+     "tmdb": {"enabled": false, "key_set": false},
      "revision": "m1"}
     """
 
+    static let metadataConnections = #"{"plex": "connected", "tmdb": "missing"}"#
+
     func testMetadataSettingsDecodeFromServerShape() throws {
         let decoded = try JSONDecoder.mediaforce.decode(MetadataSettingsFacts.self, from: Data(Self.metadataFacts.utf8))
-        XCTAssertEqual(decoded.plex, .init(
-            enabled: true, address: "http://plex.local:32400", keyName: "MEDIAFORCE_PLEX_TOKEN", keyFound: true
-        ))
-        XCTAssertEqual(decoded.tmdb, .init(enabled: false, keyName: "MEDIAFORCE_TMDB_TOKEN", keyFound: false))
+        XCTAssertEqual(decoded.plex, .init(enabled: true, address: "http://plex.local:32400", keySet: true))
+        XCTAssertEqual(decoded.tmdb, .init(enabled: false, keySet: false))
         XCTAssertEqual(decoded.revision, "m1")
+    }
+
+    func testKeyStateFollowsWhatTheServerLastFound() throws {
+        let connections = try JSONDecoder.mediaforce.decode(MetadataConnections.self, from: Data(Self.metadataConnections.utf8))
+        XCTAssertEqual(ServiceKeyState(keySet: true, checking: false, checked: connections.plex), .connected)
+        XCTAssertEqual(ServiceKeyState(keySet: false, checking: false, checked: connections.tmdb), .notSet)
+        XCTAssertEqual(ServiceKeyState(keySet: true, checking: true, checked: "connected"), .checking)
+        XCTAssertEqual(ServiceKeyState(keySet: true, checking: false, checked: "rejected"), .rejected)
+        XCTAssertEqual(ServiceKeyState(keySet: true, checking: false, checked: "unreachable"), .unreachable)
+        XCTAssertEqual(ServiceKeyState(keySet: true, checking: false, checked: "not_checked"), .saved)
+        XCTAssertEqual(ServiceKeyState(keySet: true, checking: false, checked: nil), .saved)
+    }
+
+    func testAKeyIsSentOnlyWithItsService() throws {
+        let body = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder.mediaforce.encode(ServiceKeySave(service: "tmdb", key: "k1")))
+                as? NSDictionary
+        )
+        XCTAssertEqual(body, ["service": "tmdb", "key": "k1"] as NSDictionary)
+    }
+
+    func testEveryKeyRefusalCodeHasItsOwnWords() {
+        let codes = ["key_invalid", "key_not_saved"]
+        let words = codes.map { Words.serviceKeyRefused($0) }
+        XCTAssertEqual(Set(words).count, codes.count)
+        XCTAssertFalse(words.contains(Words.serviceKeyRefused("service_unknown")))
     }
 
     func testMetadataSaveBodySendsOnlyWhatTheTabEdits() throws {

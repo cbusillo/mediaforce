@@ -115,6 +115,8 @@ def register_metadata_settings_routes(
     *,
     metadata_settings_facts: Callable[[], dict[str, Any]],
     save_metadata_settings_action: Callable[..., dict[str, Any]],
+    metadata_connections: Callable[[], dict[str, str]],
+    save_service_key_action: Callable[[str, str], dict[str, Any]],
 ) -> None:
     """The Mac app's Plex and TMDB settings tab. Refusals carry a code the app words; never a sentence."""
 
@@ -145,6 +147,28 @@ def register_metadata_settings_routes(
         except ValueError:
             return JSONResponse({"ok": False, "code": "invalid_settings"}, status_code=400)
         return JSONResponse(result)
+
+    @app.get("/api/app/settings/metadata/connections")
+    def api_app_metadata_connections() -> JSONResponse:
+        return JSONResponse(metadata_connections())
+
+    @app.post("/api/app/settings/metadata/key")
+    async def api_app_service_key_save(request: Request) -> JSONResponse:
+        if not _is_json(request):
+            return JSONResponse({"ok": False, "code": "invalid_settings"}, status_code=415)
+        body = await request_body(request)
+        try:
+            result = await run_in_threadpool(
+                save_service_key_action, str(body.get("service") or ""), str(body.get("key") or "").strip(),
+            )
+        except SettingsValidationError as exc:
+            return JSONResponse({"ok": False, "code": exc.code}, status_code=400)
+        return JSONResponse(result)
+
+
+def _is_json(request: Request) -> bool:
+    """A key is taken only as JSON, which a page on another site cannot post here without the server's consent."""
+    return request.headers.get("content-type", "").split(";", 1)[0].strip().lower() == "application/json"
 
 
 def register_compression_settings_routes(
