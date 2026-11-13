@@ -92,7 +92,7 @@ struct OriginalConfirmation: Codable {
 @MainActor
 struct OriginalApprovalStore {
     var directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appending(path: "mediaforce/mac-app/original-approvals")
+        .appending(path: "\(BackgroundService.isProof ? BackgroundService.label : "mediaforce")/mac-app/original-approvals")
     var authenticate: @MainActor (String) async throws -> Bool = authenticateOwner
 
     static func authenticateOwner(_ reason: String) async throws -> Bool {

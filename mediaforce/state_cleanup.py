@@ -21,7 +21,9 @@ from mediaforce.encoding.quality import (
 from mediaforce.hosts import DEFAULT_HOST_CAPABILITIES
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.remote import run_remote_command
-from mediaforce.ops.runtime_install import RuntimeProtectionError, paths_overlap, protected_runtime_roots, retained_deploy_stage, runtime_activity
+from mediaforce.ops.runtime_install import (
+    RuntimeProtectionError, paths_overlap, protected_runtime_roots, retained_deploy_stage, runtime_activity, update_hold_reason,
+)
 from mediaforce.hosts.work_window import controller_work_allowed
 
 SECONDS_PER_DAY = 86400
@@ -59,6 +61,10 @@ def purge_transient_artifacts(config: MediaforceConfig, *, force: bool = False) 
     with runtime_activity(config.paths.db_path.parent, cleanup=True) as acquired:
         if not acquired:
             LOGGER.warning("Cleanup refused: a controller deployment is active")
+            return False
+        if update_hold_reason(config.paths.db_path.parent):
+            # Both the new rollback pair and the last usable one stay until the update finishes.
+            LOGGER.warning("Cleanup refused: an app update is unfinished")
             return False
         return _purge_due_transient_artifacts(config)
 

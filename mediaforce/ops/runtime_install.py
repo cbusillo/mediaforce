@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import plistlib
 import sys
 import time
 from collections.abc import Iterator
@@ -10,8 +11,33 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+UPDATE_INTENT_NAME = "update-intent.json"
+# The live service. A proof build names its own label and port in its Info.plist so it can never address this one.
+SERVICE_LABEL = "com.mediaforce.web"
+SERVER_PORT = 8777
+
+
 class RuntimeProtectionError(RuntimeError):
     pass
+
+
+def read_update_intent(support_dir: Path) -> dict | None:
+    """The unfinished app update beside this database, or None. An unreadable record still counts as unfinished."""
+    try:
+        value = json.loads((support_dir / "runtime" / UPDATE_INTENT_NAME).read_text())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return {"phase": "unreadable"}
+    return value if isinstance(value, dict) else {"phase": "unreadable"}
+
+
+def update_hold_reason(support_dir: Path) -> str | None:
+    """Why new work and cleanup wait: an update holds them until it finishes, across quit, replacement and reboot."""
+    intent = read_update_intent(support_dir)
+    if intent is None:
+        return None
+    return f"Mediaforce is updating to build {intent.get('to', 'unknown')}. New work waits until it finishes."
 
 
 def bundled_app_path() -> Path | None:
@@ -21,8 +47,31 @@ def bundled_app_path() -> Path | None:
     return None
 
 
+def bundle_service(app: Path | None) -> tuple[str, int]:
+    """The launchd label and local port this app's server uses: the live service's unless the build names others."""
+    info = plistlib.loads((app / "Contents/Info.plist").read_bytes()) if app else {}
+    return str(info.get("MediaforceServiceLabel") or SERVICE_LABEL), int(info.get("MediaforceServerPort") or SERVER_PORT)
+
+
+def bundle_build(app: Path | None) -> str | None:
+    return str(plistlib.loads((app / "Contents/Info.plist").read_bytes())["CFBundleVersion"]) if app else None
+
+
+def support_root(home: Path) -> Path:
+    """Application support for this server: the live folder, or a proof build's own folder named by its label."""
+    label = bundle_service(bundled_app_path())[0]
+    return home.resolve() / "Library" / "Application Support" / ("mediaforce" if label == SERVICE_LABEL else label)
+
+
+def require_own_support(app: Path, database: Path, home: Path) -> None:
+    """A proof build never opens or records anything beside the live service's database."""
+    live = home.resolve() / "Library" / "Application Support" / "mediaforce"
+    if bundle_service(app)[0] != SERVICE_LABEL and database.resolve().is_relative_to(live):
+        raise RuntimeProtectionError(f"a proof build must use its own config and database, not {database}")
+
+
 def runtime_directory(home: Path) -> Path:
-    return home.resolve() / "Library" / "Application Support" / "mediaforce" / "runtime"
+    return support_root(home) / "runtime"
 
 
 def require_release_directory(project_root: Path, home: Path) -> None:

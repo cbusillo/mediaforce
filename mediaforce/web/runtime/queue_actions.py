@@ -5,6 +5,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
 from mediaforce.library.background_work import set_background_work_paused
 from mediaforce.library.evidence_queue import resume_evidence_queue
+from mediaforce.ops.runtime_install import update_hold_reason
 
 
 def pause_encode_queue_action(*, connection_factory: Any, config: MediaforceConfig, now_iso: Any) -> dict[str, Any]:
@@ -17,7 +18,8 @@ def pause_encode_queue_action(*, connection_factory: Any, config: MediaforceConf
 
 
 def resume_encode_queue_action(*, connection_factory: Any, config: MediaforceConfig, now_iso: Any) -> dict[str, Any]:
-    _ = config
+    if hold := update_hold_reason(config.paths.db_path.parent):
+        return {"ok": False, "message": hold}
     with connection_factory() as connection:
         updated_at = now_iso()
         connection.commit()

@@ -2,6 +2,17 @@ import Foundation
 
 enum Words {
     static let needsYou = "Needs you"
+    static let updated = "Mediaforce updated itself between files and is running again."
+    static let updateWaitingForQuietTime = "Mediaforce installs this update between files."
+    static let updateServerUnavailable = "Mediaforce can't update because its background service isn't set up on this Mac."
+
+    static func updateNeedsYou(_ problem: String) -> String {
+        "Mediaforce couldn't finish an update on its own and needs you: \(problem)"
+    }
+
+    static func updateFailedBefore(build: String) -> String {
+        "Version \(build) didn't start correctly on this Mac, so Mediaforce went back to the earlier version and waits for a newer one."
+    }
     static let library = "Library"
 
     static func folderName(_ prefix: String) -> String {

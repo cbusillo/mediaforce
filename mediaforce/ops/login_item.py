@@ -10,12 +10,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from mediaforce.ops.runtime_install import RuntimeProtectionError, require_release_directory, runtime_directory
+from mediaforce.ops.runtime_install import (
+    SERVICE_LABEL, RuntimeProtectionError, bundle_service, require_release_directory, runtime_directory,
+)
 
 
-LOGIN_ITEM_LABEL = "com.mediaforce.web"
+LOGIN_ITEM_LABEL = SERVICE_LABEL
 MACOS_SIGNING_TEAM = "MM5YXC7T6E"
-BUNDLED_UPDATE_RECOVERY = "Restore the saved app and configuration. Continue using the current Mediaforce installation until bundled updates are available."
+BUNDLED_UPDATE_RECOVERY = "Restore the saved app and configuration; a new build arrives through the app's update."
 BOOTOUT_ACCEPTED_EXIT_CODES = frozenset({0, 3, 36, 113})
 LOGIN_ITEM_LOG_ROTATION_BYTES = 16 * 1024 * 1024
 LOGIN_ITEM_PATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -33,6 +35,8 @@ class LoginItemPaths:
     home: Path
     config_path: Path | None = None
     credentials_path: Path | None = None
+    # The saved service's own label, for commands that address it after its app moved or was removed.
+    saved_label: str | None = None
 
     @property
     def bundled(self) -> bool:
@@ -55,12 +59,19 @@ class LoginItemPaths:
         return self.project_root
 
     @property
+    def label(self) -> str:
+        if self.saved_label:
+            return self.saved_label
+        return bundle_service(self.project_root)[0] if self.bundled else LOGIN_ITEM_LABEL
+
+    @property
     def plist(self) -> Path:
-        return self.home / "Library" / "LaunchAgents" / f"{LOGIN_ITEM_LABEL}.plist"
+        return self.home / "Library" / "LaunchAgents" / f"{self.label}.plist"
 
     @property
     def log_dir(self) -> Path:
-        return self.home / "Library" / "Logs" / "mediaforce"
+        # Another service, such as a proof build's, never writes or rotates the live service's logs.
+        return self.home / "Library" / "Logs" / ("mediaforce" if self.label == LOGIN_ITEM_LABEL else self.label)
 
     @property
     def stdout_log(self) -> Path:
@@ -78,7 +89,7 @@ def render_login_item_plist(paths: LoginItemPaths) -> bytes:
     if paths.credentials_path is not None:
         arguments.extend(["--credentials", str(paths.credentials_path)])
     payload = {
-        "Label": LOGIN_ITEM_LABEL,
+        "Label": paths.label,
         "ProgramArguments": arguments,
         "WorkingDirectory": str(paths.working_directory),
         "EnvironmentVariables": {"PATH": _login_item_path(paths.home)},
@@ -122,7 +133,7 @@ def enable_login_item(paths: LoginItemPaths, *, runner: CommandRunner | None = N
     command_runner = runner or _run_command
     install_state = install_login_item(paths)
     domain = _launch_domain()
-    target = _launch_target()
+    target = _launch_target(paths.label)
     _bootout(command_runner, target)
     _wait_until_unloaded(command_runner, target)
     rotate_login_item_logs(paths)
@@ -132,10 +143,9 @@ def enable_login_item(paths: LoginItemPaths, *, runner: CommandRunner | None = N
 
 
 def disable_login_item(paths: LoginItemPaths, *, runner: CommandRunner | None = None) -> None:
-    _ = paths
     _require_supported_platform()
     command_runner = runner or _run_command
-    target = _launch_target()
+    target = _launch_target(paths.label)
     _bootout(command_runner, target)
     _wait_until_unloaded(command_runner, target)
     _require_success(command_runner(["/bin/launchctl", "disable", target]), "disable the login item")
@@ -175,9 +185,9 @@ def login_item_status(paths: LoginItemPaths, *, runner: CommandRunner | None = N
             "  next     run `uv sync`, then enable the login item again",
         ]
     command_runner = runner or _run_command
-    result = command_runner(["/bin/launchctl", "print", _launch_target()])
+    result = command_runner(["/bin/launchctl", "print", _launch_target(paths.label)])
     lines = [
-        f"login item: {'enabled' if result.returncode == 0 else 'installed but not running'} {LOGIN_ITEM_LABEL}",
+        f"login item: {'enabled' if result.returncode == 0 else 'installed but not running'} {paths.label}",
         f"  plist    {paths.plist} (current)",
         f"  program  {paths.program} --no-reload",
         f"  logs     {paths.stdout_log}",
@@ -224,9 +234,11 @@ def run_login_item_command(
         except RuntimeProtectionError:
             root = runtime_directory(home) / "current"
     plist = LoginItemPaths(project_root=root, home=home).plist
+    saved_label = None
     if plist.exists():
         try:
             installed = plistlib.loads(plist.read_bytes())
+            saved_label = installed.get("Label") if isinstance(installed.get("Label"), str) else None
             arguments = installed.get("ProgramArguments", [])
             installed_program = Path(arguments[0])
             installed_root = (
@@ -257,7 +269,8 @@ def run_login_item_command(
         except (OSError, ValueError, KeyError, IndexError, TypeError, plistlib.InvalidFileException, LoginItemError) as exc:
             print(f"login item: cannot identify installed runtime: {exc}")
             return 1
-    paths = LoginItemPaths(project_root=root.resolve(), home=home, config_path=config_path, credentials_path=credentials_path)
+    paths = LoginItemPaths(project_root=root.resolve(), home=home, config_path=config_path, credentials_path=credentials_path,
+                           saved_label=saved_label)
     try:
         if action == "install":
             state = install_login_item(paths)
@@ -265,19 +278,19 @@ def run_login_item_command(
             return 0
         if action == "enable":
             state = enable_login_item(paths)
-            print(f"login item: enabled {LOGIN_ITEM_LABEL} ({state})")
+            print(f"login item: enabled {paths.label} ({state})")
             return 0
         if action == "restart":
             state = enable_login_item(paths)
-            print(f"login item: restarted {LOGIN_ITEM_LABEL} ({state})")
+            print(f"login item: restarted {paths.label} ({state})")
             return 0
         if action == "disable":
             disable_login_item(paths)
-            print(f"login item: disabled {LOGIN_ITEM_LABEL}")
+            print(f"login item: disabled {paths.label}")
             return 0
         if action == "uninstall":
             uninstall_login_item(paths)
-            print(f"login item: uninstalled {LOGIN_ITEM_LABEL}")
+            print(f"login item: uninstalled {paths.label}")
             return 0
         if action == "status":
             status, output = login_item_status(paths)
@@ -307,6 +320,11 @@ def _atomic_write(path: Path, payload: bytes, *, mode: int = 0o644) -> None:
 
 
 def _require_bundled_install(paths: LoginItemPaths) -> None:
+    from mediaforce.core.config import load_config
+    from mediaforce.ops.runtime_install import require_own_support
+
+    if paths.config_path is not None:
+        require_own_support(paths.project_root, load_config(paths.config_path).paths.db_path, paths.home)
     if "AppTranslocation" in paths.project_root.parts:
         raise LoginItemError("move Mediaforce to its permanent location before setting up the background service")
     _verify_signed_bundle(paths.project_root)
@@ -412,7 +430,7 @@ def _bootstrap(runner: CommandRunner, domain: str, plist_path: Path) -> None:
         result = runner(command)
     _require_success(result, "bootstrap the login item")
     # Without -k, a job launchd already started keeps running.
-    _require_success(runner(["/bin/launchctl", "kickstart", f"{domain}/{LOGIN_ITEM_LABEL}"]), "start the login item")
+    _require_success(runner(["/bin/launchctl", "kickstart", f"{domain}/{plist_path.stem}"]), "start the login item")
 
 
 def _require_success(result: subprocess.CompletedProcess[str], action: str) -> None:
@@ -434,8 +452,8 @@ def _launch_domain() -> str:
     return f"gui/{os.getuid()}"
 
 
-def _launch_target() -> str:
-    return f"{_launch_domain()}/{LOGIN_ITEM_LABEL}"
+def _launch_target(label: str = LOGIN_ITEM_LABEL) -> str:
+    return f"{_launch_domain()}/{label}"
 
 
 def _launchctl_value(output: str, key: str) -> str | None:
@@ -473,6 +491,16 @@ def _show_logs(path: Path, *, follow: bool, lines: int) -> int:
 
 
 __all__ = [
+    # Deploy and update transactions share these launchd and file steps.
+    "CommandRunner",
+    "_atomic_write",
+    "_bootstrap",
+    "_bundle_code_hash",
+    "_launch_domain",
+    "_launch_target",
+    "_require_success",
+    "_run_command",
+    "_verify_signed_bundle",
     "MACOS_SIGNING_TEAM",
     "BOOTOUT_ACCEPTED_EXIT_CODES",
     "LOGIN_ITEM_LABEL",

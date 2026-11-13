@@ -28,6 +28,7 @@ from fastapi import HTTPException
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.runtime.scratch_reservations import calibration_scratch_reservations
+from mediaforce.ops.runtime_install import update_hold_reason
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission, controller_storage_admission_issue
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
@@ -4128,7 +4129,7 @@ def process_encode_queue_once(
 
     with open_db(config.paths.db_path) as connection:
         state = load_queue_state(connection)
-        if state.get("is_paused") or state.get("stop_requested"):
+        if state.get("is_paused") or state.get("stop_requested") or update_hold_reason(config.paths.db_path.parent):
             return
         while True:
             next_job = claim_next_runnable_encode_job(

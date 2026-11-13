@@ -93,6 +93,24 @@ examples and are assembled from the digest-pinned runtime and hashed lockfile.
 Upstream Python tests, development objects and local wheel-origin records are
 omitted from the app.
 Staged native code has debug symbols stripped before signing; qualification
-rejects retained object-file debug maps. Until update support is delivered,
-startup refuses an app replaced in place over a saved service. Restore the
-saved app/configuration and keep using the current controller deployment.
+rejects retained object-file debug maps. Sparkle's framework helpers are
+signed as whole bundles, inside out, with the same team.
+
+## Updates with Sparkle
+
+A build checks for updates only when its Info.plist names a feed
+(`MEDIAFORCE_UPDATE_FEED`) and public EdDSA key (`MEDIAFORCE_UPDATE_KEY`);
+source builds leave both empty. The steps around Sparkle are in
+`mediaforce/ops/controller_deploy.py`, run by the app as
+`mediaforce-server service update reconcile|prepare|cancel|rollback`. Updates
+install automatically between files: at once when nothing runs, otherwise after
+draining files that finish within 15 minutes. While `runtime/update-intent.json`
+exists beside the database, it holds new work and cleanup; pauses a person set
+are never changed. A failed new build rolls back on its own; a stuck update is
+recovered by running `reconcile` or `rollback` from either the installed app or
+the stage's saved copy.
+
+`scripts/build-mac-app.sh proof OUTPUT CACHE BUILD FEED KEY` builds a copy for
+update proofs with its own app ID, service label, port, support folder and
+logs. Run its service from a folder on the internal drive: a launchd agent
+stalled reading an app on an external volume.

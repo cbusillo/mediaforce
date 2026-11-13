@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from sqlalchemy import func, select
 
@@ -25,6 +25,7 @@ class ReleaseWorkCounts(TypedDict):
 class ReleaseWorkSnapshot(TypedDict):
     observed_at: str
     counts: ReleaseWorkCounts
+    server: NotRequired[dict[str, str | None]]
 
 
 def release_work_payload(db_path: Path) -> ReleaseWorkSnapshot:

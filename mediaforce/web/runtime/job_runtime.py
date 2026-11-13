@@ -33,6 +33,7 @@ from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ScheduleWindowClosedError
 from mediaforce.library.media_scopes import path_matches_scope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.library.background_work import background_work_is_paused
+from mediaforce.ops.runtime_install import update_hold_reason
 from mediaforce.library.metadata_sync import sync_external_metadata
 from mediaforce.library.scanner import scan_library
 from mediaforce.state_cleanup import purge_transient_artifacts
@@ -968,6 +969,9 @@ def calibration_queue_worker_loop(
 
 def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRuntimeDeps) -> None:
     config = load_config(config_path)
+    if update_hold_reason(config.paths.db_path.parent):
+        # Queued samples wait for an app update; running ones finish.
+        return
     capacities = {
         "sample": deps.sample_calibration_concurrency,
         "full": deps.full_calibration_concurrency,
