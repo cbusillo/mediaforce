@@ -1,7 +1,7 @@
 """Kind approvals: one approval covering every TV season of a kind of content (#1047).
 
 The Director decided on 2026-10-22 (#517) that one approval may cover every show that measures the same,
-starting with darker and bright live action. Cartoons and 4K stay one-time choices made show by show.
+starting with darker and bright live action. Cartoons stay one-time choices made show by show.
 
 A kind approval is a copy of a current folder approval the Director chose to extend, kept in the web state
 directory's `kinds` folder, one file per kind. Production approval precedence lives in production_approval;
@@ -32,9 +32,10 @@ from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES, derive_item_workflow_state
 from mediaforce.library.content_kinds import season_grouping, season_kind_report
 from mediaforce.tuning.calibration_jobs import load_latest_job, load_latest_jobs_for_prefixes
+from mediaforce.tuning.size_goals import tallest_picture
 from mediaforce.web.runtime.app_samples import sample_moments
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
-from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
+from mediaforce.web.runtime.production_approval import KEEP_FULL_HEIGHT_FIELD, EffectiveApproval, LoadCalibrationState, \
     SampleWait, approval_prefixes, cached_calibration_loader, effective_production_approval, holds_approval, production_approval_contract, \
     production_calibration, sample_allows_kind, season_prefix_of, season_prefix_from_types
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
@@ -82,13 +83,26 @@ def approve_kind(
     refusal = _extension_refusal(EffectiveApproval(from_prefix, payload, production_approval_contract(payload)))
     if refusal is not None:
         return {"ok": False, "code": refusal}
-    saved = {**payload, "kind": kind, "from_prefix": from_prefix, "kind_approved_at": approved_at}
+    _save_kind_approval(config, kind, {**payload, "kind": kind, "from_prefix": from_prefix, "kind_approved_at": approved_at})
+    return {"ok": True, "kind": kind, "from_prefix": from_prefix}
+
+
+def _save_kind_approval(config: MediaforceConfig, kind: str, payload: Mapping[str, Any]) -> None:
     path = kind_approval_file(config, kind)
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False, suffix=".tmp") as handle:
-        json.dump(saved, handle, indent=2, sort_keys=True)
+        json.dump(payload, handle, indent=2, sort_keys=True)
     os.replace(handle.name, path)
-    return {"ok": True, "kind": kind, "from_prefix": from_prefix}
+
+
+def choose_kind_picture_height(config: MediaforceConfig, kind: str, *, keep_full_height: bool) -> bool:
+    """Save whether 4K stays 4K under this kind's approval; False when the kind holds no approval to save it on."""
+    approval = load_kind_approval(config, kind)
+    if kind not in APPROVABLE_KINDS or approval is None or not holds_approval(approval):
+        return False
+    saved = {key: value for key, value in approval.items() if key != KEEP_FULL_HEIGHT_FIELD}
+    _save_kind_approval(config, kind, {**saved, KEEP_FULL_HEIGHT_FIELD: True} if keep_full_height else saved)
+    return True
 
 
 def _extension_refusal(approval: EffectiveApproval) -> str | None:
@@ -346,7 +360,7 @@ def next_approved_season(
     return None
 
 
-KINDS_IN_ORDER = ("darker_live_action", "bright_live_action", "cartoon", "4k")
+KINDS_IN_ORDER = ("darker_live_action", "bright_live_action", "cartoon")
 NO_FOLDER_APPROVAL_CODE = "no_folder_approval"
 SOURCE_KIND_DIFFERS_CODE = "source_kind_differs"
 
@@ -358,6 +372,7 @@ def _approval_facts(config: MediaforceConfig, calibration: Mapping[str, Any] | N
     contract = object_dict(production_approval_contract(payload))
     size_goal = object_dict(object_dict(contract.get("operator_intent")).get("size_goal"))
     return {"from_prefix": payload.get("from_prefix"), "approved_at": payload.get("kind_approved_at"),
+            "keep_full_height": bool(payload.get(KEEP_FULL_HEIGHT_FIELD)),
             "size_goal_mode": size_goal.get("mode"), "size_goal_mb": size_goal.get("value_mb"),
             "sample_moments": sample_moments(payload, review_dir=config.paths.review_dir)}
 
@@ -598,6 +613,7 @@ def kinds_payload(
         "mixed_seasons": int(object_dict(totals.get("mixed")).get("seasons") or 0),
         "unmeasured_seasons": int(object_dict(totals.get("unmeasured")).get("seasons") or 0),
         "folder_approved_seasons": int(object_dict(totals.get("folder_approved")).get("seasons") or 0),
+        "tallest_picture": tallest_picture(config.video),
     }
     for entry in payload["kinds"]:
         season = entry["sample_season"]

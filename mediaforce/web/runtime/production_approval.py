@@ -20,7 +20,8 @@ would reject for one of its files. Production actions find their approval with
 under it.
 
 An approval governs the settings its sample tested: video, subtitles and the audio its tuning may
-change. The show's sound choice and planning, including the series lifecycle mode, stay the owner's:
+change. A kind's approval also says once whether 4K stays 4K; unless the Director chose to keep it, every
+taller original it covers comes down to the library's tallest picture (`with_kind_picture_height`). The show's sound choice and planning, including the series lifecycle mode, stay the owner's:
 the sample records them but production uses the owner's current ones (`policy_with_owner_settings`).
 Changing them leaves the approval and its contract as they are, so finished files still publish.
 """
@@ -37,7 +38,8 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.type_defs import int_value, object_dict
 from mediaforce.library.candidate_selection import season_identity
-from mediaforce.tuning.size_goals import operator_intent_from_policy
+from mediaforce.tuning.size_goals import ResolutionIntent, operator_intent_from_policy, resolution_intent_from_policy, \
+    tallest_picture
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash, review_gate
 from mediaforce.web.runtime.production_holds import approval_identity
 
@@ -47,6 +49,8 @@ PRODUCTION_APPROVAL_CONTRACT_SCHEMA_VERSION = 1
 APPROVAL_NEEDS_FRESH_SAMPLE_CODE = "approval_needs_fresh_sample"
 NEARER_APPROVAL_CODE = "nearer_approval"
 _APPROVAL_FIELDS = ("accepted_at", "accepted_sample_job_id", "accepted_policy_hash")
+# Saved on a kind's approval when the Director keeps 4K at 4K; absent, 4K comes down to the library's tallest picture.
+KEEP_FULL_HEIGHT_FIELD = "keep_full_height"
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +235,9 @@ def production_approval_contract(calibration: Mapping[str, Any]) -> dict[str, An
     audio_preset = str(object_dict(object_dict(calibration.get("policy")).get("audio")).get("preset") or "")
     if audio_preset:
         request = {**request, "audio_preset": audio_preset}
+    # Choosing to keep 4K changes what the files it covers look like, so files made before the choice are made again.
+    if calibration.get(KEEP_FULL_HEIGHT_FIELD):
+        request = {**request, KEEP_FULL_HEIGHT_FIELD: True}
     return {
         "schema_version": PRODUCTION_APPROVAL_CONTRACT_SCHEMA_VERSION,
         "sample_job_id": sample_job_id,
@@ -302,6 +309,27 @@ def policy_with_owner_settings(
     if audio:
         policy["audio"] = audio
     return copy.deepcopy(policy)
+
+
+def with_kind_picture_height(policy: Mapping[str, Any], calibration: Mapping[str, Any], config: MediaforceConfig) -> dict[str, Any]:
+    """The production policy under a kind's approval, with the kind's 4K choice applied.
+
+    A kind's approval was sampled on one show, so its own height setting never decides another show's 4K: 4K comes
+    down to the library's tallest picture unless the Director chose to keep it. A lower limit the sample chose stays.
+    A folder's own approval is returned as it is; its sample already made the choice for that folder.
+    """
+    limit = tallest_picture(object_dict(config.raw.get("video")))
+    if not calibration.get("kind_approved_at") or limit <= 0:
+        return dict(policy)
+    video = object_dict(policy.get("video"))
+    resolution = resolution_intent_from_policy(video)
+    cap = (resolution.max_height or 0) if resolution.mode == "max_height" else 0
+    if calibration.get(KEEP_FULL_HEIGHT_FIELD):
+        cap = 0 if cap >= limit else cap
+    elif cap <= 0 or cap > limit:
+        cap = limit
+    chosen = ResolutionIntent("max_height", cap, "kind_approval") if cap > 0 else ResolutionIntent("source", None, "kind_approval")
+    return {**policy, "video": {**video, **chosen.policy_fragment()["video"]}}
 
 
 def production_approval_identity(calibration: Mapping[str, Any]) -> str:

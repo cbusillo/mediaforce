@@ -36,11 +36,11 @@ from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash, review_gate
 from mediaforce.web.runtime.kind_approvals import APPROVABLE_KINDS, APPROVAL_NOT_CURRENT_CODE, KIND_IS_ONE_TIME_CODE, \
     KIND_QUEUE_WAITS_CODE, KIND_RETRY_SECONDS, SIZE_GOAL_NOT_SCALABLE_CODE, KindAwareLoader, KindSeason, SeasonKinds, \
-    NO_FOLDER_APPROVAL_CODE, SOURCE_KIND_DIFFERS_CODE, approve_kind, approve_kind_action, background_queue_blocker, kind_snapshot, kinds_payload, load_kind_approval, \
+    NO_FOLDER_APPROVAL_CODE, SOURCE_KIND_DIFFERS_CODE, approve_kind, approve_kind_action, background_queue_blocker, choose_kind_picture_height, kind_snapshot, kinds_payload, load_kind_approval, \
     next_kind_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
 from mediaforce.web.runtime.page_state import PageStateFacts, PageStateSources, card_page_states, decide_page_state
-from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_matches, \
-    production_calibration
+from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_contract, \
+    production_approval_matches, production_calibration, with_kind_picture_height
 
 APPROVED_SEASON = "tv/Drama/Season 1"
 SEASON = "tv/Thriller/Season 2"
@@ -215,6 +215,30 @@ def test_a_never_sampled_season_of_an_approved_kind_is_queued_under_it(tmp_path:
     assert production_approval_matches(effective_production_approval(config, EPISODE, load), manifest, item)
 
 
+@pytest.mark.parametrize("keep", [False, True])
+def test_a_kinds_approval_says_once_whether_4k_stays_4k(tmp_path: Path, keep: bool) -> None:
+    config = _config(tmp_path)
+    config.raw["video"].update({"max_height": 1080, "resolution_intent_mode": "max_height"})
+    # The approved show's sample kept its original's height, which for its 1080p original was the same thing.
+    calibration = _approved(config)
+    calibration["policy"]["video"].update({"max_height": 0, "resolution_intent_mode": "source"})
+    calibration["accepted_policy_hash"] = calibration_policy_hash(calibration)
+    approve_kind(config, DARKER, APPROVED_SEASON, calibration, approved_at="now")
+    first = production_approval_contract(load_kind_approval(config, DARKER) or {})
+    assert choose_kind_picture_height(config, DARKER, keep_full_height=keep)
+    assert not choose_kind_picture_height(config, "bright_live_action", keep_full_height=keep)
+
+    result, manifests = _queue(config, SEASON, _loader({}, {SEASON: DARKER}))
+
+    assert result["ok"], result
+    video = manifests[0]["items"][0]["resolved_policy"]["video"]
+    assert (video["resolution_intent_mode"], video["max_height"]) == (("source", 0) if keep else ("max_height", 1080))
+    # Keeping 4K changes what the files look like, so files made before the choice are made again.
+    assert (production_approval_contract(load_kind_approval(config, DARKER) or {}) != first) == keep
+    # A folder's own approval already made its choice when its sample was made.
+    assert with_kind_picture_height(calibration["policy"], calibration, config) == calibration["policy"]
+
+
 def test_a_season_outside_every_approved_kind_is_not_queued(tmp_path: Path) -> None:
     config = _config(tmp_path)
     approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
@@ -348,13 +372,12 @@ def test_the_kinds_facts_say_what_each_kind_covers_and_how_it_is_decided(tmp_pat
     # Only folder approvals are counted, so the page never works out a season's kind just to skip it.
     assert asked == []
     kinds = {kind["kind"]: kind for kind in facts["kinds"]}
-    assert [kind["kind"] for kind in facts["kinds"]] == ["darker_live_action", "bright_live_action", "cartoon", "4k"]
     assert kinds[DARKER]["shows"] == [{"prefix": "tv/Drama", "seasons": 1, "waiting_bytes": 1000,
                                        "sample_season": APPROVED_SEASON}]
     assert kinds[DARKER]["sample_season"] is None
     assert kinds[DARKER]["settings"] == []
     assert kinds[DARKER]["approval"] == {"from_prefix": APPROVED_SEASON, "approved_at": "2026-10-26T01:00:00+00:00",
-                                         "size_goal_mode": "normalized", "size_goal_mb": 300.0, "library_item_id": None, "sample_moments": []}
+                                         "keep_full_height": False, "size_goal_mode": "normalized", "size_goal_mb": 300.0, "library_item_id": None, "sample_moments": []}
     assert kinds["bright_live_action"]["approval"] is None and kinds["cartoon"]["one_time"]
     assert facts["unmeasured_seasons"] == 1
     assert facts["left_out"] == [{"season": "tv/Fresh/Season 1", "kind": "unmeasured", "waiting_bytes": 1000}]
@@ -921,7 +944,7 @@ def _approve_stale_kind(config: MediaforceConfig, kind: str) -> None:
 
 
 @pytest.mark.parametrize("stale_kind", [False, True])
-@pytest.mark.parametrize("kind", [DARKER, "bright_live_action", "unmeasured", "mixed", "cartoon", "4k"])
+@pytest.mark.parametrize("kind", [DARKER, "bright_live_action", "unmeasured", "mixed", "cartoon"])
 def test_old_samples_follow_a_reusable_kind_while_its_newest_sample_stays_visible(
         tmp_path: Path, kind: str, stale_kind: bool,
 ) -> None:
@@ -1282,10 +1305,10 @@ def test_kind_extension_never_copies_a_different_approved_draft(tmp_path: Path) 
     assert result == {"ok": False, "code": "sample_changed"}
     assert load_kind_approval(config, DARKER) is None
 
-def _completed_and_waiting_seasons(connection: DBClient, *, height: int = 1080) -> None:
+def _completed_and_waiting_seasons(connection: DBClient) -> None:
     for season in [APPROVED_SEASON, SEASON]:
         published = _content_item(connection, f"{season}/e00.mkv", status="promoted", codec="av1", current_dark=0.0)
-        _admit_historical_original(connection, published, dark=0.5, height=height)
+        _admit_historical_original(connection, published, dark=0.5)
         connection.execute(series_metadata.insert().values(
             series_prefix="/".join(season.split("/")[:2]), tmdb_genres_json='["Drama"]', updated_at="now"))
     _content_item(connection, f"{SEASON}/e01.mkv", status="discovered", codec="h264", current_dark=0.0)
@@ -1443,18 +1466,17 @@ def test_measuring_outside_the_pipeline_names_the_reason_and_next_action(
     assert bool(state["wait_detail"]) == bool(reason)
 
 
-@pytest.mark.parametrize("kind", ["cartoon", "4k"])
 @pytest.mark.parametrize("approval_scope", [APPROVED_SEASON, "tv/Drama"])
-def test_one_time_kind_moves_on_from_an_approved_show_sample(tmp_path: Path, kind: str, approval_scope: str) -> None:
+def test_one_time_kind_moves_on_from_an_approved_show_sample(tmp_path: Path, approval_scope: str) -> None:
+    kind = "cartoon"
     config = _config(tmp_path)
     calibration = _approved_on(config, f"{APPROVED_SEASON}/e00.mkv")
     folders = {APPROVED_SEASON: {key: value for key, value in calibration.items() if not key.startswith("accepted_")}}
     load = _loader(folders, {APPROVED_SEASON: kind, SEASON: kind})
     _finished_sample(config, APPROVED_SEASON)
     with open_db(config.paths.db_path) as connection:
-        _completed_and_waiting_seasons(connection, height=2160 if kind == "4k" else 1080)
-        if kind == "cartoon":
-            connection.execute(series_metadata.update().values(tmdb_genres_json='["Animation"]'))
+        _completed_and_waiting_seasons(connection)
+        connection.execute(series_metadata.update().values(tmdb_genres_json='["Animation"]'))
         connection.commit()
         before = next(row for row in kinds_payload(connection, config, load_calibration_state=load)["kinds"] if row["kind"] == kind)
         assert before["sample_ready"] and before["sample_season"] == APPROVED_SEASON

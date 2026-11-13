@@ -19,9 +19,11 @@ from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, Sourc
 # Kinds of content group seasons by number ranges of their originals' measured traits, so that one
 # approval can cover every season that measures the same (Director decision, #517, 2026-10-22).
 # The ranges were chosen against the live library on 2026-10-25; see #1046 for the evidence.
-ContentKind = Literal["darker_live_action", "bright_live_action", "cartoon", "4k"]
-SeasonKind = Literal["darker_live_action", "bright_live_action", "cartoon", "4k", "mixed", "unmeasured"]
-EpisodeSide = Literal["darker", "bright", "between", "repeated_frames", "4k"]
+# 4K is a picture height, not a kind: a 4K season takes its kind from its other traits, and each kind's approval
+# says whether 4K stays 4K or comes down to the library's tallest picture (#1385).
+ContentKind = Literal["darker_live_action", "bright_live_action", "cartoon"]
+SeasonKind = Literal["darker_live_action", "bright_live_action", "cartoon", "mixed", "unmeasured"]
+EpisodeSide = Literal["darker", "bright", "between", "repeated_frames"]
 
 CONTENT_KINDS_VERSION = 1
 # An episode is darker when at least this share of its measured frames is dark, and bright below the
@@ -31,8 +33,6 @@ BRIGHT_MAX_DARK_FRAMES = 0.10
 # Live action rarely repeats frames (90% of its episodes are under 0.16); above this an episode does
 # not look like live action, whatever its darkness.
 LIVE_ACTION_MAX_REPEATED_FRAMES = 0.40
-UHD_MIN_HEIGHT = 1600
-UHD_MIN_WIDTH = 3000
 # A season belongs to a kind when this share of its sided episodes agree; otherwise it is mixed.
 SEASON_AGREEMENT = 0.80
 ANIMATION_GENRE = "animation"
@@ -44,8 +44,6 @@ class EpisodeTraits:
 
     dark_frame_fraction: float | None
     repeated_frame_fraction: float | None
-    height: int | None
-    width: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,22 +59,18 @@ class SeasonGrouping:
                 "sides": dict(sorted(self.sides.items())), "reason": self.reason}
 
 
-def episode_traits(fingerprint_summary: Mapping[str, Any] | None, profile: Mapping[str, Any]) -> EpisodeTraits:
-    """Traits from an original's media fingerprint summary, if measured, and its stream profile."""
+def episode_traits(fingerprint_summary: Mapping[str, Any] | None) -> EpisodeTraits:
+    """Traits from an original's media fingerprint summary, if measured."""
     aggregate = object_dict(object_dict(object_dict(fingerprint_summary).get("analysis")).get("aggregate"))
     measured = "dark_frame_fraction" in aggregate and "duplicate_like_frame_fraction" in aggregate
     return EpisodeTraits(
         dark_frame_fraction=float_value(aggregate["dark_frame_fraction"]) if measured else None,
         repeated_frame_fraction=float_value(aggregate["duplicate_like_frame_fraction"]) if measured else None,
-        height=int_value(profile.get("height")) or None,
-        width=int_value(profile.get("width")) or None,
     )
 
 
 def episode_side(traits: EpisodeTraits) -> EpisodeSide | None:
-    """Where one episode falls; None when only its resolution is known and it is not 4K."""
-    if (traits.height or 0) >= UHD_MIN_HEIGHT or (traits.width or 0) >= UHD_MIN_WIDTH:
-        return "4k"
+    """Where one episode falls; None when its fingerprint is unmeasured."""
     if traits.dark_frame_fraction is None or traits.repeated_frame_fraction is None:
         return None
     if traits.repeated_frame_fraction >= LIVE_ACTION_MAX_REPEATED_FRAMES:
@@ -110,9 +104,7 @@ def season_kind(episodes: Sequence[EpisodeTraits | None], *, animated: bool | No
 
     if not measured:
         return grouping("unmeasured", "no_measured_original")
-    # Cartoons and 4K stay one-time Director choices, so they never fall into a live-action kind.
-    if sides["4k"]:
-        return grouping("4k") if sides["4k"] == len(measured) else grouping("mixed", "partly_4k")
+    # Cartoons stay one-time Director choices, so they never fall into a live-action kind.
     if animated:
         return grouping("cartoon")
     if animated is None:
@@ -165,9 +157,7 @@ def _original_traits(
             traits.append(None)
             continue
         fingerprint = evidence.traits["media_fingerprint"]
-        # The admitted original's resolution counts even when its fingerprint does not.
-        trusted = fingerprint.summary if fingerprint.tier in {"proven", "probable"} else None
-        traits.append(episode_traits(trusted, evidence.profile))
+        traits.append(episode_traits(fingerprint.summary if fingerprint.tier in {"proven", "probable"} else None))
     return traits
 
 
@@ -340,8 +330,6 @@ def season_kind_report(
             "darker_min_dark_frames": DARKER_MIN_DARK_FRAMES,
             "bright_max_dark_frames": BRIGHT_MAX_DARK_FRAMES,
             "live_action_max_repeated_frames": LIVE_ACTION_MAX_REPEATED_FRAMES,
-            "uhd_min_height": UHD_MIN_HEIGHT,
-            "uhd_min_width": UHD_MIN_WIDTH,
             "season_agreement": SEASON_AGREEMENT,
         },
         "totals": {kind: dict(counts) for kind, counts in sorted(totals.items())},

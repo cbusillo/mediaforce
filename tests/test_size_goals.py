@@ -150,6 +150,14 @@ class SizeGoalTests(unittest.TestCase):
             all(option["operator_intent"]["size_goal"]["mode"] == "normalized" for option in options)
         )
 
+    def test_choosing_a_size_keeps_the_folders_picture_height(self) -> None:
+        legacy = {"target_size_mb": 225, "target_runtime_minutes": 45}
+        for video, default in ((self.default_video, self.default_video), (legacy, self.default_video), ({**legacy, "max_height": 0}, {})):
+            options = guided_size_goal_options(video, item_runtime_seconds=45 * 60, default_video_policy=default)
+            expected = operator_intent_from_policy(video if "max_height" in video else default).resolution.request_payload()
+            self.assertTrue(options)
+            self.assertEqual([option["operator_intent"]["resolution"] for option in options], [expected] * len(options))
+
     def test_settings_without_a_size_offer_sizes_around_the_size_asked_for(self) -> None:
         options = guided_size_goal_options(
             {"max_height": 1080},

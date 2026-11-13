@@ -122,7 +122,7 @@ from mediaforce.tuning.av1_cold_start import plan_av1_cold_start
 from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_risk_public_view, \
     target_size_search_public_view
 from mediaforce.tuning.compression_intent import compression_intent_options
-from mediaforce.tuning.size_goals import guided_size_goal_options, operator_intent_from_policy
+from mediaforce.tuning.size_goals import guided_size_goal_options, operator_intent_from_policy, tallest_picture
 from mediaforce.tuning.target_provenance import exact_item_target_provenance_blocker, target_size_provenance
 from mediaforce.core.type_defs import JSONValue, float_value, int_value, mapping_dict, object_dict, object_list
 from mediaforce.web.routes import register_app_window_routes, register_completed_routes, \
@@ -141,7 +141,7 @@ from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_wor
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
 from mediaforce.web.runtime.folder_state import state_slug
 from mediaforce.web.runtime.kind_approvals import KindAwareLoader, SeasonKinds, approve_kind_action, \
-    background_queue_blocker, kind_snapshot, kinds_payload, next_kind_season, next_approved_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
+    background_queue_blocker, choose_kind_picture_height, kind_snapshot, kinds_payload, next_kind_season, next_approved_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
     archive_cleanup_summary, clear_archive_cleanup_action, \
@@ -1611,6 +1611,7 @@ def create_app(
                 "compression_intent_options": compression_intent_options(operator_intent.compression_intent),
                 "stream_budget_ledger": stream_budget.to_payload(),
                 "size_goal_options": size_goal_options,
+                "tallest_picture": tallest_picture(config.video),
                 "quality_risk": quality_risk_public_view(quality_risk_contract),
                 "quality_memory": quality_memory,
                 "failed_target_size_search": target_size_search_public_view(latest_failed_target_trace),
@@ -2313,13 +2314,14 @@ def create_app(
         )
 
     def _make_app_sample_action(
-            normalized_prefix: str, size: str | None, balance: str | None,
+            normalized_prefix: str, size: str | None, balance: str | None, keep_full_height: bool | None,
     ) -> dict[str, Any]:
         payloads = _season_payloads(normalized_prefix)
         if payloads is None:
             return {"ok": False, "code": "refused"}
         return make_sample(
             *payloads, size, balance, ai_tune=_folder_ai_tune_action, retry_saved=_folder_ai_tune_confirm_action,
+            keep_full_height=keep_full_height,
         )
 
     register_app_window_routes(
@@ -2343,6 +2345,7 @@ def create_app(
         kinds_payload=_kinds_payload,
         approve_kind_action=_approve_app_kind,
         stop_kind_action=lambda kind: {"ok": True, "stopped": stop_kind_approval(config, kind)},
+        kind_picture_action=lambda kind, keep: {"ok": choose_kind_picture_height(config, kind, keep_full_height=keep)},
     )
     register_child_recovery_routes(app, recover_children_action=_recover_children_action)
     register_size_decision_routes(app, decide_size_exception_action=_decide_size_exception_action)

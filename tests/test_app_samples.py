@@ -291,15 +291,6 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     assert calls.pop()[4]["compression_intent"]["level"] == "balanced"
     assert make(_folder(compression_intent_options=[]), _status(), "smaller") == {"ok": False, "code": "choose_balance"}
 
-    # Made again at the season's own size, a sample keeps the season's resolution; a size the owner picks brings its own.
-    limited = _folder(resolved_operator_intent={
-        **_folder()["resolved_operator_intent"], "resolution": {"mode": "max_height", "max_height": 1080, "requires_confirmation": False},
-    })
-    assert make(limited, _status("needs_help", "make_sample", "missing_clips"), None)["ok"] is True
-    _kind, _prefix, note, _host, intent, _token = calls.pop()
-    assert intent["resolution"] == {"mode": "max_height", "max_height": 1080} and "1080p" in note
-    assert make(limited, _status(), "smaller")["ok"] is True
-    assert calls.pop()[4]["resolution"]["mode"] == "source"
 
     # A saved request that can no longer run is asked for anew rather than refused.
     refused_retry = make_sample(
@@ -386,18 +377,62 @@ def test_changing_a_reviewed_samples_balance_keeps_measured_direction_for_the_ne
     assert calls[-1][3]["compression_intent"] == chosen["compression_intent"]
 
 
+def _four_k(keeps: bool = False) -> dict[str, Any]:
+    """A season whose sample episode is 4K, in a library whose tallest picture is 1080p."""
+    resolution = {"mode": "source", "max_height": None} if keeps else {"mode": "max_height", "max_height": 1080}
+    folder = _folder(sample_item={"source_size_bytes": 3_853_264_012, "height": 2160}, tallest_picture=1080)
+    for option in folder["size_goal_options"]:
+        option["operator_intent"]["resolution"] = resolution
+    folder["resolved_operator_intent"] = {**folder["resolved_operator_intent"], "resolution": resolution,
+                                          "request": {**folder["resolved_operator_intent"]["request"], "resolution": resolution}}
+    return folder
+
+
+@pytest.mark.parametrize("keeps", [False, True])
+def test_a_4k_season_offers_keeping_4k_or_bringing_it_down_and_the_sample_is_made_at_that_height(keeps: bool) -> None:
+    calls: list[tuple[Any, ...]] = []
+
+    def make(folder: dict[str, Any], status: dict[str, Any], chosen_size: str | None, keep_height: bool | None) -> dict[str, Any]:
+        return make_sample(folder, status, chosen_size, ai_tune=lambda *args: calls.append(args) or {"ok": True},
+                           retry_saved=lambda *args: {"ok": True}, keep_full_height=keep_height)
+
+    four_k = _four_k(keeps)
+    assert sample_facts(four_k, _status())["picture"] == {"source_height": 2160, "limit": 1080, "keeps_full_height": keeps}
+    assert sample_facts(_folder(tallest_picture=1080, sample_item={"height": 1080}), _status())["picture"] is None
+    assert sample_facts(_folder(tallest_picture=0, sample_item={"height": 2160}), _status())["picture"] is None
+
+    kept = {"mode": "source", "max_height": None}
+    brought_down = {"mode": "max_height", "max_height": 1080}
+    # Without a choice the season's own height stands, whichever size is picked; a choice decides it.
+    for size, keep, resolution in [(None, None, kept if keeps else brought_down), ("smaller", None, kept if keeps else brought_down),
+                                   ("smaller", True, kept), (None, False, brought_down)]:
+        assert make(four_k, _status("needs_help", "make_sample", "missing_clips"), size, keep)["ok"] is True
+        note, intent = calls[-1][1], calls[-1][3]
+        assert intent["resolution"] == resolution
+        assert ("1080p" in note) == (resolution == brought_down)
+    # Making a reviewed sample again at the other height asks for it rather than repeating the measured request.
+    assert make(four_k, _status(), None, not keeps)["ok"] is True
+    assert calls[-1][3]["resolution"] == (brought_down if keeps else kept)
+    assert make(four_k, _status(), None, keeps)["ok"] is True
+    assert calls[-1][3]["resolution"] == (kept if keeps else brought_down) and "1.4 times" in calls[-1][1]
+    # A season that is not taller than the limit ignores the choice.
+    assert make(_folder(tallest_picture=1080), _status("needs_help", "make_sample", "missing_clips"), "smaller", True)["ok"]
+    assert calls[-1][3]["resolution"] == _option("smaller", 1)["operator_intent"]["resolution"]
+
+
 def test_native_make_route_forwards_the_chosen_size_and_balance() -> None:
-    calls: list[tuple[str, str | None, str | None]] = []
+    calls: list[tuple[str, str | None, str | None, bool | None]] = []
     app = FastAPI()
     register_app_window_routes(
         app, main_window_payload=dict, tv_shows_payload=dict, movies_payload=dict, other_media_payload=dict,
         sample_payload=lambda _prefix: None,
-        make_sample_action=lambda prefix, size, balance: calls.append((prefix, size, balance)) or {"ok": True},
+        make_sample_action=lambda prefix, size, balance, keep: calls.append((prefix, size, balance, keep)) or {"ok": True},
         approve_sample_action=lambda *_args: {}, compress_season_action=lambda _prefix: {},
     )
     endpoint = _route(app, "/api/app/samples/{prefix:path}/make", "POST")
-    assert _post(endpoint, {"size": "smaller", "balance": "reference"}) == (200, {"ok": True})
-    assert calls == [(PREFIX, "smaller", "reference")]
+    assert _post(endpoint, {"size": "smaller", "balance": "reference", "keep_full_height": True}) == (200, {"ok": True})
+    assert _post(endpoint, {"keep_full_height": "yes"}) == (200, {"ok": True})
+    assert calls == [(PREFIX, "smaller", "reference", True), (PREFIX, None, None, None)]
 
 
 def test_a_running_sample_says_when_it_should_be_ready_only_when_comparable_samples_tell() -> None:

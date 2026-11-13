@@ -33,8 +33,8 @@ def connection() -> Iterator[DBClient]:
     engine.dispose()
 
 
-def _episode(dark: float, *, repeated: float = 0.05, height: int = 1080) -> EpisodeTraits:
-    return EpisodeTraits(dark_frame_fraction=dark, repeated_frame_fraction=repeated, height=height, width=height * 16 // 9)
+def _episode(dark: float, *, repeated: float = 0.05) -> EpisodeTraits:
+    return EpisodeTraits(dark_frame_fraction=dark, repeated_frame_fraction=repeated)
 
 
 def _fingerprint(dark: float) -> dict[str, object]:
@@ -52,12 +52,10 @@ def test_close_measurements_of_one_show_land_in_one_kind() -> None:
 
 def test_a_season_spanning_two_kinds_is_mixed() -> None:
     assert season_kind([_episode(0.5), _episode(0.4), _episode(0.01), _episode(0.03)], animated=False).kind == "mixed"
-    assert season_kind([_episode(0.5), _episode(0.4, height=2160)], animated=False).kind == "mixed"
 
 
-def test_cartoons_and_4k_never_join_a_live_action_kind() -> None:
+def test_cartoons_never_join_a_live_action_kind() -> None:
     assert season_kind([_episode(0.4), _episode(0.5)], animated=True).kind == "cartoon"
-    assert season_kind([_episode(0.4, height=2160)], animated=False).kind == "4k"
     assert season_kind([_episode(0.4)], animated=None).kind == "unmeasured"
     assert season_kind([_episode(0.4, repeated=0.6), _episode(0.4, repeated=0.7)], animated=False).kind == "mixed"
 
@@ -65,14 +63,6 @@ def test_cartoons_and_4k_never_join_a_live_action_kind() -> None:
 def test_unmeasured_episodes_do_not_vote() -> None:
     assert season_kind([None, _episode(0.4), None], animated=False).kind == "darker_live_action"
     assert season_kind([None, None], animated=False).kind == "unmeasured"
-
-
-def test_a_known_4k_original_counts_without_a_fingerprint() -> None:
-    unmeasured_4k = EpisodeTraits(dark_frame_fraction=None, repeated_frame_fraction=None, height=2160, width=3840)
-    unmeasured_hd = EpisodeTraits(dark_frame_fraction=None, repeated_frame_fraction=None, height=1080, width=1920)
-
-    assert season_kind([_episode(0.4), _episode(0.5), unmeasured_4k], animated=False).kind == "mixed"
-    assert season_kind([_episode(0.4), unmeasured_hd], animated=False).kind == "darker_live_action"
 
 
 def _item(connection: DBClient, rel_path: str, *, status: str, codec: str, current_dark: float) -> int:
@@ -133,6 +123,22 @@ def test_report_groups_waiting_seasons_by_original_traits_only(connection: DBCli
     assert seasons["tv/Drama/Season 2"]["kind"] == "unmeasured"
     assert "tv/Drama/Season 3" not in seasons
     assert report["totals"]["folder_approved"]["seasons"] == 1
+
+
+def test_a_4k_original_takes_its_kind_from_its_other_traits(connection: DBClient) -> None:
+    for season, heights in (("Season 1", (2160, 2160)), ("Season 2", (2160, 1080))):
+        for episode, height in enumerate(heights):
+            published = _item(connection, f"tv/Space/{season}/e0{episode}.mkv", status="promoted", codec="av1", current_dark=0.0)
+            _admit_historical_original(connection, published, dark=0.5, height=height)
+        _item(connection, f"tv/Space/{season}/e09.mkv", status="discovered", codec="h264", current_dark=0.5)
+    connection.execute(series_metadata.insert().values(series_prefix="tv/Space", tmdb_genres_json='["Drama"]', updated_at=timestamp()))
+
+    report = season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False)
+
+    # A season all in 4K and one only partly in 4K both measure like any other season of their look.
+    assert {row["season"]: row["kind"] for row in report["seasons"]} == {
+        "tv/Space/Season 1": "darker_live_action", "tv/Space/Season 2": "darker_live_action",
+    }
 
 
 def test_bulk_evidence_matches_individual_reads_and_report_queries_stay_bounded(connection: DBClient) -> None:
@@ -326,7 +332,8 @@ def test_reused_classifications_follow_changed_saved_inputs(connection: DBClient
         assert load.call_count == 2
     with LibraryCalculations().request(connection):
         assert report() == changed
-    if change != "measurement_root":
+    # A measuring root or the original's picture size changes what is read, not the kinds it gives.
+    if change not in {"measurement_root", "version"}:
         assert changed != initial
 
 

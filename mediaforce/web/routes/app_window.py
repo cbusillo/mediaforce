@@ -19,7 +19,7 @@ def register_app_window_routes(
         other_media_payload: Callable[[], dict[str, Any]],
         sample_payload: Callable[[str], dict[str, Any] | None],
         approve_sample_action: Callable[[str, Collection[str], str, str], dict[str, Any]],
-        make_sample_action: Callable[[str, str | None, str | None], dict[str, Any]],
+        make_sample_action: Callable[[str, str | None, str | None, bool | None], dict[str, Any]],
         compress_season_action: Callable[[str], dict[str, Any]],
         item_payload: Callable[[str], dict[str, Any] | None] | None = None,
         player_source: Callable[[int, str], Path | None] | None = None,
@@ -27,6 +27,7 @@ def register_app_window_routes(
         kinds_payload: Callable[[], dict[str, Any]] | None = None,
         approve_kind_action: Callable[[str, str], dict[str, Any]] | None = None,
         stop_kind_action: Callable[[str], dict[str, Any]] | None = None,
+        kind_picture_action: Callable[[str, bool], dict[str, Any]] | None = None,
 ) -> None:
 
     @app.get("/api/app/main-window")
@@ -91,6 +92,17 @@ def register_app_window_routes(
         def api_app_kind_stop(kind: str) -> JSONResponse:
             return JSONResponse(stop_kind(kind))
 
+    if kind_picture_action is not None:
+        choose_picture = kind_picture_action
+
+        @app.post("/api/app/kinds/{kind}/picture")
+        async def api_app_kind_picture(kind: str, request: Request) -> JSONResponse:
+            keep = (await request_body(request)).get("keep_full_height")
+            if not isinstance(keep, bool):
+                return JSONResponse({"ok": False, "code": "refused"}, status_code=400)
+            result = await run_in_threadpool(choose_picture, kind, keep)
+            return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
     @app.get("/api/app/samples/{prefix:path}")
     def api_app_sample(prefix: str) -> JSONResponse:
         facts = sample_payload(prefix.strip("/"))
@@ -119,8 +131,9 @@ def register_app_window_routes(
         body = await request_body(request)
         size = body.get("size")
         balance = body.get("balance")
+        keep_full_height = body.get("keep_full_height")
         result = await run_in_threadpool(
             make_sample_action, prefix.strip("/"), size if isinstance(size, str) else None,
-            balance if isinstance(balance, str) else None,
+            balance if isinstance(balance, str) else None, keep_full_height if isinstance(keep_full_height, bool) else None,
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
