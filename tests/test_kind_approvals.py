@@ -376,6 +376,42 @@ def test_movies_follow_the_live_action_look_like_waiting_seasons_but_never_extra
         assert [item["library_item_id"] for item in manifests[0]["items"]] == [feature]
 
 
+@pytest.mark.parametrize("compressing", [False, True])
+def test_a_library_not_set_to_compress_adds_nothing_to_a_looks_offers_counts_or_samples(tmp_path: Path, compressing: bool) -> None:
+    config = _config(tmp_path)
+    availability = "production" if compressing else "browse_only"
+    config.raw["media"]["libraries"] += [
+        {"key": "movies", "path": str(tmp_path / "movies"), "type": "movie", "availability": availability},
+        {"key": "kids", "path": str(tmp_path / "kids"), "type": "tv", "availability": availability},
+        {"key": "shows", "path": str(tmp_path / "shows"), "type": "tv", "availability": availability},
+    ]
+    engine = create_engine("sqlite://")
+    with engine.connect() as connection:
+        metadata.create_all(connection)
+        for measured in ("movies/Heat (1995)/Heat.mkv", "kids/Toons/Season 1/e00.mkv", "shows/Drama/Season 1/e00.mkv"):
+            published = _content_item(connection, measured, status="promoted", codec="av1", current_dark=0.0)
+            _admit_historical_original(connection, published, dark=0.5)
+            _content_item(connection, measured.replace("e00", "e01").replace("Heat.mkv", "Heat - 4K.mkv"),
+                          status="discovered", codec="h264", current_dark=0.0)
+        connection.execute(series_metadata.insert().values(series_prefix="kids/Toons", tmdb_genres_json='["Animation"]', updated_at="now"))
+        connection.execute(series_metadata.insert().values(series_prefix="shows/Drama", tmdb_genres_json='["Drama"]', updated_at="now"))
+        _content_item(connection, "movies/Unseen (2020)/Unseen.mkv", status="discovered", codec="h264", current_dark=0.0)
+        facts = kinds_payload(connection, config, load_calibration_state=_loader({}, {}))
+    engine.dispose()
+
+    kinds = {kind["kind"]: kind for kind in facts["kinds"]}
+    offered = {kind: [show["prefix"] for show in kinds[kind]["shows"]] for kind in kinds}
+    assert offered == ({LIVE_ACTION: ["movies/Heat (1995)", "shows/Drama"], "cartoon": ["kids/Toons"]} if compressing
+                       else {LIVE_ACTION: [], "cartoon": []})
+    assert all((kinds[kind]["seasons"] > 0) == compressing and (kinds[kind]["waiting_bytes"] > 0) == compressing
+               and kinds[kind]["needs_you"] == compressing for kind in kinds)
+    assert [row["season"] for row in facts["left_out"]] == (["movies/Unseen (2020)"] if compressing else [])
+    # No show of a library that is not compressing can become a look's sample.
+    cards = [{"prefix": prefix, "page_state": {"key": "needs_test"}}
+             for prefix in ("movies/Heat (1995)", "kids/Toons/Season 1", "shows/Drama/Season 1")]
+    assert bool(any(kind_sample_candidates(facts["kinds"], cards).values())) == compressing
+
+
 def test_seasons_a_kind_covers_are_offered_one_at_a_time_largest_first(tmp_path: Path) -> None:
     config = _config(tmp_path)
     small, large, own = "tv/Small/Season 1", "tv/Large/Season 1", "tv/Own/Season 1"
@@ -1546,9 +1582,10 @@ def test_measuring_outside_the_pipeline_names_the_reason_and_next_action(
             _content_item(connection, f"{SEASON}/e02.mkv", status="discovered", codec="hevc", current_dark=0.5)
         connection.commit()
         load = KindAwareLoader(lambda *_args: None, SeasonKinds())
-        wait = load.sample_waits(config)[SEASON]
+        wait = load.sample_waits(config).get(SEASON)
         state = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))[SEASON]
-    assert wait.measurement_reasons == ((reason,) if reason else ())
+    # A library not set to compress follows no look, yet its season still says why nothing happens there.
+    assert (wait is None) if not enabled else wait is not None and wait.measurement_reasons == ((reason,) if reason else ())
     assert state["key"] == "waiting_for_measurement" and not state["needs_you"]
     assert bool(state["wait_detail"]) == bool(reason)
 

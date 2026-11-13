@@ -37,7 +37,7 @@ from mediaforce.web.runtime.app_samples import sample_moments
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 from mediaforce.web.runtime.production_approval import KEEP_FULL_HEIGHT_FIELD, EffectiveApproval, LoadCalibrationState, \
     SampleWait, approval_prefixes, cached_calibration_loader, effective_production_approval, holds_approval, production_approval_contract, \
-    production_calibration, sample_allows_kind, sample_kept_full_height, season_prefix_of
+    offered_library_types, production_calibration, sample_allows_kind, sample_kept_full_height, season_prefix_of
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
 from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES
 from mediaforce.web.runtime.production_holds import approval_identity
@@ -267,17 +267,16 @@ def background_queue_blocker(
 def _waiting_seasons(connection: DBClient, config: MediaforceConfig) -> list[tuple[str, int, tuple[int, ...]]]:
     """Seasons and movie titles with files still to compress, largest waiting space first, with those files' ids.
 
-    Files the owner chose to keep original are finished, so they never bring a season back. Only libraries set to
-    compress are offered; queueing refuses the rest anyway.
+    Files the owner chose to keep original are finished, so they never bring a season back.
     """
     rows = _waiting_files(connection)
     blocked = _files_waiting_for_owner(connection, rows, config=config)
-    producing = config.source_root_map
+    library_types = offered_library_types(config)
     waiting: dict[str, tuple[int, list[int]]] = {}
     for item in rows:
         rel_path = str(item["rel_path"])
-        season = season_prefix_of(config, rel_path)
-        if (season is None or int(item["id"]) in blocked or rel_path.split("/", 1)[0] not in producing
+        season = look_group(library_types, rel_path)
+        if (season is None or int(item["id"]) in blocked
                 or not (rel_path.startswith(f"{season}/") or (rel_path == season and PurePosixPath(rel_path).suffix))):
             continue
         size, ids = waiting.get(season, (0, []))
@@ -419,7 +418,7 @@ def _tv_episodes(connection: DBClient, config: MediaforceConfig) -> dict[str, li
         connection, "tv_episodes", (select(library_items.c.id, library_items.c.rel_path, library_items.c.missing_since),
                                     select(staged_artifacts.c.library_item_id, staged_artifacts.c.promoted_at, staged_artifacts.c.archived_source_path),
                                     select(item_events.c.library_item_id, item_events.c.event_type)),
-        config.library_type_map, lambda: _read_tv_episodes(connection, config),
+        offered_library_types(config), lambda: _read_tv_episodes(connection, config),
     )
 
 
@@ -427,7 +426,7 @@ def _read_tv_episodes(connection: DBClient, config: MediaforceConfig) -> dict[st
     """Every TV show's and movie title's files by path, each with its id when it is published and its original backup is
     still kept to compare, else 0. A movie title stands as its own show and season."""
     removed = confirmed_originals_removed_item_ids(connection)
-    library_types = config.library_type_map
+    library_types = offered_library_types(config)
     shows: dict[str, list[tuple[str, int]]] = {}
     rows = connection.execute(select(
         library_items.c.id, library_items.c.rel_path, staged_artifacts.c.promoted_at, staged_artifacts.c.archived_source_path,
@@ -461,7 +460,7 @@ def _show_approvals(
         load_calibration_state: LoadCalibrationState,
 ) -> list[_ShowApproval]:
     """The current folder approvals on a show or its seasons, each with its sample's season and the seasons it governs."""
-    library_types = config.library_type_map
+    library_types = offered_library_types(config)
     seasons = {season for rel_path, _ in episodes if (season := look_group(library_types, rel_path)) is not None}
     found: dict[str, tuple[EffectiveApproval, str]] = {}
     governed: dict[str, list[str]] = {}
@@ -521,7 +520,7 @@ def _kind_report(
         approval = effective_production_approval(config, prefix, load)
         return approval is not None and approval.current
 
-    return season_kind_report(connection, library_types=config.library_type_map, folder_approved=folder_approved,
+    return season_kind_report(connection, library_types=offered_library_types(config), folder_approved=folder_approved,
                               measurement_roots=config.source_root_map,
                               sample_seasons=sample_seasons)
 
@@ -558,7 +557,7 @@ def _kind_contents(connection: DBClient, config: MediaforceConfig, load_calibrat
         return load_calibration_state(loader_config, prefix)
 
     load_calibration_state = cached_calibration_loader(load_calibration_state)
-    library_types = config.library_type_map
+    library_types = offered_library_types(config)
     episodes = _tv_episodes(connection, config)
     approvals_by_show = {show: found for show, files in episodes.items()
                          if (found := _show_approvals(config, show, files, folders_only))}

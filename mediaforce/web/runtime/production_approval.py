@@ -106,6 +106,13 @@ def sample_wait(config: MediaforceConfig, prefix: str, load: LoadCalibrationStat
     return load.sample_waits(config).get(prefix) if isinstance(load, SampleWaitSource) else None
 
 
+def offered_library_types(config: MediaforceConfig) -> dict[str, str]:
+    """Library types as the kinds see them: a library not set to compress has no look, so none of its seasons or
+    movies is offered, counted, sampled or queued under one. Queueing refuses such a library anyway."""
+    compressing = config.source_root_map
+    return {root: library_type if root in compressing else "other" for root, library_type in config.library_type_map.items()}
+
+
 def season_prefix_of(config: MediaforceConfig, rel_path: str) -> str | None:
     """The TV season or movie title a kind of content covers for this path, if any (see `look_group`)."""
     return look_group(config.library_type_map, rel_path)
