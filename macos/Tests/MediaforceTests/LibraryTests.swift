@@ -17,11 +17,19 @@ final class LibraryTests: XCTestCase {
         await listing.refresh(client, kind: .everything)
         XCTAssertEqual(listing.estimatedTotalSavedBytes(savedSoFar: 10), 160)
         XCTAssertFalse(listing.estimateIsPartial)
+        let complete = Self.estimateValue(listing)
 
         PartialLibraryServer.mode = .partial
         await listing.refresh(client, kind: .everything)
         XCTAssertEqual(listing.estimatedTotalSavedBytes(savedSoFar: 10), 140)
         XCTAssertTrue(listing.estimateIsPartial)
+        let partial = Self.estimateValue(listing)
+        XCTAssertTrue(partial.contains(Words.size(140)))
+        XCTAssertNotEqual(
+            partial.replacingOccurrences(of: Words.size(140), with: ""),
+            complete.replacingOccurrences(of: Words.size(160), with: ""),
+            "A partial total must read differently from a complete one"
+        )
 
         PartialLibraryServer.mode = .truncated
         await listing.refresh(client, kind: .everything)
@@ -38,6 +46,15 @@ final class LibraryTests: XCTestCase {
         await listing.refresh(client, kind: .everything)
         XCTAssertEqual(listing.estimatedTotalSavedBytes(savedSoFar: 10), 10)
         XCTAssertFalse(listing.estimateIsPartial)
+        XCTAssertEqual(
+            Self.estimateValue(listing).replacingOccurrences(of: Words.size(10), with: ""),
+            complete.replacingOccurrences(of: Words.size(160), with: "")
+        )
+    }
+
+    @MainActor
+    private static func estimateValue(_ listing: MediaListing) -> String {
+        Words.estimatedTotalSavingsValue(listing.estimatedTotalSavedBytes(savedSoFar: 10), partial: listing.estimateIsPartial)
     }
 
     @MainActor
