@@ -6,6 +6,8 @@ struct RenderOptions {
     var server = ServerConnection.localServer
     var pages: [String] = []
     var size = NSSize(width: 1440, height: 1000)
+    // The window's least width less its sidebar.
+    static let narrowestPage = 880.0
 
     init(arguments: [String]) throws {
         guard let directory = arguments.first, !directory.hasPrefix("--") else {
@@ -25,7 +27,8 @@ struct RenderOptions {
                 server = url
             case "--page": pages.append(value)
             case "--width", "--height":
-                let minimum = option == "--width" ? 1100.0 : 700.0
+                // A page is drawn without the sidebar, so it can be as narrow as the narrowest window leaves it.
+                let minimum = option == "--width" ? RenderOptions.narrowestPage : 700.0
                 guard let points = Double(value), points.isFinite, (minimum...4096).contains(points) else {
                     throw RenderFailure("\(option) must be between \(Int(minimum)) and 4096 points")
                 }
@@ -220,7 +223,7 @@ enum RenderCommand {
         }
         let view = MainPage(place: place, facts: model.facts!, model: model, open: { _ in })
             .toolbar { ToolbarItem(placement: .navigation) { PauseButton(facts: model.facts!, model: model) } }
-            .frame(minWidth: 1100, minHeight: 700)
+            .frame(minWidth: RenderOptions.narrowestPage, minHeight: 700)
         return (AnyView(view), paths)
     }
 

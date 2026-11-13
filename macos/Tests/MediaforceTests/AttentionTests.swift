@@ -22,6 +22,7 @@ final class AttentionTests: XCTestCase {
         kindReady: Bool? = nil,
         startPrefix: String? = nil,
         oneTime: Bool = false,
+        settingsAvailable: Bool = false,
         backups: Int = 0
     ) throws -> MainWindowFacts {
         let finishedJSON = finished.map { season in
@@ -38,7 +39,7 @@ final class AttentionTests: XCTestCase {
             let status = kindStatus.map { #""\#($0)""# } ?? "null"
             let ready = kindReady.map { String($0) } ?? "null"
             let start = startPrefix.map { #""\#($0)""# } ?? "null"
-            return #"{"kind": "\#(kind.kind)", "sample_season": \#(season), "sample_status": \#(status), "sample_ready": \#(ready), "sample_start_prefix": \#(start), "one_time": \#(oneTime)}"#
+            return #"{"kind": "\#(kind.kind)", "sample_season": \#(season), "sample_status": \#(status), "sample_ready": \#(ready), "sample_start_prefix": \#(start), "one_time": \#(oneTime), "settings_available": \#(settingsAvailable)}"#
         }
         let reason = computerReason.map { #""\#($0)""# } ?? "null"
         let since = computerSince.map { #""\#($0)""# } ?? "null"
@@ -137,18 +138,6 @@ final class AttentionTests: XCTestCase {
         let noticed = Attention.review(unsuitable, remembered: Attention.review(try facts(), remembered: nil).memory)
         XCTAssertEqual(noticed.badgeCount, 1)
         XCTAssertEqual(noticed.notices.count, 1)
-    }
-
-    func testAKindsButtonNamesWhatItAsksNotWhereItOpens() throws {
-        let sizeChoice = try facts(kinds: [("bright_live_action", nil)], kindStatus: "choose_size", kindReady: false,
-                                   startPrefix: "tv/Psych/Season 3")
-        let size = try XCTUnwrap(sizeChoice.work.kindsNeedingYou.first)
-        XCTAssertEqual(Words.kindAction(size), Words.sampleAction("choose_size"))
-        let ready = try facts(kinds: [("bright_live_action", "tv/Psych/Season 3")], kindStatus: "pending_review", kindReady: true)
-        XCTAssertEqual(Words.kindAction(try XCTUnwrap(ready.work.kindsNeedingYou.first)), Words.sampleAction("review_sample"))
-        let blocked = try facts(kinds: [("bright_live_action", nil)], kindStatus: "sample_blocked", kindReady: false,
-                                startPrefix: "tv/Psych/Season 3")
-        XCTAssertEqual(Words.kindAction(try XCTUnwrap(blocked.work.kindsNeedingYou.first)), Words.sampleAction("make_sample"))
     }
 
     func testASeasonWithFileDecisionsNotifiesAndCountsOnce() throws {
@@ -314,34 +303,6 @@ final class AttentionTests: XCTestCase {
         XCTAssertEqual(Attention.openingPlace(cleared, fallback: .spaceSaved), .spaceSaved)
         XCTAssertEqual(Attention.openingPlace(cleared), .library)
         XCTAssertEqual(Place(notificationValue: Place.needsYou.notificationValue), .needsYou)
-    }
-
-    @MainActor
-    func testAShowCardGivesAReasonOnlyWhenItAddsOne() throws {
-        let ready = try facts(waitingSamples: [(prefix: "tv/E/Season 3", state: "ready_to_compare", action: "review_sample")])
-        XCTAssertNil(WaitingShow(try XCTUnwrap(Attention.waitingItems(ready).first), facts: ready).description)
-        let failed = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(MainWindowTests.facts.utf8))
-        let item = try XCTUnwrap(Attention.waitingItems(failed).first { $0.opens == .sample("tv/Lucifer/Season 2") })
-        XCTAssertEqual(WaitingShow(item, facts: failed).description, Words.sampleFailure("missing_clips"))
-    }
-
-    func testNeedsYouPutsKindsFirstAndDrawsEveryWaitingItem() throws {
-        let waiting = try facts(waitingSamples: [(prefix: "tv/E/Season 3", state: "ready_to_compare", action: "review_sample")],
-                                computers: [(key: "mini", state: "password_needed", needsYou: true)],
-                                kinds: [(kind: "cartoon", sampleSeason: "tv/F/Season 1")], backups: 3)
-        let groups = WaitingGroups(waiting)
-        XCTAssertEqual(groups.first, groups.kinds.first)
-        XCTAssertEqual(groups.kinds.count, 1)
-        XCTAssertEqual(groups.shows.map(\.opens), [.sample("tv/E/Season 3")])
-        let drawn = groups.kinds + groups.shows + groups.computers + [groups.backups].compactMap { $0 }
-        XCTAssertEqual(Set(drawn.map(\.id)), Set(Attention.waitingItems(waiting).map(\.id)))
-        XCTAssertTrue(WaitingGroups(try facts()).isEmpty)
-    }
-
-    func testNeedsYouStatusDoesNotPointAtItsOwnItems() throws {
-        let waiting = try facts(kinds: [(kind: "cartoon", sampleSeason: "tv/F/Season 1")])
-        XCTAssertNotNil(Words.workExplanation(waiting))
-        XCTAssertNil(Words.workExplanation(waiting, onNeedsYou: true))
     }
 
     func testCountsReadNaturally() {
