@@ -93,7 +93,9 @@ the clips play in a browser), `episode_bytes` (the sampled episode now),
 compressing would take), `goal_bytes`, `size_status`, `draft_hash`, and the
 `size_choices` keys with their per-episode `target_bytes`, and `balance_choices`
 with each choice's key, label, detail and selected state. Balance controls apply
-to making a sample and appear beside those actions.
+to making a sample and appear beside those actions. When a kind's first sample
+waits on this season for a size choice, `action` is `choose_size`; when it waits
+for a balance choice or could not start, `action` is `make_sample`.
 
 `POST .../approve` with `confirm` (`high_impact`, `size_tradeoff`) and
 `reviewed_draft_hash` approves the sample and starts compressing the season.

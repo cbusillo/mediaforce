@@ -208,10 +208,25 @@ enum Words {
 
     static func sampleAction(_ action: String?) -> String? {
         switch action {
-        case "review_sample": "Watch sample"
-        case "make_sample", "retry_sample": "Make sample"
-        case "choose_size": "Choose size"
+        case "review_sample": watchSample
+        case "make_sample", "retry_sample": makeSample
+        case "choose_size": chooseSize
         default: nil
+        }
+    }
+
+    static let chooseSize = "Choose size"
+
+    /// The button for a kind waiting in Needs you, named for what the Director does once it is open.
+    static func kindAction(_ kind: MainWindowFacts.PendingKind) -> String {
+        if kind.settingsAvailable == true { return "Choose settings" }
+        if kind.sampleReady ?? true { return watchSample }
+        return switch kind.sampleStatus {
+        case "choose_size": chooseSize
+        case "choose_balance": "Choose detail"
+        case "pending_review", "completed": "Choose another sample"
+        case "sample_blocked", "failed", "stopped", "needs_attention": makeSample
+        default: "See progress"
         }
     }
 
@@ -536,6 +551,13 @@ extension Words {
         return file.episode == nil ? folders : "\(folders), \(fileName(file))"
     }
 
+    static func backupsReady(_ backups: MainWindowFacts.OriginalBackups) -> String {
+        "\(count(backups.count, "original backup")), \(size(backups.bytes)), \(backups.count == 1 ? "is" : "are") ready to delete."
+    }
+
+    static let backupsByTitle = "List by title"
+    static let backupsUnlisted = "Mediaforce didn't answer, so the list can't be shown yet."
+
     static func showBackups(_ seasons: Int, _ bytes: Int64) -> String {
         "\(count(seasons, "season")), \(size(bytes)) of backups"
     }
@@ -600,7 +622,8 @@ extension Words {
         case ("needs_help", "check_computer"): "An episode is on hold until a computer is checked."
         case ("needs_help", "review_files"): "Some files need you before the season can go on."
         case ("needs_help", _): "The sample needs making again."
-        case ("needs_test", _): "This season has no sample yet."
+        case (_, "choose_size"): "Choose a size for this season's first sample."
+        case ("needs_test", _), ("waiting_for_kind", "make_sample"): "This season has no sample yet."
         case ("waiting_for_measurement", _): facts.waitDetail ?? "This season needs original measurements before its kind can be chosen."
         case ("waiting_for_kind", _): "This season will follow the choice for its kind of content."
         case ("ready_to_make", _): "Approved. The season waits to be compressed."
@@ -1208,7 +1231,7 @@ extension Words {
 
     static func fileState(_ file: ItemFacts.File) -> String {
         switch file.stage {
-        case "needs_you": file.sizeQuestion != nil ? "Needs more than its size goal" : waitLabel(file)
+        case "needs_you": file.sizeQuestion != nil ? "Needs more than its size goal" : waitLabel(file.waitReason?.code ?? file.validation)
         case "kept_original": "\(keptOriginal): \(keptReason("motion_\(file.keptReason ?? "")"))"
         case "held": file.heldReason == "motion_pattern" ? "Kept original: Mediaforce can't convert its motion safely" : "Waiting to start"
         case "compressing": file.percentComplete.map { "Compressing, \($0)%" } ?? "Compressing"
@@ -1262,8 +1285,20 @@ extension Words {
         }
     }
 
-    private static func waitLabel(_ file: ItemFacts.File) -> String {
-        switch file.waitReason?.code ?? file.validation {
+    /// What a season's waiting files ask of the Director, short enough for its card: the file and its reason, or
+    /// that several files each need something different.
+    static func filesAsk(_ files: [ItemFacts.File]) -> String? {
+        let asks = files.map { file in
+            file.stage == "needs_you" ? fileState(file) : waitLabel(file.additionalWaitReasons?.first?.code)
+        }
+        guard let ask = asks.first else { return nil }
+        let many = count(files.count, files.allSatisfy { $0.episode != nil } ? "episode" : "file")
+        if Set(asks).count > 1 { return "\(many) each need something different" }
+        return files.count == 1 ? "\(fileName(files[0])): \(ask)" : "\(many): \(ask)"
+    }
+
+    private static func waitLabel(_ code: String?) -> String {
+        switch code {
         case "check_failed", "failed": "Didn't pass its check"
         case "publish_failed": "Couldn't publish"
         case "publish_unsafe": "Files need restoring"
@@ -1442,7 +1477,8 @@ extension Words {
 extension Words {
     static func workAction(_ action: SampleFacts.Action) -> String {
         switch action {
-        case .approve, .makeAgain, .makeSample, .chooseSize, .tryAnotherSize, .openSample: "Watch the Sample"
+        case .approve, .makeAgain, .makeSample, .tryAnotherSize, .openSample: "Watch the Sample"
+        case .chooseSize: "Choose a Size"
         case .startCompressing: startCompressing
         case .checkFiles: "Check New Files"
         case .reviewFiles: "Review Files"

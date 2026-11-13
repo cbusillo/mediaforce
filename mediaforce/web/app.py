@@ -136,7 +136,7 @@ from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.library.metadata_sync import cached_poster, metadata_configuration_status
 from mediaforce.reviewing.clips import review_file_from_url
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, SampleStartWait, approve_sample, make_sample, sample_facts, \
-    prepare_waiting_samples, samples_to_remake, start_compressing
+    prepare_waiting_samples, samples_to_remake, start_compressing, with_first_sample_question
 from mediaforce.web.runtime.app_window import app_window_payload, movies_payload, other_media_payload, tv_shows_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
@@ -2303,7 +2303,7 @@ def create_app(
         payloads = _season_payloads(normalized_prefix)
         if payloads is None:
             return None
-        facts = sample_facts(*payloads)
+        facts = with_first_sample_question(sample_facts(*payloads), sample_start_waits.values())
         return {**facts, "approval_kind": _app_sample_kind(normalized_prefix) if facts["state"] == "ready_to_compare" else None}
 
     def _approve_app_kind(kind: str, from_prefix: str, reviewed_draft_hash: str | None = None) -> dict[str, Any]:

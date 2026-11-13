@@ -27,6 +27,7 @@ DEFAULT_BALANCE = "balanced"
 SAMPLE_REMAKE_LIMIT = 3
 # A sample the owner stopped, or whose size goal can't be reached, waits on the owner rather than being made again.
 _NOT_REMADE_FAILURES = SIZE_GOAL_FAILURES | {"stopped"}
+_FIRST_SAMPLE_QUESTIONS = frozenset({"choose_size", "choose_balance", "sample_blocked"})
 
 
 def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[str, Any]:
@@ -208,7 +209,7 @@ def prepare_waiting_samples(
                 started = True
                 break
             if wait is None:
-                wait = SampleStartWait(season, str(result.get("code") or "refused"))
+                wait = SampleStartWait(season, _start_refusal(payloads[0], result))
         if started:
             continue
         prior = (previous or {}).get(kind)
@@ -220,6 +221,26 @@ def prepare_waiting_samples(
             repeated = prior is not None and prior.reason in {"retry_backoff", "sample_blocked"}
             waits[kind] = SampleStartWait(wait.prefix, "sample_blocked" if repeated else "retry_backoff")
     return waits
+
+
+def _start_refusal(folder: Mapping[str, Any], result: Mapping[str, Any]) -> str:
+    code = str(result.get("code") or "refused")
+    return code if _season_offers_the_choice(folder, code) else "refused"
+
+
+def _season_offers_the_choice(folder: Mapping[str, Any], code: str) -> bool:
+    if code == "choose_size":
+        return bool(_size_choices(folder))
+    if code == "choose_balance":
+        return bool(_balance_choices(folder))
+    return True
+
+
+def with_first_sample_question(facts: dict[str, Any], waits: Iterable[SampleStartWait]) -> dict[str, Any]:
+    reason = next((wait.reason for wait in waits if wait.prefix == facts["prefix"]), None)
+    if reason not in _FIRST_SAMPLE_QUESTIONS or facts["action"] not in (None, "make_sample"):
+        return facts
+    return {**facts, "action": "choose_size" if reason == "choose_size" else "make_sample"}
 
 
 def samples_to_remake(cards: Iterable[Mapping[str, Any]], failed_in_a_row: Callable[[str], int]) -> list[str]:
