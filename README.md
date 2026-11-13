@@ -29,8 +29,8 @@ The current implementation covers:
   Settings, talking to the local server's API
 - Library shows saved-so-far beside estimated total savings, adding the server's
   remaining TV, movie, and Other estimates. Missing estimates, an incomplete
-  listing, or a failed library refresh mark the total as partial; no available
-  estimate says it is not known yet.
+  listing, or a failed library refresh make it read "At least" instead of
+  "About"; no available estimate says it is not known yet.
 - “Needs you” gathers every item counted by the Dock badge, with links to sample decisions,
   kind approvals, seasons, computers, and original-backup cleanup. Opening the app from the Dock, its waiting
   menu-bar notice, or a notification shows the list while anything waits

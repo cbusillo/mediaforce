@@ -48,14 +48,15 @@ struct StorageBar: View {
                 .buttonStyle(.plain)
                 .pointerStyle(.link)
                 .help(Words.spaceSaved)
-                VStack(alignment: .leading, spacing: 4) {
-                    let estimate = listing.estimatedTotalSavedBytes(savedSoFar: facts.spaceSaved.bytes)
-                    metric(estimate.map { "About \(Words.size($0))" } ?? Words.notKnownYet, label: Words.estimatedTotalSavings)
-                    if estimate != nil && listing.estimateIsPartial && !listing.loading {
-                        Text(Words.partialSavingsEstimate)
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
+                metric(
+                    Words.estimatedTotalSavingsValue(
+                        listing.estimatedTotalSavedBytes(savedSoFar: facts.spaceSaved.bytes),
+                        partial: listing.estimateIsPartial
+                    ),
+                    label: Words.estimatedTotalSavings
+                )
+                .accessibilityElement(children: .combine)
+                .help(Words.estimatedTotalSavingsHelp)
             }
             Spacer()
         }
