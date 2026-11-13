@@ -9,25 +9,25 @@ import pytest
 
 from mediaforce.library.external_metadata import ProviderHttpError
 from mediaforce.library.metadata_sync import metadata_connection_states
-from mediaforce.library.service_keys import SECURITY_ITEM_NOT_FOUND, SERVICE_KEY_ENVIRONMENT, KeychainKeyStore, \
-    KeyStore, ServiceKeyNotSaved, service_key
+from mediaforce.library.service_keys import KEYCHAIN_SERVICE, LIVE_STATE_DIR, SECURITY_ITEM_NOT_FOUND, \
+    SERVICE_KEY_ENVIRONMENT, KeychainKeyStore, KeyStore, ServiceKeyNotSaved, keychain_service_for, service_key
 
 
 class FakeSecurityTool:
     def __init__(self) -> None:
         self.calls: list[tuple[list[str], str | None]] = []
-        self.items: dict[str, str] = {}
+        self.items: dict[tuple[str, str], str] = {}
 
     def run(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         sent = kwargs.get("input")
         self.calls.append((command, sent))
         if command[1:] == ["-q", "-i"] and isinstance(sent, str):
             words = sent.split('"')
-            self.items[words[3]] = words[7]
+            self.items[words[1], words[3]] = words[7]
             return subprocess.CompletedProcess(command, 0, "", "")
-        account = command[command.index("-a") + 1]
-        if account in self.items:
-            return subprocess.CompletedProcess(command, 0, f"{self.items[account]}\n", "")
+        item = (command[command.index("-s") + 1], command[command.index("-a") + 1])
+        if item in self.items:
+            return subprocess.CompletedProcess(command, 0, f"{self.items[item]}\n", "")
         return subprocess.CompletedProcess(command, SECURITY_ITEM_NOT_FOUND, "", "not found")
 
 
@@ -128,3 +128,31 @@ def test_connection_state_without_a_key_or_a_way_to_check_never_calls_out(
     states = metadata_connection_states(_metadata_config(tmdb_enabled=False), key_store, fetch_json_fn=refuse_calls)
 
     assert states == {"plex": "missing", "tmdb": "not_checked"}
+
+
+def test_only_the_installed_apps_own_folder_uses_the_plain_keychain_entries(tmp_path: Path) -> None:
+    live = tmp_path / LIVE_STATE_DIR
+    proof = tmp_path / "Library" / "Application Support" / "com.mediaforce.web.proof"
+    others = [proof, tmp_path / "snapshot" / "state", live / "development"]
+    for folder in [live, *others]:
+        folder.mkdir(parents=True)
+
+    names = [keychain_service_for(folder, home=tmp_path) for folder in others]
+
+    assert keychain_service_for(live, home=tmp_path) == KEYCHAIN_SERVICE
+    assert KEYCHAIN_SERVICE not in names
+    assert len(set(names)) == len(others)
+
+
+def test_servers_on_different_state_folders_never_see_each_others_keys(
+        security_tool: FakeSecurityTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installed = KeychainKeyStore(available=True, keychain_service=keychain_service_for(tmp_path / LIVE_STATE_DIR, tmp_path))
+    snapshot = KeychainKeyStore(available=True, keychain_service=keychain_service_for(tmp_path / "snapshot", tmp_path))
+    installed.write("plex", "installed-key")
+    snapshot.write("tmdb", "snapshot-key")
+    monkeypatch.setenv(SERVICE_KEY_ENVIRONMENT["plex"], "from-snapshot-env")
+
+    assert (installed.read("tmdb"), snapshot.read("plex")) == (None, None)
+    assert service_key("plex", {}, snapshot) == "from-snapshot-env"
+    assert service_key("plex", {}, installed) == "installed-key"

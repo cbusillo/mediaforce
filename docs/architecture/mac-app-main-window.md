@@ -271,14 +271,21 @@ server address, TMDB on or off, and for each its access key.
 `key_set`), `tmdb` (`enabled`, `key_set`) and `revision`, a hash of the stored
 `metadata` section. A key is entered once: `POST
 /api/app/settings/metadata/key` takes `service` (`plex` or `tmdb`) and `key`
-as JSON only, keeps the key in the login Keychain through Apple's `security`
+and keeps the key in the login Keychain through Apple's `security`
 tool (on standard input, never its command line) and answers with the facts.
 The server reads a key from the Keychain first, then from the environment or
 `.env` an earlier install used. No key is ever in an answer, the runtime
 settings, the database or a log. `GET /api/app/settings/metadata/connections`
 says for each service `missing`, `not_checked` (turned off, or Plex has no
 address), `connected`, `rejected` (the service refused the key) or
-`unreachable`. `POST /api/app/settings/metadata` takes `plex`
+`unreachable`. The key save, the connection check and the metadata save answer `403`
+`not_this_mac` unless the request names this server by its loopback address
+and port and carries no Origin, or this server's own loopback origin, so no
+web page, even one behind a rebound DNS name, can set a key, change where it
+is sent or make the server send it. Only a server whose database lives in the
+installed app's own folder uses the plain `Mediaforce` Keychain entries; a
+development, test or proof server uses entries named after its own database
+folder. `POST /api/app/settings/metadata` takes `plex`
 (`enabled`, `address`), `tmdb` (`enabled`) and `revision`, works as the other
 tabs do, and saves only the runtime settings `metadata` key, normalized as the
 web save does. Key variable names, refresh intervals and the TMDB address carry

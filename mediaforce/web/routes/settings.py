@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from mediaforce.web.routes.folders import request_body
+from mediaforce.web.routes.local_requests import refusal_unless_this_mac
 from mediaforce.web.settings_runtime import SettingsValidationError
 
 
@@ -129,6 +130,8 @@ def register_metadata_settings_routes(
 
     @app.post("/api/app/settings/metadata")
     async def api_app_metadata_settings_save(request: Request) -> JSONResponse:
+        if refusal := refusal_unless_this_mac(request):
+            return refusal
         body = await request_body(request)
 
         def _connection(name: str) -> dict[str, Any]:
@@ -149,13 +152,15 @@ def register_metadata_settings_routes(
         return JSONResponse(result)
 
     @app.get("/api/app/settings/metadata/connections")
-    def api_app_metadata_connections() -> JSONResponse:
+    def api_app_metadata_connections(request: Request) -> JSONResponse:
+        if refusal := refusal_unless_this_mac(request):
+            return refusal
         return JSONResponse(metadata_connections())
 
     @app.post("/api/app/settings/metadata/key")
     async def api_app_service_key_save(request: Request) -> JSONResponse:
-        if not _is_json(request):
-            return JSONResponse({"ok": False, "code": "invalid_settings"}, status_code=415)
+        if refusal := refusal_unless_this_mac(request):
+            return refusal
         body = await request_body(request)
         try:
             result = await run_in_threadpool(
@@ -164,11 +169,6 @@ def register_metadata_settings_routes(
         except SettingsValidationError as exc:
             return JSONResponse({"ok": False, "code": exc.code}, status_code=400)
         return JSONResponse(result)
-
-
-def _is_json(request: Request) -> bool:
-    """A key is taken only as JSON, which a page on another site cannot post here without the server's consent."""
-    return request.headers.get("content-type", "").split(";", 1)[0].strip().lower() == "application/json"
 
 
 def register_compression_settings_routes(

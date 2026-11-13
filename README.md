@@ -686,7 +686,9 @@ membership under newer policy or metadata.
 
 Enter the Plex token and the TMDB API read-access token once in Settings ›
 Plex and TMDB. The server keeps each in the login Keychain (service
-`Mediaforce`, accounts `plex` and `tmdb`) through Apple's `security` tool, so
+`Mediaforce`, accounts `plex` and `tmdb`; a server on any other state folder,
+such as a development or proof server, uses its own `Mediaforce <hash>`
+entries) through Apple's `security` tool, so
 it reads them back on every start without a permission dialog; Settings only
 ever learns whether a key is set and whether the service accepts it. A key
 already set in the launch environment or the `.env` file

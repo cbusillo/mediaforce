@@ -71,7 +71,7 @@ def sync_external_metadata(
     settings = config.metadata
     plex_settings = _mapping(settings.get("plex"))
     tmdb_settings = _mapping(settings.get("tmdb"))
-    store = key_store or service_keys.system_key_store()
+    store = key_store or service_keys.system_key_store(config.paths.db_path.parent)
     stats = MetadataSyncStats()
 
     plex_base_url = str(plex_settings.get("base_url") or "").strip()

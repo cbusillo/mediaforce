@@ -1037,16 +1037,19 @@ def create_app(
             settings = None
         return {"ok": True, "settings": settings}
 
+    def _key_store() -> service_keys.KeyStore:
+        return service_keys.system_key_store(config.paths.db_path.parent)
+
     def _metadata_settings_facts() -> dict[str, Any]:
         """The Plex and TMDB tab's connections and revision, both from one stored state."""
         snapshot, revision = _settings_snapshot("metadata")
         return _metadata_settings_facts_runtime(
-            status=metadata_configuration_status(snapshot, service_keys.system_key_store()), revision=revision,
+            status=metadata_configuration_status(snapshot, _key_store()), revision=revision,
         )
 
     def _metadata_connections() -> dict[str, str]:
         snapshot, _revision = _settings_snapshot("metadata")
-        return metadata_connection_states(snapshot, service_keys.system_key_store())
+        return metadata_connection_states(snapshot, _key_store())
 
     def _save_service_key_action(service: str, key: str) -> dict[str, Any]:
         """Keep a Plex or TMDB key in the Keychain; the answer says only that it is set, never the key."""
@@ -1055,7 +1058,7 @@ def create_app(
         if not service_keys.is_valid_service_key(key):
             raise SettingsValidationError("Paste the whole key.", "key_invalid")
         try:
-            service_keys.system_key_store().write(service, key)
+            _key_store().write(service, key)
         except service_keys.ServiceKeyNotSaved:
             raise SettingsValidationError("The key could not be kept in the Keychain.", "key_not_saved") from None
         return {"ok": True, "settings": _metadata_settings_facts()}
