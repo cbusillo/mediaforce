@@ -217,18 +217,6 @@ enum Words {
 
     static let chooseSize = "Choose size"
 
-    /// The button for a kind waiting in Needs you, named for what the Director does once it is open.
-    static func kindAction(_ kind: MainWindowFacts.PendingKind) -> String {
-        if kind.settingsAvailable == true { return "Choose settings" }
-        if kind.sampleReady ?? true { return watchSample }
-        return switch kind.sampleStatus {
-        case "choose_size": chooseSize
-        case "choose_balance": "Choose detail"
-        case "pending_review", "completed": "Choose another sample"
-        default: makeSample
-        }
-    }
-
     static func eventKind(_ kind: String) -> String {
         switch kind {
         case "promotion_completed": "replaced"
@@ -254,8 +242,7 @@ extension Words {
         return Attention.waitingOnYou(facts) > 0 ? "Waiting for you" : "All caught up"
     }
 
-    /// On Needs you itself, sentences that point at that page's own items are left out.
-    static func workExplanation(_ facts: MainWindowFacts, onNeedsYou: Bool = false) -> String? {
+    static func workExplanation(_ facts: MainWindowFacts) -> String? {
         let work = facts.work
         var sentences: [String] = []
         if work.pausedByOwner {
@@ -273,16 +260,14 @@ extension Words {
             sentences.append("Work is waiting and no computer can take it right now. See Computers for why.")
         }
         sentences.append(contentsOf: work.originalCheckWaitReasons)
-        if !onNeedsYou {
-            if work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
-                sentences.append("Nothing is being compressed. \(count(facts.samples.waitingOnYou.count, "sample")) under Samples need you first.")
-            }
-            if !work.kindsNeedingYou.isEmpty {
-                sentences.append("\(count(work.kindsNeedingYou.count, "kind")) waiting in Needs you.")
-            }
-            if !work.seasonsNeedingYou.isEmpty {
-                sentences.append("\(count(work.seasonsNeedingYou.count, "season")) waiting for you in \(mediaKind(.tv)).")
-            }
+        if work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
+            sentences.append("Nothing is being compressed. \(count(facts.samples.waitingOnYou.count, "sample")) under Samples need you first.")
+        }
+        if !work.kindsNeedingYou.isEmpty {
+            sentences.append("\(count(work.kindsNeedingYou.count, "group")) of shows waiting in Needs you.")
+        }
+        if !work.seasonsNeedingYou.isEmpty {
+            sentences.append("\(count(work.seasonsNeedingYou.count, "season")) waiting for you in \(mediaKind(.tv)).")
         }
         return sentences.isEmpty ? nil : sentences.joined(separator: " ")
     }
@@ -549,13 +534,6 @@ extension Words {
         let folders = seasonPrefix.split(separator: "/").dropFirst().joined(separator: ", ")
         return file.episode == nil ? folders : "\(folders), \(fileName(file))"
     }
-
-    static func backupsReady(_ backups: MainWindowFacts.OriginalBackups) -> String {
-        "\(count(backups.count, "original backup")), \(size(backups.bytes)), \(backups.count == 1 ? "is" : "are") ready to delete."
-    }
-
-    static let backupsByTitle = "List by title"
-    static let backupsUnlisted = "Mediaforce didn't answer, so the list can't be shown yet."
 
     static func showBackups(_ seasons: Int, _ bytes: Int64) -> String {
         "\(count(seasons, "season")), \(size(bytes)) of backups"
@@ -1278,18 +1256,6 @@ extension Words {
         }
     }
 
-    /// What a season's waiting files ask of the Director, short enough for its card: the file and its reason, or
-    /// that several files each need something different.
-    static func filesAsk(_ files: [ItemFacts.File]) -> String? {
-        let asks = files.map { file in
-            file.stage == "needs_you" ? fileState(file) : waitLabel(file.additionalWaitReasons?.first?.code)
-        }
-        guard let ask = asks.first else { return nil }
-        let many = count(files.count, files.allSatisfy { $0.episode != nil } ? "episode" : "file")
-        if Set(asks).count > 1 { return "\(many) each need something different" }
-        return files.count == 1 ? "\(fileName(files[0])): \(ask)" : "\(many): \(ask)"
-    }
-
     private static func waitLabel(_ code: String?) -> String {
         switch code {
         case "check_failed", "failed": "Didn't pass its check"
@@ -1649,5 +1615,88 @@ extension Words {
         case .wipe: "Wipe"
         case .oneAtATime: "One at a time"
         }
+    }
+}
+
+/// Needs you: each thing named, its question in a few words, and the answers.
+extension Words {
+    static let nothingNeedsYou = "Nothing needs you"
+    static let watchFirst = "Watch first"
+    static let watchIt = "Watch it"
+    static let chooseSettings = "Choose settings"
+    static let chooseDetail = "Choose detail"
+    static let chooseAnotherShow = "Choose another show"
+    static let openSample = "Open sample"
+    static let showSeason = "Show season"
+    static let showComputer = "Show computer"
+    static let reviewFileList = "Review file list"
+    static let reviewAndDelete = "Review and delete"
+    static let originalFiles = "Original files"
+    static let originalBackups = "Original backups"
+    static let backupsAsk = "Delete them to free the space?"
+    static let firstSampleDetailAsk = "Choose how much detail its first sample keeps."
+    static let firstSampleStopped = "Its first sample stopped."
+    static let sampleStopped = "Its sample stopped."
+    static let spaceCovered = "The space this covers"
+
+    static func needsYouCount(_ count: Int) -> String {
+        count == 0 ? "" : "\(count) waiting"
+    }
+
+    /// A show's, season's or file's own name: the last folder of its path.
+    static func lastFolder(_ path: String) -> String {
+        path.split(separator: "/").last.map(String.init) ?? path
+    }
+
+    static func useSettingsAsk(_ setting: KindsFacts.Setting?) -> String {
+        guard let setting else { return "Use the settings you approved for another show?" }
+        return "Use \(setting.name)'s settings, \(sizeSetting(setting))?"
+    }
+
+    static func useForShows(_ shows: Int) -> String {
+        shows == 1 ? "Use for this show" : "Use for all \(shows) shows"
+    }
+
+    /// A sample ready to watch, named by its season, or by its show and season when the row is a group's.
+    static func sampleReadyAsk(show: String? = nil, season: String?) -> String {
+        switch (show, season) {
+        case let (show?, season?): "The sample from \(show), \(season) is ready."
+        case let (nil, season?): "\(season)'s sample is ready."
+        default: "Its sample is ready."
+        }
+    }
+
+    static func firstSampleSizeAsk(_ season: String?) -> String {
+        season.map { "Choose a size for \($0)'s first sample." } ?? "Choose a size for its first sample."
+    }
+
+    static func sampleSizeAsk(_ failure: String?) -> String {
+        "\(sampleFailure(failure) ?? "It can't reach its size goal and still look right.") Choose a size."
+    }
+
+    static func sampleCannotDecideGroup(_ show: String?) -> String {
+        "\(show.map { "\($0)'s sample" } ?? "This sample") can't decide the whole group."
+    }
+
+    static func sizeQuestionAsk(_ file: ItemFacts.File, _ question: ItemFacts.SizeQuestion) -> String {
+        "\(fileName(file)) needs \(size(question.smallestQualitySafeBytes)) to look right, more than its \(size(question.goalBytes)) goal."
+    }
+
+    static func sizeHeldAsk(_ file: ItemFacts.File) -> String {
+        "\(fileName(file)) came out much smaller than its sample."
+    }
+
+    static func heldFileAsk(_ file: ItemFacts.File) -> String {
+        "\(fileName(file)) is on hold until \(file.unconfirmedStop?.computer ?? "its computer") is checked."
+    }
+
+    static func computerAsk(_ computer: MainWindowFacts.Computer) -> String {
+        computerFixHelp(computer.state) ?? computer.attentionReason ?? "\(computerState(computer.state))."
+    }
+
+    static func originalsAsk(_ preview: OriginalPreview) -> String {
+        if let problem = preview.problem { return problem }
+        guard let list = try? preview.fileList() else { return "This file list changed. Prepare it again before confirming." }
+        return "Confirm \(count(list.items.count, "file")) \(list.items.count == 1 ? "was" : "were") acquired independently."
     }
 }

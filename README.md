@@ -31,8 +31,9 @@ The current implementation covers:
   remaining TV, movie, and Other estimates. Missing estimates, an incomplete
   listing, or a failed library refresh make it read "At least" instead of
   "About"; no available estimate says it is not known yet.
-- “Needs you” gathers every item counted by the Dock badge, with links to sample decisions,
-  kind approvals, seasons, computers, and original-backup cleanup. Opening the app from the Dock, its waiting
+- “Needs you” lists every item counted by the Dock badge as one row each: what stops work first, then the
+  most space. Each row asks its question in a few words and takes the answer in place where Mediaforce can
+  (a group's settings, a sample size, keeping or remaking a file), or opens the page the answer needs. Opening the app from the Dock, its waiting
   menu-bar notice, or a notification shows the list while anything waits
 - the Mac Media table fills the available window below its filters, with one
   scrollbar for its rows and a visible column header while browsing

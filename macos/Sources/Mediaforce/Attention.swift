@@ -142,25 +142,25 @@ struct Attention: Equatable, Sendable {
 
     private static func kindWaitingReason(_ kind: MainWindowFacts.PendingKind) -> String {
         if kind.settingsAvailable == true {
-            return "Choose an already approved show's settings for this kind. A new sample isn't needed."
+            return "Use the settings you approved for another show. No new sample is needed."
         }
         if kind.sampleReady ?? true {
             let name = kind.sampleSeason?.split(separator: "/").dropFirst().joined(separator: " • ") ?? "The sample"
             return kind.oneTime == true
-                ? "\(name) is ready to watch. Each show of this kind needs its own choice."
-                : "Watch the sample and choose how this kind of content should look."
+                ? "\(name) is ready to watch."
+                : "Watch the sample and choose how these shows should look."
         }
         switch kind.sampleStatus {
         case "pending_review", "completed":
-            return "This sample cannot approve the kind. Open this kind to choose a different show's sample or approved settings."
+            return "This sample can't decide the whole group. Choose another show's sample."
         case "choose_size":
-            return "Choose a size before Mediaforce can make the first sample."
+            return "Choose a size for the first sample."
         case "choose_balance":
-            return "Choose how much detail to keep before Mediaforce can make the first sample."
+            return "Choose how much detail the first sample keeps."
         case "sample_blocked":
             return "The first sample cannot start yet. Open it to see what needs choosing."
         default:
-            return "The sample needs attention before you can approve this kind. Open it to see what to do next."
+            return "The first sample stopped."
         }
     }
 

@@ -1,356 +1,435 @@
 import SwiftUI
 
-/// What is waiting for the Director, in the TV shows page's own parts. A decision about a kind of content leads,
-/// then shows as poster cards, then the compact rows for computers and cleanup.
+/// Everything waiting for the Director, as one list. Each row is one thing: the space it covers, its picture, what it
+/// asks in a few words, and the answers beside it. What stops work comes first, then the most space.
 struct NeedsYouPage: View {
     let facts: MainWindowFacts
     let posters: PosterStore
     let model: MainWindowModel
     let open: (Place) -> Void
-    @State private var originalPreview: OriginalPreview?
-    // Each waiting season's files, read from its page, so its card can say what they ask.
+    // Each waiting season's files, and each size question's sample, read from their pages so a row can answer in place.
     @State private var seasonFiles: [String: ItemFacts] = [:]
+    @State private var samples: [String: SampleFacts] = [:]
+    @State private var working: Set<String> = []
+    @State private var reads = 0
+    @State private var originalPreview: OriginalPreview?
+    @State private var releasing: HeldFile?
 
     var body: some View {
-        let waiting = WaitingGroups(facts)
-        let previews = facts.originalPreviews ?? []
-        PageFrame(title: Words.needsYou, subtitle: Words.workHeadline(facts)) {
-            if let status = Words.workExplanation(facts, onNeedsYou: true) {
-                Text(status)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: 640, alignment: .leading)
-            }
-            if waiting.isEmpty && previews.isEmpty {
+        let items = NeedsYouItem.items(facts, kinds: model.kinds, files: seasonFiles, samples: samples)
+        PageFrame(title: Words.needsYou, subtitle: Words.needsYouCount(items.count)) {
+            if items.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Nothing is waiting for you").font(.title2.weight(.semibold))
-                    Text("Mediaforce marks this page and the sidebar when something does.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                    Label(Words.nothingNeedsYou, systemImage: "checkmark.circle")
+                        .font(.title2.weight(.semibold))
+                    if facts.spaceSaved.bytes > 0 {
+                        Text(Words.savedSoFar(facts.spaceSaved.bytes))
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 30)
+                    }
                 }
+                .padding(.bottom, 10)
                 FinishedShelf(seasons: Array(facts.recentlyFinishedSeasons.prefix(6)), posters: posters, open: open)
+            } else {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                        if index > 0 { Divider().padding(.leading, NeedsYouRow.textInset) }
+                        NeedsYouRow(item: item, first: index == 0, posters: posters, working: working.contains(item.id)) {
+                            perform($0, for: item)
+                        }
+                    }
+                }
+                .frame(maxWidth: NeedsYouRow.maxWidth, alignment: .leading)
             }
-            ForEach(waiting.kinds, id: \.id) { item in
-                KindDecisionBand(item: item, kind: model.kinds?.kinds.first { item.id.hasPrefix("kind:\($0.kind):") },
-                                 action: facts.work.kindsNeedingYou.first { item.id.hasPrefix("kind:\($0.kind):") }.map(Words.kindAction)
-                                     ?? Words.waitingAction(item.opens),
-                                 posters: posters, primary: item == waiting.first, open: open)
-            }
-            if !waiting.shows.isEmpty { shows(waiting) }
-            if !waiting.computers.isEmpty { computers(waiting) }
-            if waiting.backups != nil || !previews.isEmpty { cleanup(waiting, previews) }
         }
         .sheet(item: $originalPreview) { OriginalApprovalView(preview: $0, model: model) }
-        .task(id: waitingSeasonsKey) { await readSeasonFiles() }
+        .confirmationDialog(
+            releasing.map { Words.releaseHoldQuestion($0.file) } ?? "",
+            isPresented: Binding(get: { releasing != nil }, set: { if !$0 { releasing = nil } }),
+            presenting: releasing
+        ) { held in
+            Button(Words.releaseHoldButton(held.file)) { answerFile(.releaseHold, held.prefix, held.file, item: held.item) }
+            Button(Words.cancel, role: .cancel) {}
+        } message: { held in
+            Text(Words.releaseHoldWarning(held.file))
+        }
+        .task(id: readKey) { await readDetails() }
     }
 
-    // A season's files are read again when its state changes or another file finishes somewhere.
-    private var waitingSeasonsKey: [String] {
-        facts.work.seasonsNeedingYou.map { "\($0.prefix):\($0.state ?? ""):\($0.action ?? "")" } + ["\(facts.lastChange?.id ?? 0)"]
+    // Read again when what waits changes or another file finishes somewhere.
+    private var readKey: [String] {
+        facts.work.seasonsNeedingYou.map { "\($0.prefix):\($0.state ?? ""):\($0.action ?? "")" }
+            + NeedsYouItem.sizeQuestions(facts) + ["\(facts.lastChange?.id ?? 0)", "\(reads)"]
     }
 
-    private func readSeasonFiles() async {
-        var read: [String: ItemFacts] = [:]
+    private func readDetails() async {
+        var files: [String: ItemFacts] = [:]
         for season in facts.work.seasonsNeedingYou {
-            read[season.prefix] = try? await model.client.item(season.prefix)
+            files[season.prefix] = try? await model.client.item(season.prefix)
+        }
+        var read: [String: SampleFacts] = [:]
+        for prefix in NeedsYouItem.sampleReads(facts) {
+            read[prefix] = try? await model.client.sample(prefix)
         }
         guard !Task.isCancelled else { return }
-        seasonFiles = read
+        seasonFiles = files
+        samples = read
     }
 
-    private func heading(_ title: String, count: Int? = nil) -> some View {
-        HStack(spacing: 6) {
-            Text(title).font(.headline)
-            if let count { Text("\(count)").foregroundStyle(.secondary).monospacedDigit() }
-        }
-    }
-
-    private func shows(_ waiting: WaitingGroups) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            heading("Shows", count: waiting.shows.count)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: ShowCard.width, maximum: ShowCard.width), spacing: 22, alignment: .top)],
-                      alignment: .leading, spacing: 22) {
-                ForEach(waiting.shows, id: \.id) { item in
-                    ShowCard(item: item, card: WaitingShow(item, facts: facts, files: seasonFiles), posters: posters,
-                             primary: item == waiting.first, open: open)
-                }
+    private func perform(_ answer: NeedsYouAnswer, for item: NeedsYouItem) {
+        switch answer.action {
+        case .open(let place): open(place)
+        case .originals(let preview): originalPreview = preview
+        case .file(.releaseHold, let prefix, let file): releasing = HeldFile(item: item.id, prefix: prefix, file: file)
+        case .file(let action, let prefix, let file): answerFile(action, prefix, file, item: item.id)
+        case .useSettings(let kind, let from):
+            act(item.id) {
+                let result = try await $0.approveKind(kind, from: from)
+                return result.ok ? nil : ActionNotice(title: Words.kindRefusedTitle, message: Words.kindRefusal(result.code))
+            }
+        case .makeSample(let prefix, let size):
+            act(item.id) {
+                // A sample that needs more than a size opens its page, which says what else to choose.
+                if try await !$0.makeSample(prefix, size: size, balance: nil).ok { open(.sample(prefix)) }
+                return nil
             }
         }
     }
 
-    private func computers(_ waiting: WaitingGroups) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            heading("Computers", count: waiting.computers.count)
-            ForEach(waiting.computers, id: \.id) { item in
-                let computer = facts.computers.first { item.id.hasPrefix("computer:\($0.key):") }
-                CompactDecision(symbol: computer.map(Words.computerSymbol) ?? "desktopcomputer",
-                                name: computer.flatMap(\.name) ?? item.title,
-                                detail: computer.map { $0.attentionReason ?? Words.computerState($0.state) } ?? item.body,
-                                waiting: true, action: Words.waitingAction(item.opens),
-                                primary: item == waiting.first) { item.opens.map(open) }
-            }
+    private func answerFile(_ action: ItemAction, _ prefix: String, _ file: ItemFacts.File, item: String) {
+        act(item) {
+            let result = try await $0.answer(action, in: prefix, for: file)
+            return result.ok ? nil : ActionNotice(title: Words.actionRefused(action), message: Words.actionRefusal(result.code, result.message))
         }
     }
 
-    private func cleanup(_ waiting: WaitingGroups, _ previews: [OriginalPreview]) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            heading("Cleanup")
-            ForEach(previews) { preview in
-                CompactDecision(symbol: "doc.text.magnifyingglass", name: previewLine(preview), action: "Review file list") {
-                    originalPreview = preview
-                }
+    private func act(_ item: String, _ action: @escaping @MainActor (MediaforceClient) async throws -> ActionNotice?) {
+        working.insert(item)
+        Task {
+            do {
+                if let notice = try await action(model.client) { model.notice = notice }
+            } catch {
+                model.notice = .unanswered
             }
-            if let backups = waiting.backups {
-                BackupsCleanup(backups: facts.originalBackups, client: model.client, action: Words.waitingAction(backups.opens),
-                               primary: backups == waiting.first) {
-                    backups.opens.map(open)
-                }
-            }
+            await model.refresh()
+            await model.refreshKinds()
+            reads += 1
+            working.remove(item)
         }
     }
 
-    private func previewLine(_ preview: OriginalPreview) -> String {
-        if let problem = preview.problem { return problem }
-        if let waiting = preview.waiting { return waiting }
-        if let list = try? preview.fileList() { return "\(list.items.count) original files need your confirmation" }
-        return "An original-file request needs preparing again"
+    private struct HeldFile: Identifiable {
+        let item: String
+        let prefix: String
+        let file: ItemFacts.File
+        var id: Int { file.id }
     }
 }
 
-/// The page's waiting items by where each one is drawn. Original-file confirmations are drawn from their own previews.
-struct WaitingGroups {
-    let kinds: [AttentionNotice]
-    let shows: [AttentionNotice]
-    let computers: [AttentionNotice]
-    let backups: AttentionNotice?
-    // The one strong button on the page belongs to whichever item comes first.
-    var first: AttentionNotice? { kinds.first ?? shows.first ?? computers.first ?? backups }
-    var isEmpty: Bool { first == nil }
+/// One thing waiting for the Director: what it is, the space it covers, and each question it asks.
+struct NeedsYouItem: Identifiable {
+    enum Picture: Equatable {
+        case posters([String])
+        case symbol(String)
+    }
 
-    init(_ facts: MainWindowFacts) {
-        let items = Attention.waitingItems(facts).filter { !$0.id.hasPrefix("original:") }
-        kinds = items.filter { $0.id.hasPrefix("kind:") }
-        computers = items.filter { $0.id.hasPrefix("computer:") }
-        backups = items.first { $0.id == Attention.backupsNoticeID }
-        shows = items.filter { !$0.id.hasPrefix("kind:") && !$0.id.hasPrefix("computer:") && $0.id != Attention.backupsNoticeID }
+    let id: String
+    let title: String
+    var context: String?
+    var bytes: Int64?
+    let picture: Picture
+    let asks: [NeedsYouAsk]
+    // Where its name leads, to look closer before answering.
+    var opens: Place?
+    // A computer or a confirmation that holds up other work comes before any space.
+    var stopsWork = false
+}
+
+/// One question, as a short line, with a way to look first and the answers that settle it.
+struct NeedsYouAsk: Identifiable {
+    let line: String
+    var look: NeedsYouAnswer?
+    let answers: [NeedsYouAnswer]
+    var id: String { line }
+}
+
+struct NeedsYouAnswer {
+    enum Action {
+        case open(Place)
+        case useSettings(kind: String, from: String)
+        case makeSample(prefix: String, size: String?)
+        case file(ItemAction, prefix: String, file: ItemFacts.File)
+        case originals(OriginalPreview)
+    }
+
+    let title: String
+    let action: Action
+
+    /// Answered on the page itself, rather than by opening another.
+    var answersInPlace: Bool {
+        if case .open = action { false } else { true }
     }
 }
 
-/// What one waiting show says on its card. The poster's label says its state and the button what to do, so a
-/// description appears only when it tells the Director why.
 @MainActor
-struct WaitingShow {
-    let name: String
-    let posterPrefix: String?
-    let label: String
-    let state: String
-    let description: String?
-    let action: String
+extension NeedsYouItem {
+    /// The rows, one for each thing the sidebar and badge count.
+    static func items(_ facts: MainWindowFacts, kinds: KindsFacts?, files: [String: ItemFacts] = [:],
+                      samples: [String: SampleFacts] = [:]) -> [NeedsYouItem] {
+        let rows = Attention.waitingItems(facts).filter(\.notifies).map { notice in
+            item(notice, facts: facts, kinds: kinds, files: files, samples: samples)
+        }
+        return rows.enumerated().sorted { left, right in
+            let a = left.element, b = right.element
+            if a.stopsWork != b.stopsWork { return a.stopsWork }
+            if (a.bytes ?? -1) != (b.bytes ?? -1) { return (a.bytes ?? -1) > (b.bytes ?? -1) }
+            return left.offset < right.offset
+        }.map(\.element)
+    }
 
-    init(_ item: AttentionNotice, facts: MainWindowFacts, files: [String: ItemFacts] = [:]) {
-        if let sample = facts.samples.waitingOnYou.first(where: { item.opens == .sample($0.prefix) }) {
-            name = sample.show
-            posterPrefix = sample.showPrefix
-            label = sample.season.map { "Season \($0)" } ?? sample.show
-            state = Words.sampleState(sample)
-            description = Words.sampleFailure(sample.failure)
-            action = Words.sampleAction(sample.action) ?? Words.waitingAction(item.opens)
-        } else if let season = facts.work.seasonsNeedingYou.first(where: { item.opens == .item($0.prefix) }) {
-            name = season.showName
-            posterPrefix = MediaPoster.titlePrefix(season.prefix)
-            label = Words.seasonName(season)
-            state = files[season.prefix].flatMap { Words.filesAsk($0.waiting) } ?? Words.tvSeasonState(season)
-            description = Words.sampleFailure(season.failure)
-            action = Words.waitingAction(item.opens)
+    /// The samples whose size choices or season size a row reads.
+    static func sampleReads(_ facts: MainWindowFacts) -> [String] {
+        facts.samples.waitingOnYou.map(\.prefix) + sizeQuestions(facts)
+    }
+
+    static func sizeQuestions(_ facts: MainWindowFacts) -> [String] {
+        facts.work.kindsNeedingYou.filter { $0.settingsAvailable != true && $0.sampleReady != true && $0.sampleStatus == "choose_size" }
+            .compactMap(\.sampleStartPrefix)
+    }
+
+    private static func item(_ notice: AttentionNotice, facts: MainWindowFacts, kinds: KindsFacts?,
+                             files: [String: ItemFacts], samples: [String: SampleFacts]) -> NeedsYouItem {
+        if let pending = facts.work.kindsNeedingYou.first(where: { notice.id.hasPrefix("kind:\($0.kind):") }) {
+            return kindItem(notice, pending, kind: kinds?.kinds.first { $0.kind == pending.kind }, samples: samples)
+        }
+        if let sample = facts.samples.waitingOnYou.first(where: { notice.opens == .sample($0.prefix) }) {
+            return sampleItem(notice, sample, facts: samples[sample.prefix])
+        }
+        if let season = facts.work.seasonsNeedingYou.first(where: { notice.opens == .item($0.prefix) }) {
+            return seasonItem(notice, season, files: files[season.prefix])
+        }
+        if let computer = facts.computers.first(where: { notice.id.hasPrefix("computer:\($0.key):") }) {
+            return NeedsYouItem(id: notice.id, title: computer.name ?? computer.key, picture: .symbol(Words.computerSymbol(computer)),
+                                asks: [NeedsYouAsk(line: Words.computerAsk(computer),
+                                                   answers: [NeedsYouAnswer(title: Words.showComputer, action: .open(.computer(computer.key)))])],
+                                opens: .computer(computer.key), stopsWork: true)
+        }
+        if let preview = facts.originalPreviews?.first(where: { notice.id.hasPrefix("original:\($0.id)") }) {
+            return NeedsYouItem(id: notice.id, title: Words.originalFiles, picture: .symbol("doc.on.doc"),
+                                asks: [NeedsYouAsk(line: Words.originalsAsk(preview),
+                                                   answers: [NeedsYouAnswer(title: Words.reviewFileList, action: .originals(preview))])],
+                                stopsWork: true)
+        }
+        if notice.id == Attention.backupsNoticeID {
+            let backups = facts.originalBackups
+            return NeedsYouItem(id: notice.id, title: Words.originalBackups, context: Words.count(backups.count, "file"),
+                                bytes: backups.bytes, picture: .symbol("archivebox"),
+                                asks: [NeedsYouAsk(line: Words.backupsAsk,
+                                                   answers: [NeedsYouAnswer(title: Words.reviewAndDelete, action: .open(.spaceSaved))])],
+                                opens: .spaceSaved)
+        }
+        return NeedsYouItem(id: notice.id, title: notice.title, picture: .symbol("questionmark.circle"),
+                            asks: [NeedsYouAsk(line: notice.body, answers: notice.opens.map { [NeedsYouAnswer(title: Words.openItem, action: .open($0))] } ?? [])])
+    }
+
+    /// A group of shows decided together; a group whose shows are each decided on their own is shown by the show it asks about.
+    private static func kindItem(_ notice: AttentionNotice, _ pending: MainWindowFacts.PendingKind, kind: KindsFacts.Kind?,
+                                 samples: [String: SampleFacts]) -> NeedsYouItem {
+        let group = Words.kindName(pending.kind)
+        let season = pending.sampleSeason ?? pending.sampleStartPrefix
+        let showPrefix = season.map(MediaPoster.titlePrefix)
+        let showName = showPrefix.map(Words.lastFolder)
+        let opens = notice.opens ?? .kind(pending.kind)
+        let ask: NeedsYouAsk
+        if pending.settingsAvailable == true {
+            if let kind, let setting = kind.firstSetting {
+                ask = NeedsYouAsk(line: Words.useSettingsAsk(setting), look: NeedsYouAnswer(title: Words.watchFirst, action: .open(.kind(kind.kind))),
+                                  answers: [NeedsYouAnswer(title: Words.useForShows(kind.shows.count),
+                                                           action: .useSettings(kind: kind.kind, from: setting.fromPrefix))])
+            } else {
+                ask = NeedsYouAsk(line: Words.useSettingsAsk(nil), answers: [NeedsYouAnswer(title: Words.chooseSettings, action: .open(.kind(pending.kind)))])
+            }
+        } else if pending.sampleReady ?? true {
+            let line = pending.oneTime == true ? Words.sampleReadyAsk(season: season.map(Words.lastFolder))
+                : Words.sampleReadyAsk(show: showName, season: season.map(Words.lastFolder))
+            ask = NeedsYouAsk(line: line, answers: [NeedsYouAnswer(title: Words.watchSample, action: .open(opens))])
         } else {
-            name = item.title
-            posterPrefix = nil
-            label = Words.needsYou
-            state = ""
-            description = item.body
-            action = Words.waitingAction(item.opens)
+            switch pending.sampleStatus {
+            case "choose_size":
+                let prefix = pending.sampleStartPrefix ?? ""
+                ask = NeedsYouAsk(line: Words.firstSampleSizeAsk(season.map(Words.lastFolder)),
+                                  answers: sizeAnswers(prefix, samples[prefix]) ?? [NeedsYouAnswer(title: Words.chooseSize, action: .open(opens))])
+            case "choose_balance":
+                ask = NeedsYouAsk(line: Words.firstSampleDetailAsk, answers: [NeedsYouAnswer(title: Words.chooseDetail, action: .open(opens))])
+            case "pending_review", "completed":
+                ask = NeedsYouAsk(line: Words.sampleCannotDecideGroup(showName),
+                                  look: pending.sampleSeason.map { NeedsYouAnswer(title: Words.watchIt, action: .open(.sample($0))) },
+                                  answers: [NeedsYouAnswer(title: Words.chooseAnotherShow, action: .open(.kind(pending.kind)))])
+            default:
+                ask = NeedsYouAsk(line: Words.firstSampleStopped, answers: [NeedsYouAnswer(title: Words.openSample, action: .open(opens))])
+            }
         }
+        if pending.oneTime == true, let showPrefix, let showName {
+            return NeedsYouItem(id: notice.id, title: showName, context: group,
+                                bytes: kind?.shows.first { $0.prefix == showPrefix }?.waitingBytes,
+                                picture: .posters([showPrefix]), asks: [ask], opens: .kind(pending.kind))
+        }
+        return NeedsYouItem(id: notice.id, title: group, context: kind.map { Words.count($0.shows.count, "show") },
+                            bytes: kind?.waitingBytes, picture: .posters(kind.map { $0.shows.prefix(3).map(\.prefix) } ?? []), asks: [ask],
+                            opens: .kind(pending.kind))
+    }
+
+    private static func sampleItem(_ notice: AttentionNotice, _ sample: MainWindowFacts.Sample, facts: SampleFacts?) -> NeedsYouItem {
+        let place = Place.sample(sample.prefix)
+        let ask = if sample.state == "ready_to_compare" {
+            NeedsYouAsk(line: Words.sampleReadyAsk(season: nil), answers: [NeedsYouAnswer(title: Words.watchSample, action: .open(place))])
+        } else if sample.action == "choose_size" {
+            NeedsYouAsk(line: Words.sampleSizeAsk(sample.failure),
+                        answers: sizeAnswers(sample.prefix, facts) ?? [NeedsYouAnswer(title: Words.chooseSize, action: .open(place))])
+        } else {
+            NeedsYouAsk(line: Words.sampleFailure(sample.failure) ?? Words.sampleStopped,
+                        answers: [NeedsYouAnswer(title: Words.makeSampleAgain, action: .makeSample(prefix: sample.prefix, size: nil))])
+        }
+        return NeedsYouItem(id: notice.id, title: sample.show, context: sample.season.map { "Season \($0)" },
+                            bytes: facts?.seasonBytes, picture: .posters([sample.showPrefix]), asks: [ask], opens: place)
+    }
+
+    private static func seasonItem(_ notice: AttentionNotice, _ season: TVShowsFacts.Season, files: ItemFacts?) -> NeedsYouItem {
+        let waiting = files?.waiting ?? []
+        let asks = waiting.isEmpty
+            ? [NeedsYouAsk(line: Words.sampleFailure(season.failure) ?? Words.tvSeasonState(season),
+                           answers: [NeedsYouAnswer(title: Words.showSeason, action: .open(.item(season.prefix)))])]
+            : waiting.map { fileAsk($0, season: season.prefix) }
+        return NeedsYouItem(id: notice.id, title: season.showName, context: Words.seasonName(season),
+                            bytes: waiting.isEmpty ? season.bytes : waiting.reduce(0) { $0 + ($1.originalBytes ?? $1.bytes) },
+                            picture: .posters([MediaPoster.titlePrefix(season.prefix)]), asks: asks, opens: .item(season.prefix))
+    }
+
+    /// One file's question, answered on the page where Mediaforce takes the answer for that file.
+    static func fileAsk(_ file: ItemFacts.File, season: String) -> NeedsYouAsk {
+        if let question = file.sizeQuestion {
+            return NeedsYouAsk(line: Words.sizeQuestionAsk(file, question), answers: [
+                NeedsYouAnswer(title: Words.keepTheOriginal, action: .file(.keepOriginal, prefix: season, file: file)),
+                NeedsYouAnswer(title: Words.allowLarger(question), action: .file(.allowLarger, prefix: season, file: file)),
+            ])
+        }
+        if file.validation == "size_held" {
+            return NeedsYouAsk(line: Words.sizeHeldAsk(file), answers: [
+                NeedsYouAnswer(title: Words.keepThisCopy, action: .file(.keepThisCopy, prefix: season, file: file)),
+                NeedsYouAnswer(title: Words.makeItAgain, action: .file(.makeAgain, prefix: season, file: file)),
+            ])
+        }
+        if file.heldForUnconfirmedStop {
+            return NeedsYouAsk(line: Words.heldFileAsk(file),
+                               answers: [NeedsYouAnswer(title: Words.tryHeldFileAgain, action: .file(.releaseHold, prefix: season, file: file))])
+        }
+        return NeedsYouAsk(line: "\(Words.fileName(file)): \(Words.fileState(file)).",
+                           answers: [NeedsYouAnswer(title: Words.showSeason, action: .open(.item(season)))])
+    }
+
+    private static func sizeAnswers(_ prefix: String, _ facts: SampleFacts?) -> [NeedsYouAnswer]? {
+        guard let choices = facts?.sizeChoices, !choices.isEmpty else { return nil }
+        return choices.map { NeedsYouAnswer(title: Words.sizeChoice($0), action: .makeSample(prefix: prefix, size: $0.key)) }
     }
 }
 
-/// A decision that covers many shows: wide, with a stack of the shows it decides, so it never reads as one show's card.
-private struct KindDecisionBand: View {
-    private static let postersShown = 5
+/// A row: the space on the left so the biggest reads first, the picture, then the title and each question with its answers.
+private struct NeedsYouRow: View {
+    static let sizeWidth: CGFloat = 70
+    static let pictureWidth: CGFloat = 44
+    static let gap: CGFloat = 16
+    static let maxWidth: CGFloat = 1040
+    static var textInset: CGFloat { sizeWidth + pictureWidth + gap * 2 }
 
-    let item: AttentionNotice
-    let kind: KindsFacts.Kind?
-    let action: String
+    let item: NeedsYouItem
+    let first: Bool
     let posters: PosterStore
-    let primary: Bool
-    let open: (Place) -> Void
+    let working: Bool
+    let perform: (NeedsYouAnswer) -> Void
 
     var body: some View {
-        HStack(alignment: .center, spacing: 18) {
-            if let shows = kind?.shows, !shows.isEmpty {
-                HStack(spacing: -16) {
-                    ForEach(shows.prefix(Self.postersShown)) { show in
-                        MediaPoster(titlePrefix: show.prefix, name: show.name,
-                                    kind: MediaKind(rawValue: String(show.prefix.split(separator: "/").first ?? "")) ?? .other,
-                                    posters: posters, width: 46)
-                            .overlay(RoundedRectangle(cornerRadius: 3, style: .continuous)
-                                .strokeBorder(Color(nsColor: .textBackgroundColor), lineWidth: 1.5))
-                    }
-                }
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(item.title).font(.title3.weight(.semibold))
-                    if let kind { Text(Words.kindSubtitle(kind)).foregroundStyle(.secondary).monospacedDigit() }
-                }
-                Text(item.body)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let place = item.opens {
-                    DecisionButton(title: action, primary: primary) { open(place) }
-                        .padding(.top, 2)
-                }
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: 720, alignment: .leading)
-        .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-}
-
-private struct ShowCard: View {
-    static let width: CGFloat = 148
-
-    let item: AttentionNotice
-    let card: WaitingShow
-    let posters: PosterStore
-    let primary: Bool
-    let open: (Place) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button { item.opens.map(open) } label: {
-                PosterView(show: card.name, image: card.posterPrefix.flatMap(posters.image(for:)),
-                           headline: card.label, detail: card.state, width: Self.width)
-            }
-            .buttonStyle(.plain)
-            .pointerStyle(.link)
-            .accessibilityLabel(item.title)
-            .help(card.state)
-            Text(card.name).font(.callout.weight(.semibold)).lineLimit(1)
-            if let description = card.description {
-                Text(description)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-            if let place = item.opens {
-                DecisionButton(title: card.action, primary: primary) { open(place) }
-            }
-        }
-        // A row's cards share its height, so their buttons line up.
-        .frame(width: Self.width, alignment: .leading)
-        .frame(maxHeight: .infinity, alignment: .top)
-    }
-}
-
-/// A computer or cleanup job as the TV shows page draws a computer, with its button beside it.
-private struct CompactDecision: View {
-    let symbol: String
-    let name: String
-    var detail: String?
-    var waiting = false
-    let action: String
-    var primary = false
-    let run: () -> Void
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 10) {
-            Image(systemName: symbol)
+        HStack(alignment: .top, spacing: Self.gap) {
+            Text(item.bytes.map(Words.size) ?? "")
+                .font(.system(size: 15).monospacedDigit())
                 .foregroundStyle(.secondary)
-                .frame(width: 22)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(name).fixedSize(horizontal: false, vertical: true)
-                if let detail {
-                    HStack(spacing: 4) {
-                        if waiting { WaitingMark().accessibilityHidden(true) }
-                        Text(detail).foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: Self.sizeWidth, alignment: .trailing)
+                .help(item.bytes == nil ? "" : Words.spaceCovered)
+            NeedsYouPicture(picture: item.picture, posters: posters)
+                .frame(width: Self.pictureWidth, alignment: .leading)
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if let place = item.opens {
+                        // The name opens its page, to watch or look closer before answering.
+                        Button(item.title) { perform(NeedsYouAnswer(title: item.title, action: .open(place))) }
+                            .buttonStyle(QuietLinkStyle(primary: true))
+                            .font(.system(size: 15, weight: .semibold))
+                            .pointerStyle(.link)
+                    } else {
+                        Text(item.title).font(.system(size: 15, weight: .semibold))
                     }
-                    .font(.caption)
+                    if let context = item.context {
+                        Text(context).foregroundStyle(.secondary)
+                    }
                 }
-            }
-            .frame(minWidth: 260, alignment: .leading)
-            DecisionButton(title: action, primary: primary, run: run)
-        }
-        .padding(.leading, 6)
-    }
-}
-
-/// Original backups as one sentence with their size and the one button, with the titles holding them listed only on request.
-private struct BackupsCleanup: View {
-    let backups: MainWindowFacts.OriginalBackups
-    let client: MediaforceClient
-    let action: String
-    let primary: Bool
-    let review: () -> Void
-    @State private var listed = false
-    @State private var titles: [SpaceSavedFacts.Show]?
-    @State private var unreadable = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text(Words.backupsReady(backups)).monospacedDigit()
-                DecisionButton(title: action, primary: primary, run: review)
-            }
-            DisclosureGroup(Words.backupsByTitle, isExpanded: $listed) {
-                if let titles {
-                    Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 18, verticalSpacing: 4) {
-                        ForEach(titles) { title in
-                            GridRow {
-                                Text(title.name)
-                                Text(Words.showBackups(title.seasonPrefixes.count, title.backupBytes))
-                                    .foregroundStyle(.secondary)
-                                    .monospacedDigit()
+                ForEach(item.asks) { ask in
+                    DecisionLine {
+                        Text(ask.line).fixedSize(horizontal: false, vertical: true)
+                    } buttons: {
+                        if let look = ask.look {
+                            Button(look.title) { perform(look) }
+                                .buttonStyle(QuietLinkStyle())
+                                .padding(.trailing, 4)
+                        }
+                        ForEach(Array(ask.answers.enumerated()), id: \.offset) { index, answer in
+                            // The page's one strong button: the first row's last answer, as a dialog's default sits last.
+                            if first && ask.id == item.asks.first?.id && index == ask.answers.count - 1 {
+                                Button(answer.title) { perform(answer) }.buttonStyle(.borderedProminent)
+                            } else {
+                                Button(answer.title) { perform(answer) }
                             }
                         }
                     }
-                    .padding(.top, 4)
-                } else if unreadable {
-                    Text(Words.backupsUnlisted).foregroundStyle(.secondary)
-                } else {
-                    ProgressView().controlSize(.small)
                 }
             }
-            .font(.callout)
-            .frame(maxWidth: 640, alignment: .leading)
+            .disabled(working)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.leading, 6)
-        .task(id: listed) { await list() }
-    }
-
-    private func list() async {
-        guard listed, titles == nil else { return }
-        do {
-            titles = SpaceSavedFacts.shows(try await client.completed().folders)
-            unreadable = false
-        } catch {
-            unreadable = true
-        }
+        .padding(.vertical, 14)
     }
 }
 
-private struct DecisionButton: View {
-    let title: String
-    let primary: Bool
-    let run: () -> Void
+/// A row's picture, all one size: a show's poster, a small stack for a group of shows, or a symbol for everything else.
+private struct NeedsYouPicture: View {
+    let picture: NeedsYouItem.Picture
+    let posters: PosterStore
 
     var body: some View {
-        if primary {
-            Button(title, action: run).buttonStyle(.borderedProminent).controlSize(.small)
-        } else {
-            Button(title, action: run).controlSize(.small)
+        switch picture {
+        case .posters(let prefixes) where prefixes.count > 1:
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(prefixes.enumerated().reversed()), id: \.offset) { index, prefix in
+                    poster(prefix, width: 34)
+                        .overlay(RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .strokeBorder(Color(nsColor: .textBackgroundColor), lineWidth: 1))
+                        .offset(x: CGFloat(index) * 5, y: CGFloat(index) * 6)
+                }
+            }
+            .frame(width: 44, height: 66, alignment: .topLeading)
+        case .posters(let prefixes):
+            poster(prefixes.first ?? "", width: 44)
+        case .symbol(let name):
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(Color.primary.opacity(0.05))
+                .frame(width: 44, height: 66)
+                .overlay(Image(systemName: name).font(.system(size: 19)).foregroundStyle(.secondary))
+                .accessibilityHidden(true)
         }
+    }
+
+    private func poster(_ prefix: String, width: CGFloat) -> some View {
+        MediaPoster(titlePrefix: prefix, name: Words.lastFolder(prefix),
+                    kind: MediaKind(rawValue: String(prefix.split(separator: "/").first ?? "")) ?? .other,
+                    posters: posters, width: width)
     }
 }

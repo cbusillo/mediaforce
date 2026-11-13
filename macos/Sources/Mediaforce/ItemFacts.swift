@@ -149,6 +149,18 @@ extension MediaforceClient {
         return facts
     }
 
+    /// One file's answer, from its season's page or from Needs you.
+    func answer(_ action: ItemAction, in prefix: String, for file: ItemFacts.File) async throws -> ItemActionResult {
+        switch action {
+        case .makeAgain: try await makeAgain(prefix, file.libraryItemId)
+        case .keepThisCopy: try await keepThisCopy(prefix, file.libraryItemId)
+        case .putOriginalBack: try await putOriginalBack(prefix, file.libraryItemId)
+        case .allowLarger: try await decideSize(file.sizeQuestion?.jobId ?? "", allow: true)
+        case .keepOriginal: try await decideSize(file.sizeQuestion?.jobId ?? "", allow: false)
+        case .releaseHold: try await releaseHold(file)
+        }
+    }
+
     func player(_ libraryItemId: Int, _ side: PlayerSide) -> URL {
         baseURL.appending(path: "api/app/player/\(libraryItemId)/\(side.rawValue)/index.m3u8")
     }
