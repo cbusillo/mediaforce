@@ -99,11 +99,9 @@ def test_away_computer_and_missing_history_never_get_an_assignment(connection: D
     assert result["lined_up"][0]["starts_at"] is None
 
 
-def test_stale_held_attempts_remain_visible_without_becoming_queued_work(connection: DBClient, tmp_path: Path) -> None:
-    prefix = "tv/Finished/Season 1"
-    _encode_job(connection, prefix, status="needs_attention")
+def test_held_attempts_are_not_lined_up_or_changed(connection: DBClient, tmp_path: Path) -> None:
+    _encode_job(connection, "tv/Finished/Season 1", status="needs_attention")
     result = activity_payload(connection, _config(tmp_path), [], observed_at=NOW, next_season=None, storage_admits_work=True)
-    assert result["earlier_holds"][0]["prefix"] == prefix
     assert not result["lined_up"]
     assert connection.execute(encode_jobs.select()).mappings().one()["status"] == "needs_attention"
 

@@ -9,7 +9,7 @@ final class ActivityTests: XCTestCase {
                    "running":[],"finish_current_file":true}],
      "lined_up":[{"id":"a","prefix":"tv/Show/Season 1","show_prefix":"tv/Show","show":"Show","title":"Episode 1",
                   "starts_at":null,"finishes_at":null,"computer_key":null,"computer_name":null,"waiting":"Waiting for storage","progress":null}],
-     "earlier_holds":[],"next_season":{"prefix":"tv/Next/Season 2","show_prefix":"tv/Next","show":"Next","season":2}}
+     "next_season":{"prefix":"tv/Next/Season 2","show_prefix":"tv/Next","show":"Next","season":2}}
     """
 
     func testUnknownStartsStayVisibleWithoutAnInventedTimeOrComputer() throws {
