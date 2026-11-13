@@ -48,8 +48,7 @@ The current implementation covers:
 Approving a live-action kind’s representative sample approves the kind across
 its shows. The kind keeps the watched sample as its evidence. Choose
 “Approve only this season” for a season-only decision.
-Live-action seasons and movies can follow one approval for their kind of content
-("How it should look": live action and cartoons). Older unapproved
+Live-action seasons can follow one approval for their kind of content. Older unapproved
 season samples stop asking separately when they finished before the kind was
 approved or before its newest sample was requested. Newer samples, uncertain timing,
 and existing folder approvals keep their own decision. While the kind waits for a
@@ -64,14 +63,8 @@ choice reaches Needs you only when the season offers one; otherwise the start is
 retried like any other refusal. An existing
 approved setting comes first. An unsuitable sample stays reachable and stops
 automatic sampling of further shows until that kind's choice is settled.
-Cartoons continue to need
-a choice for each show. 4K is not a look: a look's approval says once whether 4K
-stays 4K or comes down to the library's tallest picture (Settings), and it comes
-down unless the Director chooses to keep it. A season whose sample episode is
-taller than that limit offers the same choice on its sample page, and choosing a
-size never changes it. Movies use the live action look; movie genres are not
-stored, so an animated movie is live action too. VR & 3D has no look until
-Mediaforce can compress it. Seasons missing original measurements wait for measuring without a sample decision, even
+Cartoons and 4K continue to need
+a choice for each show. Seasons missing original measurements wait for measuring without a sample decision, even
 when an older sample is saved. After measuring, they follow their kind; measured
 seasons without a reusable kind keep their own sample decisions. A blocked
 measurement names its reason and next action on the season and sample page:
@@ -387,12 +380,12 @@ See which kind of content each season still waiting on a sample belongs to:
 uv run mediaforce content-kinds
 ```
 
-This read-only JSON report groups each waiting season and movie title: cartoon
-by the series' TMDB genres, else live action once any of its originals is
-measured, else unmeasured. It reads only proven or probable original
-measurements, so published episodes count with the original they were made
-from, and output measurements never count. Seasons with a folder approval are
-only counted. A movie title holds only its feature files, never its extras.
+This read-only JSON report groups each waiting season by number ranges of its
+originals' measured traits: darker live action, bright live action, cartoon,
+4K, mixed, or unmeasured. It reads only proven or probable original traits, so
+published episodes vote with the original they were made from, and output
+measurements never count. Seasons with a folder approval are only counted.
+Cartoons come from the series' TMDB genres.
 
 Inspect a target-size default proposal using a current visual boundary observation
 ID from the configured database:

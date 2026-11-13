@@ -23,14 +23,6 @@ struct SampleFacts: Decodable, Sendable {
     let readyInSeconds: Int?
     let sizeChoices: [SizeChoice]
     let balanceChoices: [BalanceChoice]
-    // Offered when the season's sample episode is taller than the library's tallest picture; nil otherwise.
-    var picture: Picture? = nil
-
-    struct Picture: Decodable, Sendable, Equatable {
-        let sourceHeight: Int
-        let limit: Int
-        let keepsFullHeight: Bool
-    }
 
     struct Moment: Decodable, Sendable, Hashable {
         let atSeconds: Double
@@ -98,17 +90,10 @@ struct SampleFacts: Decodable, Sendable {
 
 struct SampleChoices {
     var selectedBalance: String?
-    var keepFullHeight: Bool?
     var askingSize = false
 
     func balance(in facts: SampleFacts?) -> String? {
         selectedBalance == facts?.balanceChoices.first(where: \.selected)?.key ? nil : selectedBalance
-    }
-
-    /// The 4K choice to send: nil when the season offers none or it is the season's own.
-    func picture(in facts: SampleFacts?) -> Bool? {
-        guard let picture = facts?.picture, let keepFullHeight, keepFullHeight != picture.keepsFullHeight else { return nil }
-        return keepFullHeight
     }
 
     mutating func compressed(_ result: SampleActionResult, facts: SampleFacts?) -> ActionNotice? {
@@ -117,7 +102,7 @@ struct SampleChoices {
     }
 
     mutating func made(_ result: SampleActionResult, facts: SampleFacts?) -> ActionNotice? {
-        if result.ok { selectedBalance = nil; keepFullHeight = nil }
+        if result.ok { selectedBalance = nil }
         askingSize = result.code == "choose_size" && facts?.sizeChoices.isEmpty == false
         return result.ok || askingSize ? nil : .sampleRefused
     }

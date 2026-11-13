@@ -70,7 +70,6 @@ def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[s
             {"key": choice["key"], "target_bytes": int_value(object_dict(choice["resolved_size_goal"]).get("target_size_bytes"))}
             for choice in _size_choices(folder)
         ],
-        "picture": _picture(folder),
         "balance_choices": [
             {"key": choice["key"], "label": choice["title"], "detail": str(choice.get("detail") or ""),
              "selected": choice == effective_balance}
@@ -136,22 +135,15 @@ def make_sample(
         *,
         ai_tune: AiTuneFn,
         retry_saved: RetrySampleFn,
-        keep_full_height: bool | None = None,
 ) -> dict[str, Any]:
-    """Make the sample again: retry the saved request, or ask for a new one at the chosen or current size.
-
-    When the season's original is taller than the library's tallest picture, the sample is made at the height the
-    owner chose for it, else at the season's current one.
-    """
+    """Make the sample again: retry the saved request, or ask for a new one at the chosen or current size."""
     prefix = str(folder["prefix"])
     action = object_dict(status.get("page_state")).get("primary_action")
     if size is None and action == "choose_size":
         return {"ok": False, "code": "choose_size"}
     result: Mapping[str, Any] = {}
     retry = object_dict(status.get("retryable_sample_job"))
-    picture = _picture(folder)
-    height_changes = picture is not None and keep_full_height is not None and keep_full_height != picture["keeps_full_height"]
-    if size is None and balance is None and action == "retry_sample" and not height_changes:
+    if size is None and balance is None and action == "retry_sample":
         try:
             result = retry_saved(prefix, "", "")
         except HTTPException:
@@ -163,7 +155,6 @@ def make_sample(
             request = _sample_request(
                 folder, size, balance, remake=action == "review_sample",
                 retry=retry if action == "retry_sample" and (balance is not None or retry.get("policy")) else None,
-                resolution=_picture_resolution(picture, keep_full_height),
             )
             if isinstance(request, str):
                 return {"ok": False, "code": request}
@@ -268,12 +259,10 @@ def samples_to_remake(cards: Iterable[Mapping[str, Any]], failed_in_a_row: Calla
 
 def _sample_request(
         folder: Mapping[str, Any], size: str | None, balance: str | None, *, remake: bool,
-        retry: dict[str, Any] | None = None, resolution: dict[str, Any] | None = None,
+        retry: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any] | None] | str:
-    current_intent = _current_operator_intent(folder)
-    if size is None and balance is None and remake and (resolution is None or current_intent is None
-                                                         or current_intent.get("resolution") == resolution):
-        return _measured_request(folder), current_intent
+    if size is None and balance is None and remake:
+        return _measured_request(folder), _current_operator_intent(folder)
     balances = _balance_choices(folder)
     if balance is not None:
         balance_choice = next((option for option in balances if option["key"] == balance), None)
@@ -282,7 +271,7 @@ def _sample_request(
     else:
         balance_choice = _effective_balance(balances)
     if size is None and (remake or retry is not None):
-        current = current_intent
+        current = _current_operator_intent(folder)
         goal_mb = _goal_bytes(folder) / DECIMAL_MEGABYTE_BYTES
         if retry is not None:
             policy = object_dict(retry.get("policy"))
@@ -306,9 +295,7 @@ def _sample_request(
             if balance_choice is None:
                 return "choose_balance"
             intent = with_compression_intent(current, object_dict(balance_choice.get("compression_intent")))
-        if resolution is not None and intent.get("resolution") != resolution:
-            intent = {**intent, "resolution": resolution}
-        elif remake:
+        if remake:
             return _measured_request(folder, compression_intent=object_dict(intent.get("compression_intent"))), intent
         return sample_goal_request({"operator_intent": intent, "resolved_size_goal": {"target_size_mb": goal_mb}}), intent
     choices = _size_choices(folder)
@@ -323,9 +310,12 @@ def _sample_request(
     intent = with_compression_intent(
         object_dict(choice["operator_intent"]), object_dict(balance_choice.get("compression_intent"))
     )
+    resolution = None if size else _current_resolution(folder)
     if resolution is not None:
+        # A sample made at the season's own size keeps its resolution; a size the owner picks brings its own.
         intent = {**intent, "resolution": resolution}
-    return sample_goal_request({**choice, "operator_intent": intent}), intent
+        choice = {**choice, "operator_intent": intent}
+    return sample_goal_request(choice), intent
 
 
 def _measured_request(folder: Mapping[str, Any], *, compression_intent: dict[str, Any] | None = None) -> str:
@@ -344,24 +334,11 @@ def _measured_request(folder: Mapping[str, Any], *, compression_intent: dict[str
     )
 
 
-def _picture(folder: Mapping[str, Any]) -> dict[str, Any] | None:
-    """The 4K choice, offered when the season's sample episode is taller than the library's tallest picture: keep
-    its height, or bring it down to that limit. Without a choice saved here it follows the library and comes down."""
-    limit = int_value(folder.get("tallest_picture"))
-    height = int_value(object_dict(folder.get("sample_item")).get("height"))
-    if limit <= 0 or height <= limit:
-        return None
+def _current_resolution(folder: Mapping[str, Any]) -> dict[str, Any] | None:
     resolution = object_dict(object_dict(folder.get("resolved_operator_intent")).get("resolution"))
-    keeps = not resolution.get("requires_confirmation") and (
-        resolution.get("mode") == "source" or (resolution.get("mode") == "max_height" and int_value(resolution.get("max_height")) >= height))
-    return {"source_height": height, "limit": limit, "keeps_full_height": keeps}
-
-
-def _picture_resolution(picture: Mapping[str, Any] | None, keep_full_height: bool | None) -> dict[str, Any] | None:
-    """The resolution the owner chose for a season that offers the 4K choice; None leaves the season's own."""
-    if picture is None or keep_full_height is None:
+    if resolution.get("mode") not in ("source", "max_height") or resolution.get("requires_confirmation"):
         return None
-    return {"mode": "source", "max_height": None} if keep_full_height else {"mode": "max_height", "max_height": picture["limit"]}
+    return {"mode": resolution["mode"], "max_height": resolution.get("max_height")}
 
 
 def _current_operator_intent(folder: Mapping[str, Any]) -> dict[str, Any] | None:

@@ -109,7 +109,7 @@ final class SampleTests: XCTestCase {
     }
 
     func testKindApprovalNamesItsScopeAndExpiresWhenRepresentationChanges() throws {
-        let scopedJSON = Self.facts().replacingOccurrences(of: #""draft_hash""#, with: #""approval_kind": "live_action", "draft_hash""#)
+        let scopedJSON = Self.facts().replacingOccurrences(of: #""draft_hash""#, with: #""approval_kind": "darker_live_action", "draft_hash""#)
         let scoped = try decode(scopedJSON)
         let kind = try XCTUnwrap(scoped.approvalKind)
         let approval = SampleApproval(reviewedDraftHash: "draft-1", scope: kind)
@@ -183,7 +183,7 @@ final class SampleClientTests: XCTestCase {
 
     func testARefusedApprovalIsAnAnswerNotAFailure() async throws {
         let result = try await client(status: 409, body: #"{"ok": false, "code": "confirm_size_tradeoff"}"#)
-            .approveSample("tv/Lucifer/Season 2", confirm: ["high_impact"], draftHash: "draft-1", scope: "live_action")
+            .approveSample("tv/Lucifer/Season 2", confirm: ["high_impact"], draftHash: "draft-1", scope: "darker_live_action")
         XCTAssertEqual(result.code, "confirm_size_tradeoff")
         let request = try XCTUnwrap(Self.requests.first)
         XCTAssertEqual(request.httpMethod, "POST")
@@ -191,7 +191,7 @@ final class SampleClientTests: XCTestCase {
         let sent = try XCTUnwrap(StubServerBody.json(request))
         XCTAssertEqual(sent["confirm"] as? [String], ["high_impact"])
         XCTAssertEqual(sent["reviewed_draft_hash"] as? String, "draft-1")
-        XCTAssertEqual(sent["approval_scope"] as? String, "live_action")
+        XCTAssertEqual(sent["approval_scope"] as? String, "darker_live_action")
     }
 
     func testAChangedKindAfterSavingNamesThePartialApprovalEvenIfCompressionStarted() throws {
@@ -226,28 +226,12 @@ final class SampleClientTests: XCTestCase {
         } catch {}
     }
 
-    func testMakingASampleSendsTheChosenSizeBalanceAndHeight() async throws {
+    func testMakingASampleSendsTheChosenSizeAndBalance() async throws {
         _ = try await client(status: 200, body: #"{"ok": true}"#)
-            .makeSample("tv/Lucifer/Season 2", size: "smaller", balance: "reference", keepFullHeight: true)
+            .makeSample("tv/Lucifer/Season 2", size: "smaller", balance: "reference")
         let sent = try XCTUnwrap(StubServerBody.json(try XCTUnwrap(Self.requests.first)))
         XCTAssertEqual(sent["size"] as? String, "smaller")
         XCTAssertEqual(sent["balance"] as? String, "reference")
-        XCTAssertEqual(sent["keep_full_height"] as? Bool, true)
-    }
-
-    func testA4KSeasonSendsOnlyAHeightTheOwnerChangedAndForgetsItOnceMade() throws {
-        func decode(_ json: String) throws -> SampleFacts { try JSONDecoder.mediaforce.decode(SampleFacts.self, from: Data(json.utf8)) }
-        let fourK = try decode(SampleTests.facts().replacingOccurrences(
-            of: #""draft_hash""#, with: #""picture": {"source_height": 2160, "limit": 1080, "keeps_full_height": false}, "draft_hash""#))
-        var choices = SampleChoices()
-        XCTAssertNil(choices.picture(in: fourK))
-        choices.keepFullHeight = false
-        XCTAssertNil(choices.picture(in: fourK))
-        choices.keepFullHeight = true
-        XCTAssertEqual(choices.picture(in: fourK), true)
-        XCTAssertNil(choices.picture(in: try decode(SampleTests.facts())))
-        _ = choices.made(SampleActionResult(ok: true, code: nil, compressing: nil, kindCode: nil, reason: nil), facts: fourK)
-        XCTAssertNil(choices.picture(in: fourK))
     }
 
     func testSizeConfirmationsOpenChoicesAndUnchangedFailedRetriesKeepTheirRequest() async throws {
