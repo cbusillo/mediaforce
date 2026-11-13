@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import os
+import pwd
 import re
 import subprocess
 import sys
@@ -94,7 +95,8 @@ def keychain_service_for(state_dir: Path, home: Path | None = None) -> str:
     """The installed app's own entries are plain "Mediaforce"; a development, test or proof server, whose database
     lives anywhere else, gets entries of its own named by its folder, so it never reads, sends or replaces the
     installed app's keys."""
-    live = (home or Path.home()) / LIVE_STATE_DIR
+    # The Keychain belongs to the signed-in user, whatever HOME a launch sets, so the account's own home decides.
+    live = (home or Path(pwd.getpwuid(os.getuid()).pw_dir)) / LIVE_STATE_DIR
     if state_dir.resolve() == live.resolve():
         return KEYCHAIN_SERVICE
     digest = hashlib.sha256(str(state_dir.resolve()).encode()).hexdigest()[:STATE_HASH_LENGTH]

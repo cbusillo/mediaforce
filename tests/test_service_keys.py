@@ -156,3 +156,10 @@ def test_servers_on_different_state_folders_never_see_each_others_keys(
     assert (installed.read("tmdb"), snapshot.read("plex")) == (None, None)
     assert service_key("plex", {}, snapshot) == "from-snapshot-env"
     assert service_key("plex", {}, installed) == "installed-key"
+
+
+def test_a_launch_with_another_home_does_not_claim_the_installed_apps_entries(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert keychain_service_for(tmp_path / LIVE_STATE_DIR) != KEYCHAIN_SERVICE
