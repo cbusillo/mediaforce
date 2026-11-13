@@ -106,10 +106,6 @@ struct MediaforceClient: Sendable {
         return try JSONDecoder.mediaforce.decode(HostActionResult.self, from: data)
     }
 
-    func lookForNewFiles() async throws {
-        _ = try await post("api/catalog/refresh")
-    }
-
     func pause() async throws {
         _ = try await post("api/encode-queue/pause")
     }
@@ -163,6 +159,16 @@ struct MediaforceClient: Sendable {
 
     func saveMetadataSettings(_ save: MetadataSettingsSave) async throws -> MetadataSettingsSaveResult {
         try await saveSettings("api/app/settings/metadata", save, as: MetadataSettingsSaveResult.self)
+    }
+
+    func metadataConnections() async throws -> MetadataConnections {
+        var request = URLRequest(url: baseURL.appending(path: "api/app/settings/metadata/connections"))
+        request.timeoutInterval = Self.factsTimeout
+        return try await decode(MetadataConnections.self, from: request)
+    }
+
+    func saveServiceKey(_ save: ServiceKeySave) async throws -> MetadataSettingsSaveResult {
+        try await saveSettings("api/app/settings/metadata/key", save, as: MetadataSettingsSaveResult.self)
     }
 
     func compressionSettings() async throws -> CompressionSettingsFacts {

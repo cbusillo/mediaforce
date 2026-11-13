@@ -71,9 +71,8 @@ from mediaforce.execution import (
 from mediaforce.library.calculation_reuse import LibraryCalculations
 from mediaforce.library.evidence_worker import default_evidence_worker_deps
 from mediaforce.library.folder_profiles import inspect_prefix
-from mediaforce.library.background_work import background_work_is_paused, ensure_background_work_state
-from mediaforce.library.evidence_queue import EvidenceQueueConflict, \
-    ensure_evidence_queue_state
+from mediaforce.library.background_work import ensure_background_work_state
+from mediaforce.library.evidence_queue import ensure_evidence_queue_state
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import media_group_scope_for_rel_path, resolve_media_scope, resolve_media_scopes, \
     scope_rel_path_filter, series_context_for_prefix
@@ -129,10 +128,11 @@ from mediaforce.core.type_defs import JSONValue, float_value, int_value, mapping
 from mediaforce.web.routes import register_app_window_routes, register_completed_routes, \
     register_compression_settings_routes, register_computer_settings_routes, register_dashboard_routes, \
     register_folder_routes, register_host_routes, register_library_settings_routes, \
-    register_metadata_settings_routes, register_operator_work_routes, register_queue_routes, register_settings_routes
+    register_metadata_settings_routes, register_queue_routes, register_settings_routes
 from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.routes.posters import register_poster_routes
-from mediaforce.library.metadata_sync import cached_poster, metadata_configuration_status
+from mediaforce.library import service_keys
+from mediaforce.library.metadata_sync import cached_poster, metadata_configuration_status, metadata_connection_states
 from mediaforce.reviewing.clips import review_file_from_url
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, SampleStartWait, approve_sample, make_sample, sample_facts, \
     prepare_waiting_samples, samples_to_remake, start_compressing, with_first_sample_question
@@ -1035,10 +1035,31 @@ def create_app(
             settings = None
         return {"ok": True, "settings": settings}
 
+    def _key_store() -> service_keys.KeyStore:
+        return service_keys.system_key_store(config.paths.db_path.parent)
+
     def _metadata_settings_facts() -> dict[str, Any]:
         """The Plex and TMDB tab's connections and revision, both from one stored state."""
         snapshot, revision = _settings_snapshot("metadata")
-        return _metadata_settings_facts_runtime(status=metadata_configuration_status(snapshot), revision=revision)
+        return _metadata_settings_facts_runtime(
+            status=metadata_configuration_status(snapshot, _key_store()), revision=revision,
+        )
+
+    def _metadata_connections() -> dict[str, str]:
+        snapshot, _revision = _settings_snapshot("metadata")
+        return metadata_connection_states(snapshot, _key_store())
+
+    def _save_service_key_action(service: str, key: str) -> dict[str, Any]:
+        """Keep a Plex or TMDB key in the Keychain; the answer says only that it is set, never the key."""
+        if service not in service_keys.SERVICE_KEY_ENVIRONMENT:
+            raise SettingsValidationError("Choose Plex or TMDB.", "service_unknown")
+        if not service_keys.is_valid_service_key(key):
+            raise SettingsValidationError("Paste the whole key.", "key_invalid")
+        try:
+            _key_store().write(service, key)
+        except service_keys.ServiceKeyNotSaved:
+            raise SettingsValidationError("The key could not be kept in the Keychain.", "key_not_saved") from None
+        return {"ok": True, "settings": _metadata_settings_facts()}
 
     def _save_metadata_settings_action(
             *,
@@ -1263,6 +1284,8 @@ def create_app(
         app,
         metadata_settings_facts=_metadata_settings_facts,
         save_metadata_settings_action=_save_metadata_settings_action,
+        metadata_connections=_metadata_connections,
+        save_service_key_action=_save_service_key_action,
     )
     register_compression_settings_routes(
         app,
@@ -1286,28 +1309,6 @@ def create_app(
         prepare_host_action=_prepare_host_action,
         reset_host_trust_action=_reset_host_trust_action,
         retry_host_connection_action=_retry_host_connection_action,
-    )
-
-    def _refresh_catalog_action() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            if background_work_is_paused(connection):
-                raise EvidenceQueueConflict(
-                    "Background catalog and analysis work is paused. Resume it before refreshing the catalog."
-                )
-            job = _maybe_schedule_scan(connection, config, prefix=None, force=True)
-        status = str((job or {}).get("status") or "queued")
-        return {
-            "ok": True,
-            "message": (
-                "Catalog refresh is already running."
-                if status == "running"
-                else "Catalog refresh queued. Existing remembered results remain available while it runs."
-            ),
-        }
-
-    register_operator_work_routes(
-        app,
-        refresh_catalog_action=_refresh_catalog_action,
     )
 
     def _folder_content_payload(normalized_prefix: str) -> tuple[dict[str, Any], int]:

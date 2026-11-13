@@ -268,13 +268,26 @@ saved work window has and no stored computer names, and computers that chose
 it by its placeholder key follow. Hours must be whole hours from 0 to 23.
 
 The Plex and TMDB tab is the web page's metadata panel: Plex on or off and its
-server address, TMDB on or off, and for each whether its access key is set.
+server address, TMDB on or off, and for each its access key.
 `GET /api/app/settings/metadata` gives `plex` (`enabled`, `address`,
-`key_name`, `key_found`), `tmdb` (`enabled`, `key_name`, `key_found`) and
-`revision`, a hash of the stored `metadata` section. Settings never hold a
-key: `key_name` is the environment variable the server reads it from and
-`key_found` only says whether it is set, so no key can reach the app, and
-neither field is accepted back. `POST /api/app/settings/metadata` takes `plex`
+`key_set`), `tmdb` (`enabled`, `key_set`) and `revision`, a hash of the stored
+`metadata` section. A key is entered once: `POST
+/api/app/settings/metadata/key` takes `service` (`plex` or `tmdb`) and `key`
+and keeps the key in the login Keychain through Apple's `security`
+tool (on standard input, never its command line) and answers with the facts.
+The server reads a key from the Keychain first, then from the environment or
+`.env` an earlier install used. No key is ever in an answer, the runtime
+settings, the database or a log. `GET /api/app/settings/metadata/connections`
+says for each service `missing`, `not_checked` (turned off, or Plex has no
+address), `connected`, `rejected` (the service refused the key) or
+`unreachable`. The key save, the connection check and the metadata save answer `403`
+`not_this_mac` unless the request names this server by its loopback address
+and port and carries no Origin, or this server's own loopback origin, so no
+web page, even one behind a rebound DNS name, can set a key, change where it
+is sent or make the server send it. Only a server whose database lives in the
+installed app's own folder uses the plain `Mediaforce` Keychain entries; a
+development, test or proof server uses entries named after its own database
+folder. `POST /api/app/settings/metadata` takes `plex`
 (`enabled`, `address`), `tmdb` (`enabled`) and `revision`, works as the other
 tabs do, and saves only the runtime settings `metadata` key, normalized as the
 web save does. Key variable names, refresh intervals and the TMDB address carry
@@ -283,12 +296,12 @@ a removed library; each library's Plex path is a library setting, edited with
 the library on the web.
 
 The Compression tab is the web page's default episode size: what Mediaforce
-aims for, the size goal for an episode of a given length, how far over the
-goal a file may be, the largest allowed size as a share of the original, the
+aims for, the size goal for an episode of a given length, the largest allowed
+size as a share of the original, the
 tallest picture and film grain, with how picture quality is measured (the
 picture appearance and picture detail scores) and how samples are made under
 Advanced. `GET /api/app/settings/compression` gives `aim`, `size_goal_mb`,
-`size_goal_minutes`, `size_limit_percent`, `largest_percent`,
+`size_goal_minutes`, `largest_percent`,
 `tallest_picture`, `grain`, `measurement`, `appearance_target`,
 `appearance_minimum`, `detail_target`, `detail_minimum`, `sample_method`, the
 read-only `size_goal_mode`, the choices `aims`, `measurements` and
@@ -296,9 +309,10 @@ read-only `size_goal_mode`, the choices `aims`, `measurements` and
 `POST /api/app/settings/compression` takes every one of those editable fields
 and `revision`, works as the other tabs do, and saves only the runtime
 settings `video` key through the web save's validation; a choice the web does
-not offer is refused rather than replaced. As on the web, changing the size
-limit holds samples to the same limit; video defaults the tab does not show
-carry over.
+not offer is refused rather than replaced. Video defaults the tab does not
+show carry over, including how far over the size goal a sample or finished
+file may be: that allowance is built in and not a setting, so an install keeps
+whatever it already saved.
 
 ## Notifications and the Dock badge
 

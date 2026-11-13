@@ -205,19 +205,44 @@ final class SettingsTests: XCTestCase {
     }
 
     static let metadataFacts = """
-    {"plex": {"enabled": true, "address": "http://plex.local:32400", "key_name": "MEDIAFORCE_PLEX_TOKEN",
-              "key_found": true},
-     "tmdb": {"enabled": false, "key_name": "MEDIAFORCE_TMDB_TOKEN", "key_found": false},
+    {"plex": {"enabled": true, "address": "http://plex.local:32400", "key_set": true},
+     "tmdb": {"enabled": false, "key_set": false},
      "revision": "m1"}
     """
 
+    static let metadataConnections = #"{"plex": "connected", "tmdb": "missing"}"#
+
     func testMetadataSettingsDecodeFromServerShape() throws {
         let decoded = try JSONDecoder.mediaforce.decode(MetadataSettingsFacts.self, from: Data(Self.metadataFacts.utf8))
-        XCTAssertEqual(decoded.plex, .init(
-            enabled: true, address: "http://plex.local:32400", keyName: "MEDIAFORCE_PLEX_TOKEN", keyFound: true
-        ))
-        XCTAssertEqual(decoded.tmdb, .init(enabled: false, keyName: "MEDIAFORCE_TMDB_TOKEN", keyFound: false))
+        XCTAssertEqual(decoded.plex, .init(enabled: true, address: "http://plex.local:32400", keySet: true))
+        XCTAssertEqual(decoded.tmdb, .init(enabled: false, keySet: false))
         XCTAssertEqual(decoded.revision, "m1")
+    }
+
+    func testKeyStateFollowsWhatTheServerLastFound() throws {
+        let connections = try JSONDecoder.mediaforce.decode(MetadataConnections.self, from: Data(Self.metadataConnections.utf8))
+        XCTAssertEqual(ServiceKeyState(keySet: true, checking: false, checked: connections.plex), .connected)
+        XCTAssertEqual(ServiceKeyState(keySet: false, checking: false, checked: connections.tmdb), .notSet)
+        XCTAssertEqual(ServiceKeyState(keySet: true, checking: true, checked: "connected"), .checking)
+        XCTAssertEqual(ServiceKeyState(keySet: true, checking: false, checked: "rejected"), .rejected)
+        XCTAssertEqual(ServiceKeyState(keySet: true, checking: false, checked: "unreachable"), .unreachable)
+        XCTAssertEqual(ServiceKeyState(keySet: true, checking: false, checked: "not_checked"), .saved)
+        XCTAssertEqual(ServiceKeyState(keySet: true, checking: false, checked: nil), .saved)
+    }
+
+    func testAKeyIsSentOnlyWithItsService() throws {
+        let body = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder.mediaforce.encode(ServiceKeySave(service: "tmdb", key: "k1")))
+                as? NSDictionary
+        )
+        XCTAssertEqual(body, ["service": "tmdb", "key": "k1"] as NSDictionary)
+    }
+
+    func testEveryKeyRefusalCodeHasItsOwnWords() {
+        let codes = ["key_invalid", "key_not_saved"]
+        let words = codes.map { Words.serviceKeyRefused($0) }
+        XCTAssertEqual(Set(words).count, codes.count)
+        XCTAssertFalse(words.contains(Words.serviceKeyRefused("service_unknown")))
     }
 
     func testMetadataSaveBodySendsOnlyWhatTheTabEdits() throws {
@@ -244,7 +269,7 @@ final class SettingsTests: XCTestCase {
     }
 
     static let compressionFacts = """
-    {"aim": "size_first_review", "size_goal_mb": 300.0, "size_goal_minutes": 45.0, "size_limit_percent": 10.0,
+    {"aim": "size_first_review", "size_goal_mb": 300.0, "size_goal_minutes": 45.0,
      "largest_percent": 80.0, "tallest_picture": 1080, "grain": 8, "measurement": "vmaf",
      "appearance_target": 85.0, "appearance_minimum": 80.0, "detail_target": 41.0, "detail_minimum": 35.0,
      "sample_method": "ab_av1_fast_sample", "size_goal_mode": "normalized",
@@ -257,8 +282,7 @@ final class SettingsTests: XCTestCase {
     }
 
     private let compressionRefusalCodes = [
-        "size_goal_invalid", "size_goal_minutes_invalid", "size_limit_invalid", "sample_size_limit_invalid",
-        "largest_size_invalid", "tallest_picture_invalid", "grain_invalid", "appearance_target_invalid",
+        "size_goal_invalid", "size_goal_minutes_invalid", "largest_size_invalid", "tallest_picture_invalid", "grain_invalid", "appearance_target_invalid",
         "appearance_minimum_invalid", "detail_target_invalid", "detail_minimum_invalid",
         "appearance_minimum_above_target", "detail_minimum_above_target", "unknown_aim", "unknown_measurement",
         "unknown_sample_method",
@@ -269,7 +293,6 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(decoded.aim, "size_first_review")
         XCTAssertEqual(decoded.sizeGoalMb, 300)
         XCTAssertEqual(decoded.sizeGoalMinutes, 45)
-        XCTAssertEqual(decoded.sizeLimitPercent, 10)
         XCTAssertEqual(decoded.largestPercent, 80)
         XCTAssertEqual(decoded.tallestPicture, 1080)
         XCTAssertEqual(decoded.grain, 8)
@@ -293,7 +316,7 @@ final class SettingsTests: XCTestCase {
             JSONSerialization.jsonObject(with: JSONEncoder.mediaforce.encode(draft.saveBody)) as? NSDictionary
         )
         XCTAssertEqual(body, [
-            "aim": "quality_first_sample", "size_goal_mb": 450, "size_goal_minutes": 45, "size_limit_percent": 10,
+            "aim": "quality_first_sample", "size_goal_mb": 450, "size_goal_minutes": 45,
             "largest_percent": 80, "tallest_picture": 720, "grain": 8, "measurement": "auto",
             "appearance_target": 85, "appearance_minimum": 80, "detail_target": 41, "detail_minimum": 35,
             "sample_method": "ab_av1_fast_sample", "revision": "v1",
@@ -325,8 +348,8 @@ final class SettingsTests: XCTestCase {
         let facts = try compression()
         var shown: [String] = [
             Words.compressionTab, Words.aimSection, Words.aimPicker, Words.sizeSection, Words.sizeGoal,
-            Words.megabytes, Words.forAnEpisodeOf, Words.minutes, Words.sizeLimit, Words.sizeLimitHelp,
-            Words.largestSize, Words.percentOfOriginal, Words.largestSizeHelp, Words.percent, Words.pictureSection,
+            Words.megabytes, Words.forAnEpisodeOf, Words.minutes,
+            Words.largestSize, Words.percentOfOriginal, Words.largestSizeHelp, Words.pictureSection,
             Words.tallestPicture, Words.pixelsTall, Words.tallestPictureHelp, Words.grain, Words.grainHelp,
             Words.advancedCompression, Words.measurementPicker, Words.appearanceTarget, Words.appearanceMinimum,
             Words.detailTarget, Words.detailMinimum, Words.scoresHelp, Words.samplePicker,
@@ -377,6 +400,5 @@ final class ComputerFixTests: XCTestCase {
         XCTAssertEqual(ComputerFix.primary(for: "remote_login_off"), .checkAgain)
         XCTAssertNil(ComputerFix.primary(for: "ready"))
         XCTAssertEqual(Words.computerAction(.setUp, needsPassword: true), "Set Up")
-        XCTAssertEqual(Words.atOnce(2), "Jobs at once: 2")
     }
 }

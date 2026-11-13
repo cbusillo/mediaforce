@@ -15,16 +15,19 @@ from mediaforce.web import app as web_app
 OTHER_SECTIONS = ("remote_hosts", "encode_queue", "video", "metadata", "folder_policy_overrides")
 
 
-def _json_request(payload: dict[str, Any]) -> Request:
+APP_SERVER = ("127.0.0.1", 8777)
+APP_HEADERS = {"host": "127.0.0.1:8777", "content-type": "application/json"}
+
+
+def _json_request(payload: dict[str, Any], headers: dict[str, str] | None = None, method: str = "POST") -> Request:
+    """A request as the Mac app sends it to this server, unless `headers` says otherwise."""
     body = json.dumps(payload).encode()
 
     async def receive() -> dict[str, Any]:
         return {"type": "http.request", "body": body, "more_body": False}
 
-    return Request(
-        {"type": "http", "method": "POST", "path": "/", "headers": [(b"content-type", b"application/json")]},
-        receive,
-    )
+    sent = [(name.encode(), value.encode()) for name, value in (headers or APP_HEADERS).items()]
+    return Request({"type": "http", "method": method, "path": "/", "headers": sent, "server": APP_SERVER}, receive)
 
 
 def _endpoint(app: FastAPI, method: str, path: str = "/api/app/settings/library") -> Any:

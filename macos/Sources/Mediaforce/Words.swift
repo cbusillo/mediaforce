@@ -317,7 +317,7 @@ extension Words {
         case "restarted": "It was interrupted by a restart."
         case "stopped": "It was stopped."
         case "containment_unproven":
-            "Mediaforce couldn't confirm an episode's picture check ended. Make sure the computer that ran it is idle. The episode stays on hold until that's confirmed."
+            "Mediaforce couldn't confirm a computer finished an episode's picture check. Once it's idle, try that episode again."
         default: recordedStop(code)
         }
     }
@@ -498,7 +498,6 @@ extension Words {
     static let pausedBar = "Mediaforce is paused. Nothing new starts."
     static let checksPausedBar = "Checks are paused."
     static let appName = "Mediaforce"
-    static let lookForNewFilesNow = "Look for New Files"
     static let openMediaforce = "Open Mediaforce"
     static let settingsEllipsis = "Settings…"
     static let resumeHelp = "Resume compression and paused checks."
@@ -832,6 +831,7 @@ extension Words {
     static let librariesSection = "Libraries"
     static let workingSpaceSection = "Working space"
     static let libraryName = "Name"
+    static let unnamedLibrary = "New library"
     static let libraryFolder = "Folder"
     static let libraryType = "Kind"
     static let plexPath = "Path reported by Plex"
@@ -993,9 +993,7 @@ extension Words {
         }
     }
 
-    static func atOnce(_ count: Int) -> String {
-        "Jobs at once: \(count.formatted())"
-    }
+    static let jobsAtOnce = "Jobs at once"
 
     static func day(_ code: String) -> String {
         switch code {
@@ -1072,14 +1070,30 @@ extension Words {
     static let useTMDB = "Use TMDB"
     static let useTMDBHelp = "TMDB tells Mediaforce whether a show is still airing."
     static let accessKey = "Access key"
-    static let accessKeyFound = "Found"
-    static let accessKeyDetails = "Key details"
-    static let accessKeyReadFrom = "Read from"
-    static let accessKeyHelp = "Mediaforce reads the key from this setting on the Mac that runs it, and sees a change after it restarts. Settings never show or store the key itself."
+    static let enterKey = "Enter key"
+    static let replaceKey = "Replace key"
+    static let pasteKeyPrompt = "Paste the key"
+    static let saveKey = "Save Key"
+    static let keyKeptInKeychain = "Kept in this Mac's Keychain. Settings never show it again."
     static let metadataHelp = "A full library scan refreshes what Plex and TMDB know. What Mediaforce already learned stays available while either can't be reached."
 
-    static func accessKeyNeeded(_ name: String) -> String {
-        "Needed. Set \(name) on the Mac that runs Mediaforce."
+    static func serviceKeyState(_ state: ServiceKeyState, name: String) -> String {
+        switch state {
+        case .notSet: "Not set"
+        case .checking: "Checking…"
+        case .saved: "Saved"
+        case .connected: "Connected"
+        case .rejected: "\(name) didn't accept this key"
+        case .unreachable: "Can't reach \(name)"
+        }
+    }
+
+    static func serviceKeyRefused(_ code: String?) -> String {
+        switch code {
+        case "key_invalid": "That isn't a whole key. Paste the key again, with nothing before or after it."
+        case "key_not_saved": "Mediaforce couldn't keep the key in this Mac's Keychain. Try again."
+        default: "Mediaforce couldn't save the key."
+        }
     }
 
     static func metadataSaveRefused(_ code: String?) -> String {
@@ -1095,6 +1109,10 @@ extension ActionNotice {
     static func metadataSettingsNotSaved(_ code: String?) -> ActionNotice {
         ActionNotice(title: "Settings not saved", message: Words.metadataSaveRefused(code))
     }
+
+    static func serviceKeyNotSaved(_ code: String?) -> ActionNotice {
+        ActionNotice(title: "Key not saved", message: Words.serviceKeyRefused(code))
+    }
 }
 
 extension Words {
@@ -1106,12 +1124,9 @@ extension Words {
     static let megabytes = "MB"
     static let forAnEpisodeOf = "for an episode of"
     static let minutes = "minutes"
-    static let sizeLimit = "Allowed over the goal"
-    static let sizeLimitHelp = "A finished file may be this much over its size goal. Samples are held to the same limit. Smaller is never a failure by itself."
     static let largestSize = "Largest allowed size"
     static let percentOfOriginal = "% of the original"
     static let largestSizeHelp = "A compressed file bigger than this share of its original is not used."
-    static let percent = "%"
     static let pictureSection = "Picture"
     static let tallestPicture = "Tallest picture"
     static let pixelsTall = "pixels tall"
@@ -1166,8 +1181,6 @@ extension Words {
         switch code {
         case "size_goal_invalid": "The size goal must be between 1 and 100,000 MB."
         case "size_goal_minutes_invalid": "The episode length for the size goal must be between 1 and 1,440 minutes."
-        case "size_limit_invalid": "How far over the goal a file may be must be between 0.1% and 100%."
-        case "sample_size_limit_invalid": "The saved size limit for samples isn't between 0.1% and 100%. Change how far over the goal a file may be, then save."
         case "largest_size_invalid": "The largest allowed size must be between 1% and 100% of the original."
         case "tallest_picture_invalid": "The tallest picture must be a whole number of pixels from 0 to 4,320."
         case "grain_invalid": "Film grain must be a whole number from 0 to 50."
@@ -1272,7 +1285,7 @@ extension Words {
         case "quality_floor_size_conflict": "To look right it needs more space than its size goal."
         case "final_size_target_miss": "The compressed copy didn't come out at its size goal."
         case "containment_unproven":
-            "Mediaforce couldn't confirm its picture check ended on \(computer). Make sure \(computer) is idle. This file stays on hold until that's confirmed."
+            "Mediaforce couldn't confirm \(computer) finished its picture check. Once \(computer) is idle, try this file again."
         case "needs_review": "It ran into a problem Mediaforce couldn't sort out by itself."
         case "schedule_too_short": "It takes longer than every computer's work window. A longer work window lets it run."
         case "plan_rebuild": "Its work needs to be set up again before it can run."

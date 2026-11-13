@@ -219,7 +219,8 @@ Mediaforce render /path/to/captures --page needs-you --page 'sample:tv/Show/Seas
 
 Other page names are `library`, `tv`, `movies`, `other`, `activity`,
 `space-saved`, `media`, `kind:CODE`, `item:PREFIX`, `settings:libraries`,
-`settings:compression`, `settings:computers` and `settings:metadata`.
+`settings:compression`, `settings:computers`, `settings:metadata` and `menu`
+(the menu bar panel, drawn at its own size and only when asked for).
 `--server URL` selects another server; the default is the app's local server.
 `--width POINTS` and `--height POINTS` adjust the viewport. Settings retain
 their normal form width. Use a new empty output directory for each run so old
@@ -686,11 +687,16 @@ filesystem modification time as the final fallback. Selection provenance is
 written into the run manifest so retries and recovery do not silently recompute
 membership under newer policy or metadata.
 
-Plex and TMDB credentials are never written through the Settings UI. Set them in
-the launch environment instead:
-
-- `MEDIAFORCE_PLEX_TOKEN`: Plex server token
-- `MEDIAFORCE_TMDB_TOKEN`: TMDB API read-access token
+Enter the Plex token and the TMDB API read-access token once in Settings ›
+Plex and TMDB. The server keeps each in the login Keychain (service
+`Mediaforce`, accounts `plex` and `tmdb`; a server on any other state folder,
+such as a development or proof server, uses its own `Mediaforce <hash>`
+entries) through Apple's `security` tool, so
+it reads them back on every start without a permission dialog; Settings only
+ever learns whether a key is set and whether the service accepts it. A key
+already set in the launch environment or the `.env` file
+(`MEDIAFORCE_PLEX_TOKEN`, `MEDIAFORCE_TMDB_TOKEN`) keeps working; a key
+entered in Settings takes its place.
 
 The configured SSH account and media paths are unrelated to these credentials.
 Plex path mappings translate the paths reported by Plex to the corresponding
