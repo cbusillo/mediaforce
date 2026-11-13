@@ -171,6 +171,26 @@ class _SleepingComputer:
         return False
 
 
+class _HeldRunComputer:
+    LISTING_ITSELF = "90 80 R Fri Oct 9 14:00:00 2026 ps -ww -axo pid=,ppid=,stat=,lstart=,args=\n"
+
+    def __init__(self, extra_processes: str = "", *, listing: subprocess.CompletedProcess[str] | None = None) -> None:
+        self.listing = listing or subprocess.CompletedProcess(
+            ["ps"], 0, f"1 0 S Fri Oct 9 14:00:00 2026 sshd\n{extra_processes}{self.LISTING_ITSELF}", "")
+        self.commands: list[str] = []
+
+    def run_remote_command(
+            self, host: dict[str, Any], command: list[str], *_args: Any, **kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        self.commands.append(" ".join([*command, str(kwargs.get("input_text") or "")]))
+        if command[0] == "ps":
+            return self.listing
+        return _remote_cleanup_succeeds(host, command, **kwargs)
+
+    def signals_sent(self) -> list[str]:
+        return [command for command in self.commands if "kill" in command]
+
+
 def _scratch_fixture_is_local(_lookup_host: str) -> bool:
     return False
 
@@ -4007,7 +4027,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual((self.root / "source" / "tv" / "show" / "last-episode.mkv").read_text(), "source")
         self.assertIn("Measuring quality on Remote A", plain_message)
 
-    def test_quality_run_a_computer_does_not_confirm_stopped_goes_to_the_owner_with_its_explanation(self) -> None:
+    def test_quality_run_a_computer_does_not_confirm_stopped_for_a_day_goes_to_the_owner_with_its_explanation(self) -> None:
         scope = self._scoped_quality_run()
         survivors = subprocess.CompletedProcess(["ssh"], 1, "", "fixture survivors remain")
         refused = subprocess.CompletedProcess(["ssh"], 255, "", "fixture@remote-a.example: Permission denied (publickey).")
@@ -4031,6 +4051,15 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     progress["quality_containment"].update({key: value for key, value in change.items() if key == "scoped_temp_dir"})
                     save_encode_job(connection, {**job, **{key: value for key, value in change.items() if key != "scoped_temp_dir"},
                                                  "progress": progress})
+                    self._due_now(connection, job)
+                    encode_runtime.reconcile_encode_jobs(connection, self.config, web_app._encode_queue_runtime_deps())
+                    waiting = load_encode_job(connection, job["job_id"])
+                    assert waiting is not None
+                    self.assertEqual(waiting["status"], "retry_backoff")
+                    self.assertFalse(encode_runtime.unfinished_child_reason(waiting)[2])
+
+                    failed_at = datetime.now(tz=UTC) - encode_runtime.UNCONFIRMED_RUN_ASK_AFTER - timedelta(minutes=1)
+                    save_encode_job(connection, {**waiting, "last_failure_at": failed_at.isoformat()})
                     self._due_now(connection, job)
                     answering_computer.reset_mock()
                     encode_runtime.reconcile_encode_jobs(connection, self.config, web_app._encode_queue_runtime_deps())
@@ -4125,6 +4154,117 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(updated["terminal_reason"], encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND)
         self.assertEqual(updated["error"], plain_message)
         self.assertIsNone(updated["retry_not_before"])
+
+    def _held_quality_run(self, connection: DBClient, name: str, **changes: Any) -> tuple[dict[str, Any], Path]:
+        item_id = self._insert_library_item(connection, self._create_source_file(f"{name}.mkv"), status="encoding")
+        self._write_manifest(
+            f"manifest-{name}.json", [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{name}.mkv"))}],
+        )
+        self._save_job(connection, job_id=f"job-{name}", manifest_name=f"manifest-{name}.json",
+                       host=dict(self._QUALITY_TIMEOUT_HOST), status="needs_attention", attempt_count=1)
+        job = load_encode_job(connection, f"job-{name}")
+        assert job is not None
+        held_at = web_app._now_iso()
+        timeout = encoding_quality.RemoteQualityTimeoutError(
+            phase="crf_search", timeout_seconds=encoding_quality.REMOTE_QUALITY_SILENCE_TIMEOUT_SECONDS,
+            host_key="remote-a", host_label="Remote A", remote_process_contained=False, stalled=True,
+        )
+        job.update({
+            "last_failure_kind": encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND,
+            "terminal_reason": encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND, "error": str(timeout),
+            "last_host": dict(self._QUALITY_TIMEOUT_HOST), "started_at": held_at, "finished_at": held_at,
+            "last_failure_at": held_at, **changes,
+        })
+        save_encode_job(connection, job)
+        partial = staging_runtime.partial_output_path(self._staging_path(f"{name}.mkv"))
+        partial.parent.mkdir(parents=True, exist_ok=True)
+        partial.write_text("old frames")
+        connection.commit()
+        return job, partial
+
+    def _restart_and_retry(self, connection: DBClient, computer: _HeldRunComputer, job: dict[str, Any]) -> dict[str, Any]:
+        with self._quality_timeout_computer(computer.run_remote_command):
+            web_app._recover_encode_queue(connection, self.config)
+            if (load_encode_job(connection, job["job_id"]) or {}).get("status") == "retry_backoff":
+                self._due_now(connection, job)
+            encode_runtime.reconcile_encode_jobs(connection, self.config, web_app._encode_queue_runtime_deps())
+        current = load_encode_job(connection, job["job_id"])
+        assert current is not None
+        return current
+
+    def test_held_file_goes_back_to_work_once_its_computer_shows_no_quality_run(self) -> None:
+        computer = _HeldRunComputer()
+        with open_db(self.config.paths.db_path) as connection:
+            job, partial = self._held_quality_run(connection, "held-episode")
+            retried = self._restart_and_retry(connection, computer, job)
+
+        self.assertEqual((retried["status"], retried["attempt_count"]), ("queued", 1))
+        self.assertFalse(partial.exists())
+        self.assertEqual(computer.signals_sent(), [])
+        self.assertEqual((self.root / "source" / "tv" / "show" / "held-episode.mkv").read_text(), "source")
+
+    def test_held_file_waits_without_asking_until_its_computer_goes_unconfirmed_for_a_day(self) -> None:
+        scope = f"{self.config.staging_root}/.mediaforce-ab-av1-{'a' * 32}"
+        still_running = {
+            "quality run": f"50 1 S Fri Oct 9 13:00:00 2026 /opt/homebrew/bin/ab-av1 crf-search --temp-dir {scope}\n",
+            "orphaned sample encode": f"51 1 S Fri Oct 9 13:00:00 2026 ffmpeg -i {scope}/sample.mkv -f null -\n",
+        }
+        answers = {
+            **{name: _HeldRunComputer(process) for name, process in still_running.items()},
+            "failed listing": _HeldRunComputer(listing=subprocess.CompletedProcess(["ps"], 1, "", "ps: fixture failure")),
+            "partial listing": _HeldRunComputer(listing=subprocess.CompletedProcess(["ps"], 0, "1 0 S Fri Oct 9 14:00:00 2026 sshd\n", "")),
+            "unreachable": _HeldRunComputer(listing=_remote_host_unreachable()),
+        }
+        for name, computer in answers.items():
+            with self.subTest(name), open_db(self.config.paths.db_path) as connection:
+                job, partial = self._held_quality_run(connection, name.replace(" ", "-"))
+                waiting = self._restart_and_retry(connection, computer, job)
+                self.assertEqual(waiting["status"], "retry_backoff")
+                self.assertFalse(encode_runtime.unfinished_child_reason(waiting)[2])
+                if name == "unreachable":
+                    self.assertEqual(encode_runtime.unfinished_child_reason(waiting)[0], "waiting_for_computer:Remote A")
+
+                progress = copy.deepcopy(waiting["progress"])
+                checking_since = datetime.now(tz=UTC) - encode_runtime.UNCONFIRMED_RUN_ASK_AFTER - timedelta(minutes=1)
+                progress[encode_runtime.QUALITY_CONTAINMENT_PROGRESS_KEY]["checking_since"] = checking_since.isoformat()
+                save_encode_job(connection, {**waiting, "progress": progress})
+                asked = self._restart_and_retry(connection, computer, job)
+
+                self.assertEqual((asked["status"], asked["terminal_reason"]),
+                                 ("needs_attention", encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND))
+                self.assertTrue(encode_runtime.unfinished_child_reason(asked)[2])
+                self.assertEqual(self._restart_and_retry(connection, computer, job)["status"], "needs_attention")
+                self.assertTrue(partial.exists())
+                self.assertEqual(computer.signals_sent(), [])
+
+    def test_held_file_without_a_clear_record_or_attempt_left_stays_with_the_owner(self) -> None:
+        other_computer = {**self._QUALITY_TIMEOUT_HOST, "key": "remote-b", "host": "remote-b.example"}
+        max_attempts = web_app._encode_queue_runtime_deps().encode_job_max_attempts
+        for name, changes in (
+                ("another-computer-recorded", {"last_host": other_computer}),
+                ("streamed", {"host": {**self._QUALITY_TIMEOUT_HOST, "media_access": "stream"}}),
+                ("last-attempt", {"attempt_count": max_attempts}),
+                ("not-a-quality-run", {"error": "Encoder containment could not be proven."})):
+            with self.subTest(name), open_db(self.config.paths.db_path) as connection:
+                computer = _HeldRunComputer()
+                job, partial = self._held_quality_run(connection, name, **changes)
+                held = load_encode_job(connection, job["job_id"])
+                after = self._restart_and_retry(connection, computer, job)
+                self.assertEqual(after, held)
+                self.assertTrue(partial.exists())
+                self.assertEqual(computer.commands, [])
+
+    def test_held_file_a_later_run_already_covers_stays_with_the_owner(self) -> None:
+        computer = _HeldRunComputer()
+        with open_db(self.config.paths.db_path) as connection:
+            job, partial = self._held_quality_run(connection, "covered-later")
+            later_at = (datetime.now(tz=UTC) + timedelta(minutes=1)).isoformat(timespec="seconds")
+            save_encode_job(connection, {**job, "job_id": "later-run", "status": "completed", "created_at": later_at,
+                                         "last_failure_kind": None, "terminal_reason": None, "error": None})
+            held = load_encode_job(connection, job["job_id"])
+            after = self._restart_and_retry(connection, computer, job)
+        self.assertEqual(after, held)
+        self.assertTrue(partial.exists())
 
     def test_folder_retry_keeps_earlier_children_when_later_cleanup_refuses(self) -> None:
         with open_db(self.config.paths.db_path) as connection:

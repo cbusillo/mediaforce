@@ -41,7 +41,7 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, RUNNABLE_ENCODE_JOB_KINDS, ensure_queue_state, \
-    encode_run_manifest_indexes, list_child_encode_jobs, load_encode_job, load_queue_state, persisted_encode_host_payload, save_encode_job, save_queue_state
+    encode_run_manifest_files, encode_run_manifest_indexes, list_child_encode_jobs, load_encode_job, load_queue_state, persisted_encode_host_payload, save_encode_job, save_queue_state
 from mediaforce.core.process_control import (
     ManagedProcessController,
     ProcessCancelledError,
@@ -56,14 +56,15 @@ from mediaforce.encoding.free_space import CapacityCache, large_job_requires_ser
 from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND, CONTAINMENT_UNPROVEN_OWNER_STEP, \
     REMOTE_QUALITY_TIMEOUT_FAILURE_KIND, QualityTempSetupError, RemoteQualityTimeoutError, \
     analyze_quality_policy_failure, quality_error_message, stop_timed_out_remote_quality_run
-from mediaforce.encoding.staged_host import StagedScratchError, host_scratch_root, measure_scratch_free_bytes, \
+from mediaforce.encoding.staged_host import STAGED_JOB_KEY, StagedScratchError, host_scratch_root, measure_scratch_free_bytes, \
     required_scratch_bytes
 from mediaforce.hosts.types import is_stop_signal_exit, is_storage_io_failure, is_vmaf_model_load_failure
 from mediaforce.encoding.cadence import CadenceResolutionError
 from mediaforce.encoding.free_space import ReserveInputError
 from mediaforce.encoding.staging import EncodeConnectionLostError, FinishedOutputNotVisibleError, \
     StagedOutputHeldForReviewError, UnreadableEncodeOutputError, partial_output_path, safe_unlink
-from mediaforce.encoding.remote_cleanup import RemoteHostUnreachableError, end_remote_output_writers
+from mediaforce.encoding.remote_cleanup import RemoteHostUnreachableError, confirm_computer_runs_no_quality_run, \
+    end_remote_output_writers
 from mediaforce.encoding.dispatch_coordination import STANDALONE_CLI_ENCODE_ORIGINS, locked_encode_dispatch as _locked_encode_dispatch
 from mediaforce.encoding.helpers import resolve_item_staging_path
 from mediaforce.encoding.plain_failure import FINAL_SIZE_MISS_RE, QUALITY_FLOOR_CONFLICT_RE, \
@@ -281,6 +282,7 @@ REMOTE_QUALITY_TIMEOUT_RETRY_NOTE = "It will be tried again."
 REMOTE_QUALITY_TIMEOUT_EXHAUSTED_NOTE = "It kept running too long, so this file needs you."
 QUALITY_RUN_RECHECK_NOTE = "Mediaforce will check that computer again and try this file once that run has ended."
 QUALITY_CONTAINMENT_PROGRESS_KEY = "quality_containment"
+UNCONFIRMED_RUN_ASK_AFTER = timedelta(hours=24)
 SCOPED_QUALITY_TEMP_DIR_NAME = re.compile(r"\.mediaforce-ab-av1-[0-9a-f]{32}")
 # Failures a retry cannot change: a measured result, a plan or evidence contract, or a finished
 # output kept for review (a retry's cleanup would delete it).
@@ -315,6 +317,7 @@ def recover_encode_queue(
     reconcile_encode_jobs(connection, config, deps, restart_recovery=True)
     sweep_stopped_remote_encodes(connection, config, deps)
     _release_jobs_stranded_by_an_outage(connection, deps)
+    _check_held_quality_runs_again(connection, deps)
     clear_stale_encoding_items_when_idle(connection, config, deps)
     connection.commit()
 
@@ -427,12 +430,41 @@ def _quality_containment_scope(config: MediaforceConfig, job: Mapping[str, Any],
     if not scope:
         raise RuntimeError("Mediaforce did not save which work folder that run used, so its stop cannot be confirmed.")
     if (not job.get("started_at") or int_value(job.get("attempt_count")) < 1
-            or context.get("host_key") != str(host.get("key") or host.get("host") or "").strip()
+            or context.get("host_key") != _recorded_host_key(host)
             or not SCOPED_QUALITY_TEMP_DIR_NAME.fullmatch(Path(scope).name)
             or Path(scope).parent != config.staging_root_for_host(host)
             or context.get("receipt") != _remote_cleanup_receipt(config, job, items, quality_scope=scope)):
         raise RuntimeError("The saved quality run does not match this attempt, computer and work folder.")
     return scope
+
+
+def _recorded_host_key(host: Mapping[str, Any]) -> str:
+    return str(host.get("key") or host.get("host") or "").strip()
+
+
+def _unconfirmed_run_computer(job: Mapping[str, Any]) -> dict[str, Any]:
+    host = object_dict(job.get("host"))
+    key = _recorded_host_key(host)
+    if (execution_mode_for_host(host) != "ssh" or host_media_access_for_host(host) != "mounted"
+            or host.get(STAGED_JOB_KEY)):
+        raise RuntimeError("This run needs a separate recovery check on the computer where it started.")
+    recorded = (
+        object_dict(job.get("last_host")).get("key"),
+        object_dict(object_dict(job.get("progress")).get(QUALITY_CONTAINMENT_PROGRESS_KEY)).get("host_key"),
+    )
+    if not key or not job.get("started_at") or any(value and value != key for value in recorded):
+        raise RuntimeError("Mediaforce's record of which computer ran it is missing or does not match.")
+    return host
+
+
+def _show_quality_run_ended(config: MediaforceConfig, job: Mapping[str, Any], items: list[dict[str, Any]]) -> None:
+    context = object_dict(object_dict(job.get("progress")).get(QUALITY_CONTAINMENT_PROGRESS_KEY))
+    if context.get("scoped_temp_dir"):
+        stop_timed_out_remote_quality_run(
+            object_dict(job.get("host")), _quality_containment_scope(config, job, items), wake_before_connect=False,
+        )
+        return
+    confirm_computer_runs_no_quality_run(_unconfirmed_run_computer(job), run_command=run_remote_command)
 
 
 def _waits_for_quality_run_stop(job: Mapping[str, Any]) -> bool:
@@ -453,7 +485,7 @@ def _confirm_quality_run_stopped(
         if config is None:
             raise RuntimeError("Mediaforce's settings were unavailable, so the quality run could not be checked.")
         items = _encode_job_estimate_items(job, manifest_items_cache={manifest_path: manifest_items}, strict_indexes=True)
-        stop_timed_out_remote_quality_run(host, _quality_containment_scope(config, job, items), wake_before_connect=False)
+        _show_quality_run_ended(config, job, items)
     except RemoteHostUnreachableError as exc:
         unconfirmed = _deferred_cleanup_result(
             [_StagingPathCleanupResult(_StagingPathCleanupOutcome.CLEANUP_DEFERRED, detail=str(exc), host_unreachable=True)],
@@ -745,10 +777,11 @@ def reconcile_encode_jobs(
             cleanup_outcome = _EncodeRetryArtifactCleanupResult(
                 _EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE,
             )
-        if _waits_for_quality_run_stop(payload) and (
+        waits_for_quality_run = _waits_for_quality_run_stop(payload)
+        if waits_for_quality_run and (
                 cleanup_outcome.outcome is _EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE
-                or (cleanup_outcome.outcome is _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED
-                    and cleanup_outcome.check_failed)):
+                or (_quality_run_not_shown_ended(cleanup_outcome, wake_error)
+                    and _unconfirmed_run_waited_long_enough(payload, now, deps))):
             _ask_owner_about_unconfirmed_quality_run(
                 connection, config, payload, deps, cleanup_outcome.detail or "Its saved file list could not be read.",
             )
@@ -804,6 +837,8 @@ def reconcile_encode_jobs(
                     "retry_not_before": retry_not_before,
                     "waiting_reason": (
                         cleanup_outcome.detail if cleanup_outcome.waiting_for_computer
+                        else f"Waiting to confirm {host_label} finished its earlier run of this file; "
+                        f"next check at {retry_not_before}" if waits_for_quality_run
                         else f"Waiting to reach {host_label} to remove an unfinished file it left; "
                         f"next try at {retry_not_before}"
                     ),
@@ -855,13 +890,27 @@ def reconcile_encode_jobs(
     connection.commit()
 
 
+def _quality_run_not_shown_ended(outcome: _EncodeRetryArtifactCleanupResult, wake_error: str | None) -> bool:
+    return (outcome.outcome is _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED
+            and (outcome.check_failed or outcome.waiting_for_computer or wake_error is not None))
+
+
+def _unconfirmed_run_waited_long_enough(job: Mapping[str, Any], now: datetime, deps: EncodeQueueRuntimeDeps) -> bool:
+    context = object_dict(object_dict(job.get("progress")).get(QUALITY_CONTAINMENT_PROGRESS_KEY))
+    checking_since = deps.parse_iso(context.get("checking_since") or job.get("last_failure_at"))
+    return checking_since is None or now - checking_since >= UNCONFIRMED_RUN_ASK_AFTER
+
+
 def _ask_owner_about_unconfirmed_quality_run(
         connection: DBClient, config: MediaforceConfig, job: dict[str, Any], deps: EncodeQueueRuntimeDeps, detail: str,
 ) -> None:
     progress = object_dict(job.get("progress"))
     progress.pop(WAITING_FOR_COMPUTER_PROGRESS_KEY, None)
+    progress.pop("cleanup_deferrals", None)
+    context = object_dict(progress.get(QUALITY_CONTAINMENT_PROGRESS_KEY))
+    progress[QUALITY_CONTAINMENT_PROGRESS_KEY] = {**context, "asked_at": deps.now_iso()}
     job["progress"] = progress
-    original = str(object_dict(progress.get(QUALITY_CONTAINMENT_PROGRESS_KEY)).get("timeout_message") or job.get("error") or "")
+    original = str(context.get("timeout_message") or job.get("error") or "")
     transition_encode_job_failure(
         connection, config, job, deps, failure_kind=CONTAINMENT_UNPROVEN_FAILURE_KIND,
         error_message=f"{original} Details: {detail}",
@@ -2339,6 +2388,73 @@ def _release_jobs_stranded_by_an_outage(connection: DBClient, deps: EncodeQueueR
         snapshot = stable_json_hash(job)
         _requeue_restart_stopped_job(job, deps)
         _save_swept_job(connection, job, snapshot, deps)
+
+
+def _check_held_quality_runs_again(connection: DBClient, deps: EncodeQueueRuntimeDeps) -> None:
+    rows = connection.execute(
+        select(encode_jobs.c.job_id)
+        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+        .where(encode_jobs.c.status == "needs_attention")
+        .where(encode_jobs.c.last_failure_kind == CONTAINMENT_UNPROVEN_FAILURE_KIND)
+    ).mappings().fetchall()
+    for row in rows:
+        job = load_encode_job(connection, str(row["job_id"]))
+        if job is None or not _held_quality_run_can_be_checked(connection, job, deps):
+            continue
+        snapshot = stable_json_hash(job)
+        _wait_to_check_held_quality_run(job, deps)
+        _save_swept_job(connection, job, snapshot, deps)
+
+
+def _held_quality_run_can_be_checked(connection: DBClient, job: Mapping[str, Any], deps: EncodeQueueRuntimeDeps) -> bool:
+    context = object_dict(object_dict(job.get("progress")).get(QUALITY_CONTAINMENT_PROGRESS_KEY))
+    if (context.get("asked_at") or int_value(job.get("attempt_count")) >= deps.encode_job_max_attempts
+            or CONTAINMENT_UNPROVEN_OWNER_STEP not in str(context.get("timeout_message") or job.get("error") or "")):
+        return False
+    try:
+        _unconfirmed_run_computer(job)
+    except RuntimeError:
+        return False
+    return not _a_later_run_may_have_the_file(connection, job)
+
+
+def _a_later_run_may_have_the_file(connection: DBClient, job: Mapping[str, Any]) -> bool:
+    held_ids = {item.library_item_id for item in encode_run_manifest_files(job, strict_indexes=True)}
+    if not held_ids or min(held_ids) <= 0 or not job.get("created_at"):
+        return True
+    later_runs = connection.execute(
+        select(encode_jobs.c.manifest_path, encode_jobs.c.manifest_indexes_json, encode_jobs.c.job_kind)
+        .where(encode_jobs.c.created_at >= job.get("created_at"))
+        .where(encode_jobs.c.job_id.not_in([job["job_id"], job.get("parent_job_id") or job["job_id"]]))
+    ).mappings().fetchall()
+    for run in later_runs:
+        files = encode_run_manifest_files(
+            {**run, "manifest_indexes": json.loads(run["manifest_indexes_json"] or "null")}, strict_indexes=True,
+        )
+        if not files or held_ids & {item.library_item_id for item in files}:
+            return True
+    return False
+
+
+def _wait_to_check_held_quality_run(job: dict[str, Any], deps: EncodeQueueRuntimeDeps) -> None:
+    progress = object_dict(job.get("progress"))
+    progress.pop("cleanup_deferrals", None)
+    context = object_dict(progress.get(QUALITY_CONTAINMENT_PROGRESS_KEY))
+    original = str(context.get("timeout_message") or job.get("error") or "")
+    now_iso = deps.now_iso()
+    progress[QUALITY_CONTAINMENT_PROGRESS_KEY] = {
+        **context, "timeout_message": original, "checking_since": now_iso,
+        "host_key": _recorded_host_key(object_dict(job.get("host"))),
+    }
+    job.update({
+        "status": "retry_backoff",
+        "finished_at": None,
+        "retry_not_before": now_iso,
+        "waiting_reason": f"Checking that {_computer_label(object_dict(job.get('host')))} finished its earlier run of this file.",
+        "terminal_reason": None,
+        "error": original.replace(CONTAINMENT_UNPROVEN_OWNER_STEP, QUALITY_RUN_RECHECK_NOTE),
+        "progress": progress,
+    })
 
 
 def _record_quality_containment(

@@ -155,16 +155,28 @@ the Director-watched session on a real encode computer.
     shown stopped and the attempt is unchanged, the usual cleanup removes the
     unfinished output and the file is queued, within its existing attempt
     limit, schedule and validation.
-  - When the computer answers but does not confirm the run ended (survivors,
-    a refused sign-in, a failed check), or the saved folder, attempt or
-    outputs no longer match, the file goes to the user with the original
-    explanation and that detail.
-  - On its last attempt, or without a saved scoped folder (older records,
-    local, streamed and scratch work), the file waits for the user with the
-    plain instruction to check that computer is idle and then try the file
-    again. The user's Retry keeps its existing route. A generic empty process
-    list, an unreachable computer, an old pid, elapsed time or an absent
-    output never shows a run stopped.
+  - When the run is not shown stopped (the computer does not answer,
+    survivors, a refused sign-in, a failed check, or the saved folder,
+    attempt or outputs no longer match), the file keeps waiting and is
+    checked again under the usual retry backoff. Only after
+    `UNCONFIRMED_RUN_ASK_AFTER` (a day) without proof does it go to the user,
+    with the original explanation and the last detail.
+  - A file already held for this reason when Mediaforce starts (records from
+    before these checks, or one that waited for the user after a failed
+    check) goes back to the same wait when it is a mounted remote quality run
+    below its attempt limit, its saved computer records agree, and no later
+    run includes the file. Without a saved scoped folder, the check stops
+    nothing: it takes a fresh, complete process listing from that computer
+    (the listing must show itself) and passes only when no `ab-av1` and no
+    process naming a quality work folder is running there, so another
+    file's quality run on that computer keeps it waiting too. A file that
+    went to the user after the day is not checked again; the user's Retry
+    with its confirmation stays the override.
+  - On its last attempt, or for local, streamed and scratch work, the file
+    waits for the user with the plain instruction to check that computer is
+    idle and then try the file again. The user's Retry keeps its existing
+    route. A generic empty process list, an unreachable computer, an old pid,
+    elapsed time or an absent output never shows a run stopped.
 
 A sample job records the same kind, message and whether the run was stopped in
 its result, without retrying on its own.

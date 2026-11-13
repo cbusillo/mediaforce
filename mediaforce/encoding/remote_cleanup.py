@@ -198,6 +198,28 @@ def end_remote_output_writers(
         raise RuntimeError("The remote encode is still ending; wait before making this file again.")
 
 
+QUALITY_RUN_FOLDER_MARKERS = (".mediaforce-ab-av1-", ".ab-av1-")
+
+
+def _program(process: _RemoteProcess) -> str:
+    return Path(process.command.split()[0]).name
+
+
+def _is_quality_run(process: _RemoteProcess) -> bool:
+    return _program(process) == "ab-av1" or any(marker in process.command for marker in QUALITY_RUN_FOLDER_MARKERS)
+
+
+def confirm_computer_runs_no_quality_run(
+        host: dict[str, Any], *, run_command: Callable[..., subprocess.CompletedProcess[str]] = run_remote_command,
+) -> None:
+    processes = _inventory(host, run_command)
+    if not any(_program(process) == "ps" for process in processes.values()):
+        raise RuntimeError("The computer's process listing did not include the listing itself, so it may be incomplete.")
+    remaining = sorted(pid for pid, process in processes.items() if _is_quality_run(process))
+    if remaining:
+        raise RuntimeError(f"A quality run is still going on that computer (process {', '.join(map(str, remaining))}).")
+
+
 def encode_host_file_sizes(
         host: dict[str, Any], paths: Sequence[Path], *,
         run_command: Callable[..., subprocess.CompletedProcess[str]] = run_remote_command,
