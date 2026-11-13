@@ -1,7 +1,6 @@
 """Check a mounted encoder's output on its host: end an interrupted encoder before the output is
 reused, and read which output files the host itself sees."""
 
-import re
 import shlex
 import subprocess
 import time
@@ -199,11 +198,10 @@ def end_remote_output_writers(
         raise RuntimeError("The remote encode is still ending; wait before making this file again.")
 
 
-QUALITY_RUN_FOLDER_MARKERS = (".mediaforce-ab-av1-", ".ab-av1-")
 # Remote quality runs start ab-av1 (quality.py), which starts ffmpeg (sample encodes with libsvtav1 and
 # the metric) and ffprobe; remote encodes and crop detection start ffmpeg (helpers.py, execution.py).
-MEDIA_WORK_PROGRAMS = frozenset({"ab-av1", "ffmpeg", "ffprobe"})
-_COMMAND_LINE_WORD = re.compile(r"[^\s;:'\"=|&()<>`]+")
+# A quality run's work folder (.mediaforce-ab-av1-, .ab-av1-) carries the first name too.
+MEDIA_WORK_NAMES = ("ab-av1", "ffmpeg", "ffprobe")
 
 
 def _program(process: _RemoteProcess) -> str:
@@ -211,9 +209,9 @@ def _program(process: _RemoteProcess) -> str:
 
 
 def _may_be_left_by_a_quality_run(process: _RemoteProcess) -> bool:
-    named_programs = {Path(word).name for word in _COMMAND_LINE_WORD.findall(process.command)}
-    return bool(named_programs & MEDIA_WORK_PROGRAMS) or any(
-        marker in process.command for marker in QUALITY_RUN_FOLDER_MARKERS)
+    # Anywhere in the command line, so a wrapper shell or a renamed build such as ffmpeg7 still counts.
+    command = process.command.lower()
+    return any(name in command for name in MEDIA_WORK_NAMES)
 
 
 def confirm_computer_runs_no_quality_run(

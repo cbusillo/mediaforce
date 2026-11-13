@@ -4236,6 +4236,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                                     "-i /Volumes/media/tv/show/episode.mkv -lavfi libvmaf -f null -\n",
             "probe inside a wrapper": "53 1 S Fri Oct 9 13:00:00 2026 sh -lc export PATH=/opt/homebrew/bin:$PATH; "
                                       "ffprobe -v error /Volumes/media/tv/show/episode.mkv\n",
+            "renamed build under a wrapper": "54 1 S Fri Oct 9 13:00:00 2026 nice /usr/local/bin/ffmpeg7 -i sample.mkv -f null -\n",
         }
         answers = {
             **{name: _HeldRunComputer(process) for name, process in still_running.items()},
