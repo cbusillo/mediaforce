@@ -106,10 +106,6 @@ struct MediaforceClient: Sendable {
         return try JSONDecoder.mediaforce.decode(HostActionResult.self, from: data)
     }
 
-    func lookForNewFiles() async throws {
-        _ = try await post("api/catalog/refresh")
-    }
-
     func pause() async throws {
         _ = try await post("api/encode-queue/pause")
     }

@@ -498,7 +498,6 @@ extension Words {
     static let pausedBar = "Mediaforce is paused. Nothing new starts."
     static let checksPausedBar = "Checks are paused."
     static let appName = "Mediaforce"
-    static let lookForNewFilesNow = "Look for New Files"
     static let openMediaforce = "Open Mediaforce"
     static let settingsEllipsis = "Settings…"
     static let resumeHelp = "Resume compression and paused checks."

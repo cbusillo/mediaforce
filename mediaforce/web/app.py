@@ -71,9 +71,8 @@ from mediaforce.execution import (
 from mediaforce.library.calculation_reuse import LibraryCalculations
 from mediaforce.library.evidence_worker import default_evidence_worker_deps
 from mediaforce.library.folder_profiles import inspect_prefix
-from mediaforce.library.background_work import background_work_is_paused, ensure_background_work_state
-from mediaforce.library.evidence_queue import EvidenceQueueConflict, \
-    ensure_evidence_queue_state
+from mediaforce.library.background_work import ensure_background_work_state
+from mediaforce.library.evidence_queue import ensure_evidence_queue_state
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import media_group_scope_for_rel_path, resolve_media_scope, resolve_media_scopes, \
     scope_rel_path_filter, series_context_for_prefix
@@ -129,7 +128,7 @@ from mediaforce.core.type_defs import JSONValue, float_value, int_value, mapping
 from mediaforce.web.routes import register_app_window_routes, register_completed_routes, \
     register_compression_settings_routes, register_computer_settings_routes, register_dashboard_routes, \
     register_folder_routes, register_host_routes, register_library_settings_routes, \
-    register_metadata_settings_routes, register_operator_work_routes, register_queue_routes, register_settings_routes
+    register_metadata_settings_routes, register_queue_routes, register_settings_routes
 from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.library.metadata_sync import cached_poster, metadata_configuration_status
@@ -1286,28 +1285,6 @@ def create_app(
         prepare_host_action=_prepare_host_action,
         reset_host_trust_action=_reset_host_trust_action,
         retry_host_connection_action=_retry_host_connection_action,
-    )
-
-    def _refresh_catalog_action() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            if background_work_is_paused(connection):
-                raise EvidenceQueueConflict(
-                    "Background catalog and analysis work is paused. Resume it before refreshing the catalog."
-                )
-            job = _maybe_schedule_scan(connection, config, prefix=None, force=True)
-        status = str((job or {}).get("status") or "queued")
-        return {
-            "ok": True,
-            "message": (
-                "Catalog refresh is already running."
-                if status == "running"
-                else "Catalog refresh queued. Existing remembered results remain available while it runs."
-            ),
-        }
-
-    register_operator_work_routes(
-        app,
-        refresh_catalog_action=_refresh_catalog_action,
     )
 
     def _folder_content_payload(normalized_prefix: str) -> tuple[dict[str, Any], int]:

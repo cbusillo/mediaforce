@@ -82,6 +82,13 @@ final class MenuBarTests: XCTestCase {
         XCTAssertNil(try facts(work: work(checksPaused: true, running: 1)).statusOpens)
     }
 
+    func testThePosterIsTheShowBeingCompressed() throws {
+        XCTAssertEqual(try facts(work: work(running: 2, seasons: ["tv/Futurama/Season 3", "tv/ER/Season 1"])).compressingSeason?.showPrefix,
+                       "tv/Futurama")
+        XCTAssertNil(try facts(work: work(paused: true, running: 1, seasons: ["tv/ER/Season 1"])).compressingSeason)
+        XCTAssertNil(try facts(work: work(reasons: ["no_computer_ready"], running: 1, seasons: ["tv/ER/Season 1"])).compressingSeason)
+    }
+
     func testAComputerNeedingTheOwnerIsWaitingForYou() throws {
         var facts = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(MainWindowTests.facts.utf8)) as? [String: Any])
         facts["work"] = try JSONSerialization.jsonObject(with: Data(work().utf8))

@@ -13,7 +13,7 @@ struct MenuBarPanel: View {
                 if Attention.waitingOnYou(facts) > 0 {
                     Divider().padding(.horizontal, 10)
                     Button { open(.needsYou) } label: {
-                        Label("\(Words.needsYou) · \(Attention.waitingOnYou(facts))", systemImage: "hand.raised")
+                        MenuRowLabel(title: "\(Words.needsYou) · \(Attention.waitingOnYou(facts))", systemImage: "hand.raised")
                     }
                     .buttonStyle(MenuRowStyle())
                 }
@@ -24,14 +24,9 @@ struct MenuBarPanel: View {
                     .padding(.vertical, 12)
             }
             Divider().padding(.horizontal, 10).padding(.vertical, 5)
-            Button(Words.lookForNewFilesNow) {
-                Task { await model.perform { try await $0.lookForNewFiles() } }
-            }
-            .buttonStyle(MenuRowStyle())
-            .disabled(model.connection != .reachable)
-            Button(Words.openMediaforce) { open(Attention.openingPlace(model.facts)) }
+            Button { open(Attention.openingPlace(model.facts)) } label: { MenuRowLabel(title: Words.openMediaforce) }
                 .buttonStyle(MenuRowStyle())
-            SettingsLink { Text(Words.settingsEllipsis) }
+            SettingsLink { MenuRowLabel(title: Words.settingsEllipsis) }
                 .buttonStyle(MenuRowStyle())
                 .simultaneousGesture(TapGesture().onEnded { NSApp.activate() })
         }
@@ -61,16 +56,15 @@ struct MenuBarPanel: View {
                 Text(Words.staleNotice(model.connection, lastHeard: model.lastHeard))
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
-            } else if Words.menuStatus(facts) == Words.waitingForYou {
-                EmptyView()
-            } else if let place = facts.statusOpens {
-                Button(Words.menuStatus(facts)) { open(place) }
-                    .buttonStyle(QuietLinkStyle())
-                    .lineLimit(2)
-            } else {
-                Text(Words.menuStatus(facts))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+            } else if Words.menuStatus(facts) != Words.waitingForYou {
+                HStack(spacing: MenuRowLabel.spacing) {
+                    if let season = facts.compressingSeason {
+                        MediaPoster(titlePrefix: season.showPrefix, name: season.show,
+                                    kind: MediaKind(rawValue: String(season.showPrefix.split(separator: "/").first ?? "")) ?? .other,
+                                    posters: model.posters, width: MenuRowLabel.iconWidth)
+                    }
+                    status(facts)
+                }
             }
             // The main window may be closed, so an action that went wrong is said here too.
             if let notice = model.notice {
@@ -86,6 +80,19 @@ struct MenuBarPanel: View {
         .padding(.bottom, 10)
     }
 
+    @ViewBuilder
+    private func status(_ facts: MainWindowFacts) -> some View {
+        if let place = facts.statusOpens {
+            Button(Words.menuStatus(facts)) { open(place) }
+                .buttonStyle(QuietLinkStyle())
+                .lineLimit(2)
+        } else {
+            Text(Words.menuStatus(facts))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+    }
+
     /// Brings the main window forward, on a page when one is named, and closes the panel.
     private func open(_ place: Place) {
         NSApp.keyWindow?.close()
@@ -96,6 +103,24 @@ struct MenuBarPanel: View {
             model.placeRequest = PlaceRequest(place: place)
         }
         NSApp.activate()
+    }
+}
+
+/// A row's icon and name. Every row keeps the icon column, so the names line up whether or not a row has an icon.
+struct MenuRowLabel: View {
+    static let iconWidth: CGFloat = 20
+    static let spacing: CGFloat = 8
+    let title: String
+    var systemImage: String?
+
+    var body: some View {
+        HStack(spacing: Self.spacing) {
+            ZStack {
+                if let systemImage { Image(systemName: systemImage) }
+            }
+            .frame(width: Self.iconWidth)
+            Text(title)
+        }
     }
 }
 
@@ -160,10 +185,16 @@ enum MenuBarGlyph {
 }
 
 extension MainWindowFacts {
+    /// The season the status line names while compressing; its show's poster sits beside the line.
+    var compressingSeason: Season? {
+        if work.pausedByOwner || work.stopReasons.contains(where: ["storage_unavailable", "no_computer_ready"].contains) { return nil }
+        return work.runningCount > 0 ? work.runningSeasons.first : nil
+    }
+
     var statusOpens: Place? {
         if work.pausedByOwner || work.stopReasons.contains("storage_unavailable") { return nil }
         if work.stopReasons.contains("no_computer_ready") { return .computer(nil) }
-        if work.runningCount > 0 { return work.runningSeasons.first.map { .item($0.prefix) } }
+        if work.runningCount > 0 { return compressingSeason.map { .item($0.prefix) } }
         if work.waitingCount > 0 { return nil }
         if work.checksPaused { return .library }
         return nil
