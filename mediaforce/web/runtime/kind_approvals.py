@@ -1,7 +1,7 @@
-"""Kind approvals: one approval covering every TV season of a kind of content (#1047).
+"""Kind approvals: one approval covering every TV season of a kind of content (#1047), a "look" on screen.
 
-The Director decided on 2026-10-22 (#517) that one approval may cover every show that measures the same,
-starting with darker and bright live action. Cartoons stay one-time choices made show by show.
+The Director decided on 2026-10-22 (#517) that one approval may cover every show that measures the same, and on
+#1385 that live action is one look. Cartoons stay one-time choices made show by show.
 
 A kind approval is a copy of a current folder approval the Director chose to extend, kept in the web state
 directory's `kinds` folder, one file per kind. Production approval precedence lives in production_approval;
@@ -43,7 +43,10 @@ from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUN
 from mediaforce.web.runtime.production_holds import approval_identity
 from mediaforce.web.runtime.file_encode_outcomes import file_encode_outcomes
 
-APPROVABLE_KINDS = ("darker_live_action", "bright_live_action")
+LIVE_ACTION = "live_action"
+APPROVABLE_KINDS = (LIVE_ACTION,)
+# Darker and bright live action merged into live action (#1385); their saved approvals are carried over once.
+MERGED_INTO_LIVE_ACTION = ("darker_live_action", "bright_live_action")
 KIND_IS_ONE_TIME_CODE = "kind_is_one_time"
 APPROVAL_NOT_CURRENT_CODE = "approval_not_current"
 SIZE_GOAL_NOT_SCALABLE_CODE = "size_goal_not_scalable"
@@ -62,6 +65,24 @@ def load_kind_approval(config: MediaforceConfig, kind: str) -> dict[str, Any] | 
     except (FileNotFoundError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) and payload.get("kind") == kind else None
+
+
+def migrate_kind_approvals(config: MediaforceConfig) -> None:
+    """Carry a darker or bright live action approval over to live action, unchanged; safe to run any number of times.
+
+    The darker approval wins when both exist; the show the bright one came from keeps its own approval, which still
+    governs that show. An old file that holds no approval is removed without becoming one.
+    """
+    old_files = [kind_approval_file(config, kind) for kind in MERGED_INTO_LIVE_ACTION]
+    if not any(path.exists() for path in old_files):
+        return
+    if load_kind_approval(config, LIVE_ACTION) is None:
+        carried = next((approval for kind in MERGED_INTO_LIVE_ACTION
+                        if holds_approval(approval := load_kind_approval(config, kind))), None)
+        if carried is not None:
+            _save_kind_approval(config, LIVE_ACTION, {**carried, "kind": LIVE_ACTION})
+    for path in old_files:
+        path.unlink(missing_ok=True)
 
 
 def approved_kinds(config: MediaforceConfig) -> list[str]:
@@ -360,7 +381,7 @@ def next_approved_season(
     return None
 
 
-KINDS_IN_ORDER = ("darker_live_action", "bright_live_action", "cartoon")
+KINDS_IN_ORDER = (LIVE_ACTION, "cartoon")
 NO_FOLDER_APPROVAL_CODE = "no_folder_approval"
 SOURCE_KIND_DIFFERS_CODE = "source_kind_differs"
 
@@ -377,7 +398,7 @@ def _approval_facts(config: MediaforceConfig, calibration: Mapping[str, Any] | N
             "sample_moments": sample_moments(payload, review_dir=config.paths.review_dir)}
 
 
-LEFT_OUT_KINDS = ("mixed", "unmeasured")
+LEFT_OUT_KINDS = ("unmeasured",)
 
 
 def _size_goal_facts(approval: EffectiveApproval) -> dict[str, Any]:
@@ -610,7 +631,6 @@ def kinds_payload(
         } for kind in KINDS_IN_ORDER],
         "left_out": [{"season": row["season"], "kind": row["kind"], "waiting_bytes": int(row["waiting_bytes"])}
                      for row in report["seasons"] if row["kind"] in LEFT_OUT_KINDS],
-        "mixed_seasons": int(object_dict(totals.get("mixed")).get("seasons") or 0),
         "unmeasured_seasons": int(object_dict(totals.get("unmeasured")).get("seasons") or 0),
         "folder_approved_seasons": int(object_dict(totals.get("folder_approved")).get("seasons") or 0),
         "tallest_picture": tallest_picture(config.video),

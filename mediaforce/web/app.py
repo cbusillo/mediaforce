@@ -141,7 +141,7 @@ from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_wor
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
 from mediaforce.web.runtime.folder_state import state_slug
 from mediaforce.web.runtime.kind_approvals import KindAwareLoader, SeasonKinds, approve_kind_action, \
-    background_queue_blocker, choose_kind_picture_height, kind_snapshot, kinds_payload, next_kind_season, next_approved_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
+    background_queue_blocker, choose_kind_picture_height, kind_snapshot, kinds_payload, migrate_kind_approvals, next_kind_season, next_approved_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
     archive_cleanup_summary, clear_archive_cleanup_action, \
@@ -581,6 +581,7 @@ def create_app(
             try:
                 shutdown_event.clear()
                 migrate_config_state(config)
+                migrate_kind_approvals(config)
                 try:
                     learned_mount_count = learn_controller_smb_mounts(config)
                     if learned_mount_count:

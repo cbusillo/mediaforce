@@ -13,7 +13,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, metadata, motion_keep_decisions, series_metadata, source_admissions, source_generations, source_measurements, source_versions, source_transitions, staged_artifacts, target_production_outcomes
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.utils import timestamp
-from mediaforce.library.content_kinds import EpisodeTraits, season_kind, season_kind_report
+from mediaforce.library.content_kinds import season_kind, season_kind_report
 from mediaforce.library.calculation_reuse import LibraryCalculations
 from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, append_measurement, append_version, json_text, \
     load_source_evidence, load_source_evidence_bulk
@@ -33,36 +33,45 @@ def connection() -> Iterator[DBClient]:
     engine.dispose()
 
 
-def _episode(dark: float, *, repeated: float = 0.05) -> EpisodeTraits:
-    return EpisodeTraits(dark_frame_fraction=dark, repeated_frame_fraction=repeated)
-
-
-def _fingerprint(dark: float) -> dict[str, object]:
-    return {"schema_version": 1, "analysis": {"aggregate": {"dark_frame_fraction": dark, "duplicate_like_frame_fraction": 0.05}},
+def _fingerprint(dark: float, *, repeated: float = 0.05) -> dict[str, object]:
+    return {"schema_version": 1, "analysis": {"aggregate": {"dark_frame_fraction": dark, "duplicate_like_frame_fraction": repeated}},
             "decision": {"status": "measured", "traits": ["typical"]}}
 
 
-def test_close_measurements_of_one_show_land_in_one_kind() -> None:
-    darker = season_kind([_episode(0.31), _episode(0.17), _episode(0.24), _episode(0.45)], animated=False)
-    bright = season_kind([_episode(0.02), _episode(0.12), _episode(0.08)], animated=False)
-
-    assert darker.kind == "darker_live_action"
-    assert bright.kind == "bright_live_action"
-
-
-def test_a_season_spanning_two_kinds_is_mixed() -> None:
-    assert season_kind([_episode(0.5), _episode(0.4), _episode(0.01), _episode(0.03)], animated=False).kind == "mixed"
+def _measured_season(connection: DBClient, season: str, originals: list[tuple[float, float]]) -> None:
+    """A season whose published episodes' originals measured each (darkness, repeated frames), and one still waiting."""
+    for episode, (dark, repeated) in enumerate(originals):
+        published = _item(connection, f"{season}/e0{episode}.mkv", status="promoted", codec="av1", current_dark=0.0)
+        _admit_historical_original(connection, published, dark=dark, repeated=repeated)
+    _item(connection, f"{season}/e99.mkv", status="discovered", codec="h264", current_dark=0.5)
 
 
-def test_cartoons_never_join_a_live_action_kind() -> None:
-    assert season_kind([_episode(0.4), _episode(0.5)], animated=True).kind == "cartoon"
-    assert season_kind([_episode(0.4)], animated=None).kind == "unmeasured"
-    assert season_kind([_episode(0.4, repeated=0.6), _episode(0.4, repeated=0.7)], animated=False).kind == "mixed"
+def test_every_measured_live_action_season_is_one_look_however_dark_or_repetitive(connection: DBClient) -> None:
+    seasons = {
+        "tv/Noir/Season 1": [(0.31, 0.05), (0.24, 0.05)],  # was darker
+        "tv/Sunny/Season 1": [(0.02, 0.05), (0.08, 0.05)],  # was bright
+        "tv/Dusk/Season 1": [(0.12, 0.05), (0.15, 0.05)],  # was between the two, so in no kind
+        "tv/Split/Season 1": [(0.5, 0.05), (0.4, 0.05), (0.01, 0.05), (0.03, 0.05)],  # was mixed
+        "tv/Stills/Season 1": [(0.4, 0.6), (0.4, 0.7), (0.3, 0.05)],  # repeated frames could never win, so was mixed
+        "tv/Toons/Season 1": [(0.4, 0.6)],
+        "tv/Unknown/Season 1": [(0.4, 0.05)],
+    }
+    for season, originals in seasons.items():
+        _measured_season(connection, season, originals)
+    for show, genres in [("Noir", '["Drama"]'), ("Sunny", '["Reality"]'), ("Dusk", '["Drama"]'), ("Split", '["Comedy"]'),
+                         ("Stills", '["Documentary"]'), ("Toons", '["Animation", "Comedy"]')]:
+        connection.execute(series_metadata.insert().values(series_prefix=f"tv/{show}", tmdb_genres_json=genres, updated_at=timestamp()))
+
+    report = season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False)
+
+    kinds = {row["season"]: (row["kind"], row["reason"]) for row in report["seasons"]}
+    assert kinds == {**{season: ("live_action", None) for season in list(seasons)[:5]},
+                     "tv/Toons/Season 1": ("cartoon", None), "tv/Unknown/Season 1": ("unmeasured", "genres_unknown")}
 
 
 def test_unmeasured_episodes_do_not_vote() -> None:
-    assert season_kind([None, _episode(0.4), None], animated=False).kind == "darker_live_action"
-    assert season_kind([None, None], animated=False).kind == "unmeasured"
+    assert season_kind([False, True, False], animated=False).kind == "live_action"
+    assert season_kind([False, False], animated=True).kind == "unmeasured"
 
 
 def _item(connection: DBClient, rel_path: str, *, status: str, codec: str, current_dark: float) -> int:
@@ -79,7 +88,7 @@ def _item(connection: DBClient, rel_path: str, *, status: str, codec: str, curre
     return int(result.inserted_primary_key[0])
 
 
-def _admit_historical_original(connection: DBClient, item_id: int, *, dark: float, height: int = 1080) -> None:
+def _admit_historical_original(connection: DBClient, item_id: int, *, dark: float, height: int = 1080, repeated: float = 0.05) -> None:
     now = timestamp()
     generation = f"generation-{item_id}"
     connection.execute(source_generations.insert().values(generation_id=generation, created_at=now))
@@ -100,7 +109,7 @@ def _admit_historical_original(connection: DBClient, item_id: int, *, dark: floa
         checks_json=json_text({"codec_rule_hash": rule, "encode_link": True, "unavailability": "removed", "plans": [plan]}),
     ))
     append_measurement(connection, version_id=original, kind="media_fingerprint", binding="historical-plan-sampled",
-                       summary=_fingerprint(dark), provenance={"basis": "historical-plan", "codec_rule_hash": rule, **plan},
+                       summary=_fingerprint(dark, repeated=repeated), provenance={"basis": "historical-plan", "codec_rule_hash": rule, **plan},
                        measured_at=None, recorded_at=now)
 
 
@@ -117,8 +126,8 @@ def test_report_groups_waiting_seasons_by_original_traits_only(connection: DBCli
                                 folder_approved=lambda prefix: prefix == "tv/Drama/Season 3")
 
     seasons = {row["season"]: row for row in report["seasons"]}
-    # The published episode's output measures bright; only its original's darkness counts.
-    assert seasons["tv/Drama/Season 1"]["kind"] == "darker_live_action"
+    # The published episode's admitted original is measured; its output never counts.
+    assert seasons["tv/Drama/Season 1"]["kind"] == "live_action"
     # A waiting episode's current file is not yet an admitted original.
     assert seasons["tv/Drama/Season 2"]["kind"] == "unmeasured"
     assert "tv/Drama/Season 3" not in seasons
@@ -137,7 +146,7 @@ def test_a_4k_original_takes_its_kind_from_its_other_traits(connection: DBClient
 
     # A season all in 4K and one only partly in 4K both measure like any other season of their look.
     assert {row["season"]: row["kind"] for row in report["seasons"]} == {
-        "tv/Space/Season 1": "darker_live_action", "tv/Space/Season 2": "darker_live_action",
+        "tv/Space/Season 1": "live_action", "tv/Space/Season 2": "live_action",
     }
 
 
@@ -189,7 +198,7 @@ def test_bulk_evidence_matches_individual_reads_and_report_queries_stay_bounded(
     finally:
         event.remove(connection.engine, "before_cursor_execute", count_query)
 
-    assert first["seasons"][0]["kind"] == "darker_live_action"
+    assert first["seasons"][0]["kind"] == "live_action"
     assert refreshed["seasons"][0]["measured"] == first["seasons"][0]["measured"] - 1
     assert refreshed_queries == first_queries
 
@@ -294,7 +303,7 @@ def test_reused_classifications_follow_changed_saved_inputs(connection: DBClient
         assert report() == initial
         assert load.call_count == 1
         if change == "measurement":
-            connection.execute(source_measurements.update().values(summary_json=json.dumps(_fingerprint(0.0))))
+            connection.execute(source_measurements.update().values(summary_json=json.dumps({"schema_version": 1, "analysis": {}})))
         elif change == "admission":
             connection.execute(source_admissions.update().values(tier="unknown"))
         elif change == "version":
