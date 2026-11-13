@@ -1542,7 +1542,10 @@ extension Words {
 // The page for how each kind of content should look.
 extension Words {
     static let howItShouldLook = "How it should look"
-    static let showsOfThisKind = "Shows of this kind"
+    static let showsOfThisKind = "Shows and movies"
+    static let fourK = "4K"
+    static let keepFourK = "Keep 4K"
+    static func bringDownTo(_ height: Int) -> String { "Bring down to \(height)p" }
     static let approvedShow = "Approved"
     // Stopping removes the shared setting, so each show of the kind goes back to its own sample.
     static let stopUsingKind = "Decide Show by Show"
@@ -1564,30 +1567,25 @@ extension Words {
     static let couldNotPlaySample = "Couldn't play this moment of the sample."
     static let gettingSampleReady = "Getting the sample ready to play"
     static let gettingEpisodeReady = "Getting the episode ready to play"
-    static let seasonsWithoutKindTitle = "Seasons that don't fit a kind"
+    static let seasonsWithoutKindTitle = "Not measured yet"
     static let showEverything = "Show Everything"
 
     static func kindName(_ code: String) -> String {
         switch code {
-        case "darker_live_action": "Darker live action"
-        case "bright_live_action": "Bright live action"
+        case "live_action": "Live action"
         case "cartoon": "Cartoons"
-        case "4k": "4K"
         default: code.replacingOccurrences(of: "_", with: " ").capitalized
         }
     }
 
     static func kindSubtitle(_ kind: KindsFacts.Kind) -> String {
-        "\(count(kind.shows.count, "show")) · \(size(kind.waitingBytes))"
+        let movies = kind.shows.filter(\.isMovie).count
+        let shows = count(kind.shows.count - movies, "show")
+        return "\(movies > 0 ? "\(shows) · \(count(movies, "movie"))" : shows) · \(size(kind.waitingBytes))"
     }
 
     static func useForKind(_ code: String) -> String {
-        let name = switch code {
-        case "darker_live_action": "Darker Live Action"
-        case "bright_live_action": "Bright Live Action"
-        default: kindName(code)
-        }
-        return "Use for All \(name)"
+        "Use for All \(code == "live_action" ? "Live Action" : kindName(code))"
     }
 
     static func sizeSetting(_ setting: KindsFacts.Setting) -> String {
@@ -1611,7 +1609,7 @@ extension Words {
     }
 
     static func kindEmpty(_ code: String) -> String {
-        "No seasons measure as \(kindName(code).lowercased()) yet."
+        "Nothing measures as \(kindName(code).lowercased()) yet."
     }
 
     static let kindNothingToWatch = "No episode made with this setting is kept to compare yet."
@@ -1637,12 +1635,10 @@ extension Words {
     static func openShow(_ show: String) -> String { "Open \(show)" }
 
     static func seasonsWithoutKind(_ seasons: Int) -> String {
-        seasons == 1 ? "1 season doesn't fit a kind" : "\(seasons.formatted()) seasons don't fit a kind"
+        "\(seasons.formatted()) not measured yet"
     }
 
-    static func leftOutReason(_ code: String) -> String {
-        code == "mixed" ? "mixed kinds" : "not measured yet"
-    }
+    static let leftOutReason = "not measured yet"
 
     static func playerLayout(_ layout: CompareLayout) -> String {
         switch layout {
