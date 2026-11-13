@@ -1,8 +1,10 @@
 import json
 import os
 import subprocess
+import threading
 import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -305,6 +307,47 @@ def test_an_old_copy_of_the_same_file_is_not_kept_as_its_pair(config: Mediaforce
         assert player_file(config, replaced, "original") is not None
 
     assert not stale.exists()
+
+
+def test_a_comparisons_two_halves_prepare_at_the_same_time(config: MediaforceConfig, tmp_path: Path) -> None:
+    with open_db(config.paths.db_path) as connection:
+        replaced = _replaced(connection, tmp_path, 1, size=40, original_size=70)
+        connection.commit()
+    both_preparing = threading.Barrier(2, timeout=5)
+
+    def remux_alongside_the_other_half(source: Path, target: Path) -> None:
+        both_preparing.wait()
+        _remux_by_copy(source, target)
+
+    with patch.object(app_item, "_remux", side_effect=remux_alongside_the_other_half), ThreadPoolExecutor(2) as pool:
+        halves = [pool.submit(player_file, config, replaced, side) for side in app_item.PLAYER_SIDES]
+        prepared = [half.result() for half in halves]
+
+    assert all(path is not None and path.is_file() for path in prepared)
+
+
+@pytest.mark.parametrize(("sound", "copied"), [("opus", True), ("eac3", True), ("dts", False), ("truehd", False)])
+def test_the_player_copies_sound_the_mac_plays_and_converts_the_rest(tmp_path: Path, sound: str, copied: bool) -> None:
+    source = tmp_path / "episode.mkv"
+    source.write_bytes(b"N")
+    target = tmp_path / "episode.mp4"
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **_options: object) -> SimpleNamespace:
+        commands.append(command)
+        if command[0] == "ffprobe":
+            streams = [{"codec_type": "video", "codec_name": "av1"}, {"codec_type": "audio", "codec_name": sound}]
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"streams": streams}), stderr="")
+        Path(command[-1]).write_bytes(b"M")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch.object(app_item, "ffprobe_binary", return_value="ffprobe"), patch.object(app_item, "ffmpeg_binary", return_value="ffmpeg"), \
+            patch.object(app_item.subprocess, "run", side_effect=run):
+        app_item._remux(source, target)
+
+    remux = commands[-1]
+    assert target.read_bytes() == b"M"
+    assert (remux[remux.index("-c:a") + 1] == "copy") is copied
 
 
 def test_a_whole_show_lists_every_season_in_order(config: MediaforceConfig, tmp_path: Path) -> None:
