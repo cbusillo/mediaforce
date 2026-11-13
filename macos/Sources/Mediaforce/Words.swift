@@ -522,7 +522,6 @@ extension Words {
     static let compareNoEpisode = "None of this show's episodes still has its original backup to compare."
     static let compareUnanswered = "Mediaforce didn't answer, so this show can't play yet."
     static let spaceSaved = "Space saved"
-    static let compareFirst = "Compare a few episodes first"
 
     static func showOnly(_ group: LibraryStateGroup) -> String {
         "Show only \(libraryState(group).lowercased())"
