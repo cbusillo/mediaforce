@@ -134,7 +134,9 @@ enum RenderCommand {
         let previousAppearance = NSApp.appearance
         NSApp.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         defer { NSApp.appearance = previousAppearance }
-        let size = NSSize(width: page.hasPrefix("settings:") ? 760 : size.width, height: size.height)
+        // The menu bar panel is drawn at its own size, as it opens under the menu bar.
+        let size = page == "menu" ? NSHostingView(rootView: view).fittingSize
+            : NSSize(width: page.hasPrefix("settings:") ? 760 : size.width, height: size.height)
         let host = NSHostingView(rootView: view.environment(\.colorScheme, dark ? .dark : .light)
             .frame(width: size.width, height: size.height))
         host.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
@@ -170,6 +172,7 @@ enum RenderCommand {
         let parts = page.split(separator: ":", maxSplits: 1).map(String.init)
         guard let name = parts.first else { throw RenderFailure("Page name is empty") }
         let value = parts.count > 1 ? parts[1] : ""
+        if name == "menu" { return (AnyView(MenuBarPanel(model: model)), []) }
         if name == "originals" {
             guard let preview = model.facts?.originalPreviews?.first else { throw RenderFailure("No original-file request is waiting") }
             return (AnyView(OriginalApprovalView(preview: preview, model: model)), [])

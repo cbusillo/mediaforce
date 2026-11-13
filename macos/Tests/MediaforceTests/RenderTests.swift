@@ -1,4 +1,5 @@
 import AppKit
+import os
 import XCTest
 @testable import Mediaforce
 
@@ -70,6 +71,21 @@ final class RenderTests: XCTestCase {
             let name = "nothing-waiting-" + file.lastPathComponent
             try FileManager.default.copyItem(at: file, to: URL(fileURLWithPath: directory).appendingPathComponent(name))
         }
+    }
+
+    func testTheMenuShowsThePosterOfWhatItIsCompressing() async throws {
+        let retained = ProcessInfo.processInfo.environment["MEDIAFORCE_MENU_RENDER_OUTPUT"]
+        let directory = retained ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        defer { if retained == nil { try? FileManager.default.removeItem(atPath: directory) } }
+        let options = try RenderOptions(arguments: [directory, "--server", "http://mediaforce.invalid", "--page", "menu"])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CompressingRenderServer.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        CompressingRenderServer.requested.withLock { $0 = [] }
+        let rendered = try await RenderCommand.run(options, session: session)
+        XCTAssertFalse(try XCTUnwrap(rendered["menu"]).isEmpty)
+        XCTAssertTrue(CompressingRenderServer.requested.withLock { $0.contains("/api/app/posters/\(CompressingRenderServer.show)") })
     }
 
     func testBlockedFilesAndKeptOriginalsRenderOnNativePages() async throws {
@@ -251,6 +267,28 @@ private final class NothingWaitingRenderServer: RenderFixtureServer, @unchecked 
         facts["samples"] = samples
         facts["computers"] = computers.map { $0.merging(["needs_you": false]) { _, new in new } }
         facts["original_backups"] = ["count": 0, "bytes": 0]
+        return (try? JSONSerialization.data(withJSONObject: facts)).map { String(decoding: $0, as: UTF8.self) }
+    }
+}
+
+private final class CompressingRenderServer: RenderFixtureServer, @unchecked Sendable {
+    static let show = "tv/Futurama"
+    static let requested = OSAllocatedUnfairLock<[String]>(initialState: [])
+
+    override func startLoading() {
+        Self.requested.withLock { $0.append(request.url!.path) }
+        super.startLoading()
+    }
+
+    override func payload(_ path: String) -> String? {
+        guard path == "/api/app/main-window", let original = super.payload(path),
+              var facts = try? JSONSerialization.jsonObject(with: Data(original.utf8)) as? [String: Any],
+              var work = facts["work"] as? [String: Any] else { return super.payload(path) }
+        work["stop_reasons"] = []
+        work["running_count"] = 1
+        work["running_seasons"] = [["prefix": "\(Self.show)/Season 3", "show_prefix": Self.show, "show": "Futurama",
+                                    "season_folder": "Season 3", "season": 3]]
+        facts["work"] = work
         return (try? JSONSerialization.data(withJSONObject: facts)).map { String(decoding: $0, as: UTF8.self) }
     }
 }

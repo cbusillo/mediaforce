@@ -219,7 +219,8 @@ Mediaforce render /path/to/captures --page needs-you --page 'sample:tv/Show/Seas
 
 Other page names are `library`, `tv`, `movies`, `other`, `activity`,
 `space-saved`, `media`, `kind:CODE`, `item:PREFIX`, `settings:libraries`,
-`settings:compression`, `settings:computers` and `settings:metadata`.
+`settings:compression`, `settings:computers`, `settings:metadata` and `menu`
+(the menu bar panel, drawn at its own size and only when asked for).
 `--server URL` selects another server; the default is the app's local server.
 `--width POINTS` and `--height POINTS` adjust the viewport. Settings retain
 their normal form width. Use a new empty output directory for each run so old

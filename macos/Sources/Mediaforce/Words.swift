@@ -500,7 +500,6 @@ extension Words {
     static let next = "Next"
     static let looksGood = "Looks Good"
     static let appName = "Mediaforce"
-    static let lookForNewFilesNow = "Look for New Files"
     static let openMediaforce = "Open Mediaforce"
     static let settingsEllipsis = "Settings…"
     static let resumeHelp = "Resume compression and paused checks."
