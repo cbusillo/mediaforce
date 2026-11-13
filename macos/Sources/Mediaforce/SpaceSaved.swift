@@ -1,41 +1,60 @@
 import SwiftUI
 
-/// What compressing has given back: the library as one storage bar, then the one Delete for the original backups. Comparing
-/// an episode with its original backup is there to open, never asked for.
+/// What compressing has given back: the library as one storage bar, the one Delete for the original backups, then an
+/// episode playing beside its original backup. The bar comes from the main window's facts, so it shows at once; the
+/// backups and the shows to compare fill in as Mediaforce answers.
 struct SpaceSavedPage: View {
     let facts: MainWindowFacts
     let model: MainWindowModel
     let openItem: (String) -> Void
-    @State private var comparing = false
+    // The whole Cleanup folder, as Delete clears it, not only the backups of seasons listed as finished.
+    @State private var cleanup: CleanupFolder?
+    @State private var shows: [SpaceSavedFacts.Show]?
+    @State private var refreshFailed = false
+    @State private var lastHeard: Date?
 
     var body: some View {
-        RefreshingPage(title: Words.spaceSaved, subtitle: Words.savedSoFar(facts.spaceSaved.bytes),
-                       load: { try await SpaceSavedFacts.load(model.client) }) { (saved: SpaceSavedFacts) in
-            SpaceSavedBar(library: facts.library, savedBytes: facts.spaceSaved.bytes, backupBytes: saved.cleanup.totalSizeBytes)
-            if saved.cleanup.fileCount > 0 {
-                DeleteBackups(count: saved.cleanup.fileCount, bytes: saved.cleanup.totalSizeBytes, model: model)
-            } else {
-                Text(Words.noBackupsWaiting).foregroundStyle(.secondary)
+        PageFrame(title: Words.spaceSaved, subtitle: Words.savedSoFar(facts.spaceSaved.bytes)) {
+            if refreshFailed {
+                StaleNotice(connection: .failing, lastHeard: lastHeard)
+                    .padding(.horizontal, -34)
             }
-            if !saved.shows.isEmpty {
-                DisclosureGroup(Words.compareFirst, isExpanded: $comparing) {
-                    // Built only once opened, so nothing loads or plays until the Director asks.
-                    if comparing {
-                        CompareEpisodes(shows: saved.shows, model: model, openItem: openItem)
-                            .padding(.top, 10)
-                    }
+            SpaceSavedBar(library: facts.library, savedBytes: facts.spaceSaved.bytes, backupBytes: cleanup?.totalSizeBytes ?? 0)
+            if let cleanup {
+                if cleanup.fileCount > 0 {
+                    DeleteBackups(count: cleanup.fileCount, bytes: cleanup.totalSizeBytes, model: model)
+                } else {
+                    Text(Words.noBackupsWaiting).foregroundStyle(.secondary)
                 }
-                .padding(.top, 8)
             }
+            if let shows {
+                if !shows.isEmpty {
+                    CompareEpisodes(shows: shows, model: model, openItem: openItem)
+                        .padding(.top, 8)
+                }
+            } else if !refreshFailed {
+                ProgressView().frame(maxWidth: 760, minHeight: 200)
+            }
+        }
+        .task { await watch() }
+    }
+
+    private func watch() async {
+        while !Task.isCancelled {
+            do {
+                cleanup = try await model.client.cleanupFolder()
+                shows = SpaceSavedFacts.shows(try await model.client.completed().folders)
+                refreshFailed = false
+                lastHeard = .now
+            } catch {
+                refreshFailed = true
+            }
+            try? await Task.sleep(for: MainWindowModel.refreshInterval)
         }
     }
 }
 
-struct SpaceSavedFacts: Sendable {
-    let shows: [Show]
-    // The whole Cleanup folder, as Delete clears it, not only the backups of seasons listed as finished.
-    let cleanup: CleanupFolder
-
+enum SpaceSavedFacts {
     struct Folder: Decodable, Sendable {
         let prefix: String
         let subtitle: String
@@ -68,13 +87,6 @@ struct SpaceSavedFacts: Sendable {
             }
         }
         return shows
-    }
-
-    @MainActor
-    static func load(_ client: MediaforceClient) async throws -> SpaceSavedFacts {
-        async let completed = client.completed()
-        async let cleanup = client.cleanupFolder()
-        return try await SpaceSavedFacts(shows: shows(completed.folders), cleanup: cleanup)
     }
 }
 
