@@ -16,6 +16,7 @@ from mediaforce.core.type_defs import float_value, object_dict
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
 from mediaforce.web.runtime.host_recovery import host_absence_state, host_recovery_snapshot, retry_host_connection
+from mediaforce.web.runtime.host_status import publish_host_status
 from mediaforce.remote import HostReadinessError, HostStatus, collect_host_statuses, host_status_targets_current_machine, \
     normalize_host_media_access, remote_mount_recovery_supported, run_host_lifecycle_command
 
@@ -378,10 +379,10 @@ def host_lifecycle_start_timeout_seconds(host: dict[str, Any] | None) -> int:
 
 
 def fresh_host_status_for_key(config: MediaforceConfig, host_key: str) -> HostStatus | None:
-    for status in collect_host_statuses(config):
-        if status.key == host_key or status.label == host_key:
-            return status
-    return None
+    statuses = collect_host_statuses(config)
+    for status in statuses:
+        publish_host_status(config, status)
+    return next((status for status in statuses if host_key in {status.key, status.label}), None)
 
 
 def ensure_encode_host_ready(

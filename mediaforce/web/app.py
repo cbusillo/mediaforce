@@ -97,7 +97,6 @@ from mediaforce.encoding.quality import quality_toolchain_identity, run_sample_e
 from mediaforce.remote import (
     HostReadinessError,
     HostStatus,
-    collect_host_statuses,
     learn_controller_smb_mounts,
     prepare_remote_host_with_password,
     remote_mount_recovery_supported,
@@ -2826,13 +2825,6 @@ def _host_lifecycle_stop_command(host: dict[str, Any] | None) -> str:
 
 def _host_lifecycle_start_timeout_seconds(host: dict[str, Any] | None) -> int:
     return host_lifecycle_start_timeout_seconds(host)
-
-
-def _fresh_host_status_for_key(config: MediaforceConfig, host_key: str) -> HostStatus | None:
-    for status in collect_host_statuses(config):
-        if status.key == host_key or status.label == host_key:
-            return status
-    return None
 
 
 def _ensure_encode_host_ready(config: MediaforceConfig, host_payload: dict[str, Any] | None) -> bool:
