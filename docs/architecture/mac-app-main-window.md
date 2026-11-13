@@ -230,9 +230,18 @@ tracks. The picture is copied packet by packet from one keyframe to the next.
 The sound is copied when the Mac plays it (AAC, AC-3, E-AC-3, Opus) and
 otherwise becomes stereo PCM, decoding only a DTS track's core; it is read from
 twelve seconds before each cut, since an encode can store sound ahead of its
-picture. Each player buffers about twenty seconds ahead. Each side of the
-comparison checks that its seek still belongs to the latest request before
-moving, including while paused.
+picture. Each player buffers about twenty seconds ahead.
+
+An episode opens straight onto its opening moment: the player reads the
+episode's length from the playlist and asks both sides for that moment before
+either loads, so neither fetches or shows the start first. Every move to a new
+moment (opening, a jump, a frame step, play, each step of a drag) holds the
+pictures until both sides are on the same frame: each keeps the frame it showed,
+or stays blank while an episode opens, so the two are never seen on different
+moments. Only the newest move shows them again. Dragging the scrubber moves the
+compressed side to the nearest frame it can show quickly and the original to
+that same frame, one seek at a time and always toward where the scrubber is
+now; letting go lands both on the exact frame.
 
 Scrolling over either comparison picture scrolls the page, or pans both pictures
 at actual size; it never scrubs a video. Seeking and frame stepping use the
