@@ -135,15 +135,16 @@ enum RenderCommand {
         let previousAppearance = NSApp.appearance
         NSApp.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         defer { NSApp.appearance = previousAppearance }
-        // The menu bar panel is drawn at its own size, as it opens under the menu bar.
-        let size = page == "menu" ? NSHostingView(rootView: view).fittingSize
+        // The menu bar panel is drawn at its own size and without a title bar, as it opens under the menu bar.
+        let menu = page == "menu"
+        let size = menu ? NSHostingView(rootView: view).fittingSize
             : NSSize(width: page.hasPrefix("settings:") ? 760 : size.width, height: size.height)
         let host = NSHostingView(rootView: view.environment(\.colorScheme, dark ? .dark : .light)
             .frame(width: size.width, height: size.height))
         host.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         host.sceneBridgingOptions = [.title, .toolbars]
         host.frame = NSRect(origin: .zero, size: size)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: host.frame, styleMask: menu ? [.borderless] : [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         window.contentView = host

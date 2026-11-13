@@ -100,7 +100,8 @@ struct MenuBarPanel: View {
     }
 }
 
-/// A row's icon and name. Every row keeps the icon column, so the names line up whether or not a row has an icon.
+/// A row's name, after its icon when it has one. As in the system's menu bar panels, every line starts at the panel's
+/// one left edge: an icon or poster sits on it, and a line without one starts its text there.
 struct MenuRowLabel: View {
     static let iconWidth: CGFloat = 20
     static let spacing: CGFloat = 8
@@ -109,10 +110,9 @@ struct MenuRowLabel: View {
 
     var body: some View {
         HStack(spacing: Self.spacing) {
-            ZStack {
-                if let systemImage { Image(systemName: systemImage) }
+            if let systemImage {
+                Image(systemName: systemImage).frame(width: Self.iconWidth, alignment: .leading)
             }
-            .frame(width: Self.iconWidth)
             Text(title)
         }
     }
