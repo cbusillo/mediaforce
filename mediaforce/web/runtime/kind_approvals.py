@@ -1,7 +1,7 @@
-"""Kind approvals: one approval covering every TV season of a kind of content (#1047).
+"""Kind approvals: one approval covering every TV season of a kind of content (#1047), a "look" on screen.
 
-The Director decided on 2026-10-22 (#517) that one approval may cover every show that measures the same,
-starting with darker and bright live action. Cartoons and 4K stay one-time choices made show by show.
+The Director decided on 2026-10-22 (#517) that one approval may cover every show that measures the same, and on
+#1385 that live action is one look. Cartoons stay one-time choices made show by show.
 
 A kind approval is a copy of a current folder approval the Director chose to extend, kept in the web state
 directory's `kinds` folder, one file per kind. Production approval precedence lives in production_approval;
@@ -30,19 +30,23 @@ from mediaforce.core.type_defs import object_dict
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES, derive_item_workflow_state
-from mediaforce.library.content_kinds import season_grouping, season_kind_report
+from mediaforce.library.content_kinds import look_group, season_grouping, season_kind_report
 from mediaforce.tuning.calibration_jobs import load_latest_job, load_latest_jobs_for_prefixes
+from mediaforce.tuning.size_goals import tallest_picture
 from mediaforce.web.runtime.app_samples import sample_moments
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
-from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
+from mediaforce.web.runtime.production_approval import KEEP_FULL_HEIGHT_FIELD, EffectiveApproval, LoadCalibrationState, \
     SampleWait, approval_prefixes, cached_calibration_loader, effective_production_approval, holds_approval, production_approval_contract, \
-    production_calibration, sample_allows_kind, season_prefix_of, season_prefix_from_types
+    offered_library_types, production_calibration, sample_allows_kind, sample_kept_full_height, season_prefix_of
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
 from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES
 from mediaforce.web.runtime.production_holds import approval_identity
 from mediaforce.web.runtime.file_encode_outcomes import file_encode_outcomes
 
-APPROVABLE_KINDS = ("darker_live_action", "bright_live_action")
+LIVE_ACTION = "live_action"
+APPROVABLE_KINDS = (LIVE_ACTION,)
+# Darker and bright live action merged into live action (#1385); their saved approvals are carried over once.
+MERGED_INTO_LIVE_ACTION = ("darker_live_action", "bright_live_action")
 KIND_IS_ONE_TIME_CODE = "kind_is_one_time"
 APPROVAL_NOT_CURRENT_CODE = "approval_not_current"
 SIZE_GOAL_NOT_SCALABLE_CODE = "size_goal_not_scalable"
@@ -61,6 +65,24 @@ def load_kind_approval(config: MediaforceConfig, kind: str) -> dict[str, Any] | 
     except (FileNotFoundError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) and payload.get("kind") == kind else None
+
+
+def migrate_kind_approvals(config: MediaforceConfig) -> None:
+    """Carry a darker or bright live action approval over to live action, unchanged; safe to run any number of times.
+
+    The darker approval wins when both exist; the show the bright one came from keeps its own approval, which still
+    governs that show. An old file that holds no approval is removed without becoming one.
+    """
+    old_files = [kind_approval_file(config, kind) for kind in MERGED_INTO_LIVE_ACTION]
+    if not any(path.exists() for path in old_files):
+        return
+    if load_kind_approval(config, LIVE_ACTION) is None:
+        carried = next((approval for kind in MERGED_INTO_LIVE_ACTION
+                        if holds_approval(approval := load_kind_approval(config, kind))), None)
+        if carried is not None:
+            _save_kind_approval(config, LIVE_ACTION, {**carried, "kind": LIVE_ACTION})
+    for path in old_files:
+        path.unlink(missing_ok=True)
 
 
 def approved_kinds(config: MediaforceConfig) -> list[str]:
@@ -82,13 +104,30 @@ def approve_kind(
     refusal = _extension_refusal(EffectiveApproval(from_prefix, payload, production_approval_contract(payload)))
     if refusal is not None:
         return {"ok": False, "code": refusal}
-    saved = {**payload, "kind": kind, "from_prefix": from_prefix, "kind_approved_at": approved_at}
+    saved = {key: value for key, value in payload.items() if key != KEEP_FULL_HEIGHT_FIELD}
+    # A sample the Director watched at 4K keeps 4K for the whole kind; any other comes down to the tallest picture.
+    if sample_kept_full_height(payload, config):
+        saved[KEEP_FULL_HEIGHT_FIELD] = True
+    _save_kind_approval(config, kind, {**saved, "kind": kind, "from_prefix": from_prefix, "kind_approved_at": approved_at})
+    return {"ok": True, "kind": kind, "from_prefix": from_prefix}
+
+
+def _save_kind_approval(config: MediaforceConfig, kind: str, payload: Mapping[str, Any]) -> None:
     path = kind_approval_file(config, kind)
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False, suffix=".tmp") as handle:
-        json.dump(saved, handle, indent=2, sort_keys=True)
+        json.dump(payload, handle, indent=2, sort_keys=True)
     os.replace(handle.name, path)
-    return {"ok": True, "kind": kind, "from_prefix": from_prefix}
+
+
+def choose_kind_picture_height(config: MediaforceConfig, kind: str, *, keep_full_height: bool) -> bool:
+    """Save whether 4K stays 4K under this kind's approval; False when the kind holds no approval to save it on."""
+    approval = load_kind_approval(config, kind)
+    if kind not in APPROVABLE_KINDS or approval is None or not holds_approval(approval):
+        return False
+    saved = {key: value for key, value in approval.items() if key != KEEP_FULL_HEIGHT_FIELD}
+    _save_kind_approval(config, kind, {**saved, KEEP_FULL_HEIGHT_FIELD: True} if keep_full_height else saved)
+    return True
 
 
 def _extension_refusal(approval: EffectiveApproval) -> str | None:
@@ -226,16 +265,19 @@ def background_queue_blocker(
 
 
 def _waiting_seasons(connection: DBClient, config: MediaforceConfig) -> list[tuple[str, int, tuple[int, ...]]]:
-    """Seasons with files still to compress, largest waiting space first, with those files' ids.
+    """Seasons and movie titles with files still to compress, largest waiting space first, with those files' ids.
 
     Files the owner chose to keep original are finished, so they never bring a season back.
     """
     rows = _waiting_files(connection)
     blocked = _files_waiting_for_owner(connection, rows, config=config)
+    library_types = offered_library_types(config)
     waiting: dict[str, tuple[int, list[int]]] = {}
     for item in rows:
-        season = season_prefix_of(config, str(item["rel_path"]))
-        if season is None or int(item["id"]) in blocked or not str(item["rel_path"]).startswith(f"{season}/"):
+        rel_path = str(item["rel_path"])
+        season = look_group(library_types, rel_path)
+        if (season is None or int(item["id"]) in blocked
+                or not (rel_path.startswith(f"{season}/") or (rel_path == season and PurePosixPath(rel_path).suffix))):
             continue
         size, ids = waiting.get(season, (0, []))
         waiting[season] = (size + int(item["size_bytes"] or 0), [*ids, int(item["id"])])
@@ -346,7 +388,7 @@ def next_approved_season(
     return None
 
 
-KINDS_IN_ORDER = ("darker_live_action", "bright_live_action", "cartoon", "4k")
+KINDS_IN_ORDER = (LIVE_ACTION, "cartoon")
 NO_FOLDER_APPROVAL_CODE = "no_folder_approval"
 SOURCE_KIND_DIFFERS_CODE = "source_kind_differs"
 
@@ -358,11 +400,12 @@ def _approval_facts(config: MediaforceConfig, calibration: Mapping[str, Any] | N
     contract = object_dict(production_approval_contract(payload))
     size_goal = object_dict(object_dict(contract.get("operator_intent")).get("size_goal"))
     return {"from_prefix": payload.get("from_prefix"), "approved_at": payload.get("kind_approved_at"),
+            "keep_full_height": bool(payload.get(KEEP_FULL_HEIGHT_FIELD)),
             "size_goal_mode": size_goal.get("mode"), "size_goal_mb": size_goal.get("value_mb"),
             "sample_moments": sample_moments(payload, review_dir=config.paths.review_dir)}
 
 
-LEFT_OUT_KINDS = ("mixed", "unmeasured")
+LEFT_OUT_KINDS = ("unmeasured",)
 
 
 def _size_goal_facts(approval: EffectiveApproval) -> dict[str, Any]:
@@ -375,15 +418,15 @@ def _tv_episodes(connection: DBClient, config: MediaforceConfig) -> dict[str, li
         connection, "tv_episodes", (select(library_items.c.id, library_items.c.rel_path, library_items.c.missing_since),
                                     select(staged_artifacts.c.library_item_id, staged_artifacts.c.promoted_at, staged_artifacts.c.archived_source_path),
                                     select(item_events.c.library_item_id, item_events.c.event_type)),
-        config.library_type_map, lambda: _read_tv_episodes(connection, config),
+        offered_library_types(config), lambda: _read_tv_episodes(connection, config),
     )
 
 
 def _read_tv_episodes(connection: DBClient, config: MediaforceConfig) -> dict[str, list[tuple[str, int]]]:
-    """Every TV show's files by path, each with its id when it is published and its original backup is still kept to
-    compare, else 0."""
+    """Every TV show's and movie title's files by path, each with its id when it is published and its original backup is
+    still kept to compare, else 0. A movie title stands as its own show and season."""
     removed = confirmed_originals_removed_item_ids(connection)
-    library_types = config.library_type_map
+    library_types = offered_library_types(config)
     shows: dict[str, list[tuple[str, int]]] = {}
     rows = connection.execute(select(
         library_items.c.id, library_items.c.rel_path, staged_artifacts.c.promoted_at, staged_artifacts.c.archived_source_path,
@@ -391,7 +434,7 @@ def _read_tv_episodes(connection: DBClient, config: MediaforceConfig) -> dict[st
         .where(LIBRARY_ITEM_PRESENT).order_by(library_items.c.rel_path)).mappings()
     for row in rows:
         rel_path = str(row["rel_path"])
-        if season_prefix_from_types(library_types, rel_path) is None:
+        if look_group(library_types, rel_path) is None:
             continue
         watchable = row["promoted_at"] is not None and bool(row["archived_source_path"]) and int(row["id"]) not in removed
         shows.setdefault("/".join(rel_path.split("/")[:2]), []).append((rel_path, int(row["id"]) if watchable else 0))
@@ -417,11 +460,11 @@ def _show_approvals(
         load_calibration_state: LoadCalibrationState,
 ) -> list[_ShowApproval]:
     """The current folder approvals on a show or its seasons, each with its sample's season and the seasons it governs."""
-    library_types = config.library_type_map
-    seasons = {season for rel_path, _ in episodes if (season := season_prefix_from_types(library_types, rel_path)) is not None}
+    library_types = offered_library_types(config)
+    seasons = {season for rel_path, _ in episodes if (season := look_group(library_types, rel_path)) is not None}
     found: dict[str, tuple[EffectiveApproval, str]] = {}
     governed: dict[str, list[str]] = {}
-    for folder in [show, *sorted(seasons)]:
+    for folder in dict.fromkeys([show, *sorted(seasons)]):
         approval = effective_production_approval(config, folder, load_calibration_state)
         if approval is None or approval.kind is not None or not approval.current:
             continue
@@ -477,7 +520,7 @@ def _kind_report(
         approval = effective_production_approval(config, prefix, load)
         return approval is not None and approval.current
 
-    return season_kind_report(connection, library_types=config.library_type_map, folder_approved=folder_approved,
+    return season_kind_report(connection, library_types=offered_library_types(config), folder_approved=folder_approved,
                               measurement_roots=config.source_root_map,
                               sample_seasons=sample_seasons)
 
@@ -514,12 +557,12 @@ def _kind_contents(connection: DBClient, config: MediaforceConfig, load_calibrat
         return load_calibration_state(loader_config, prefix)
 
     load_calibration_state = cached_calibration_loader(load_calibration_state)
-    library_types = config.library_type_map
+    library_types = offered_library_types(config)
     episodes = _tv_episodes(connection, config)
     approvals_by_show = {show: found for show, files in episodes.items()
                          if (found := _show_approvals(config, show, files, folders_only))}
     samples = _samples_in_hand(connection, {season for files in episodes.values() for path, _ in files
-                                          if (season := season_prefix_from_types(library_types, path)) is not None})
+                                          if (season := look_group(library_types, path)) is not None})
     report = _kind_report(
         connection, config, folders_only,
         sample_seasons={entry.sample_season for found in approvals_by_show.values() for entry in found}
@@ -595,9 +638,9 @@ def kinds_payload(
         } for kind in KINDS_IN_ORDER],
         "left_out": [{"season": row["season"], "kind": row["kind"], "waiting_bytes": int(row["waiting_bytes"])}
                      for row in report["seasons"] if row["kind"] in LEFT_OUT_KINDS],
-        "mixed_seasons": int(object_dict(totals.get("mixed")).get("seasons") or 0),
         "unmeasured_seasons": int(object_dict(totals.get("unmeasured")).get("seasons") or 0),
         "folder_approved_seasons": int(object_dict(totals.get("folder_approved")).get("seasons") or 0),
+        "tallest_picture": tallest_picture(config.video),
     }
     for entry in payload["kinds"]:
         season = entry["sample_season"]
