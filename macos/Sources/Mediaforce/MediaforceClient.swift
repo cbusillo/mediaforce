@@ -161,6 +161,16 @@ struct MediaforceClient: Sendable {
         try await saveSettings("api/app/settings/metadata", save, as: MetadataSettingsSaveResult.self)
     }
 
+    func metadataConnections() async throws -> MetadataConnections {
+        var request = URLRequest(url: baseURL.appending(path: "api/app/settings/metadata/connections"))
+        request.timeoutInterval = Self.factsTimeout
+        return try await decode(MetadataConnections.self, from: request)
+    }
+
+    func saveServiceKey(_ save: ServiceKeySave) async throws -> MetadataSettingsSaveResult {
+        try await saveSettings("api/app/settings/metadata/key", save, as: MetadataSettingsSaveResult.self)
+    }
+
     func compressionSettings() async throws -> CompressionSettingsFacts {
         var request = URLRequest(url: baseURL.appending(path: "api/app/settings/compression"))
         request.timeoutInterval = Self.factsTimeout

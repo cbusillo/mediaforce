@@ -147,6 +147,9 @@ class PlexClient:
             raise ProviderHttpError("Plex identity response did not include machineIdentifier")
         return value
 
+    def check_access(self) -> None:
+        self._get("library/sections")
+
     def items(self, metadata_type: int) -> Iterator[PlexItem]:
         for metadata in self._metadata(metadata_type):
             rating_key = str(metadata.get("ratingKey") or "").strip()
@@ -266,6 +269,9 @@ class TmdbClient:
             "Accept": "application/json",
             "Authorization": f"Bearer {token}",
         }
+
+    def check_access(self) -> None:
+        self._fetch_json(urljoin(self._base_url, "authentication"), self._headers, self._timeout_seconds)
 
     def series(self, series_id: int) -> TmdbSeries:
         url = urljoin(self._base_url, f"tv/{series_id}")

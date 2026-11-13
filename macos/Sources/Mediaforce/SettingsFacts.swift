@@ -260,7 +260,7 @@ struct ComputerSettingsDraft: Equatable {
     }
 }
 
-/// Settings hold only where each key is read from and whether it is set, never a key itself.
+/// Settings learn only whether each key is set, never a key itself.
 struct MetadataSettingsFacts: Decodable, Sendable, Equatable {
     let plex: Plex
     let tmdb: TMDB
@@ -269,15 +269,41 @@ struct MetadataSettingsFacts: Decodable, Sendable, Equatable {
     struct Plex: Decodable, Sendable, Equatable {
         let enabled: Bool
         let address: String
-        let keyName: String
-        let keyFound: Bool
+        let keySet: Bool
     }
 
     struct TMDB: Decodable, Sendable, Equatable {
         let enabled: Bool
-        let keyName: String
-        let keyFound: Bool
+        let keySet: Bool
     }
+}
+
+/// Whether Plex and TMDB each accept the saved key, as the server last checked.
+struct MetadataConnections: Decodable, Sendable, Equatable {
+    let plex: String
+    let tmdb: String
+}
+
+/// What the Plex and TMDB tab says about one key: set or not, and whether the service accepted it when last checked.
+enum ServiceKeyState: Equatable {
+    case notSet, checking, saved, connected, rejected, unreachable
+
+    init(keySet: Bool, checking: Bool, checked: String?) {
+        guard keySet else { self = .notSet; return }
+        guard !checking else { self = .checking; return }
+        switch checked {
+        case "connected": self = .connected
+        case "rejected": self = .rejected
+        case "unreachable": self = .unreachable
+        default: self = .saved
+        }
+    }
+}
+
+/// A key entered once in Settings, sent to the server to keep in the Keychain.
+struct ServiceKeySave: Encodable, Sendable, Equatable {
+    let service: String
+    let key: String
 }
 
 struct MetadataSettingsSave: Encodable, Sendable, Equatable {
@@ -326,7 +352,6 @@ struct CompressionSettingsFacts: Decodable, Sendable, Equatable {
     let aim: String
     let sizeGoalMb: Double
     let sizeGoalMinutes: Double
-    let sizeLimitPercent: Double
     let largestPercent: Double
     let tallestPicture: Int
     let grain: Int
@@ -347,7 +372,6 @@ struct CompressionSettingsSave: Encodable, Sendable, Equatable {
     var aim: String
     var sizeGoalMb: Double
     var sizeGoalMinutes: Double
-    var sizeLimitPercent: Double
     var largestPercent: Double
     var tallestPicture: Int
     var grain: Int
@@ -374,7 +398,6 @@ struct CompressionSettingsDraft: Equatable {
             aim: facts.aim,
             sizeGoalMb: facts.sizeGoalMb,
             sizeGoalMinutes: facts.sizeGoalMinutes,
-            sizeLimitPercent: facts.sizeLimitPercent,
             largestPercent: facts.largestPercent,
             tallestPicture: facts.tallestPicture,
             grain: facts.grain,

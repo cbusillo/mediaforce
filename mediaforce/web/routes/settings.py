@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from mediaforce.web.routes.folders import request_body
+from mediaforce.web.routes.local_requests import refusal_unless_this_mac
 from mediaforce.web.settings_runtime import SettingsValidationError
 
 
@@ -115,6 +116,8 @@ def register_metadata_settings_routes(
     *,
     metadata_settings_facts: Callable[[], dict[str, Any]],
     save_metadata_settings_action: Callable[..., dict[str, Any]],
+    metadata_connections: Callable[[], dict[str, str]],
+    save_service_key_action: Callable[[str, str], dict[str, Any]],
 ) -> None:
     """The Mac app's Plex and TMDB settings tab. Refusals carry a code the app words; never a sentence."""
 
@@ -127,6 +130,8 @@ def register_metadata_settings_routes(
 
     @app.post("/api/app/settings/metadata")
     async def api_app_metadata_settings_save(request: Request) -> JSONResponse:
+        if refusal := refusal_unless_this_mac(request):
+            return refusal
         body = await request_body(request)
 
         def _connection(name: str) -> dict[str, Any]:
@@ -144,6 +149,25 @@ def register_metadata_settings_routes(
             return JSONResponse({"ok": False, "code": exc.code}, status_code=400)
         except ValueError:
             return JSONResponse({"ok": False, "code": "invalid_settings"}, status_code=400)
+        return JSONResponse(result)
+
+    @app.get("/api/app/settings/metadata/connections")
+    def api_app_metadata_connections(request: Request) -> JSONResponse:
+        if refusal := refusal_unless_this_mac(request):
+            return refusal
+        return JSONResponse(metadata_connections())
+
+    @app.post("/api/app/settings/metadata/key")
+    async def api_app_service_key_save(request: Request) -> JSONResponse:
+        if refusal := refusal_unless_this_mac(request):
+            return refusal
+        body = await request_body(request)
+        try:
+            result = await run_in_threadpool(
+                save_service_key_action, str(body.get("service") or ""), str(body.get("key") or "").strip(),
+            )
+        except SettingsValidationError as exc:
+            return JSONResponse({"ok": False, "code": exc.code}, status_code=400)
         return JSONResponse(result)
 
 

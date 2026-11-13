@@ -10,7 +10,8 @@ When the encoder stops retrying and keeps a copy that missed its final size, it
 records only that size miss. That copy counts as not yet checked, so automatic
 publishing runs its normal check like any other finished file. If the size
 goal is the only failed check and the copy came out over the most the goal
-allows (Settings › Compression › "Allowed over the goal"), automatic publishing
+allows (the stored `video.final_output_tolerance_percent`, not shown in
+Settings), automatic publishing
 keeps the original and removes the copy, with the reason `over_size`, and
 nothing waits on the owner: the same settings make the same file (Director
 decision Q948, #1083). A copy that missed only by coming out under the goal
