@@ -7,7 +7,7 @@ struct NeedsYouPage: View {
     let posters: PosterStore
     let model: MainWindowModel
     let open: (Place) -> Void
-    // Each waiting season's files, and each size question's sample, read from their pages so a row can answer in place.
+    // Each waiting season's files, read from its page so its row can answer in place, and each waiting sample's season size.
     @State private var seasonFiles: [String: ItemFacts] = [:]
     @State private var samples: [String: SampleFacts] = [:]
     @State private var working: Set<String> = []
@@ -59,7 +59,7 @@ struct NeedsYouPage: View {
     // Read again when what waits changes or another file finishes somewhere.
     private var readKey: [String] {
         facts.work.seasonsNeedingYou.map { "\($0.prefix):\($0.state ?? ""):\($0.action ?? "")" }
-            + NeedsYouItem.sizeQuestions(facts) + ["\(facts.lastChange?.id ?? 0)", "\(reads)"]
+            + NeedsYouItem.sampleReads(facts) + ["\(facts.lastChange?.id ?? 0)", "\(reads)"]
     }
 
     private func readDetails() async {
@@ -87,10 +87,10 @@ struct NeedsYouPage: View {
                 let result = try await $0.approveKind(kind, from: from)
                 return result.ok ? nil : ActionNotice(title: Words.kindRefusedTitle, message: Words.kindRefusal(result.code))
             }
-        case .makeSample(let prefix, let size):
+        case .makeSample(let prefix):
             act(item.id) {
-                // A sample that needs more than a size opens its page, which says what else to choose.
-                if try await !$0.makeSample(prefix, size: size, balance: nil).ok { open(.sample(prefix)) }
+                // A sample that can't be made as it was opens its page, which says what to choose.
+                if try await !$0.makeSample(prefix, size: nil, balance: nil).ok { open(.sample(prefix)) }
                 return nil
             }
         }
@@ -157,18 +157,13 @@ struct NeedsYouAnswer {
     enum Action {
         case open(Place)
         case useSettings(kind: String, from: String)
-        case makeSample(prefix: String, size: String?)
+        case makeSample(prefix: String)
         case file(ItemAction, prefix: String, file: ItemFacts.File)
         case originals(OriginalPreview)
     }
 
     let title: String
     let action: Action
-
-    /// Answered on the page itself, rather than by opening another.
-    var answersInPlace: Bool {
-        if case .open = action { false } else { true }
-    }
 }
 
 @MainActor
@@ -187,20 +182,15 @@ extension NeedsYouItem {
         }.map(\.element)
     }
 
-    /// The samples whose size choices or season size a row reads.
+    /// The samples whose season size a row shows.
     static func sampleReads(_ facts: MainWindowFacts) -> [String] {
-        facts.samples.waitingOnYou.map(\.prefix) + sizeQuestions(facts)
-    }
-
-    static func sizeQuestions(_ facts: MainWindowFacts) -> [String] {
-        facts.work.kindsNeedingYou.filter { $0.settingsAvailable != true && $0.sampleReady != true && $0.sampleStatus == "choose_size" }
-            .compactMap(\.sampleStartPrefix)
+        facts.samples.waitingOnYou.map(\.prefix)
     }
 
     private static func item(_ notice: AttentionNotice, facts: MainWindowFacts, kinds: KindsFacts?,
                              files: [String: ItemFacts], samples: [String: SampleFacts]) -> NeedsYouItem {
         if let pending = facts.work.kindsNeedingYou.first(where: { notice.id.hasPrefix("kind:\($0.kind):") }) {
-            return kindItem(notice, pending, kind: kinds?.kinds.first { $0.kind == pending.kind }, samples: samples)
+            return kindItem(notice, pending, kind: kinds?.kinds.first { $0.kind == pending.kind })
         }
         if let sample = facts.samples.waitingOnYou.first(where: { notice.opens == .sample($0.prefix) }) {
             return sampleItem(notice, sample, facts: samples[sample.prefix])
@@ -233,8 +223,7 @@ extension NeedsYouItem {
     }
 
     /// A group of shows decided together; a group whose shows are each decided on their own is shown by the show it asks about.
-    private static func kindItem(_ notice: AttentionNotice, _ pending: MainWindowFacts.PendingKind, kind: KindsFacts.Kind?,
-                                 samples: [String: SampleFacts]) -> NeedsYouItem {
+    private static func kindItem(_ notice: AttentionNotice, _ pending: MainWindowFacts.PendingKind, kind: KindsFacts.Kind?) -> NeedsYouItem {
         let group = Words.kindName(pending.kind)
         let season = pending.sampleSeason ?? pending.sampleStartPrefix
         let showPrefix = season.map(MediaPoster.titlePrefix)
@@ -256,9 +245,8 @@ extension NeedsYouItem {
         } else {
             switch pending.sampleStatus {
             case "choose_size":
-                let prefix = pending.sampleStartPrefix ?? ""
                 ask = NeedsYouAsk(line: Words.firstSampleSizeAsk(season.map(Words.lastFolder)),
-                                  answers: sizeAnswers(prefix, samples[prefix]) ?? [NeedsYouAnswer(title: Words.chooseSize, action: .open(opens))])
+                                  answers: [NeedsYouAnswer(title: Words.chooseSize, action: .open(opens))])
             case "choose_balance":
                 ask = NeedsYouAsk(line: Words.firstSampleDetailAsk, answers: [NeedsYouAnswer(title: Words.chooseDetail, action: .open(opens))])
             case "pending_review", "completed":
@@ -285,10 +273,10 @@ extension NeedsYouItem {
             NeedsYouAsk(line: Words.sampleReadyAsk(season: nil), answers: [NeedsYouAnswer(title: Words.watchSample, action: .open(place))])
         } else if sample.action == "choose_size" {
             NeedsYouAsk(line: Words.sampleSizeAsk(sample.failure),
-                        answers: sizeAnswers(sample.prefix, facts) ?? [NeedsYouAnswer(title: Words.chooseSize, action: .open(place))])
+                        answers: [NeedsYouAnswer(title: Words.chooseSize, action: .open(place))])
         } else {
             NeedsYouAsk(line: Words.sampleFailure(sample.failure) ?? Words.sampleStopped,
-                        answers: [NeedsYouAnswer(title: Words.makeSampleAgain, action: .makeSample(prefix: sample.prefix, size: nil))])
+                        answers: [NeedsYouAnswer(title: Words.makeSampleAgain, action: .makeSample(prefix: sample.prefix))])
         }
         return NeedsYouItem(id: notice.id, title: sample.show, context: sample.season.map { "Season \($0)" },
                             bytes: facts?.seasonBytes, picture: .posters([sample.showPrefix]), asks: [ask], opens: place)
@@ -325,11 +313,6 @@ extension NeedsYouItem {
         }
         return NeedsYouAsk(line: "\(Words.fileName(file)): \(Words.fileState(file)).",
                            answers: [NeedsYouAnswer(title: Words.showSeason, action: .open(.item(season)))])
-    }
-
-    private static func sizeAnswers(_ prefix: String, _ facts: SampleFacts?) -> [NeedsYouAnswer]? {
-        guard let choices = facts?.sizeChoices, !choices.isEmpty else { return nil }
-        return choices.map { NeedsYouAnswer(title: Words.sizeChoice($0), action: .makeSample(prefix: prefix, size: $0.key)) }
     }
 }
 

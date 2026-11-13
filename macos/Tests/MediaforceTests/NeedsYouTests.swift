@@ -88,25 +88,12 @@ final class NeedsYouTests: XCTestCase {
         XCTAssertEqual(group.bytes, kinds.kinds.first?.waitingBytes)
     }
 
-    func testAFirstSampleSizeIsChosenOnItsRowOnceItsChoicesAreRead() throws {
-        let facts = try facts()
-        let unread = try XCTUnwrap(NeedsYouItem.items(facts, kinds: try kinds()).first { $0.id.hasPrefix("kind:4k:") })
-        XCTAssertFalse(try XCTUnwrap(unread.asks.first?.answers.first).answersInPlace)
-        XCTAssertEqual(NeedsYouItem.sizeQuestions(facts), ["tv/The Expanse/Season 3"])
-        let sample = try JSONDecoder.mediaforce.decode(SampleFacts.self, from: Data("""
-        {"prefix": "tv/The Expanse/Season 3", "show_prefix": "tv/The Expanse", "show": "The Expanse", "season": 3, "state": "needs_test",
-         "wait_detail": null, "action": "choose_size", "failure": null, "moments": [], "coverage_summary": null,
-         "episode_bytes": 4657141798, "estimated_episode_bytes": 0, "season_bytes": 61096741885, "season_episode_count": 13,
-         "goal_bytes": 0, "size_status": null, "draft_hash": null, "approval_kind": null, "ready_in_seconds": null,
-         "size_choices": [{"key": "confirm_normalized", "target_bytes": 278029000}, {"key": "confirm_absolute", "target_bytes": 300000000}],
-         "balance_choices": []}
-        """.utf8))
-        let read = try XCTUnwrap(NeedsYouItem.items(facts, kinds: try kinds(), samples: [sample.prefix: sample])
-            .first { $0.id.hasPrefix("kind:4k:") })
-        let sizes = try XCTUnwrap(read.asks.first).answers.compactMap { answer -> String? in
-            if case .makeSample(let prefix, let size) = answer.action, prefix == sample.prefix { size } else { nil }
-        }
-        XCTAssertEqual(sizes, sample.sizeChoices.map(\.key))
+    func testAFirstSampleSizeIsChosenOnTheSamplePageItNeeds() throws {
+        let row = try XCTUnwrap(NeedsYouItem.items(try facts(), kinds: try kinds()).first { $0.id.hasPrefix("kind:4k:") })
+        let answers = try XCTUnwrap(row.asks.first).answers
+        XCTAssertEqual(answers.count, 1)
+        guard case .open(let place) = try XCTUnwrap(answers.first).action else { return XCTFail("Not opened") }
+        XCTAssertEqual(place, .sample("tv/The Expanse/Season 3"))
     }
 
     func testEachFileQuestionIsAnsweredOnItsRow() throws {
