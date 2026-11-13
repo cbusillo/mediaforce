@@ -30,6 +30,7 @@ from mediaforce.web.runtime.production_approval import (
     LoadCalibrationState,
     effective_production_approval,
     production_approval_matches,
+    superseded_by_kind,
 )
 from mediaforce.web.runtime.size_held import OVER_SIZE_KEEP_REASON, keep_original_after_failed_checks
 
@@ -49,10 +50,12 @@ def publish_checked_files_once(
     load_calibration_state: LoadCalibrationState,
     remake_files: RemakeFilesFn,
     stop_event: threading.Event | None = None,
+    remake_superseded: RemakeFilesFn | None = None,
 ) -> None:
     """Check and publish each finished production file; temporary holds retry next pass.
 
     A copy that fails its check is made again through ``remake_files`` until the attempt limit, then kept original.
+    A copy made under a kind's approval that has since changed is made again through ``remake_superseded``.
     """
     if not controller_work_allowed(config) or update_hold_reason(config.paths.db_path.parent):
         # An unfinished app update holds new publication; one already holding its delivery lock finishes first.
@@ -91,7 +94,7 @@ def publish_checked_files_once(
                 break
             with open_db(config.paths.db_path) as connection:
                 _try_publish_file(
-                    connection, config, item_id, load_calibration_state, remake_files, stop_event
+                    connection, config, item_id, load_calibration_state, remake_files, stop_event, remake_superseded
                 )
 
 
@@ -102,6 +105,7 @@ def _try_publish_file(
     load_calibration_state: LoadCalibrationState,
     remake_files: RemakeFilesFn,
     stop_event: threading.Event | None,
+    remake_superseded: RemakeFilesFn | None = None,
 ) -> None:
     failure_attempts = 0
     try:
@@ -117,7 +121,7 @@ def _try_publish_file(
             failure_attempts = int(previous.get("failure_attempts") or 0)
         except (ValueError, TypeError):
             pass
-        _publish_file(connection, config, item_id, load_calibration_state, remake_files, stop_event)
+        _publish_file(connection, config, item_id, load_calibration_state, remake_files, stop_event, remake_superseded)
     except PromotionRestoreError:
         LOGGER.exception("Automatic publish could not restore item %s", item_id)
         connection.rollback()
@@ -191,6 +195,7 @@ def _publish_file(
     load_calibration_state: LoadCalibrationState,
     remake_files: RemakeFilesFn,
     stop_event: threading.Event | None,
+    remake_superseded: RemakeFilesFn | None = None,
 ) -> None:
     stage = (
         connection.execute(
@@ -292,20 +297,26 @@ def _publish_file(
         return
     reasons = []
     approval = effective_production_approval(config, rel_path, load_calibration_state)
-    if not production_approval_matches(approval, manifest, item):
+    approval_matches = production_approval_matches(approval, manifest, item)
+    if not approval_matches:
         reasons.append(
             "This file needs a current matching sample approval before it can be published."
         )
     path = Path(str(source["source_path"]))
     fingerprint = file_fingerprint(path, path.stat(), source["duration_seconds"])
-    if (
+    original_changed = (
         fingerprint != item.get("source_fingerprint")
         or fingerprint != source["fingerprint"]
         or fingerprint != stage["source_fingerprint"]
-    ):
+    )
+    if original_changed:
         reasons.append(
             "The original changed after this work was planned. Check it before making a replacement."
         )
+    if (not approval_matches and not original_changed and remake_superseded is not None
+            and superseded_by_kind(approval, manifest)):
+        _remake_superseded_copy(connection, source, remake_superseded)
+        return
     if reasons:
         _record_wait(connection, item_id, "waiting", " ".join(reasons))
         return
@@ -435,9 +446,35 @@ def _remake_or_keep_failed_copy(
         if reason:
             _record_wait(connection, item_id, "waiting", reason)
         return True
-    result = remake_files(str(source["rel_path"]), [item_id])
+    _remake_once(
+        connection, item_id, remake_files(str(source["rel_path"]), [item_id]),
+        remaking=(REMAKING_AFTER_FAILED_CHECK, "Its compressed copy didn't pass its check. Mediaforce will make it again when it can."),
+        not_remade="Its compressed copy didn't pass its check, and Mediaforce couldn't make it again.",
+    )
+    return True
+
+
+def _remake_superseded_copy(connection: DBClient, source: DBRow, remake: RemakeFilesFn) -> None:
+    """Make a copy again under its kind's current approval; it is never published under the one it was made with."""
+    connection.commit()
+    _remake_once(
+        connection, int(source["id"]), remake(str(source["rel_path"]), [int(source["id"])]),
+        remaking=("waiting", "How this kind of content should look changed after this file was made. "
+                             "Mediaforce will make it again when it can."),
+        not_remade="How this kind of content should look changed after this file was made, "
+                   "and Mediaforce couldn't make it again.",
+    )
+
+
+def _remake_once(
+    connection: DBClient, item_id: int, result: dict[str, Any], *, remaking: tuple[str, str], not_remade: str,
+) -> None:
+    """Record how asking for a remake went: queued, refused for now, or refused too often to try again unseen."""
     if item_id in result.get("queued_library_item_ids", []):
-        return True
+        return
+    saved = connection.execute(
+        select(staged_artifacts.c.validation_json).where(staged_artifacts.c.library_item_id == item_id)
+    ).scalar_one_or_none()
     refusal = next(
         (
             object_dict(file)
@@ -447,9 +484,12 @@ def _remake_or_keep_failed_copy(
         {"reason": result.get("message")},
     )
     left_out = str(refusal.get("reason") or "")
-    refusals = int(
-        object_dict(object_dict(json.loads(str(saved))).get("automatic_publish")).get("failure_attempts") or 0
-    )
+    try:
+        refusals = int(
+            object_dict(object_dict(json.loads(str(saved or "{}"))).get("automatic_publish")).get("failure_attempts") or 0
+        )
+    except (ValueError, TypeError):
+        refusals = 0
     # Work still running in the season clears by itself, so only a refusal that needs someone counts toward the owner.
     if not refusal.get("busy"):
         refusals += 1
@@ -460,22 +500,22 @@ def _remake_or_keep_failed_copy(
             connection,
             item_id,
             NOT_REMADE_AFTER_FAILED_CHECK,
-            f"Its compressed copy didn't pass its check, and Mediaforce couldn't make it again. {left_out}".strip(),
+            f"{not_remade} {left_out}".strip(),
             failure_attempts=refusals,
             blockers=list(dict.fromkeys(
                 (["copy_removed_not_queued"] if removed else []) + [str(code) for code in object_list(refusal.get("codes"))]
             )),
         )
-        return True
+        return
+    state, reason = remaking
     _record_wait(
         connection,
         item_id,
-        REMAKING_AFTER_FAILED_CHECK,
-        f"Its compressed copy didn't pass its check. Mediaforce will make it again when it can. {left_out}".strip(),
+        state,
+        f"{reason} {left_out}".strip(),
         failure_attempts=refusals,
         retry_after=time.time() + PUBLISH_RETRY_DELAY_SECONDS * max(refusals, 1),
     )
-    return True
 
 
 def _failed_check_attempts(connection: DBClient, source: DBRow) -> int:

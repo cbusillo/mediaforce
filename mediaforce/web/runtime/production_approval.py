@@ -281,6 +281,18 @@ def production_approval_matches(
     return bool(policy) and calibration_policy_hash({"policy": policy}) == accepted_hash
 
 
+def superseded_by_kind(approval: EffectiveApproval | None, manifest: Mapping[str, Any]) -> bool:
+    """True when a kind's current approval governs a file whose run recorded a different approval.
+
+    Such a file is made again under the current approval, never published under the one it was made with: the
+    kind's 4K choice changed, or its approval was replaced (such as bright live action merging into live action).
+    """
+    recorded = valid_production_approval_contract(object_dict(object_dict(manifest.get("selection")).get(
+        "production_approval_contract")))
+    return (approval is not None and approval.kind is not None and approval.current and approval.contract is not None
+            and recorded is not None and recorded != approval.contract)
+
+
 def policy_with_owner_settings(
         sample_policy: Mapping[str, Any],
         config: MediaforceConfig,

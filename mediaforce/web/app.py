@@ -656,6 +656,7 @@ def create_app(
                     automatic_publish_sweep=lambda stop_event: publish_checked_files_once(
                         load_config(config.paths.config_path), load_calibration_state=_load_calibration_state,
                         remake_files=_remake_failed_checks, stop_event=stop_event,
+                        remake_superseded=_remake_superseded_outputs,
                     ),
                 )
                 _safe_collect_host_statuses(config)
@@ -2065,6 +2066,20 @@ def create_app(
             ),
             current_approval=_remake_current_approval,
             retry_failed_check=True,
+        )
+
+    def _remake_superseded_outputs(prefix: str, item_ids: Collection[int]) -> ActionPayload:
+        return remake_staged_files(
+            config,
+            prefix,
+            item_ids,
+            now_iso=_now_iso,
+            queue_items=lambda run_prefix, mode, ids, approval: _queue_remade_files(
+                run_prefix, mode, ids, approval,
+                notes="Made again because how its kind of content should look changed after it was made.",
+            ),
+            current_approval=_remake_current_approval,
+            superseded=True,
         )
 
     def _promote_folder_outputs_action(
