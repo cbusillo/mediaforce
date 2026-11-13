@@ -2,9 +2,10 @@
 
 The page shows every file with where it has got, its size before and after, and whether its original
 backup is still there to compare against. The server sends states and codes; the app words them. The
-player reads one file at a time as MP4, remuxed once and cached, since the app's player cannot open MKV.
+player reads each file as MP4, remuxed once and cached, since the app's player cannot open MKV.
 """
 
+import json
 import re
 import shutil
 import subprocess
@@ -38,8 +39,12 @@ PLAYER_CACHE_BYTES = 40 * 1000 ** 3
 PLAYER_FREE_MARGIN_BYTES = 20 * 1000 ** 3
 PLAYER_REMUX_TIMEOUT_SECONDS = 30 * 60
 PARTIAL_SUFFIX = ".partial"
-# One preparation at a time across every file, so the space check, eviction and remux never overlap.
-_PLAYER_PREPARATION = threading.Lock()
+# Sound the Mac plays as it is, so it is copied instead of converted.
+PLAYER_COPIED_SOUND = frozenset({"aac", "ac3", "eac3", "opus"})
+# The space check and eviction run one at a time; each file prepares under its own lock, so a comparison's two
+# sides prepare together.
+_PLAYER_CACHE = threading.Lock()
+_PLAYER_PREPARING: dict[Path, threading.Lock] = {}
 _EPISODE_NUMBER = re.compile(r"[sS](\d+)[eE](\d+)")
 
 
@@ -189,27 +194,37 @@ def player_file(config: MediaforceConfig, library_item_id: int, side: str) -> Pa
     source = sources.get(side)
     if source is None:
         return None
-    stat = source.stat()
     cache = config.paths.web_state_dir / "player"
     target = _cached_name(cache, library_item_id, side, source)
     if target.is_file():
         return target
     # A second request for the same file waits here and then reads the cache.
-    with _PLAYER_PREPARATION:
+    with _preparing(target):
         if not target.is_file():
-            cache.mkdir(parents=True, exist_ok=True)
-            # The other side of the same file stays, so a comparison never evicts its own half.
-            pair = [
-                path for other, other_source in sources.items() if other != side
-                if (path := _cached_name(cache, library_item_id, other, other_source)).is_file()
-            ]
-            if stat.st_size + sum(path.stat().st_size for path in pair) > PLAYER_CACHE_BYTES:
-                raise PlayerUnavailable("too_large", f"{source.name} is too large to prepare for playing.")
-            _trim_cache(cache, keep={target, *pair}, incoming_bytes=stat.st_size)
-            if shutil.disk_usage(cache).free < stat.st_size + PLAYER_FREE_MARGIN_BYTES:
-                raise PlayerUnavailable("no_room", f"Not enough free space to prepare {source.name} for playing.")
+            with _PLAYER_CACHE:
+                _make_room(cache, target, source, [
+                    _cached_name(cache, library_item_id, other, other_source)
+                    for other, other_source in sources.items() if other != side
+                ])
             _remux(source, target)
     return target
+
+
+def _preparing(target: Path) -> threading.Lock:
+    with _PLAYER_CACHE:
+        return _PLAYER_PREPARING.setdefault(target, threading.Lock())
+
+
+def _make_room(cache: Path, target: Path, source: Path, other_sides: list[Path]) -> None:
+    """Evict older files for this one, keeping the other side of the same file so a comparison keeps both halves."""
+    size = source.stat().st_size
+    cache.mkdir(parents=True, exist_ok=True)
+    pair = [path for path in other_sides if path.is_file()]
+    if size + sum(path.stat().st_size for path in pair) > PLAYER_CACHE_BYTES:
+        raise PlayerUnavailable("too_large", f"{source.name} is too large to prepare for playing.")
+    _trim_cache(cache, keep={target, *pair}, incoming_bytes=size)
+    if shutil.disk_usage(cache).free < size + PLAYER_FREE_MARGIN_BYTES:
+        raise PlayerUnavailable("no_room", f"Not enough free space to prepare {source.name} for playing.")
 
 
 def _player_sources(library_file: Path, backup: Path | None, *, replaced: bool) -> dict[str, Path]:
@@ -230,13 +245,12 @@ def _cached_name(cache: Path, library_item_id: int, side: str, source: Path) -> 
 
 
 def _remux(source: Path, target: Path) -> None:
-    """Copy the picture as it is and make the sound stereo AAC, which every Mac plays."""
+    """Copy the picture as it is, and the sound too when the Mac plays it; other sound becomes stereo AC-3."""
     partial = target.with_name(f".{target.stem}.{uuid4().hex}{PARTIAL_SUFFIX}")
-    # The app's player takes HEVC only under its hvc1 tag.
-    tag = ["-tag:v", "hvc1"] if _video_codec(source) == "hevc" else []
+    video, sound = _first_codecs(source)
     command = [
-        ffmpeg_binary(), "-nostdin", "-loglevel", "error", "-i", str(source),
-        "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", *tag, "-c:a", "aac", "-ac", "2", "-b:a", "192k",
+        ffmpeg_binary(), "-nostdin", "-loglevel", "error", *_sound_decoding(sound), "-i", str(source),
+        "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", *_picture_tag(video), *_sound_encoding(sound),
         "-movflags", "+faststart", "-f", "mp4", str(partial),
     ]
     try:
@@ -250,16 +264,35 @@ def _remux(source: Path, target: Path) -> None:
     partial.replace(target)
 
 
-def _video_codec(source: Path) -> str:
+def _picture_tag(video: str) -> list[str]:
+    """The app's player takes HEVC only under its hvc1 tag."""
+    return ["-tag:v", "hvc1"] if video == "hevc" else []
+
+
+def _sound_decoding(sound: str) -> list[str]:
+    """A DTS track's lossless extension takes most of the time to decode and adds nothing to a stereo preview."""
+    return ["-core_only", "1"] if sound == "dts" else []
+
+
+def _sound_encoding(sound: str) -> list[str]:
+    if sound in PLAYER_COPIED_SOUND:
+        return ["-c:a", "copy"]
+    return ["-c:a", "ac3", "-ac", "2", "-b:a", "192k"]
+
+
+def _first_codecs(source: Path) -> tuple[str, str]:
+    """The first picture and sound tracks' codecs, empty when a file has none."""
     try:
         result = subprocess.run(
-            [ffprobe_binary(), "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name",
-             "-of", "default=noprint_wrappers=1:nokey=1", str(source)],
+            [ffprobe_binary(), "-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "json", str(source)],
             capture_output=True, text=True, timeout=60,
         )
     except subprocess.TimeoutExpired as error:
         raise PlayerUnavailable("too_slow", f"Reading {source.name} took too long.") from error
-    return result.stdout.strip()
+    streams = json.loads(result.stdout or "{}").get("streams") or []
+    first = {kind: next((str(stream.get("codec_name") or "") for stream in streams if stream.get("codec_type") == kind), "")
+             for kind in ("video", "audio")}
+    return first["video"], first["audio"]
 
 
 def _trim_cache(cache: Path, *, keep: set[Path], incoming_bytes: int) -> None:

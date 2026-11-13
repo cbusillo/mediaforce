@@ -198,9 +198,12 @@ copy, or make it again) and `put-original-back`.
 `GET /api/app/player/{library_item_id}/{side}` serves one file for the page's
 player, `side` `compressed` or `original` (the backup of a replaced file, or the
 file itself when it was never replaced), or `404` when that side is gone. The
-Mac player cannot open MKV, so the first request remuxes the file to MP4,
-copying the picture and making the sound stereo AAC, into the `player`
-folder of the web state folder (`paths.web_state_dir`); the newest six stay cached. It answers byte
+Mac player cannot open MKV, so the first request remuxes the file to MP4 into
+the `player` folder of the web state folder (`paths.web_state_dir`); the newest
+six stay cached. The picture is copied, and so is the sound when the Mac plays
+it (AAC, AC-3, E-AC-3, Opus); other sound becomes stereo AC-3, decoding only a
+DTS track's core. Reading the file from the library sets the wait, so a
+comparison's two sides prepare at the same time. It answers byte
 ranges, so the player can seek. Each side of the comparison checks that its
 seek still belongs to the latest request before moving, including while paused.
 
