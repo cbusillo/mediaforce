@@ -529,7 +529,12 @@ extension Words {
     static func savedSoFar(_ bytes: Int64) -> String { "\(size(bytes)) saved so far" }
     static let savedSoFarLabel = "Saved so far"
     static let estimatedTotalSavings = "Estimated total savings"
-    static let partialSavingsEstimate = "Partial total; some estimates are unavailable."
+    static let estimatedTotalSavingsHelp = "Space saved so far plus Mediaforce's estimate for everything still original. \"At least\" means some estimates are not available yet, so the total may be higher."
+
+    static func estimatedTotalSavingsValue(_ bytes: Int64?, partial: Bool) -> String {
+        guard let bytes else { return notKnownYet }
+        return partial ? "At least \(size(bytes))" : "About \(size(bytes))"
+    }
 
     static func spotCheckFile(_ seasonPrefix: String, _ file: ItemFacts.File) -> String {
         let folders = seasonPrefix.split(separator: "/").dropFirst().joined(separator: ", ")
