@@ -244,7 +244,7 @@ final class SettingsTests: XCTestCase {
     }
 
     static let compressionFacts = """
-    {"aim": "size_first_review", "size_goal_mb": 300.0, "size_goal_minutes": 45.0, "size_limit_percent": 10.0,
+    {"aim": "size_first_review", "size_goal_mb": 300.0, "size_goal_minutes": 45.0,
      "largest_percent": 80.0, "tallest_picture": 1080, "grain": 8, "measurement": "vmaf",
      "appearance_target": 85.0, "appearance_minimum": 80.0, "detail_target": 41.0, "detail_minimum": 35.0,
      "sample_method": "ab_av1_fast_sample", "size_goal_mode": "normalized",
@@ -257,8 +257,7 @@ final class SettingsTests: XCTestCase {
     }
 
     private let compressionRefusalCodes = [
-        "size_goal_invalid", "size_goal_minutes_invalid", "size_limit_invalid", "sample_size_limit_invalid",
-        "largest_size_invalid", "tallest_picture_invalid", "grain_invalid", "appearance_target_invalid",
+        "size_goal_invalid", "size_goal_minutes_invalid", "largest_size_invalid", "tallest_picture_invalid", "grain_invalid", "appearance_target_invalid",
         "appearance_minimum_invalid", "detail_target_invalid", "detail_minimum_invalid",
         "appearance_minimum_above_target", "detail_minimum_above_target", "unknown_aim", "unknown_measurement",
         "unknown_sample_method",
@@ -269,7 +268,6 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(decoded.aim, "size_first_review")
         XCTAssertEqual(decoded.sizeGoalMb, 300)
         XCTAssertEqual(decoded.sizeGoalMinutes, 45)
-        XCTAssertEqual(decoded.sizeLimitPercent, 10)
         XCTAssertEqual(decoded.largestPercent, 80)
         XCTAssertEqual(decoded.tallestPicture, 1080)
         XCTAssertEqual(decoded.grain, 8)
@@ -293,7 +291,7 @@ final class SettingsTests: XCTestCase {
             JSONSerialization.jsonObject(with: JSONEncoder.mediaforce.encode(draft.saveBody)) as? NSDictionary
         )
         XCTAssertEqual(body, [
-            "aim": "quality_first_sample", "size_goal_mb": 450, "size_goal_minutes": 45, "size_limit_percent": 10,
+            "aim": "quality_first_sample", "size_goal_mb": 450, "size_goal_minutes": 45,
             "largest_percent": 80, "tallest_picture": 720, "grain": 8, "measurement": "auto",
             "appearance_target": 85, "appearance_minimum": 80, "detail_target": 41, "detail_minimum": 35,
             "sample_method": "ab_av1_fast_sample", "revision": "v1",
@@ -325,8 +323,8 @@ final class SettingsTests: XCTestCase {
         let facts = try compression()
         var shown: [String] = [
             Words.compressionTab, Words.aimSection, Words.aimPicker, Words.sizeSection, Words.sizeGoal,
-            Words.megabytes, Words.forAnEpisodeOf, Words.minutes, Words.sizeLimit, Words.sizeLimitHelp,
-            Words.largestSize, Words.percentOfOriginal, Words.largestSizeHelp, Words.percent, Words.pictureSection,
+            Words.megabytes, Words.forAnEpisodeOf, Words.minutes,
+            Words.largestSize, Words.percentOfOriginal, Words.largestSizeHelp, Words.pictureSection,
             Words.tallestPicture, Words.pixelsTall, Words.tallestPictureHelp, Words.grain, Words.grainHelp,
             Words.advancedCompression, Words.measurementPicker, Words.appearanceTarget, Words.appearanceMinimum,
             Words.detailTarget, Words.detailMinimum, Words.scoresHelp, Words.samplePicker,

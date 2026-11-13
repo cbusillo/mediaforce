@@ -909,7 +909,6 @@ COMPRESSION_FIELDS = {
     "aim": "decision_model",
     "size_goal_mb": "target_size_mb",
     "size_goal_minutes": "target_runtime_minutes",
-    "size_limit_percent": "final_output_tolerance_percent",
     "largest_percent": "max_encoded_percent",
     "tallest_picture": "max_height",
     "grain": "default_grain",
@@ -955,9 +954,8 @@ def compression_settings_facts(*, video_defaults: dict[str, str], revision: str)
 def build_runtime_video_settings(*, edits: dict[str, Any], saved: dict[str, str]) -> dict[str, Any]:
     """Build validated `video` runtime settings from the Compression tab's fields.
 
-    `saved` is `settings_video_defaults_for_config`, so defaults the tab does not show carry over.
-    Changing the size limit holds samples to the same new limit; an
-    unchanged limit leaves the saved sample limit alone. Every field is required, and a choice the tab does
+    `saved` is `settings_video_defaults_for_config`, so defaults the tab does not show carry over, including how
+    far over its size goal a sample or finished file may be. Every field is required, and a choice the tab does
     not offer is refused instead of quietly replaced.
     """
     video_defaults: dict[str, Any] = dict(saved)
@@ -970,12 +968,6 @@ def build_runtime_video_settings(*, edits: dict[str, Any], saved: dict[str, str]
             if value not in choices:
                 raise SettingsValidationError("Choose one of the offered options.", code)
         video_defaults[key] = value
-    try:
-        size_limit_changed = float(str(edits["size_limit_percent"])) != float(saved["final_output_tolerance_percent"])
-    except (TypeError, ValueError):
-        size_limit_changed = True
-    if size_limit_changed:
-        video_defaults["sample_projection_tolerance_percent"] = edits["size_limit_percent"]
     return {"video": normalize_video_defaults(video_defaults)}
 
 

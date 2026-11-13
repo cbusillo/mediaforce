@@ -326,7 +326,6 @@ struct CompressionSettingsFacts: Decodable, Sendable, Equatable {
     let aim: String
     let sizeGoalMb: Double
     let sizeGoalMinutes: Double
-    let sizeLimitPercent: Double
     let largestPercent: Double
     let tallestPicture: Int
     let grain: Int
@@ -347,7 +346,6 @@ struct CompressionSettingsSave: Encodable, Sendable, Equatable {
     var aim: String
     var sizeGoalMb: Double
     var sizeGoalMinutes: Double
-    var sizeLimitPercent: Double
     var largestPercent: Double
     var tallestPicture: Int
     var grain: Int
@@ -374,7 +372,6 @@ struct CompressionSettingsDraft: Equatable {
             aim: facts.aim,
             sizeGoalMb: facts.sizeGoalMb,
             sizeGoalMinutes: facts.sizeGoalMinutes,
-            sizeLimitPercent: facts.sizeLimitPercent,
             largestPercent: facts.largestPercent,
             tallestPicture: facts.tallestPicture,
             grain: facts.grain,

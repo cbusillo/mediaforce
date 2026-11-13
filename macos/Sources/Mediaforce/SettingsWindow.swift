@@ -1211,7 +1211,6 @@ struct CompressionSettingsForm: View {
                         AmountField(title: Words.minutes, value: values.sizeGoalMinutes, format: .number, unit: Words.minutes)
                     }
                 }
-                numberRow(Words.sizeLimit, help: Words.sizeLimitHelp, value: values.sizeLimitPercent, unit: Words.percent)
                 numberRow(
                     Words.largestSize, help: Words.largestSizeHelp, value: values.largestPercent, unit: Words.percentOfOriginal
                 )

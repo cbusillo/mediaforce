@@ -25,8 +25,7 @@ def _body(app: FastAPI) -> dict[str, Any]:
     return {
         key: facts[key]
         for key in (
-            "aim", "size_goal_mb", "size_goal_minutes", "size_limit_percent", "largest_percent", "tallest_picture",
-            "grain", "measurement", "appearance_target", "appearance_minimum", "detail_target", "detail_minimum",
+            "aim", "size_goal_mb", "size_goal_minutes", "largest_percent", "tallest_picture", "grain", "measurement", "appearance_target", "appearance_minimum", "detail_target", "detail_minimum",
             "sample_method", "revision",
         )
     }
@@ -76,7 +75,7 @@ def test_compression_save_changes_only_the_video_section(compression_app: tuple[
     assert result["settings"]["size_goal_mb"] == 450
 
 
-def test_changing_the_size_limit_holds_samples_to_it_as_the_website_does(
+def test_compression_save_keeps_the_installed_size_tolerances_even_when_an_older_app_sends_one(
         compression_app: tuple[FastAPI, Path],
 ) -> None:
     app, runtime_settings_path = compression_app
@@ -86,7 +85,8 @@ def test_changing_the_size_limit_holds_samples_to_it_as_the_website_does(
     assert _save(app, body)[0] == 200
 
     video = json.loads(runtime_settings_path.read_text())["video"]
-    assert (video["sample_projection_tolerance_percent"], video["final_output_tolerance_percent"]) == (8, 8)
+    assert (video["sample_projection_tolerance_percent"], video["final_output_tolerance_percent"]) == (12, 5)
+    assert "size_limit_percent" not in _facts(app)
 
 
 def test_compression_save_leaves_the_other_tabs_current(compression_app: tuple[FastAPI, Path]) -> None:
@@ -105,7 +105,6 @@ def test_compression_save_leaves_the_other_tabs_current(compression_app: tuple[F
     [
         ({"size_goal_mb": 0}, "size_goal_invalid"),
         ({"size_goal_minutes": 2000}, "size_goal_minutes_invalid"),
-        ({"size_limit_percent": 0}, "size_limit_invalid"),
         ({"largest_percent": 101}, "largest_size_invalid"),
         ({"tallest_picture": 720.5}, "tallest_picture_invalid"),
         ({"tallest_picture": 5000}, "tallest_picture_invalid"),
