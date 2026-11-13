@@ -198,6 +198,33 @@ def end_remote_output_writers(
         raise RuntimeError("The remote encode is still ending; wait before making this file again.")
 
 
+# Remote quality runs start ab-av1 (quality.py), which starts ffmpeg (sample encodes with libsvtav1 and
+# the metric) and ffprobe; remote encodes and crop detection start ffmpeg (helpers.py, execution.py).
+# A quality run's work folder (.mediaforce-ab-av1-, .ab-av1-) carries the first name too.
+MEDIA_WORK_NAMES = ("ab-av1", "ffmpeg", "ffprobe")
+
+
+def _program(process: _RemoteProcess) -> str:
+    return Path(process.command.split()[0]).name
+
+
+def _may_be_left_by_a_quality_run(process: _RemoteProcess) -> bool:
+    # Anywhere in the command line, so a wrapper shell or a renamed build such as ffmpeg7 still counts.
+    command = process.command.lower()
+    return any(name in command for name in MEDIA_WORK_NAMES)
+
+
+def confirm_computer_runs_no_quality_run(
+        host: dict[str, Any], *, run_command: Callable[..., subprocess.CompletedProcess[str]] = run_remote_command,
+) -> None:
+    processes = _inventory(host, run_command)
+    if not any(_program(process) == "ps" for process in processes.values()):
+        raise RuntimeError("The computer's process listing did not include the listing itself, so it may be incomplete.")
+    remaining = sorted(pid for pid, process in processes.items() if _may_be_left_by_a_quality_run(process))
+    if remaining:
+        raise RuntimeError(f"Media work is still running on that computer (process {', '.join(map(str, remaining))}).")
+
+
 def encode_host_file_sizes(
         host: dict[str, Any], paths: Sequence[Path], *,
         run_command: Callable[..., subprocess.CompletedProcess[str]] = run_remote_command,

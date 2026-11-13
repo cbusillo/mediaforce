@@ -317,7 +317,7 @@ extension Words {
         case "restarted": "It was interrupted by a restart."
         case "stopped": "It was stopped."
         case "containment_unproven":
-            "Mediaforce couldn't confirm an episode's picture check ended. Make sure the computer that ran it is idle. The episode stays on hold until that's confirmed."
+            "Mediaforce couldn't confirm a computer finished an episode's picture check. Once it's idle, try that episode again."
         default: recordedStop(code)
         }
     }
@@ -1272,7 +1272,7 @@ extension Words {
         case "quality_floor_size_conflict": "To look right it needs more space than its size goal."
         case "final_size_target_miss": "The compressed copy didn't come out at its size goal."
         case "containment_unproven":
-            "Mediaforce couldn't confirm its picture check ended on \(computer). Make sure \(computer) is idle. This file stays on hold until that's confirmed."
+            "Mediaforce couldn't confirm \(computer) finished its picture check. Once \(computer) is idle, try this file again."
         case "needs_review": "It ran into a problem Mediaforce couldn't sort out by itself."
         case "schedule_too_short": "It takes longer than every computer's work window. A longer work window lets it run."
         case "plan_rebuild": "Its work needs to be set up again before it can run."
