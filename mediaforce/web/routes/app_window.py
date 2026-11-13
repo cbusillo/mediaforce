@@ -3,11 +3,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from mediaforce.web.routes.folders import request_body
-from mediaforce.web.runtime.app_item import PlayerUnavailable
+from mediaforce.web.runtime import player_stream
 
 
 def register_app_window_routes(
@@ -22,7 +22,7 @@ def register_app_window_routes(
         make_sample_action: Callable[[str, str | None, str | None], dict[str, Any]],
         compress_season_action: Callable[[str], dict[str, Any]],
         item_payload: Callable[[str], dict[str, Any] | None] | None = None,
-        player_file: Callable[[int, str], Path | None] | None = None,
+        player_source: Callable[[int, str], Path | None] | None = None,
         activity_payload: Callable[[], dict[str, Any]] | None = None,
         kinds_payload: Callable[[], dict[str, Any]] | None = None,
         approve_kind_action: Callable[[str, str], dict[str, Any]] | None = None,
@@ -60,18 +60,19 @@ def register_app_window_routes(
             facts = item_facts(prefix.strip("/"))
             return JSONResponse(facts or {}, status_code=200 if facts else 404)
 
-    if player_file is not None:
-        playable = player_file
+    if player_source is not None:
+        source_for = player_source
 
-        @app.get("/api/app/player/{library_item_id}/{side}")
-        def api_app_player(library_item_id: int, side: str) -> Response:
-            try:
-                path = playable(library_item_id, side)
-            except PlayerUnavailable as unavailable:
-                return JSONResponse({"code": unavailable.code}, status_code=503)
-            if path is None:
+        @app.get("/api/app/player/{library_item_id}/{side}/{name}")
+        def api_app_player(library_item_id: int, side: str, name: str) -> Response:
+            source = source_for(library_item_id, side)
+            if source is None:
                 return JSONResponse({}, status_code=404)
-            return FileResponse(path, media_type="video/mp4")
+            try:
+                served = player_stream.serve(source, name)
+            except player_stream.SegmentNotFound:
+                return JSONResponse({}, status_code=404)
+            return Response(served.body, media_type=served.media_type)
 
     if kinds_payload is not None and approve_kind_action is not None and stop_kind_action is not None:
         kinds_facts, approve_kind, stop_kind = kinds_payload, approve_kind_action, stop_kind_action

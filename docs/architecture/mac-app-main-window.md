@@ -195,17 +195,20 @@ null). The page saves those through the folder routes `audio-preset` and
 `series-lifecycle`, and acts on a file through `size-held-decision` (keep this
 copy, or make it again) and `put-original-back`.
 
-`GET /api/app/player/{library_item_id}/{side}` serves one file for the page's
-player, `side` `compressed` or `original` (the backup of a replaced file, or the
-file itself when it was never replaced), or `404` when that side is gone. The
-Mac player cannot open MKV, so the first request remuxes the file to MP4 into
-the `player` folder of the web state folder (`paths.web_state_dir`); the newest
-six stay cached. The picture is copied, and so is the sound when the Mac plays
-it (AAC, AC-3, E-AC-3, Opus); other sound becomes stereo AC-3, decoding only a
-DTS track's core. Reading the file from the library sets the wait, so a
-comparison's two sides prepare at the same time. It answers byte
-ranges, so the player can seek. Each side of the comparison checks that its
-seek still belongs to the latest request before moving, including while paused.
+`GET /api/app/player/{library_item_id}/{side}/index.m3u8` streams one file to
+the page's player as HLS, `side` `compressed` or `original` (the backup of a
+replaced file, or the file itself when it was never replaced), or `404` when
+that side is gone. The Mac player cannot open MKV, and reading a whole file off
+the library takes too long, so the playlist comes from the file's keyframe
+index and each segment of about six seconds is made when the player asks for
+it (`mediaforce/web/runtime/player_stream.py`). Picture and sound are separate
+tracks. The picture is copied packet by packet from one keyframe to the next.
+The sound is copied when the Mac plays it (AAC, AC-3, E-AC-3, Opus) and
+otherwise becomes stereo PCM, decoding only a DTS track's core; it is read from
+twelve seconds before each cut, since an encode can store sound ahead of its
+picture. Each player buffers about twenty seconds ahead. Each side of the
+comparison checks that its seek still belongs to the latest request before
+moving, including while paused.
 
 Scrolling over either comparison picture scrolls the page, or pans both pictures
 at actual size; it never scrubs a video. Seeking and frame stepping use the
