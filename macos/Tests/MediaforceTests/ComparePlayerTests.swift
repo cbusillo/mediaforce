@@ -77,6 +77,46 @@ final class ComparePlayerTests: XCTestCase {
         XCTAssertFalse(players.playing)
     }
 
+    func testPanningEitherSideAtActualSizeMovesBothInTheSameStep() throws {
+        let pan = Pan()
+        let picture = CGSize(width: 800, height: 600)
+        let host = NSHostingView(rootView: HStack(spacing: 8) {
+            PanningPicture(size: picture, pan: pan, content: Color.red)
+            PanningPicture(size: picture, pan: pan, content: Color.blue)
+        })
+        host.frame = NSRect(x: 0, y: 0, width: 408, height: 150)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        let sides = panningViews(in: host)
+        XCTAssertEqual(sides.count, 2)
+        for side in sides {
+            XCTAssertEqual(side.contentView.bounds.origin, NSPoint(x: 300, y: 225), "Both sides open on the middle of the picture")
+        }
+
+        for (moved, other) in [(sides[0], sides[1]), (sides[1], sides[0])] {
+            let before = moved.contentView.bounds.origin
+            let event = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
+                                              wheelCount: 2, wheel1: -30, wheel2: -40, wheel3: 0))
+            event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+            event.setIntegerValueField(.scrollWheelEventScrollPhase, value: 2)
+            moved.scrollWheel(with: try XCTUnwrap(NSEvent(cgEvent: event)))
+            let deadline = Date.now.addingTimeInterval(2)
+            while moved.contentView.bounds.origin == before, Date.now < deadline {
+                RunLoop.current.run(until: .now.addingTimeInterval(0.001))
+            }
+            XCTAssertNotEqual(moved.contentView.bounds.origin, before)
+            // The moment one side has moved, the other is already there.
+            XCTAssertEqual(other.contentView.bounds.origin, moved.contentView.bounds.origin)
+        }
+    }
+
+    private func panningViews(in view: NSView) -> [PanningScrollView] {
+        (view as? PanningScrollView).map { [$0] } ?? view.subviews.flatMap { panningViews(in: $0) }
+    }
+
     private func wait(file: StaticString = #filePath, line: UInt = #line, _ condition: () -> Bool) async throws {
         for _ in 0..<250 {
             if condition() { return }

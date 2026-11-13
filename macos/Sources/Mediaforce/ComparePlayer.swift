@@ -201,27 +201,24 @@ struct ComparePicture: View {
     var gettingReady = Words.gettingEpisodeReady
     var couldNotPlay = Words.couldNotPlayEpisode
     @Binding var view: ComparePictureView
-    @State private var pan = ScrollPosition()
-    @State private var otherPan = ScrollPosition()
-    // Where the picture was last panned to, by either side.
-    @State private var panned = CGPoint.zero
+    @State private var pan = Pan()
 
     var body: some View {
         Group {
             if !players.comparing {
-                framed(nil) { pannable(position: $pan, follows: nil) { PlayerSurface(player: players.main) } }
+                framed(nil) { pannable { PlayerSurface(player: players.main) } }
             } else {
                 switch layout {
                 case .sideBySide:
                     HStack(spacing: 8) {
-                        framed(names.originalLabel) { pannable(position: $pan, follows: $otherPan) { PlayerSurface(player: players.original) } }
-                        framed(names.compressedLabel) { pannable(position: $otherPan, follows: $pan) { PlayerSurface(player: players.main) } }
+                        framed(names.originalLabel) { pannable { PlayerSurface(player: players.original) } }
+                        framed(names.compressedLabel) { pannable { PlayerSurface(player: players.main) } }
                     }
                 case .wipe:
-                    framed(nil) { pannable(position: $pan, follows: nil) { wipe } }
+                    framed(nil) { pannable { wipe } }
                 case .oneAtATime:
                     framed(view.showingOriginal ? names.originalLabel : names.compressedLabel) {
-                        pannable(position: $pan, follows: nil) {
+                        pannable {
                             PlayerSurface(player: view.showingOriginal ? players.original : players.main)
                         }
                     }
@@ -278,26 +275,102 @@ struct ComparePicture: View {
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
-    /// Fits the picture to its frame, or in actual size shows it pixel for pixel in a view that pans; a second
-    /// view following it keeps both sides on the same spot.
+    /// Fits the picture to its frame, or in actual size shows it pixel for pixel in a view that pans with every
+    /// other view of the same picture.
     @ViewBuilder
-    private func pannable(position: Binding<ScrollPosition>, follows: Binding<ScrollPosition>?,
-                          @ViewBuilder _ content: () -> some View) -> some View {
+    private func pannable(@ViewBuilder _ content: () -> some View) -> some View {
         if view.actualSize, players.videoSize.width > 0 {
-            ScrollView([.horizontal, .vertical]) {
-                content().frame(width: players.videoSize.width, height: players.videoSize.height)
-            }
-            .scrollPosition(position)
-            .defaultScrollAnchor(.center)
-            .onScrollGeometryChange(for: CGPoint.self) { $0.contentOffset } action: { _, offset in
-                // The follower reports the spot it was moved to; ignoring that echo keeps a scroll's momentum.
-                guard abs(offset.x - panned.x) > 0.5 || abs(offset.y - panned.y) > 0.5 else { return }
-                panned = offset
-                follows?.wrappedValue.scrollTo(point: offset)
-            }
-            .scrollIndicators(.never)
+            PanningPicture(size: players.videoSize, pan: pan, content: content())
         } else {
             content()
+        }
+    }
+}
+
+/// Where an actual-size picture is panned to. Every view of the picture joins one pan, and moving any of them moves
+/// the rest in the same step, so side by side never shows two different spots.
+@MainActor
+final class Pan {
+    private let views = NSHashTable<PanningScrollView>.weakObjects()
+    private var origin: NSPoint?
+    private var moving = false
+
+    func join(_ view: PanningScrollView) {
+        views.add(view)
+        view.pan = self
+    }
+
+    /// A view that has just been laid out opens where the others are, or on the middle of the picture.
+    func place(_ view: PanningScrollView) {
+        move(view, to: origin ?? view.middle)
+    }
+
+    func moved(_ view: PanningScrollView) {
+        // AppKit scrolls a view while setting it up; only a placed view says where the picture is.
+        guard view.placed, !moving else { return }
+        moving = true
+        defer { moving = false }
+        let spot = view.contentView.bounds.origin
+        origin = spot
+        for other in views.allObjects where other !== view {
+            move(other, to: spot)
+        }
+    }
+
+    private func move(_ view: PanningScrollView, to spot: NSPoint) {
+        let clip = view.contentView
+        clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: spot, size: clip.bounds.size)).origin)
+        view.reflectScrolledClipView(view.contentView)
+    }
+}
+
+final class PanningScrollView: NSScrollView {
+    weak var pan: Pan?
+    private(set) var placed = false
+
+    var middle: NSPoint {
+        let picture = documentView?.frame.size ?? .zero
+        let shown = contentView.bounds.size
+        return NSPoint(x: max((picture.width - shown.width) / 2, 0), y: max((picture.height - shown.height) / 2, 0))
+    }
+
+    override func reflectScrolledClipView(_ clipView: NSClipView) {
+        super.reflectScrolledClipView(clipView)
+        pan?.moved(self)
+    }
+
+    override func layout() {
+        super.layout()
+        guard !placed, contentView.bounds.width > 0, (documentView?.frame.width ?? 0) > 0 else { return }
+        placed = true
+        pan?.place(self)
+    }
+}
+
+/// The picture pixel for pixel in a view that pans by scrolling, joined to the page's pan.
+struct PanningPicture<Content: View>: NSViewRepresentable {
+    let size: CGSize
+    let pan: Pan
+    let content: Content
+
+    func makeNSView(context: Context) -> PanningScrollView {
+        let view = PanningScrollView()
+        view.drawsBackground = false
+        view.hasHorizontalScroller = false
+        view.hasVerticalScroller = false
+        view.documentView = NSHostingView(rootView: content)
+        view.documentView?.setFrameSize(size)
+        pan.join(view)
+        return view
+    }
+
+    func updateNSView(_ view: PanningScrollView, context: Context) {
+        (view.documentView as? NSHostingView<Content>)?.rootView = content
+        if view.documentView?.frame.size != size {
+            view.documentView?.setFrameSize(size)
+        }
+        if view.pan !== pan {
+            pan.join(view)
         }
     }
 }
