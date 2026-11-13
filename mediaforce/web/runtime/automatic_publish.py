@@ -336,7 +336,8 @@ def _publish_file(
     )
     if report.database_truncated or record is None:
         raise RuntimeError("This file's integrity record is unavailable")
-    if record.disposition == "validation_failed" and _remake_or_keep_failed_copy(
+    # A failed copy that is already gone has nothing left to remove; it is made again like one still there.
+    if record.disposition in {"validation_failed", "missing"} and _remake_or_keep_failed_copy(
         connection, config, source, remake_files
     ):
         return

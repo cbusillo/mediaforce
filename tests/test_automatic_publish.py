@@ -175,6 +175,23 @@ def _remake_refused(_prefix: str, _ids: Any) -> dict[str, Any]:
     return {"ok": False, "message": "Mediaforce is still compressing here."}
 
 
+def _queueing_remake(config: MediaforceConfig) -> tuple[list[list[int]], delivery.RemakeFilesFn]:
+    """A remake under a current approval whose queue accepts every file, and the files it was given."""
+    queued: list[list[int]] = []
+
+    def queue_items(_prefix: str, _mode: str, ids: Any, _approval: dict[str, Any]) -> dict[str, Any]:
+        queued.append(list(ids))
+        return {"ok": True, "queued_library_item_ids": list(ids)}
+
+    def remake(prefix: str, ids: Any) -> dict[str, Any]:
+        return size_held.remake_staged_files(
+            config, prefix, ids, now_iso=timestamp, queue_items=queue_items,
+            current_approval=lambda _prefix: {"approval": "current"}, retry_failed_check=True,
+        )
+
+    return queued, remake
+
+
 def _run(
     config: MediaforceConfig,
     approval: dict[str, Any] | None = None,
@@ -1137,17 +1154,7 @@ def _kept_reason(config: MediaforceConfig, item_id: int) -> str | None:
 
 def test_failed_check_is_made_again_until_the_limit_then_the_original_is_kept(config: MediaforceConfig) -> None:
     item_id, item, staged = _stage(config, "tv/Show/Season 1/broken.mkv")
-    queued: list[list[int]] = []
-
-    def queue_items(_prefix: str, _mode: str, ids: Any, _approval: dict[str, Any]) -> dict[str, Any]:
-        queued.append(list(ids))
-        return {"ok": True, "queued_library_item_ids": list(ids)}
-
-    def remake(prefix: str, ids: Any) -> dict[str, Any]:
-        return size_held.remake_staged_files(
-            config, prefix, ids, now_iso=timestamp, queue_items=queue_items,
-            current_approval=lambda _prefix: {"approval": "current"}, retry_failed_check=True,
-        )
+    queued, remake = _queueing_remake(config)
 
     for attempt in range(1, delivery.CHECK_FAILURE_ATTEMPT_LIMIT + 1):
         with patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")):
@@ -1295,6 +1302,26 @@ def test_failed_copy_waits_for_running_work_without_going_to_the_owner(config: M
     assert payload is not None
     [episode] = payload["files"]
     assert (episode["stage"], episode["validation"]) == ("waiting", "remaking")
+
+
+def test_failed_copy_that_went_missing_is_made_again_instead_of_waiting_forever(config: MediaforceConfig) -> None:
+    item_id, _, staged = _stage(config, "tv/Show/Season 1/broken.mkv")
+    queued, remake = _queueing_remake(config)
+
+    with patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")):
+        delivery.publish_checked_files_once(
+            config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=_remake_refused
+        )
+    # A removal that reported failure can still have taken the copy, as a remote computer's did.
+    staged.unlink()
+    later = delivery.time.time() + delivery.PUBLISH_RETRY_DELAY_SECONDS * (delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1)
+    with patch.object(delivery.time, "time", return_value=later):
+        delivery.publish_checked_files_once(
+            config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=remake
+        )
+
+    assert queued == [[item_id]]
+    assert _status(config, item_id) == "planned"
 
 
 @pytest.mark.parametrize(("refusal", "reaches_owner"), [("copy_in_use", False), ("remote_settings_missing", True)])
