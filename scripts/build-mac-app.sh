@@ -21,6 +21,10 @@ derived_data="$repo_root/.build/mac-app"
 project="$repo_root/macos/Mediaforce.xcodeproj"
 # macOS gives an ad-hoc signed app no notification permission, so the installed copy is team-signed.
 
+team_id() {
+	uv run --directory "$repo_root" python -c 'from mediaforce.ops.login_item import MACOS_SIGNING_TEAM; print(MACOS_SIGNING_TEAM)'
+}
+
 generate_project() {
 	command -v xcodegen >/dev/null || { echo "xcodegen is required (brew install xcodegen)" >&2; exit 1; }
 	xcodegen generate --quiet --spec "$repo_root/macos/project.yml"
@@ -29,8 +33,15 @@ generate_project() {
 case "${1:-}" in
 test)
 	generate_project
+	# An unsigned build is a new program to macOS every time, so it asks again to read the drive the build is on
+	# and the test runner hangs until someone answers. With the team's certificate one answer lasts.
+	identity=()
+	team_id="$(team_id)"
+	if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application: .*($team_id)"; then
+		identity=(CODE_SIGN_IDENTITY="Developer ID Application" DEVELOPMENT_TEAM="$team_id")
+	fi
 	xcodebuild -project "$project" -scheme Mediaforce -destination 'platform=macOS' \
-		-derivedDataPath "$derived_data" test
+		-derivedDataPath "$derived_data" test ${identity[@]+"${identity[@]}"}
 	;;
 build|bundle|proof)
 	output="${2:?build needs an output directory}"
@@ -40,7 +51,7 @@ build|bundle|proof)
 			MEDIAFORCE_SERVER_PORT=8787 "CURRENT_PROJECT_VERSION=${4:?proof needs a build number}"
 			"MEDIAFORCE_UPDATE_FEED=${5:?proof needs a feed URL}" "MEDIAFORCE_UPDATE_KEY=${6:?proof needs a public key}")
 	fi
-	team_id="$(uv run --directory "$repo_root" python -c 'from mediaforce.ops.login_item import MACOS_SIGNING_TEAM; print(MACOS_SIGNING_TEAM)')"
+	team_id="$(team_id)"
 	generate_project
 	xcodebuild -project "$project" -scheme Mediaforce -configuration Release -destination 'platform=macOS' \
 		-derivedDataPath "$derived_data" build \
