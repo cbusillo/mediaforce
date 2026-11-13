@@ -5,7 +5,6 @@ struct ActivityFacts: Decodable, Sendable {
     let endsAt: String
     let computers: [Computer]
     let linedUp: [File]
-    let earlierHolds: [File]
     let nextSeason: MainWindowFacts.Season?
 
     struct Computer: Decodable, Sendable, Identifiable {

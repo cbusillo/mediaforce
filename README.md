@@ -995,11 +995,9 @@ those stretches. Each working computer shows progress and a finish estimate
 when one is known. The numbered line-up names the file, estimated start and
 computer; unknown starts remain listed. These forecasts use the existing
 computer history and window rules, and may change as computers become free.
-Activity reads its forecast only while the page is open. The next approved season is named below them. “Held back for you” uses the
-same waiting items and links as Needs you, including original-backup cleanup.
-
-Past attempts still marked as held remain available below the current decisions;
-Activity does not clear those records or count them as new decisions.
+Activity reads its forecast only while the page is open. The next approved season is named below them.
+Activity shows only what is running and what comes next. Held work that needs the Director is in Needs you,
+and original-backup cleanup is in Needs you and Space saved.
 
 The main window reuses unchanged library calculations without timed expiry or a
 new background process. Each refresh still reads current work status and sample

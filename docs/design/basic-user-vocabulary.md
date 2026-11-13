@@ -155,9 +155,10 @@ Keyboard refresh returns focus to the workspace heading.
 
 ### Activity
 
-- Activity answers three questions in order: what needs the user, what is
-  working now, and what finished recently. Catalog, analysis, computer, and
-  schedule maintenance stay behind explicit disclosures.
+- Activity answers what is working now and what comes next, and when. What
+  needs the user is in Needs you; backup cleanup is in Needs you and Space
+  saved. Catalog, analysis, computer, and schedule maintenance stay behind
+  explicit disclosures.
 - Every attention count maps to one visible review row and an exact owning
   route. Do not summarize several unresolved items behind a global retry or a
   destination that cannot show them.
