@@ -8,6 +8,8 @@ struct NeedsYouPage: View {
     let model: MainWindowModel
     let open: (Place) -> Void
     @State private var originalPreview: OriginalPreview?
+    // Each waiting season's files, read from its page, so its card can say what they ask.
+    @State private var seasonFiles: [String: ItemFacts] = [:]
 
     var body: some View {
         let waiting = WaitingGroups(facts)
@@ -30,13 +32,30 @@ struct NeedsYouPage: View {
             }
             ForEach(waiting.kinds, id: \.id) { item in
                 KindDecisionBand(item: item, kind: model.kinds?.kinds.first { item.id.hasPrefix("kind:\($0.kind):") },
-                             posters: posters, primary: item == waiting.first, open: open)
+                                 action: facts.work.kindsNeedingYou.first { item.id.hasPrefix("kind:\($0.kind):") }.map(Words.kindAction)
+                                     ?? Words.waitingAction(item.opens),
+                                 posters: posters, primary: item == waiting.first, open: open)
             }
             if !waiting.shows.isEmpty { shows(waiting) }
             if !waiting.computers.isEmpty { computers(waiting) }
             if waiting.backups != nil || !previews.isEmpty { cleanup(waiting, previews) }
         }
         .sheet(item: $originalPreview) { OriginalApprovalView(preview: $0, model: model) }
+        .task(id: waitingSeasonsKey) { await readSeasonFiles() }
+    }
+
+    // A season's files are read again when its state changes or another file finishes somewhere.
+    private var waitingSeasonsKey: [String] {
+        facts.work.seasonsNeedingYou.map { "\($0.prefix):\($0.state ?? ""):\($0.action ?? "")" } + ["\(facts.lastChange?.id ?? 0)"]
+    }
+
+    private func readSeasonFiles() async {
+        var read: [String: ItemFacts] = [:]
+        for season in facts.work.seasonsNeedingYou {
+            read[season.prefix] = try? await model.client.item(season.prefix)
+        }
+        guard !Task.isCancelled else { return }
+        seasonFiles = read
     }
 
     private func heading(_ title: String, count: Int? = nil) -> some View {
@@ -52,7 +71,7 @@ struct NeedsYouPage: View {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: ShowCard.width, maximum: ShowCard.width), spacing: 22, alignment: .top)],
                       alignment: .leading, spacing: 22) {
                 ForEach(waiting.shows, id: \.id) { item in
-                    ShowCard(item: item, card: WaitingShow(item, facts: facts), posters: posters,
+                    ShowCard(item: item, card: WaitingShow(item, facts: facts, files: seasonFiles), posters: posters,
                              primary: item == waiting.first, open: open)
                 }
             }
@@ -82,9 +101,8 @@ struct NeedsYouPage: View {
                 }
             }
             if let backups = waiting.backups {
-                CompactDecision(symbol: "trash", name: "Original backups",
-                                detail: "\(Words.count(facts.originalBackups.count, "backup")), \(Words.size(facts.originalBackups.bytes)), ready to delete when you are",
-                                action: Words.waitingAction(backups.opens), primary: backups == waiting.first) {
+                BackupsCleanup(backups: facts.originalBackups, client: model.client, action: Words.waitingAction(backups.opens),
+                               primary: backups == waiting.first) {
                     backups.opens.map(open)
                 }
             }
@@ -129,7 +147,7 @@ struct WaitingShow {
     let description: String?
     let action: String
 
-    init(_ item: AttentionNotice, facts: MainWindowFacts) {
+    init(_ item: AttentionNotice, facts: MainWindowFacts, files: [String: ItemFacts] = [:]) {
         if let sample = facts.samples.waitingOnYou.first(where: { item.opens == .sample($0.prefix) }) {
             name = sample.show
             posterPrefix = sample.showPrefix
@@ -141,7 +159,7 @@ struct WaitingShow {
             name = season.showName
             posterPrefix = MediaPoster.titlePrefix(season.prefix)
             label = Words.seasonName(season)
-            state = Words.tvSeasonState(season)
+            state = files[season.prefix].flatMap { Words.filesAsk($0.waiting) } ?? Words.tvSeasonState(season)
             description = Words.sampleFailure(season.failure)
             action = Words.waitingAction(item.opens)
         } else {
@@ -161,6 +179,7 @@ private struct KindDecisionBand: View {
 
     let item: AttentionNotice
     let kind: KindsFacts.Kind?
+    let action: String
     let posters: PosterStore
     let primary: Bool
     let open: (Place) -> Void
@@ -187,7 +206,7 @@ private struct KindDecisionBand: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let place = item.opens {
-                    DecisionButton(title: Words.waitingAction(place), primary: primary) { open(place) }
+                    DecisionButton(title: action, primary: primary) { open(place) }
                         .padding(.top, 2)
                 }
             }
@@ -265,6 +284,60 @@ private struct CompactDecision: View {
             DecisionButton(title: action, primary: primary, run: run)
         }
         .padding(.leading, 6)
+    }
+}
+
+/// Original backups as one sentence with their size and the one button, with the titles holding them listed only on request.
+private struct BackupsCleanup: View {
+    let backups: MainWindowFacts.OriginalBackups
+    let client: MediaforceClient
+    let action: String
+    let primary: Bool
+    let review: () -> Void
+    @State private var listed = false
+    @State private var titles: [SpaceSavedFacts.Show]?
+    @State private var unreadable = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(Words.backupsReady(backups)).monospacedDigit()
+                DecisionButton(title: action, primary: primary, run: review)
+            }
+            DisclosureGroup(Words.backupsByTitle, isExpanded: $listed) {
+                if let titles {
+                    Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 18, verticalSpacing: 4) {
+                        ForEach(titles) { title in
+                            GridRow {
+                                Text(title.name)
+                                Text(Words.showBackups(title.seasonPrefixes.count, title.backupBytes))
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                        }
+                    }
+                    .padding(.top, 4)
+                } else if unreadable {
+                    Text(Words.backupsUnlisted).foregroundStyle(.secondary)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .font(.callout)
+            .frame(maxWidth: 640, alignment: .leading)
+        }
+        .padding(.leading, 6)
+        .task(id: listed) { await list() }
+    }
+
+    private func list() async {
+        guard listed, titles == nil else { return }
+        do {
+            titles = SpaceSavedFacts.shows(try await client.completed().folders)
+            unreadable = false
+        } catch {
+            unreadable = true
+        }
     }
 }
 

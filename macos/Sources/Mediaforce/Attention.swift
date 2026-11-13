@@ -155,7 +155,7 @@ struct Attention: Equatable, Sendable {
         }
         switch kind.sampleStatus {
         case "not_started":
-            return "This kind needs a sample. Mediaforce tries to make one automatically; open it to choose a size if needed."
+            return "Mediaforce makes this kind's first sample by itself. Nothing is needed from you until it's ready to watch."
         case "starting", "running", "stopping", "queued", "retry_backoff":
             return "The sample is being prepared. Open this kind to see its progress and anything holding it up."
         case "pending_review", "completed":

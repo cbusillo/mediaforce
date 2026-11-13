@@ -148,6 +148,18 @@ final class AttentionTests: XCTestCase {
         XCTAssertEqual(noticed.notices.count, 1)
     }
 
+    func testAKindsButtonNamesWhatItAsksNotWhereItOpens() throws {
+        let sizeChoice = try facts(kinds: [("bright_live_action", nil)], kindStatus: "choose_size", kindReady: false,
+                                   startPrefix: "tv/Psych/Season 3")
+        let size = try XCTUnwrap(sizeChoice.work.kindsNeedingYou.first)
+        XCTAssertEqual(Words.kindAction(size), Words.sampleAction("choose_size"))
+        let ready = try facts(kinds: [("bright_live_action", "tv/Psych/Season 3")], kindStatus: "pending_review", kindReady: true)
+        XCTAssertEqual(Words.kindAction(try XCTUnwrap(ready.work.kindsNeedingYou.first)), Words.sampleAction("review_sample"))
+        let blocked = try facts(kinds: [("bright_live_action", nil)], kindStatus: "sample_blocked", kindReady: false,
+                                startPrefix: "tv/Psych/Season 3")
+        XCTAssertEqual(Words.kindAction(try XCTUnwrap(blocked.work.kindsNeedingYou.first)), Words.sampleAction("make_sample"))
+    }
+
     func testASeasonWithFileDecisionsNotifiesAndCountsOnce() throws {
         let baseline = try facts()
         var value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(MainWindowTests.facts.utf8)) as? [String: Any])

@@ -30,6 +30,17 @@ final class SampleTests: XCTestCase {
         XCTAssertTrue(facts.canChooseBalance)
     }
 
+    func testAKindsFirstSampleQuestionReadsAsThatQuestionOnTheSeasonsSample() throws {
+        let following = try decode(Self.facts(state: "waiting_for_kind", action: nil))
+        let asked = try decode(Self.facts(state: "waiting_for_kind", action: "choose_size"))
+        XCTAssertEqual(asked.actions, [.chooseSize])
+        XCTAssertNotEqual(Words.sampleHeadline(asked), Words.sampleHeadline(following))
+        let blocked = try decode(Self.facts(state: "waiting_for_kind", action: "make_sample"))
+        XCTAssertEqual(blocked.actions.first, .makeSample)
+        XCTAssertNotEqual(Words.sampleHeadline(blocked), Words.sampleHeadline(following))
+        XCTAssertNotEqual(Words.workAction(.chooseSize), Words.workAction(.openSample))
+    }
+
     func testEachStateShowsOnlyItsActions() throws {
         XCTAssertEqual(try decode(Self.facts()).actions, [.approve, .makeAgain, .tryAnotherSize])
         XCTAssertEqual(try decode(Self.facts(state: "needs_help", action: "retry_sample", choices: "[]")).actions, [.makeSample])
