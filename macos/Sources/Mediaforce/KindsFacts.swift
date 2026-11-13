@@ -5,8 +5,6 @@ import Foundation
 struct KindsFacts: Decodable, Sendable, Equatable {
     let kinds: [Kind]
     let leftOut: [LeftOutSeason]
-    // The library's tallest picture; 0 when every original keeps its height, so there is no 4K choice to make.
-    var tallestPicture: Int? = nil
 
     struct Kind: Decodable, Sendable, Identifiable, Equatable {
         let kind: String
@@ -53,8 +51,6 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         let sampleSeason: String
         var id: String { prefix }
         var name: String { String(prefix.split(separator: "/").last ?? "") }
-        // A movie title is listed beside the shows its look covers.
-        var isMovie: Bool { MediaKind(rawValue: String(prefix.split(separator: "/").first ?? "")) == .movies }
     }
 
     struct Setting: Decodable, Sendable, Identifiable, Equatable {
@@ -75,8 +71,6 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         let sizeGoalMode: String?
         let sizeGoalMb: Double?
         let libraryItemId: Int?
-        // Whether 4K stays 4K under this approval; otherwise it comes down to the library's tallest picture.
-        var keepFullHeight: Bool? = nil
 
         var showPrefix: String { fromPrefix.split(separator: "/").prefix(2).joined(separator: "/") }
         var setting: Setting {
@@ -86,7 +80,7 @@ struct KindsFacts: Decodable, Sendable, Equatable {
 
     struct LeftOutSeason: Decodable, Sendable, Equatable {
         let season: String
-        // "unmeasured" until its originals are measured.
+        // "mixed" when its episodes measure as different kinds, "unmeasured" before its originals are measured.
         let kind: String
         let waitingBytes: Int64
     }
@@ -110,15 +104,10 @@ extension MediaforceClient {
     }
 
     func stopKind(_ kind: String) async throws -> KindActionResult {
-        try await kindAction(kind, "stop", body: [String: String]())
+        try await kindAction(kind, "stop", body: [:])
     }
 
-    /// Saves whether 4K stays 4K under this kind's approval.
-    func chooseKindPicture(_ kind: String, keepFullHeight: Bool) async throws -> KindActionResult {
-        try await kindAction(kind, "picture", body: ["keep_full_height": keepFullHeight])
-    }
-
-    private func kindAction(_ kind: String, _ action: String, body: some Encodable) async throws -> KindActionResult {
+    private func kindAction(_ kind: String, _ action: String, body: [String: String]) async throws -> KindActionResult {
         var request = URLRequest(url: baseURL.appending(path: "api/app/kinds").appending(path: kind).appending(path: action))
         request.httpMethod = "POST"
         request.httpBody = try JSONEncoder().encode(body)

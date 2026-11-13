@@ -33,8 +33,7 @@ from mediaforce.web.runtime import automatic_publish as delivery
 from mediaforce.web.runtime import size_held
 from mediaforce.web.runtime.size_held import _load_remake_row
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
-from mediaforce.web.runtime import folder_actions
-from mediaforce.web.runtime.production_approval import EffectiveApproval, production_approval_contract
+from mediaforce.web.runtime.production_approval import production_approval_contract
 
 
 @pytest.fixture
@@ -1461,94 +1460,3 @@ def test_changed_work_hours_stop_the_next_file(config: MediaforceConfig) -> None
         delivery.publish_checked_files_once(config, load_calibration_state=lambda *_args: None, remake_files=lambda *_args: {})
     assert published == [first]
     assert second not in published
-
-
-def _look(*, keep_full_height: bool) -> dict[str, Any]:
-    """The live action look's approval, which differs only in its 4K choice."""
-    look = {**_approval(), "kind": "live_action", "kind_approved_at": timestamp(),
-            "sample_item": {"resolved_operator_intent": {"request": {"compression_intent": "balanced"}}}}
-    return {**look, "keep_full_height": True} if keep_full_height else look
-
-
-class _LookGoverns:
-    """A loader under which the look's approval governs every file, as it does a never-sampled season or movie."""
-
-    def __init__(self, look: dict[str, Any]) -> None:
-        self.look = look
-
-    def __call__(self, _config: MediaforceConfig, _prefix: str) -> dict[str, Any] | None:
-        return None
-
-    def kind_approval(self, _config: MediaforceConfig, rel_path: str) -> EffectiveApproval:
-        return EffectiveApproval(Path(rel_path).parent.as_posix(), self.look, production_approval_contract(self.look), kind="live_action")
-
-
-def _made_under(config: MediaforceConfig, item_id: int, item: dict[str, Any], approval: dict[str, Any]) -> None:
-    manifest_path = config.paths.project_root / f"manifest-{item_id}.json"
-    manifest_path.write_text(json.dumps({"run_id": f"run-{item_id}", "items": [item],
-                                         "selection": {"production_approval_contract": production_approval_contract(approval)}}))
-
-
-@pytest.mark.parametrize("rel_path", ["tv/Show/Season 1/one.mkv", "movies/Title (2000)/Title.mkv"])
-@pytest.mark.parametrize("keep_before", [False, True])
-def test_a_copy_made_before_the_looks_4k_choice_changed_is_made_again_never_published_under_the_old_choice(
-    config: MediaforceConfig, rel_path: str, keep_before: bool,
-) -> None:
-    item_id, item, staged = _stage(config, rel_path, checked=True)
-    _made_under(config, item_id, item, _look(keep_full_height=keep_before))
-    current = _look(keep_full_height=not keep_before)
-    queued: list[tuple[list[int], dict[str, Any]]] = []
-
-    def queue_items(_prefix: str, _mode: str, ids: Any, approval: dict[str, Any]) -> dict[str, Any]:
-        queued.append((list(ids), approval))
-        return {"ok": True, "queued_library_item_ids": list(ids)}
-
-    def remake_superseded(prefix: str, ids: Any) -> dict[str, Any]:
-        return size_held.remake_staged_files(config, prefix, ids, now_iso=timestamp, queue_items=queue_items,
-                                             current_approval=lambda _prefix: production_approval_contract(current),
-                                             superseded=True)
-
-    load = _LookGoverns(current)
-    with open_db(config.paths.db_path) as connection:
-        # Publishing by hand never accepts it either.
-        assert folder_actions._approved_staged_items(
-            connection, config, [{"library_item_id": item_id, "rel_path": rel_path}], load_calibration_state_fn=load,
-        )[0] == []
-    with patch("mediaforce.execution.probe_media", return_value=_probe()):
-        delivery.publish_checked_files_once(config, load_calibration_state=load, remake_files=_no_remake,
-                                            remake_superseded=remake_superseded)
-
-    assert Path(item["source_path"]).read_bytes() == b"original media file" and not staged.exists()
-    assert queued == [([item_id], production_approval_contract(current))]
-    assert _status(config, item_id) == "planned"
-    # The copy made again under the current choice publishes; nothing asks the Director.
-    _restage(config, item_id, item)
-    _made_under(config, item_id, item, current)
-    with patch("mediaforce.execution.probe_media", return_value=_probe()):
-        delivery.publish_checked_files_once(config, load_calibration_state=load, remake_files=_no_remake,
-                                            remake_superseded=remake_superseded)
-    assert _status(config, item_id) == "promoted" and len(queued) == 1
-
-
-def test_a_superseded_copy_whose_remake_keeps_being_refused_stops_and_is_never_published(config: MediaforceConfig) -> None:
-    item_id, item, staged = _stage(config, "tv/Show/Season 1/one.mkv", checked=True)
-    _made_under(config, item_id, item, _look(keep_full_height=False))
-    asked: list[int] = []
-
-    def refuse(_prefix: str, ids: Any) -> dict[str, Any]:
-        asked.extend(ids)
-        return {"ok": False, "left_out": [{"library_item_id": item_id, "reason": "The original is unreachable.",
-                                           "codes": ["original_unreachable"]}]}
-
-    with patch.object(delivery, "PUBLISH_RETRY_DELAY_SECONDS", 0), \
-            patch("mediaforce.execution.probe_media", return_value=_probe()):
-        for _ in range(delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 2):
-            delivery.publish_checked_files_once(config, load_calibration_state=_LookGoverns(_look(keep_full_height=True)),
-                                                remake_files=_no_remake, remake_superseded=refuse)
-
-    assert len(asked) == delivery.UNKNOWN_FAILURE_RETRY_LIMIT
-    assert staged.exists() and _status(config, item_id) == "validated"
-    with open_db(config.paths.db_path) as connection:
-        validation = connection.execute(select(staged_artifacts.c.validation_json)
-                                        .where(staged_artifacts.c.library_item_id == item_id)).scalar_one()
-    assert not_remade_blockers(validation) == ["original_unreachable"]

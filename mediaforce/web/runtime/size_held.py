@@ -40,7 +40,6 @@ from mediaforce.web.runtime.ambiguous_motion import _legacy_queue_mode
 from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_blocker, staged_requeue_size_blocker, \
     staged_run_items
 from mediaforce.web.runtime.manifest_reads import ManifestReader, read_manifest
-from mediaforce.web.runtime.production_approval import valid_production_approval_contract
 from mediaforce.web.runtime.motion_keep import KEPT_ORIGINAL_EVENT
 
 logger = logging.getLogger(__name__)
@@ -136,12 +135,10 @@ def remake_staged_files(
         queue_items: QueueItemsFn,
         current_approval: CurrentApprovalFn,
         retry_failed_check: bool = False,
-        superseded: bool = False,
 ) -> dict[str, Any]:
     """Recheck requested files independently and queue compatible remakes together.
 
-    ``retry_failed_check`` lets the automatic publisher remake a copy that failed a check other than its size goal;
-    ``superseded`` lets it remake a copy whose run's approval is no longer the one governing it.
+    ``retry_failed_check`` lets the automatic publisher remake a copy that failed a check other than its size goal.
     """
     groups: dict[tuple[str, str, str], list[int]] = {}
     left_out: list[dict[str, Any]] = []
@@ -159,8 +156,7 @@ def remake_staged_files(
                 recovery = None
                 if row is not None and path_matches_scope(str(row["rel_path"] or ""), prefix):
                     recovery = staged_remake_details(connection, row, prefix, current_approval=current_approval,
-                                                    manifest_reader=manifest_reader, retry_failed_check=retry_failed_check,
-                                                    superseded=superseded)
+                                                    manifest_reader=manifest_reader, retry_failed_check=retry_failed_check)
                 reason = NOT_HELD_MESSAGE if recovery is None else str(recovery["blocked_reason"])
                 if recovery is None or reason:
                     left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason,
@@ -187,8 +183,7 @@ def remake_staged_files(
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
                 row = _load_remake_row(connection, item_id)
                 recovery = staged_remake_details(connection, row, prefix, current_approval=current_approval,
-                                                manifest_reader=manifest_reader, retry_failed_check=retry_failed_check,
-                                                superseded=superseded)
+                                                manifest_reader=manifest_reader, retry_failed_check=retry_failed_check)
                 reason = NOT_HELD_MESSAGE if recovery is None else str(recovery["blocked_reason"])
                 codes = _refusal_codes(recovery)
                 if not reason and remake_intent(row) != intent:
@@ -336,10 +331,8 @@ def staged_remake_details(
         settings_history: Collection[int] | None = None,
         manifest_reader: ManifestReader = read_manifest,
         retry_failed_check: bool = False,
-        superseded: bool = False,
 ) -> dict[str, Any] | None:
-    """Offer recovery only for a size-only failure or missing settings history, a failed check when retrying it, or,
-    when ``superseded``, a copy whose run recorded an approval other than the current one governing its run.
+    """Offer recovery only for a size-only failure or missing settings history, or a failed check when retrying it.
 
     The action calls this again under its write lock before removing the output.
     """
@@ -361,15 +354,11 @@ def staged_remake_details(
         settings_history if settings_history is not None
         else staged_run_items(connection, {item_id}, manifest_reader=manifest_reader)
     )
-    if not (held or final_size or missing_policy or intent or failed_check or superseded):
+    if not (held or final_size or missing_policy or intent or failed_check):
         return None
     run_prefix, _mode, context_available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
-    approval = current_approval(run_prefix)
-    replaced = (superseded and approval is not None
-                and _recorded_contract(connection, row, manifest_reader=manifest_reader) not in (None, approval))
-    if not (held or final_size or missing_policy or intent or failed_check or replaced):
-        return None
     blocked: list[tuple[str, str]] = []
+    approval = current_approval(run_prefix)
     if intent and approval != intent.get("approval"):
         blocked.append((
             "approval_changed",
@@ -437,7 +426,7 @@ def staged_remake_details(
                 "queued_run", "A queued run may still make this file. Wait for it before making this file again.",
             ))
     reason = ("size_held" if held else "final_size" if final_size else "check_failed" if failed_check
-              else "approval_superseded" if replaced else "settings_history")
+              else "settings_history")
     return {"reason": intent.get("reason") or reason,
             "blocked_reason": " ".join(sentence for _code, sentence in blocked),
             "blocked_codes": [code for code, _sentence in blocked], "approval": approval,
@@ -472,22 +461,6 @@ def _load_remake_row(connection: DBClient, item_id: int) -> DBRow | None:
                      .outerjoin(encode_jobs, encode_jobs.c.job_id == staged_artifacts.c.encode_job_id))
         .where(staged_artifacts.c.library_item_id == item_id)
     ).mappings().fetchone()
-
-
-def _recorded_contract(connection: DBClient, row: Any, *, manifest_reader: ManifestReader) -> dict[str, Any] | None:
-    """The approval contract the copy's run was queued under, or None when its run recorded none."""
-    manifest = manifest_reader(Path(str(row["manifest_path"] or "")))
-    if manifest is not None:
-        selection = object_dict(manifest.get("selection"))
-    else:
-        stored = connection.execute(select(run_manifests.c.selection_json).where(
-            run_manifests.c.run_id == str(row["manifest_run_id"] or "")
-        )).scalar_one_or_none()
-        try:
-            selection = object_dict(json.loads(str(stored))) if stored is not None else {}
-        except json.JSONDecodeError:
-            selection = {}
-    return valid_production_approval_contract(object_dict(selection.get("production_approval_contract")))
 
 
 def _run_context(

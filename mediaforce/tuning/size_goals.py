@@ -610,7 +610,7 @@ def guided_size_goal_options(
         )
         operator_intent = OperatorIntent(
             size_goal=option_intent,
-            resolution=_kept_resolution(video_policy, default_video_policy, source="guided_preset"),
+            resolution=ResolutionIntent("source", None, "guided_preset"),
             compression_intent=context_intent.compression_intent,
             quality=context_intent.quality,
             streams=context_intent.streams,
@@ -684,7 +684,7 @@ def _legacy_confirmation_options(
     for key, title, confirmed_goal in candidates:
         operator_intent = OperatorIntent(
             size_goal=confirmed_goal,
-            resolution=_kept_resolution(video_policy, default_video_policy, source="legacy_confirmation"),
+            resolution=ResolutionIntent("source", None, "legacy_confirmation"),
             compression_intent=context_intent.compression_intent,
             quality=context_intent.quality,
             streams=context_intent.streams,
@@ -701,22 +701,6 @@ def _legacy_confirmation_options(
             }
         )
     return options
-
-
-def tallest_picture(library_video_policy: dict[str, Any]) -> int:
-    """The library's tallest picture (Settings), or 0 when it keeps every original's height."""
-    resolution = resolution_intent_from_policy(library_video_policy)
-    return (resolution.max_height or 0) if resolution.mode == "max_height" else 0
-
-
-def _kept_resolution(video_policy: dict[str, Any], default_video_policy: dict[str, Any], *, source: str) -> ResolutionIntent:
-    """The picture height a size choice keeps: the folder's own, else the library's. Choosing a size never decides it,
-    so 4K comes down to the library's tallest picture unless the owner chose to keep it (#1385)."""
-    for policy in (video_policy, default_video_policy):
-        resolution = resolution_intent_from_policy(policy)
-        if not resolution.requires_confirmation:
-            return replace(resolution, source=source)
-    return ResolutionIntent("source", None, source)
 
 
 def _allowed_policy_values(policy: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:

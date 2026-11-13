@@ -117,16 +117,6 @@ struct KindDecision: View {
                 }
                 .labelStyle(KindCheckLabel())
                 Spacer(minLength: 12)
-                if let limit = model.kinds?.tallestPicture, limit > 0 {
-                    Picker(Words.fourK, selection: Binding(
-                        get: { approval.keepFullHeight ?? false },
-                        set: { keep in act { try await $0.chooseKindPicture(kind.kind, keepFullHeight: keep) } }
-                    )) {
-                        Text(Words.bringDownTo(limit)).tag(false)
-                        Text(Words.keepFourK).tag(true)
-                    }
-                    .fixedSize()
-                }
                 Button(Words.stopUsingKind) { act { try await $0.stopKind(kind.kind) } }
             } else if let setting {
                 Button(Words.showSetting(setting.name, setting)) { openItem(setting.show) }

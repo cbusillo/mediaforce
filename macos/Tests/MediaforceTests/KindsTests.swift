@@ -5,7 +5,7 @@ import XCTest
 final class KindsTests: XCTestCase {
     private func facts(approval: String = "null") throws -> KindsFacts {
         try JSONDecoder.mediaforce.decode(KindsFacts.self, from: Data("""
-        {"kinds": [{"kind": "live_action", "one_time": false, "seasons": 3, "waiting_bytes": 9000,
+        {"kinds": [{"kind": "bright_live_action", "one_time": false, "seasons": 3, "waiting_bytes": 9000,
                     "shows": [{"prefix": "tv/Psych", "seasons": 2, "waiting_bytes": 6000, "sample_season": "tv/Psych/Season 3"},
                               {"prefix": "tv/Futurama", "seasons": 1, "waiting_bytes": 3000, "sample_season": "tv/Futurama/Season 1"}],
                     "settings": [{"show": "tv/Big Brother (US)", "from_prefix": "tv/Big Brother (US)", "size_goal_mode": "normalized",
@@ -13,8 +13,8 @@ final class KindsTests: XCTestCase {
                                  {"show": "tv/Raising Hope", "from_prefix": "tv/Raising Hope/Season 2", "size_goal_mode": "normalized",
                                   "size_goal_mb": 300.0, "library_item_id": null}],
                     "approval": \(approval), "sample_season": "tv/Psych/Season 3"}],
-         "unmeasured_seasons": 2, "folder_approved_seasons": 0, "tallest_picture": 1080,
-         "left_out": [{"season": "tv/Suits/Season 4", "kind": "unmeasured", "waiting_bytes": 100},
+         "mixed_seasons": 1, "unmeasured_seasons": 1, "folder_approved_seasons": 0,
+         "left_out": [{"season": "tv/Suits/Season 4", "kind": "mixed", "waiting_bytes": 100},
                       {"season": "tv/Dollhouse/Season 1", "kind": "unmeasured", "waiting_bytes": 700}]}
         """.utf8))
     }
@@ -29,32 +29,16 @@ final class KindsTests: XCTestCase {
         XCTAssertEqual(decided.approval?.showPrefix, "tv/Raising Hope")
     }
 
-    func testALooksApprovalSaysWhether4KStays4K() throws {
-        let kept = try facts(approval: """
-        {"from_prefix": "tv/Raising Hope/Season 2", "approved_at": "now", "keep_full_height": true, "library_item_id": null}
-        """)
-        XCTAssertEqual(kept.tallestPicture, 1080)
-        XCTAssertEqual(kept.kinds[0].approval?.keepFullHeight, true)
-        let older = try JSONDecoder.mediaforce.decode(KindsFacts.self, from: Data(#"{"kinds": [], "left_out": []}"#.utf8))
-        XCTAssertNil(older.tallestPicture)
-    }
-
-    func testAMovieTitleIsToldApartFromAShow() throws {
-        let movie = KindsFacts.Show(prefix: "movies/Heat (1995)", seasons: 1, waitingBytes: 1, sampleSeason: "movies/Heat (1995)")
-        XCTAssertTrue(movie.isMovie)
-        XCTAssertFalse(try facts().kinds[0].shows.contains(where: \.isMovie))
-    }
-
     func testTheNewestSamplesSettingComesBeforeAnOlderWatchableShow() throws {
         let older = try facts().kinds[0].settings[0]
         let latest = KindsFacts.Setting(show: "tv/The Blacklist", fromPrefix: "tv/The Blacklist/Season 10",
                                        sizeGoalMode: "normalized", sizeGoalMb: 300, libraryItemId: nil)
-        let pending = KindsFacts.Kind(kind: "live_action", oneTime: false, seasons: 1, waitingBytes: 1000,
+        let pending = KindsFacts.Kind(kind: "darker_live_action", oneTime: false, seasons: 1, waitingBytes: 1000,
                                      shows: [], settings: [older, latest], approval: nil, sampleSeason: latest.fromPrefix)
         XCTAssertEqual(pending.sampleSetting, latest)
         XCTAssertEqual(pending.firstSetting, latest)
         XCTAssertTrue(pending.showsSampleFirst)
-        var unrelated = KindsFacts.Kind(kind: "live_action", oneTime: false, seasons: 1, waitingBytes: 1000,
+        var unrelated = KindsFacts.Kind(kind: "darker_live_action", oneTime: false, seasons: 1, waitingBytes: 1000,
                                        shows: [], settings: [older], approval: nil, sampleSeason: latest.fromPrefix)
         XCTAssertFalse(unrelated.showsSampleFirst)
         unrelated.sampleReady = false
