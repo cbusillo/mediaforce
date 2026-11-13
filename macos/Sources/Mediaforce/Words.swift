@@ -225,8 +225,7 @@ enum Words {
         case "choose_size": chooseSize
         case "choose_balance": "Choose detail"
         case "pending_review", "completed": "Choose another sample"
-        case "sample_blocked", "failed", "stopped", "needs_attention": makeSample
-        default: "See progress"
+        default: makeSample
         }
     }
 

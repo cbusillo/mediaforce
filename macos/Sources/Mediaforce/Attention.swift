@@ -85,8 +85,7 @@ struct Attention: Equatable, Sendable {
                 id: "kind:\(kind.kind):\(kindNoticeStage(kind))",
                 title: Words.kindName(kind.kind),
                 body: kindWaitingReason(kind),
-                opens: kindPlace(kind),
-                notifies: kindNoticeStage(kind) != "preparing"
+                opens: kindPlace(kind)
             )
         }
         let samples = facts.samples.waitingOnYou.map { sample in
@@ -126,12 +125,10 @@ struct Attention: Equatable, Sendable {
             stage = "settings"
         } else if kind.sampleReady ?? true {
             stage = kind.sampleSeason ?? "ready"
-        } else if ["failed", "stopped", "needs_attention"].contains(kind.sampleStatus ?? "") {
-            stage = "attention:\(kind.sampleSeason ?? "")"
         } else if ["pending_review", "completed", "choose_size", "choose_balance", "sample_blocked"].contains(kind.sampleStatus ?? "") {
             stage = "choice:\(kind.sampleSeason ?? kind.sampleStartPrefix ?? "")"
         } else {
-            stage = "preparing"
+            stage = "attention:\(kind.sampleSeason ?? "")"
         }
         return stage
     }
@@ -154,10 +151,6 @@ struct Attention: Equatable, Sendable {
                 : "Watch the sample and choose how this kind of content should look."
         }
         switch kind.sampleStatus {
-        case "not_started":
-            return "Mediaforce makes this kind's first sample by itself. Nothing is needed from you until it's ready to watch."
-        case "starting", "running", "stopping", "queued", "retry_backoff":
-            return "The sample is being prepared. Open this kind to see its progress and anything holding it up."
         case "pending_review", "completed":
             return "This sample cannot approve the kind. Open this kind to choose a different show's sample or approved settings."
         case "choose_size":

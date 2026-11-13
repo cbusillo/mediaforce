@@ -110,26 +110,17 @@ final class AttentionTests: XCTestCase {
         XCTAssertEqual(attention.badgeCount, 2)
     }
 
-    func testAKindWithoutASampleStaysReachableAndNotifiesWhenReady() throws {
-        let before = try facts(kinds: [("bright_live_action", nil)], kindStatus: "not_started", kindReady: false)
-        let waiting = Attention.review(before, remembered: nil)
-        XCTAssertEqual(waiting.badgeCount, 0)
-        XCTAssertTrue(Attention.review(before, remembered: Attention.review(try facts(), remembered: nil).memory).notices.isEmpty)
-        XCTAssertEqual(Attention.waitingItems(before).map(\.opens), [.kind("bright_live_action")])
-        let queued = try facts(kinds: [("bright_live_action", "tv/Psych/Season 3")], kindStatus: "queued", kindReady: false)
-        let making = try facts(kinds: [("bright_live_action", "tv/Psych/Season 3")], kindStatus: "running", kindReady: false)
-        XCTAssertTrue(Attention.review(queued, remembered: waiting.memory).notices.isEmpty)
-        XCTAssertTrue(Attention.review(making, remembered: Attention.review(queued, remembered: waiting.memory).memory).notices.isEmpty)
+    func testAKindNotifiesAgainWhenItsRemadeSampleIsReady() throws {
         let failed = try facts(kinds: [("bright_live_action", "tv/Psych/Season 3")], kindStatus: "failed", kindReady: false)
-        XCTAssertEqual(Attention.review(failed, remembered: Attention.review(making, remembered: waiting.memory).memory).notices.count, 1)
+        let waiting = Attention.review(failed, remembered: Attention.review(try facts(), remembered: nil).memory)
+        XCTAssertEqual(waiting.notices.count, 1)
         let ready = try facts(kinds: [("bright_live_action", "tv/Psych/Season 3")], kindStatus: "pending_review", kindReady: true)
         let after = Attention.review(ready, remembered: waiting.memory)
         XCTAssertEqual(after.badgeCount, 1)
         XCTAssertEqual(after.notices.map(\.opens), [.kind("bright_live_action")])
-        XCTAssertNotEqual(Attention.waitingItems(before).first?.body, after.notices.first?.body)
         let cartoons = try facts(kinds: [("cartoon", "tv/Futurama/Season 1")], kindStatus: "pending_review", kindReady: true, oneTime: true)
         XCTAssertEqual(Attention.waitingOnYou(cartoons), 1)
-        XCTAssertNotEqual(Attention.waitingItems(cartoons).first?.body, Attention.waitingItems(before).first?.body)
+        XCTAssertNotEqual(Attention.waitingItems(cartoons).first?.body, after.notices.first?.body)
     }
 
     func testAFirstSampleChoiceIsBadgedAndOpensTheSeasonThatNeedsIt() throws {
