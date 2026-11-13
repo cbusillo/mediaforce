@@ -53,10 +53,12 @@ season samples stop asking separately when they finished before the kind was
 approved or before its newest sample was requested. Newer samples, uncertain timing,
 and existing folder approvals keep their own decision. While the kind waits for a
 choice, its newest sample stays available, even after that season finishes.
-Every unapproved kind with waiting shows appears in Needs you, including while
-its sample is being prepared or needs attention. Mediaforce automatically requests
-a first sample using the existing sample queue and size settings. Needs you
-notifies when the sample is ready to watch or needs a decision. A size or balance
+Mediaforce automatically requests a first sample for each unapproved kind with
+waiting shows, using the existing sample queue and size settings. While that
+sample is not started or being made, the kind shows its progress under How it
+should look and stays off Needs you. It reaches Needs you, and notifies, once
+there is a sample to watch, approved settings to choose, a size or detail to
+choose, or a sample to make again. A size or balance
 choice reaches Needs you only when the season offers one; otherwise the start is
 retried like any other refusal. An existing
 approved setting comes first. An unsuitable sample stays reachable and stops

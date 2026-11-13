@@ -26,6 +26,7 @@ from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed
 from mediaforce.web.runtime.encode_runtime import _encode_job_estimate_items, _encode_job_library_key, _host_allows_library
 from mediaforce.web.runtime.host_runtime import running_encode_counts_by_host
 from mediaforce.web.runtime.host_status import is_awaiting_first_check
+from mediaforce.web.runtime.page_state import SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES
 
 SCHEMA_VERSION = 1
 RECENT_SEASON_LIMIT = 12
@@ -44,6 +45,7 @@ WORKING_COMPUTER_STATES = frozenset({"ready", "busy"})
 NOT_IN_SEASON_FOLDER = "not_in_season_folder"
 # A season with no file left to compress that is not finished either, such as one whose files all stay original.
 NO_WORK = "no_work"
+FIRST_SAMPLE_UNDERWAY_STATUSES = SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES | {"not_started"}
 
 
 @dataclass(slots=True)
@@ -104,6 +106,7 @@ def app_window_payload(
             kind["settings_available"] = settings_by_kind[kind["kind"]]
         if kind["sample_season"] in remaking_samples:
             kind["sample_status"] = "retry_backoff"
+    pending_kinds = [kind for kind in pending_kinds if _kind_asks_the_director(kind)]
     kind_samples = {kind["sample_season"] for kind in pending_kinds
                     if kind.get("sample_ready", True) or kind.get("sample_status") in {"failed", "stopped", "needs_attention"}}
     samples = _samples(cards)
@@ -138,6 +141,11 @@ def app_window_payload(
         "original_backups": _original_backups(connection, promotions),
         "kept_original": _kept_original(kept, cards),
     }
+
+
+def _kind_asks_the_director(kind: Mapping[str, Any]) -> bool:
+    return bool(kind.get("settings_available") or kind.get("sample_ready")
+                or kind.get("sample_status") not in FIRST_SAMPLE_UNDERWAY_STATUSES)
 
 
 def _present_items(

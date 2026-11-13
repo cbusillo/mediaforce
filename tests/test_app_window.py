@@ -545,24 +545,17 @@ def test_kind_decision_replaces_its_sample_row_but_keeps_other_season_decisions(
     assert [season["prefix"] for season in facts["work"]["seasons_needing_you"]] == expected
 
 
-@pytest.mark.parametrize("sample_ready", [False, True])
-def test_waiting_kind_reaches_needs_you_before_its_sample_exists_and_keeps_unrelated_decisions(
-        connection: DBClient, sample_ready: bool,
-) -> None:
+def test_ready_kind_sample_is_one_decision(connection: DBClient) -> None:
     prefix = "tv/Drama/Season 1"
-    kind = {"kind": "darker_live_action", "sample_season": prefix if sample_ready else None,
-            "sample_status": "pending_review" if sample_ready else "not_started", "sample_ready": sample_ready,
+    kind = {"kind": "darker_live_action", "sample_season": prefix, "sample_status": "pending_review", "sample_ready": True,
             "one_time": False, "needs_you": True}
     facts = app_window_payload(
         connection, library_types=LIBRARY_TYPES,
         season_cards=[{"prefix": prefix, "page_state": {"key": "ready_to_compare", "needs_you": True}}],
         computers=[], controller_storage=READY_STORAGE, storage_admits_work=True, observed_at=datetime.now(UTC), kinds=[kind],
     )
-    pending = facts["work"]["kinds_needing_you"]
-    assert len(pending) == 1
-    assert pending[0]["sample_ready"] == sample_ready
-    assert pending[0]["sample_season"] == kind["sample_season"]
-    assert bool(facts["samples"]["waiting_on_you"]) != sample_ready
+    assert [pending["sample_season"] for pending in facts["work"]["kinds_needing_you"]] == [prefix]
+    assert not facts["samples"]["waiting_on_you"]
 
 
 def test_kind_sample_failure_is_one_reachable_decision(connection: DBClient) -> None:
@@ -576,6 +569,31 @@ def test_kind_sample_failure_is_one_reachable_decision(connection: DBClient) -> 
     )
     assert len(facts["work"]["kinds_needing_you"]) == 1
     assert not facts["samples"]["waiting_on_you"] and not facts["work"]["seasons_needing_you"]
+
+
+@pytest.mark.parametrize("status,ready,settings,asks", [
+    ("not_started", False, False, False),
+    ("queued", False, False, False),
+    ("running", False, False, False),
+    ("retry_backoff", False, False, False),
+    ("not_started", False, True, True),
+    ("pending_review", True, False, True),
+    ("pending_review", False, False, True),
+    ("choose_size", False, False, True),
+    ("choose_balance", False, False, True),
+    ("sample_blocked", False, False, True),
+    ("failed", False, False, True),
+])
+def test_a_kind_reaches_needs_you_only_once_it_has_something_to_watch_or_choose(
+        connection: DBClient, status: str, ready: bool, settings: bool, asks: bool,
+) -> None:
+    kind = {"kind": "bright_live_action", "sample_season": None, "sample_status": status, "sample_ready": ready,
+            "one_time": False, "settings": [{"show": "tv/Psych"}] if settings else [], "needs_you": True}
+    facts = app_window_payload(
+        connection, library_types=LIBRARY_TYPES, season_cards=[], computers=[], controller_storage=READY_STORAGE,
+        storage_admits_work=True, observed_at=datetime.now(UTC), kinds=[kind],
+    )
+    assert bool(facts["work"]["kinds_needing_you"]) == asks
 
 
 @pytest.mark.parametrize("exhausted", [False, True])
@@ -593,7 +611,6 @@ def test_automatic_sample_retries_stay_quiet_until_the_existing_retry_limit(
         connection, library_types=LIBRARY_TYPES, season_cards=cards, kinds=kinds, remaking_samples=remaking,
         computers=[], controller_storage=READY_STORAGE, storage_admits_work=True, observed_at=datetime.now(UTC),
     )
-    if has_kind:
-        assert facts["work"]["kinds_needing_you"][0]["sample_status"] == ("failed" if exhausted else "retry_backoff")
+    assert bool(facts["work"]["kinds_needing_you"]) == (has_kind and exhausted)
     assert bool(facts["samples"]["waiting_on_you"]) == (exhausted and not has_kind)
     assert not facts["work"]["seasons_needing_you"]
