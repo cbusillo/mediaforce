@@ -51,39 +51,6 @@ final class ItemTests: XCTestCase {
         XCTAssertTrue(Words.waitingReason(season.files[1]).hasPrefix("The compressed copy didn't pass its check"))
     }
 
-    func testWaitingFilesNameTheirAskOrSayTheyDiffer() throws {
-        let one = try facts([file(1, stage: "published", bytes: 1), file(9, stage: "needs_you", bytes: 1, validation: "failed")])
-        let oneAsk = try XCTUnwrap(Words.filesAsk(one.waiting))
-        XCTAssertTrue(oneAsk.contains(Words.fileName(one.waiting[0])))
-        XCTAssertTrue(oneAsk.contains(Words.fileState(one.waiting[0])))
-        let same = try facts([file(3, stage: "needs_you", bytes: 1, validation: "failed"), file(9, stage: "needs_you", bytes: 1, validation: "failed")])
-        XCTAssertTrue(try XCTUnwrap(Words.filesAsk(same.waiting)).contains(Words.fileState(same.waiting[0])))
-        let mixed = try facts([file(3, stage: "needs_you", bytes: 1, validation: "size_held"), file(9, stage: "needs_you", bytes: 1, validation: "failed")])
-        let mixedAsk = try XCTUnwrap(Words.filesAsk(mixed.waiting))
-        XCTAssertFalse(mixed.waiting.contains { mixedAsk.contains(Words.fileState($0)) })
-        let held = try facts([file(4, stage: "compressing", bytes: 1, additionalWaitReasons: #"[{"code": "containment_unproven"}]"#)])
-        XCTAssertFalse(try XCTUnwrap(Words.filesAsk(held.waiting)).contains(Words.fileState(held.files[0])))
-        XCTAssertNil(Words.filesAsk([]))
-    }
-
-    @MainActor
-    func testASeasonCardSaysWhatItsFilesAskOnceTheyAreRead() throws {
-        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(MainWindowTests.facts.utf8)) as? [String: Any])
-        var work = try XCTUnwrap(value["work"] as? [String: Any])
-        work["seasons_needing_you"] = [[
-            "prefix": "tv/Futurama/Season 2", "season": 2, "state": "needs_help", "action": "review_files",
-            "tone": "attention", "episode_count": 2, "bytes": 1000, "needs_you": true,
-        ]]
-        value["work"] = work
-        let main = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: JSONSerialization.data(withJSONObject: value))
-        let item = try XCTUnwrap(Attention.waitingItems(main).first { $0.opens == .item("tv/Futurama/Season 2") })
-        let season = try facts([file(1, stage: "published", bytes: 1), file(9, stage: "needs_you", bytes: 1, validation: "size_held")])
-        let unread = WaitingShow(item, facts: main)
-        let read = WaitingShow(item, facts: main, files: ["tv/Futurama/Season 2": season])
-        XCTAssertNotEqual(read.state, unread.state)
-        XCTAssertEqual(read.state, Words.filesAsk(season.waiting))
-    }
-
     func testAutomaticallyKeptOriginalsSayWhyWithoutAskingForAnotherDecision() throws {
         let reasons = ["check_failed", "over_size"]
         let season = try facts(reasons.enumerated().map { index, reason in

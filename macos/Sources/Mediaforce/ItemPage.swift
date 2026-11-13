@@ -175,15 +175,7 @@ struct ItemPage: View {
 
     private func act(_ action: ItemAction, _ file: ItemFacts.File) async {
         do {
-            let client = model.client
-            let result = switch action {
-            case .makeAgain: try await client.makeAgain(prefix, file.libraryItemId)
-            case .keepThisCopy: try await client.keepThisCopy(prefix, file.libraryItemId)
-            case .putOriginalBack: try await client.putOriginalBack(prefix, file.libraryItemId)
-            case .allowLarger: try await client.decideSize(file.sizeQuestion?.jobId ?? "", allow: true)
-            case .keepOriginal: try await client.decideSize(file.sizeQuestion?.jobId ?? "", allow: false)
-            case .releaseHold: try await client.releaseHold(file)
-            }
+            let result = try await model.client.answer(action, in: prefix, for: file)
             if !result.ok {
                 notice = ActionNotice(title: Words.actionRefused(action), message: Words.actionRefusal(result.code, result.message))
             }
