@@ -3,49 +3,33 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import batched
+from pathlib import PurePosixPath
 from typing import Any, Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_item_evidence_state, library_items, series_metadata, source_admissions, source_measurements, \
     source_transitions, source_versions, source_moves, staged_artifacts, target_production_outcomes, motion_keep_decisions
-from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
+from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.library.candidate_selection import season_identity
+from mediaforce.library.library_settings import normalize_library_type
+from mediaforce.library.movie_workflow import classify_movie_path
 from mediaforce.library.calculation_reuse import reuse_library_calculation
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, SourceEvidence, load_source_evidence_bulk, load_source_evidence_context
 
-# Kinds of content group seasons by number ranges of their originals' measured traits, so that one
-# approval can cover every season that measures the same (Director decision, #517, 2026-10-22).
-# The ranges were chosen against the live library on 2026-10-25; see #1046 for the evidence.
-ContentKind = Literal["darker_live_action", "bright_live_action", "cartoon", "4k"]
-SeasonKind = Literal["darker_live_action", "bright_live_action", "cartoon", "4k", "mixed", "unmeasured"]
-EpisodeSide = Literal["darker", "bright", "between", "repeated_frames", "4k"]
+# Kinds of content ("looks" on screen) group seasons so that one approval can cover every season of the same look
+# (Director decision, #517, 2026-10-22). Live action is one look: darkness runs on a smooth scale with no gap, so
+# splitting it left a third of the waiting seasons in no look (Director decision, #1385). 4K is a picture height, not
+# a look: a 4K season takes its look from its other traits, and a look's approval says whether 4K stays 4K.
+# Movies use the live action look; each movie title is grouped like a TV season, through the same code. Movie genres
+# are not stored, so an animated movie cannot be told apart yet and is live action too.
+ContentKind = Literal["live_action", "cartoon"]
+SeasonKind = Literal["live_action", "cartoon", "unmeasured"]
 
-CONTENT_KINDS_VERSION = 1
-# An episode is darker when at least this share of its measured frames is dark, and bright below the
-# lower bound. Episodes between the two fit either side, so close measurements never split a show.
-DARKER_MIN_DARK_FRAMES = 0.20
-BRIGHT_MAX_DARK_FRAMES = 0.10
-# Live action rarely repeats frames (90% of its episodes are under 0.16); above this an episode does
-# not look like live action, whatever its darkness.
-LIVE_ACTION_MAX_REPEATED_FRAMES = 0.40
-UHD_MIN_HEIGHT = 1600
-UHD_MIN_WIDTH = 3000
-# A season belongs to a kind when this share of its sided episodes agree; otherwise it is mixed.
-SEASON_AGREEMENT = 0.80
+CONTENT_KINDS_VERSION = 2
 ANIMATION_GENRE = "animation"
-
-
-@dataclass(frozen=True, slots=True)
-class EpisodeTraits:
-    """An original's traits; darkness and repeated frames are None when its fingerprint is unmeasured."""
-
-    dark_frame_fraction: float | None
-    repeated_frame_fraction: float | None
-    height: int | None
-    width: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,39 +37,16 @@ class SeasonGrouping:
     kind: SeasonKind
     episodes: int
     measured: int
-    sides: Mapping[EpisodeSide, int]
     reason: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
-        return {"kind": self.kind, "episodes": self.episodes, "measured": self.measured,
-                "sides": dict(sorted(self.sides.items())), "reason": self.reason}
+        return {"kind": self.kind, "episodes": self.episodes, "measured": self.measured, "reason": self.reason}
 
 
-def episode_traits(fingerprint_summary: Mapping[str, Any] | None, profile: Mapping[str, Any]) -> EpisodeTraits:
-    """Traits from an original's media fingerprint summary, if measured, and its stream profile."""
+def fingerprint_measured(fingerprint_summary: Mapping[str, Any] | None) -> bool:
+    """Whether an original's media fingerprint summary holds its measured picture."""
     aggregate = object_dict(object_dict(object_dict(fingerprint_summary).get("analysis")).get("aggregate"))
-    measured = "dark_frame_fraction" in aggregate and "duplicate_like_frame_fraction" in aggregate
-    return EpisodeTraits(
-        dark_frame_fraction=float_value(aggregate["dark_frame_fraction"]) if measured else None,
-        repeated_frame_fraction=float_value(aggregate["duplicate_like_frame_fraction"]) if measured else None,
-        height=int_value(profile.get("height")) or None,
-        width=int_value(profile.get("width")) or None,
-    )
-
-
-def episode_side(traits: EpisodeTraits) -> EpisodeSide | None:
-    """Where one episode falls; None when only its resolution is known and it is not 4K."""
-    if (traits.height or 0) >= UHD_MIN_HEIGHT or (traits.width or 0) >= UHD_MIN_WIDTH:
-        return "4k"
-    if traits.dark_frame_fraction is None or traits.repeated_frame_fraction is None:
-        return None
-    if traits.repeated_frame_fraction >= LIVE_ACTION_MAX_REPEATED_FRAMES:
-        return "repeated_frames"
-    if traits.dark_frame_fraction >= DARKER_MIN_DARK_FRAMES:
-        return "darker"
-    if traits.dark_frame_fraction < BRIGHT_MAX_DARK_FRAMES:
-        return "bright"
-    return "between"
+    return "dark_frame_fraction" in aggregate and "duplicate_like_frame_fraction" in aggregate
 
 
 def is_animated(genres: Sequence[str] | None) -> bool | None:
@@ -95,36 +56,21 @@ def is_animated(genres: Sequence[str] | None) -> bool | None:
     return any(str(genre).strip().casefold() == ANIMATION_GENRE for genre in genres)
 
 
-def season_kind(episodes: Sequence[EpisodeTraits | None], *, animated: bool | None) -> SeasonGrouping:
-    """Group one season by its episodes' original traits; unmeasured episodes do not vote."""
-    measured: list[EpisodeSide] = []
-    for traits in episodes:
-        side = episode_side(traits) if traits is not None else None
-        if side is not None:
-            measured.append(side)
-    sides: Counter[EpisodeSide] = Counter()
-    sides.update(measured)
+def season_kind(measured: Sequence[bool], *, animated: bool | None) -> SeasonGrouping:
+    """Group one season: a cartoon by its genres, else live action once any episode's original is measured."""
+    count = sum(measured)
 
     def grouping(kind: SeasonKind, reason: str | None = None) -> SeasonGrouping:
-        return SeasonGrouping(kind, len(episodes), len(measured), sides.copy(), reason)
+        return SeasonGrouping(kind, len(measured), count, reason)
 
-    if not measured:
+    if not count:
         return grouping("unmeasured", "no_measured_original")
-    # Cartoons and 4K stay one-time Director choices, so they never fall into a live-action kind.
-    if sides["4k"]:
-        return grouping("4k") if sides["4k"] == len(measured) else grouping("mixed", "partly_4k")
+    # Cartoons stay one-time Director choices, so they never fall into live action.
     if animated:
         return grouping("cartoon")
     if animated is None:
         return grouping("unmeasured", "genres_unknown")
-    sided = sides["darker"] + sides["bright"] + sides["repeated_frames"]
-    if not sided:
-        return grouping("mixed", "all_between")
-    if sides["darker"] >= SEASON_AGREEMENT * sided:
-        return grouping("darker_live_action")
-    if sides["bright"] >= SEASON_AGREEMENT * sided:
-        return grouping("bright_live_action")
-    return grouping("mixed", "sides_disagree")
+    return grouping("live_action")
 
 
 def _waiting(item: Mapping[str, Any]) -> bool:
@@ -150,25 +96,18 @@ def _admitted_item_ids(connection: DBClient, *, item_ids: Collection[int] | None
     return {int(row.id) for row in active_sources if row.generation_id in admitted}
 
 
-def _original_traits(
+def _measured_originals(
         episodes: Sequence[Mapping[str, Any]],
         admitted: set[int],
         evidence_by_item: Mapping[int, SourceEvidence],
-) -> list[EpisodeTraits | None]:
-    traits: list[EpisodeTraits | None] = []
+) -> list[bool]:
+    """For each episode, whether its admitted original's picture is measured with a trusted fingerprint."""
+    measured = []
     for item in episodes:
-        if int(item["id"]) not in admitted:
-            traits.append(None)
-            continue
-        evidence = evidence_by_item[int(item["id"])]
-        if evidence.original_version_id is None:
-            traits.append(None)
-            continue
-        fingerprint = evidence.traits["media_fingerprint"]
-        # The admitted original's resolution counts even when its fingerprint does not.
-        trusted = fingerprint.summary if fingerprint.tier in {"proven", "probable"} else None
-        traits.append(episode_traits(trusted, evidence.profile))
-    return traits
+        evidence = evidence_by_item.get(int(item["id"])) if int(item["id"]) in admitted else None
+        fingerprint = evidence.traits["media_fingerprint"] if evidence is not None and evidence.original_version_id is not None else None
+        measured.append(fingerprint is not None and fingerprint.tier in {"proven", "probable"} and fingerprint_measured(fingerprint.summary))
+    return measured
 
 
 def _in_folder(prefix: str) -> tuple[Any, Any]:
@@ -182,23 +121,50 @@ def _present_items(connection: DBClient, season_prefix: str | None = None) -> Se
         library_items.c.size_bytes,
     ).where(library_items.c.missing_since.is_(None))
     if season_prefix is not None:
-        query = query.where(*_in_folder(season_prefix))
+        # A movie that sits directly in its library is its own title.
+        query = query.where(or_(library_items.c.rel_path == season_prefix, and_(*_in_folder(season_prefix))))
     return connection.execute(query).mappings().all()
+
+
+def look_group(library_types: Mapping[str, str], rel_path: str) -> str | None:
+    """The unit a look covers that holds this path: a TV season, or a movie title for a movie's feature file.
+
+    Files sitting directly in a show folder are in no season; a movie's extras and unrecognised nested files are in
+    no title, so a look never covers them.
+    """
+    path = PurePosixPath(str(rel_path or "").strip().strip("/"))
+    if not path.parts:
+        return None
+    root = path.parts[0]
+    library_type = normalize_library_type(library_types.get(root), key=root)
+    if library_type == "movie":
+        membership = classify_movie_path(path.as_posix(), root=root)
+        return membership.title_prefix if membership is not None and membership.role == "feature" else None
+    if len(path.parts) < 3 or (len(path.parts) == 3 and path.suffix):
+        return None
+    identity = season_identity({"rel_path": path.as_posix()}, library_types=library_types)
+    return identity.season_prefix if identity is not None else None
 
 
 def _seasons(
         items: Sequence[Mapping[str, Any]], library_types: Mapping[str, str],
 ) -> tuple[dict[str, list[Mapping[str, Any]]], dict[str, str]]:
-    """Episodes by season, and each season's show; files sitting directly in a show folder are in no season."""
+    """Files by the season or movie title a look covers, and each TV season's show; a movie title has no show."""
     seasons: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     series_of: dict[str, str] = {}
     for item in items:
-        identity = season_identity(dict(item), library_types=library_types)
-        if identity is None or len(str(item["rel_path"]).split("/")) < 4:
+        group = look_group(library_types, str(item["rel_path"]))
+        if group is None:
             continue
-        seasons[identity.season_prefix].append(item)
-        series_of[identity.season_prefix] = identity.series_prefix
+        seasons[group].append(item)
+        if (identity := season_identity(dict(item), library_types=library_types)) is not None:
+            series_of[group] = identity.series_prefix
     return seasons, series_of
+
+
+def _animated(prefix: str, series_of: Mapping[str, str], animation: Mapping[str, bool | None]) -> bool | None:
+    """A TV season is a cartoon by its show's genres; a movie title is never one until movie genres are stored."""
+    return animation.get(series_of[prefix]) if prefix in series_of else False
 
 
 def season_grouping(
@@ -211,15 +177,14 @@ def season_grouping(
     episodes = seasons.get(season_prefix, [])
     admitted = _admitted_item_ids(connection, item_ids=[int(item["id"]) for item in episodes])
     if not admitted:
-        return season_kind([None] * len(episodes), animated=None)
+        return season_kind([False] * len(episodes), animated=None)
     evidence_by_item = load_source_evidence_bulk(
         connection, (int(item["id"]) for item in episodes if int(item["id"]) in admitted),
         context=load_source_evidence_context(connection),
     )
-    traits = _original_traits(episodes, admitted, evidence_by_item)
+    measured = _measured_originals(episodes, admitted, evidence_by_item)
     series = series_of.get(season_prefix)
-    animated = _series_animation(connection, series).get(series) if series else None
-    return season_kind(traits, animated=animated)
+    return season_kind(measured, animated=_animated(season_prefix, series_of, _series_animation(connection, series) if series else {}))
 
 
 def _series_animation(connection: DBClient, series_prefix: str | None = None) -> dict[str, bool | None]:
@@ -296,8 +261,8 @@ def season_kind_report(
             connection, (int(item["id"]) for prefix in measured_seasons for item in seasons[prefix] if int(item["id"]) in admitted),
             context=context,
         )
-        measured_groupings = {prefix: season_kind(_original_traits(seasons[prefix], admitted, evidence),
-                                         animated=animation.get(series_of[prefix])) for prefix in measured_seasons}
+        measured_groupings = {prefix: season_kind(_measured_originals(seasons[prefix], admitted, evidence),
+                                         animated=_animated(prefix, series_of, animation)) for prefix in measured_seasons}
         reasons = {prefix: _measurement_reasons(waiting_by_season[prefix], evidence, {}, measurement_roots)
                    for prefix, measured_grouping in measured_groupings.items() if measured_grouping.reason == "no_measured_original"}
         return reasons, measured_groupings
@@ -336,14 +301,6 @@ def season_kind_report(
                      "waiting_bytes": waiting_bytes})
     report: dict[str, Any] = {
         "content_kinds_version": CONTENT_KINDS_VERSION,
-        "ranges": {
-            "darker_min_dark_frames": DARKER_MIN_DARK_FRAMES,
-            "bright_max_dark_frames": BRIGHT_MAX_DARK_FRAMES,
-            "live_action_max_repeated_frames": LIVE_ACTION_MAX_REPEATED_FRAMES,
-            "uhd_min_height": UHD_MIN_HEIGHT,
-            "uhd_min_width": UHD_MIN_WIDTH,
-            "season_agreement": SEASON_AGREEMENT,
-        },
         "totals": {kind: dict(counts) for kind, counts in sorted(totals.items())},
         "unmeasured_reasons": dict(Counter(row["reason"] for row in rows if row["kind"] == "unmeasured")),
         "seasons": rows,
