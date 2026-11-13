@@ -1,6 +1,7 @@
 """Check a mounted encoder's output on its host: end an interrupted encoder before the output is
 reused, and read which output files the host itself sees."""
 
+import re
 import shlex
 import subprocess
 import time
@@ -199,14 +200,20 @@ def end_remote_output_writers(
 
 
 QUALITY_RUN_FOLDER_MARKERS = (".mediaforce-ab-av1-", ".ab-av1-")
+# Remote quality runs start ab-av1 (quality.py), which starts ffmpeg (sample encodes with libsvtav1 and
+# the metric) and ffprobe; remote encodes and crop detection start ffmpeg (helpers.py, execution.py).
+MEDIA_WORK_PROGRAMS = frozenset({"ab-av1", "ffmpeg", "ffprobe"})
+_COMMAND_LINE_WORD = re.compile(r"[^\s;:'\"=|&()<>`]+")
 
 
 def _program(process: _RemoteProcess) -> str:
     return Path(process.command.split()[0]).name
 
 
-def _is_quality_run(process: _RemoteProcess) -> bool:
-    return _program(process) == "ab-av1" or any(marker in process.command for marker in QUALITY_RUN_FOLDER_MARKERS)
+def _may_be_left_by_a_quality_run(process: _RemoteProcess) -> bool:
+    named_programs = {Path(word).name for word in _COMMAND_LINE_WORD.findall(process.command)}
+    return bool(named_programs & MEDIA_WORK_PROGRAMS) or any(
+        marker in process.command for marker in QUALITY_RUN_FOLDER_MARKERS)
 
 
 def confirm_computer_runs_no_quality_run(
@@ -215,9 +222,9 @@ def confirm_computer_runs_no_quality_run(
     processes = _inventory(host, run_command)
     if not any(_program(process) == "ps" for process in processes.values()):
         raise RuntimeError("The computer's process listing did not include the listing itself, so it may be incomplete.")
-    remaining = sorted(pid for pid, process in processes.items() if _is_quality_run(process))
+    remaining = sorted(pid for pid, process in processes.items() if _may_be_left_by_a_quality_run(process))
     if remaining:
-        raise RuntimeError(f"A quality run is still going on that computer (process {', '.join(map(str, remaining))}).")
+        raise RuntimeError(f"Media work is still running on that computer (process {', '.join(map(str, remaining))}).")
 
 
 def encode_host_file_sizes(

@@ -30,7 +30,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.runtime.scratch_reservations import calibration_scratch_reservations
 from mediaforce.ops.runtime_install import update_hold_reason
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission, controller_storage_admission_issue
-from mediaforce.hosts.config import configured_remote_host_execution_mode
+from mediaforce.hosts.config import configured_remote_host_execution_mode, ssh_target_for_host
 from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
 from mediaforce.hosts.transport import SSH_ACCESS_REFUSED_MARKERS, ssh_host_unreachable
 from mediaforce.core.db import DBClient, DBRow, is_database_busy_failure, open_db
@@ -317,7 +317,7 @@ def recover_encode_queue(
     reconcile_encode_jobs(connection, config, deps, restart_recovery=True)
     sweep_stopped_remote_encodes(connection, config, deps)
     _release_jobs_stranded_by_an_outage(connection, deps)
-    _check_held_quality_runs_again(connection, deps)
+    _check_held_quality_runs_again(connection, config, deps)
     clear_stale_encoding_items_when_idle(connection, config, deps)
     connection.commit()
 
@@ -442,17 +442,19 @@ def _recorded_host_key(host: Mapping[str, Any]) -> str:
     return str(host.get("key") or host.get("host") or "").strip()
 
 
-def _unconfirmed_run_computer(job: Mapping[str, Any]) -> dict[str, Any]:
+def _unconfirmed_run_computer(config: MediaforceConfig, job: Mapping[str, Any]) -> dict[str, Any]:
     host = object_dict(job.get("host"))
-    key = _recorded_host_key(host)
     if (execution_mode_for_host(host) != "ssh" or host_media_access_for_host(host) != "mounted"
             or host.get(STAGED_JOB_KEY)):
         raise RuntimeError("This run needs a separate recovery check on the computer where it started.")
-    recorded = (
-        object_dict(job.get("last_host")).get("key"),
-        object_dict(object_dict(job.get("progress")).get(QUALITY_CONTAINMENT_PROGRESS_KEY)).get("host_key"),
-    )
-    if not key or not job.get("started_at") or any(value and value != key for value in recorded):
+    ran_on = object_dict(job.get("last_host"))
+    key, endpoint = str(ran_on.get("key") or "").strip(), str(ran_on.get("host") or "").strip()
+    context = object_dict(object_dict(job.get("progress")).get(QUALITY_CONTAINMENT_PROGRESS_KEY))
+    configured = [entry for entry in config.remote_hosts if ssh_target_for_host(object_dict(entry)) == endpoint]
+    if (not endpoint or key != endpoint or not job.get("started_at") or len(configured) != 1
+            or configured_remote_host_execution_mode(object_dict(configured[0])) != "ssh"
+            or _recorded_host_key(host) != key or ssh_target_for_host(host) != endpoint
+            or context.get("host_key") not in (None, key) or context.get("endpoint") not in (None, endpoint)):
         raise RuntimeError("Mediaforce's record of which computer ran it is missing or does not match.")
     return host
 
@@ -464,7 +466,7 @@ def _show_quality_run_ended(config: MediaforceConfig, job: Mapping[str, Any], it
             object_dict(job.get("host")), _quality_containment_scope(config, job, items), wake_before_connect=False,
         )
         return
-    confirm_computer_runs_no_quality_run(_unconfirmed_run_computer(job), run_command=run_remote_command)
+    confirm_computer_runs_no_quality_run(_unconfirmed_run_computer(config, job), run_command=run_remote_command)
 
 
 def _waits_for_quality_run_stop(job: Mapping[str, Any]) -> bool:
@@ -780,8 +782,10 @@ def reconcile_encode_jobs(
         waits_for_quality_run = _waits_for_quality_run_stop(payload)
         if waits_for_quality_run and (
                 cleanup_outcome.outcome is _EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE
-                or (_quality_run_not_shown_ended(cleanup_outcome, wake_error)
+                or (cleanup_outcome.outcome is _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED
                     and _unconfirmed_run_waited_long_enough(payload, now, deps))):
+            if _job_changed_since(connection, payload, snapshot):
+                continue
             _ask_owner_about_unconfirmed_quality_run(
                 connection, config, payload, deps, cleanup_outcome.detail or "Its saved file list could not be read.",
             )
@@ -890,9 +894,10 @@ def reconcile_encode_jobs(
     connection.commit()
 
 
-def _quality_run_not_shown_ended(outcome: _EncodeRetryArtifactCleanupResult, wake_error: str | None) -> bool:
-    return (outcome.outcome is _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED
-            and (outcome.check_failed or outcome.waiting_for_computer or wake_error is not None))
+def _job_changed_since(connection: DBClient, job: Mapping[str, Any], snapshot: str) -> bool:
+    connection.commit()
+    current = load_encode_job(connection, str(job["job_id"]))
+    return current is None or stable_json_hash(current) != snapshot
 
 
 def _unconfirmed_run_waited_long_enough(job: Mapping[str, Any], now: datetime, deps: EncodeQueueRuntimeDeps) -> bool:
@@ -2390,7 +2395,7 @@ def _release_jobs_stranded_by_an_outage(connection: DBClient, deps: EncodeQueueR
         _save_swept_job(connection, job, snapshot, deps)
 
 
-def _check_held_quality_runs_again(connection: DBClient, deps: EncodeQueueRuntimeDeps) -> None:
+def _check_held_quality_runs_again(connection: DBClient, config: MediaforceConfig, deps: EncodeQueueRuntimeDeps) -> None:
     rows = connection.execute(
         select(encode_jobs.c.job_id)
         .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
@@ -2399,20 +2404,22 @@ def _check_held_quality_runs_again(connection: DBClient, deps: EncodeQueueRuntim
     ).mappings().fetchall()
     for row in rows:
         job = load_encode_job(connection, str(row["job_id"]))
-        if job is None or not _held_quality_run_can_be_checked(connection, job, deps):
+        if job is None or not _held_quality_run_can_be_checked(connection, config, job, deps):
             continue
         snapshot = stable_json_hash(job)
         _wait_to_check_held_quality_run(job, deps)
         _save_swept_job(connection, job, snapshot, deps)
 
 
-def _held_quality_run_can_be_checked(connection: DBClient, job: Mapping[str, Any], deps: EncodeQueueRuntimeDeps) -> bool:
+def _held_quality_run_can_be_checked(
+        connection: DBClient, config: MediaforceConfig, job: Mapping[str, Any], deps: EncodeQueueRuntimeDeps,
+) -> bool:
     context = object_dict(object_dict(job.get("progress")).get(QUALITY_CONTAINMENT_PROGRESS_KEY))
     if (context.get("asked_at") or int_value(job.get("attempt_count")) >= deps.encode_job_max_attempts
             or CONTAINMENT_UNPROVEN_OWNER_STEP not in str(context.get("timeout_message") or job.get("error") or "")):
         return False
     try:
-        _unconfirmed_run_computer(job)
+        _unconfirmed_run_computer(config, job)
     except RuntimeError:
         return False
     return not _a_later_run_may_have_the_file(connection, job)
@@ -2442,9 +2449,10 @@ def _wait_to_check_held_quality_run(job: dict[str, Any], deps: EncodeQueueRuntim
     context = object_dict(progress.get(QUALITY_CONTAINMENT_PROGRESS_KEY))
     original = str(context.get("timeout_message") or job.get("error") or "")
     now_iso = deps.now_iso()
+    ran_on = object_dict(job.get("last_host"))
     progress[QUALITY_CONTAINMENT_PROGRESS_KEY] = {
+        "host_key": ran_on.get("key"), "endpoint": ran_on.get("host"),
         **context, "timeout_message": original, "checking_since": now_iso,
-        "host_key": _recorded_host_key(object_dict(job.get("host"))),
     }
     job.update({
         "status": "retry_backoff",

@@ -155,23 +155,28 @@ the Director-watched session on a real encode computer.
     shown stopped and the attempt is unchanged, the usual cleanup removes the
     unfinished output and the file is queued, within its existing attempt
     limit, schedule and validation.
-  - When the run is not shown stopped (the computer does not answer,
-    survivors, a refused sign-in, a failed check, or the saved folder,
-    attempt or outputs no longer match), the file keeps waiting and is
-    checked again under the usual retry backoff. Only after
+  - When the run is not shown stopped for any reason (the computer does not
+    answer, survivors, a refused sign-in, a failed check, the saved folder,
+    attempt or outputs no longer match, or another encode's ownership of the
+    output blocks or clouds the check), the file keeps waiting and is checked
+    again under the usual retry backoff. Only after
     `UNCONFIRMED_RUN_ASK_AFTER` (a day) without proof does it go to the user,
     with the original explanation and the last detail.
   - A file already held for this reason when Mediaforce starts (records from
     before these checks, or one that waited for the user after a failed
     check) goes back to the same wait when it is a mounted remote quality run
-    below its attempt limit, its saved computer records agree, and no later
-    run includes the file. Without a saved scoped folder, the check stops
-    nothing: it takes a fresh, complete process listing from that computer
-    (the listing must show itself) and passes only when no `ab-av1` and no
-    process naming a quality work folder is running there, so another
-    file's quality run on that computer keeps it waiting too. A file that
-    went to the user after the day is not checked again; the user's Retry
-    with its confirmation stays the override.
+    below its attempt limit and no later run includes the file. Its saved
+    computer must be unambiguous: the attempt's `last_host` key and SSH
+    endpoint (user and host) are present, equal each other, equal the job's
+    host, and match exactly one configured SSH computer. Without a saved
+    scoped folder, the check stops nothing: it takes a fresh, complete process
+    listing from that computer (the listing must show itself) and passes only
+    when nothing there names `ab-av1`, `ffmpeg` or `ffprobe` anywhere in its
+    command line, or a quality work folder. Those are the programs remote
+    quality runs and encodes start, so any media work on that computer,
+    including another file's, keeps it waiting. A file that went to the user
+    after the day is not checked again; the user's Retry with its
+    confirmation stays the override.
   - On its last attempt, or for local, streamed and scratch work, the file
     waits for the user with the plain instruction to check that computer is
     idle and then try the file again. The user's Retry keeps its existing

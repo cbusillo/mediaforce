@@ -4155,24 +4155,29 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(updated["error"], plain_message)
         self.assertIsNone(updated["retry_not_before"])
 
-    def _held_quality_run(self, connection: DBClient, name: str, **changes: Any) -> tuple[dict[str, Any], Path]:
+    _HELD_RUN_HOST: dict[str, object] = {"key": "remote-a.example", "host": "remote-a.example", "label": "Remote A", "mode": "ssh"}
+
+    def _held_quality_run(
+            self, connection: DBClient, name: str, *, configured: list[dict[str, object]] | None = None, **changes: Any,
+    ) -> tuple[dict[str, Any], Path]:
+        self.config.raw["remote_hosts"] = [dict(self._HELD_RUN_HOST)] if configured is None else configured
         item_id = self._insert_library_item(connection, self._create_source_file(f"{name}.mkv"), status="encoding")
         self._write_manifest(
             f"manifest-{name}.json", [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{name}.mkv"))}],
         )
         self._save_job(connection, job_id=f"job-{name}", manifest_name=f"manifest-{name}.json",
-                       host=dict(self._QUALITY_TIMEOUT_HOST), status="needs_attention", attempt_count=1)
+                       host=dict(self._HELD_RUN_HOST), status="needs_attention", attempt_count=1)
         job = load_encode_job(connection, f"job-{name}")
         assert job is not None
         held_at = web_app._now_iso()
         timeout = encoding_quality.RemoteQualityTimeoutError(
             phase="crf_search", timeout_seconds=encoding_quality.REMOTE_QUALITY_SILENCE_TIMEOUT_SECONDS,
-            host_key="remote-a", host_label="Remote A", remote_process_contained=False, stalled=True,
+            host_key="remote-a.example", host_label="Remote A", remote_process_contained=False, stalled=True,
         )
         job.update({
             "last_failure_kind": encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND,
             "terminal_reason": encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND, "error": str(timeout),
-            "last_host": dict(self._QUALITY_TIMEOUT_HOST), "started_at": held_at, "finished_at": held_at,
+            "last_host": dict(self._HELD_RUN_HOST), "started_at": held_at, "finished_at": held_at,
             "last_failure_at": held_at, **changes,
         })
         save_encode_job(connection, job)
@@ -4185,12 +4190,31 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
     def _restart_and_retry(self, connection: DBClient, computer: _HeldRunComputer, job: dict[str, Any]) -> dict[str, Any]:
         with self._quality_timeout_computer(computer.run_remote_command):
             web_app._recover_encode_queue(connection, self.config)
+        return self._retry_now(connection, computer, job)
+
+    def _retry_now(self, connection: DBClient, computer: _HeldRunComputer, job: dict[str, Any]) -> dict[str, Any]:
+        with self._quality_timeout_computer(computer.run_remote_command):
             if (load_encode_job(connection, job["job_id"]) or {}).get("status") == "retry_backoff":
                 self._due_now(connection, job)
             encode_runtime.reconcile_encode_jobs(connection, self.config, web_app._encode_queue_runtime_deps())
         current = load_encode_job(connection, job["job_id"])
         assert current is not None
         return current
+
+    @staticmethod
+    def _checking_for_over_a_day(connection: DBClient, job: dict[str, Any]) -> None:
+        current = load_encode_job(connection, job["job_id"])
+        assert current is not None
+        progress = copy.deepcopy(current["progress"])
+        checking_since = datetime.now(tz=UTC) - encode_runtime.UNCONFIRMED_RUN_ASK_AFTER - timedelta(minutes=1)
+        progress[encode_runtime.QUALITY_CONTAINMENT_PROGRESS_KEY]["checking_since"] = checking_since.isoformat()
+        save_encode_job(connection, {**current, "progress": progress})
+        connection.commit()
+
+    def _assert_asks_the_owner(self, asked: dict[str, Any]) -> None:
+        self.assertEqual((asked["status"], asked["terminal_reason"]),
+                         ("needs_attention", encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND))
+        self.assertTrue(encode_runtime.unfinished_child_reason(asked)[2])
 
     def test_held_file_goes_back_to_work_once_its_computer_shows_no_quality_run(self) -> None:
         computer = _HeldRunComputer()
@@ -4208,6 +4232,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         still_running = {
             "quality run": f"50 1 S Fri Oct 9 13:00:00 2026 /opt/homebrew/bin/ab-av1 crf-search --temp-dir {scope}\n",
             "orphaned sample encode": f"51 1 S Fri Oct 9 13:00:00 2026 ffmpeg -i {scope}/sample.mkv -f null -\n",
+            "orphaned measurement": "52 1 S Fri Oct 9 13:00:00 2026 /opt/homebrew/opt/ffmpeg-full/bin/ffmpeg -i sample.mkv "
+                                    "-i /Volumes/media/tv/show/episode.mkv -lavfi libvmaf -f null -\n",
+            "probe inside a wrapper": "53 1 S Fri Oct 9 13:00:00 2026 sh -lc export PATH=/opt/homebrew/bin:$PATH; "
+                                      "ffprobe -v error /Volumes/media/tv/show/episode.mkv\n",
         }
         answers = {
             **{name: _HeldRunComputer(process) for name, process in still_running.items()},
@@ -4224,25 +4252,43 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 if name == "unreachable":
                     self.assertEqual(encode_runtime.unfinished_child_reason(waiting)[0], "waiting_for_computer:Remote A")
 
-                progress = copy.deepcopy(waiting["progress"])
-                checking_since = datetime.now(tz=UTC) - encode_runtime.UNCONFIRMED_RUN_ASK_AFTER - timedelta(minutes=1)
-                progress[encode_runtime.QUALITY_CONTAINMENT_PROGRESS_KEY]["checking_since"] = checking_since.isoformat()
-                save_encode_job(connection, {**waiting, "progress": progress})
-                asked = self._restart_and_retry(connection, computer, job)
-
-                self.assertEqual((asked["status"], asked["terminal_reason"]),
-                                 ("needs_attention", encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND))
-                self.assertTrue(encode_runtime.unfinished_child_reason(asked)[2])
+                self._checking_for_over_a_day(connection, job)
+                self._assert_asks_the_owner(self._restart_and_retry(connection, computer, job))
                 self.assertEqual(self._restart_and_retry(connection, computer, job)["status"], "needs_attention")
                 self.assertTrue(partial.exists())
                 self.assertEqual(computer.signals_sent(), [])
 
+    def test_held_file_another_encode_blocks_from_checking_asks_after_a_day(self) -> None:
+        for name, blocker_manifest in (("owned-by-another-encode", None), ("ownership-unknown", "missing-manifest.json")):
+            with self.subTest(name), open_db(self.config.paths.db_path) as connection:
+                computer = _HeldRunComputer()
+                job, partial = self._held_quality_run(connection, name)
+                encode_runtime._check_held_quality_runs_again(connection, self.config, web_app._encode_queue_runtime_deps())
+                lease = (datetime.now(tz=UTC) + timedelta(hours=1)).isoformat()
+                blocker = {**copy.deepcopy(job), "job_id": f"{name}-blocker", "status": "running", "lease_expires_at": lease,
+                           "progress": {}, "last_failure_kind": None, "terminal_reason": None}
+                if blocker_manifest is not None:
+                    blocker["manifest_path"] = str(self.root / "runs" / blocker_manifest)
+                save_encode_job(connection, blocker)
+                connection.commit()
+
+                self.assertEqual(self._retry_now(connection, computer, job)["status"], "retry_backoff")
+                self._checking_for_over_a_day(connection, job)
+                self._assert_asks_the_owner(self._retry_now(connection, computer, job))
+                self.assertTrue(partial.exists())
+                self.assertEqual(computer.commands, [])
+
     def test_held_file_without_a_clear_record_or_attempt_left_stays_with_the_owner(self) -> None:
-        other_computer = {**self._QUALITY_TIMEOUT_HOST, "key": "remote-b", "host": "remote-b.example"}
+        other_endpoint = {**self._HELD_RUN_HOST, "host": "remote-b.example"}
         max_attempts = web_app._encode_queue_runtime_deps().encode_job_max_attempts
         for name, changes in (
-                ("another-computer-recorded", {"last_host": other_computer}),
-                ("streamed", {"host": {**self._QUALITY_TIMEOUT_HOST, "media_access": "stream"}}),
+                ("another-computer-recorded", {"last_host": {**self._HELD_RUN_HOST, "key": "remote-b.example", "host": "remote-b.example"}}),
+                ("endpoint-changed-under-the-same-key", {"host": other_endpoint}),
+                ("no-recorded-endpoint", {"last_host": {"key": "remote-a.example"}}),
+                ("no-recorded-computer", {"last_host": {}}),
+                ("no-longer-configured", {"configured": []}),
+                ("configured-as-another-user", {"configured": [{**self._HELD_RUN_HOST, "host": "admin@remote-a.example"}]}),
+                ("streamed", {"host": {**self._HELD_RUN_HOST, "media_access": "stream"}}),
                 ("last-attempt", {"attempt_count": max_attempts}),
                 ("not-a-quality-run", {"error": "Encoder containment could not be proven."})):
             with self.subTest(name), open_db(self.config.paths.db_path) as connection:
@@ -4250,6 +4296,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 job, partial = self._held_quality_run(connection, name, **changes)
                 held = load_encode_job(connection, job["job_id"])
                 after = self._restart_and_retry(connection, computer, job)
+                connection.execute(delete(encode_jobs))
+                connection.commit()
                 self.assertEqual(after, held)
                 self.assertTrue(partial.exists())
                 self.assertEqual(computer.commands, [])
