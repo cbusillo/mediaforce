@@ -154,7 +154,7 @@ def estimate_encode_duration(
         samples: tuple[EncodeDurationSample, ...],
 ) -> EncodeDurationEstimate:
     source_duration_seconds = float_value(item.get("duration_seconds")) or DEFAULT_SOURCE_DURATION_SECONDS
-    host_tokens = _host_identity_tokens(host)
+    host_tokens = host_identity_tokens(host)
     host_samples = [sample for sample in samples if _sample_matches_host(sample, host_tokens)]
     comparable = _closest_sample_groups(host_samples, samples, resolution_class(item.get("height")))
     speeds = [[sample.encode_realtime_factor for sample in group] for group in comparable]
@@ -296,7 +296,7 @@ def _parse_timestamp(value: Any) -> datetime | None:
     return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
 
 
-def _host_identity_tokens(host: dict[str, Any]) -> set[str]:
+def host_identity_tokens(host: dict[str, Any]) -> set[str]:
     tokens = {
         str(host.get(key) or "").strip().casefold()
         for key in ("key", "host", "label")

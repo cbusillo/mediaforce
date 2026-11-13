@@ -202,7 +202,7 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
         case "/api/app/other": """
             {"items": [{"prefix": "other/Example", "title": "Example", "file_count": 1, "bytes": 1000, "estimated_saved_bytes": 400, "state": "ready"}], "truncated": false}
             """
-        case "/api/hosts": "{\"hosts\": []}"
+        case "/api/app/computers": ComputerFixTests.payload
         case "/api/app/activity": ActivityTests.payload
         case "/api/completed": "{\"folders\": []}"
         case "/api/archive-cleanup": "{\"file_count\": 0, \"total_size_bytes\": 0}"
@@ -313,7 +313,7 @@ private final class BrokenRenderServer: RenderFixtureServer, @unchecked Sendable
 
 private final class MissingOptionalRenderServer: RenderFixtureServer, @unchecked Sendable {
     override func payload(_ path: String) -> String? {
-        path.hasPrefix("/api/app/samples/") || ["/api/app/kinds", "/api/app/tv-shows", "/api/hosts"].contains(path)
+        path.hasPrefix("/api/app/samples/") || ["/api/app/kinds", "/api/app/tv-shows", "/api/app/computers"].contains(path)
             ? nil : super.payload(path)
     }
 }

@@ -86,12 +86,6 @@ struct MediaforceClient: Sendable {
         baseURL.appending(path: path)
     }
 
-    func hosts() async throws -> HostsFacts {
-        var request = URLRequest(url: baseURL.appending(path: "api/hosts").appending(queryItems: [URLQueryItem(name: "compact", value: "1")]))
-        request.timeoutInterval = Self.factsTimeout
-        return try await decode(HostsFacts.self, from: request)
-    }
-
     /// Runs one of a computer's fixes. Setting a computer up or starting it can take minutes, so these wait longer.
     func computerAction(_ action: ComputerAction, _ hostKey: String, password: String? = nil) async throws -> HostActionResult {
         let path = switch action {
