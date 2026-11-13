@@ -28,6 +28,7 @@ Changing them leaves the approval and its contract as they are, so finished file
 import copy
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any, Protocol, runtime_checkable
@@ -107,10 +108,15 @@ def season_prefix_of(config: MediaforceConfig, rel_path: str) -> str | None:
 
 
 def season_prefix_from_types(library_types: Mapping[str, str], rel_path: str) -> str | None:
-    path = PurePosixPath(str(rel_path or "").strip().strip("/"))
+    return _season_prefix(tuple(library_types.items()), str(rel_path or ""))
+
+
+@lru_cache(maxsize=1 << 17)
+def _season_prefix(library_types: tuple[tuple[str, str], ...], rel_path: str) -> str | None:
+    path = PurePosixPath(rel_path.strip().strip("/"))
     if len(path.parts) < 3 or (len(path.parts) == 3 and path.suffix):
         return None
-    identity = season_identity({"rel_path": path.as_posix()}, library_types=library_types)
+    identity = season_identity({"rel_path": path.as_posix()}, library_types=dict(library_types))
     return identity.season_prefix if identity is not None else None
 
 

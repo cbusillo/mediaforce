@@ -31,6 +31,7 @@ final class MainWindowModel {
     var requestedComputer: String?
     let client: MediaforceClient
     let posters: PosterStore
+    let activity = PageFacts<ActivityFacts>()
 
     init(client: MediaforceClient) {
         self.client = client

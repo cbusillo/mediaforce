@@ -1239,7 +1239,7 @@ def create_app(
     def _activity_payload() -> dict[str, Any]:
         from mediaforce.web.runtime.app_activity import activity_payload
 
-        with open_db(config.paths.db_path) as connection, kind_snapshot(connection, config, _load_calibration_state):
+        with open_db(config.paths.db_path) as connection, library_calculations.request(connection), kind_snapshot(connection, config, _load_calibration_state):
             computers = _host_runtime_rows(connection, config, collect_statuses=_cached_host_statuses)
             following = next_approved_season(connection, config, load_calibration_state=_load_calibration_state, now=wall_time())
             return activity_payload(
