@@ -178,32 +178,25 @@ struct LibrarySettingsForm: View {
     var body: some View {
         VStack(spacing: 0) {
             Form {
-                Section(Words.librariesSection) {
+                ForEach(rows) { $row in
+                    Section(row.library.name.isEmpty ? Words.unnamedLibrary : row.library.name) {
+                        LibraryRowEditor(row: $row, kinds: kinds, model: model)
+                    }
+                }
+                Section {
                     if model.draft?.rows.isEmpty ?? true {
                         Text(Words.noLibraries)
                             .foregroundStyle(.secondary)
-                    }
-                    ForEach(rows) { $row in
-                        LibraryRowEditor(row: $row, kinds: kinds, model: model)
                     }
                     Button(Words.addLibrary, systemImage: "plus") {
                         model.draft?.addLibrary(type: kinds.last ?? "other")
                     }
                 }
                 Section(Words.workingSpaceSection) {
-                    FolderField(title: Words.workingFolder, path: workingFolder)
-                    Text(Words.workingFolderHelp)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    HStack {
-                        TextField(Words.lookForNewFiles, value: refreshHours, format: .number)
-                            .multilineTextAlignment(.trailing)
-                            .frame(maxWidth: 260)
-                        Text(Words.hours)
+                    FolderField(title: Words.workingFolder, help: Words.workingFolderHelp, path: workingFolder)
+                    SettingsRow(Words.lookForNewFiles, help: Words.lookForNewFilesHelp) {
+                        AmountField(title: Words.lookForNewFiles, value: refreshHours, format: .number, unit: Words.hours)
                     }
-                    Text(Words.lookForNewFilesHelp)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
             }
             .formStyle(.grouped)
@@ -265,30 +258,17 @@ struct LibraryRowEditor: View {
     let model: LibrarySettingsModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                TextField(Words.libraryName, text: $row.library.name)
-                Picker(Words.libraryType, selection: kind) {
-                    ForEach(kinds, id: \.self) { code in
-                        Text(Words.libraryKind(code)).tag(code)
-                    }
-                }
-                .frame(maxWidth: 220)
-                Button(Words.removeLibrary, systemImage: "minus.circle") { model.pendingRemoval = row }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.borderless)
-                    .help(Words.removeLibrary)
-            }
-            FolderField(title: Words.libraryFolder, path: $row.library.folder)
-            DisclosureGroup(Words.plexPathSummary(row.library.plexPath)) {
-                TextField(Words.plexPath, text: $row.library.plexPath)
-                    .font(.body.monospaced())
-                Text(Words.plexPathHelp)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        TextField(Words.libraryName, text: $row.library.name)
+        Picker(Words.libraryType, selection: kind) {
+            ForEach(kinds, id: \.self) { code in
+                Text(Words.libraryKind(code)).tag(code)
             }
         }
-        .padding(.vertical, 4)
+        FolderField(title: Words.libraryFolder, path: $row.library.folder)
+        DisclosureGroup(Words.plexPathSummary(row.library.plexPath)) {
+            MonospacedField(title: Words.plexPath, help: Words.plexPathHelp, text: $row.library.plexPath)
+        }
+        Button(Words.removeLibrary, systemImage: "minus.circle", role: .destructive) { model.pendingRemoval = row }
     }
 
     private var kind: Binding<String> {
@@ -299,15 +279,97 @@ struct LibraryRowEditor: View {
     }
 }
 
+/// A Settings row in the standard macOS layout: a one-line label with any help under it, and the control on the right.
+struct SettingsRow<Control: View>: View {
+    let title: String
+    let help: String?
+    let control: Control
+
+    init(_ title: String, help: String? = nil, @ViewBuilder control: () -> Control) {
+        self.title = title
+        self.help = help
+        self.control = control()
+    }
+
+    var body: some View {
+        LabeledContent {
+            control
+        } label: {
+            Text(title)
+            if let help {
+                Text(help)
+            }
+        }
+    }
+}
+
+/// A small number box with its unit after it, for the control side of a `SettingsRow`.
+struct AmountField<Format: ParseableFormatStyle>: View where Format.FormatOutput == String {
+    let title: String
+    @Binding var value: Format.FormatInput
+    let format: Format
+    var unit: String?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            TextField(title, value: $value, format: format)
+                .labelsHidden()
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 72)
+            if let unit { Text(unit) }
+        }
+        .fixedSize()
+    }
+}
+
+/// A whole number with its stepper after it, for the control side of a `SettingsRow`.
+struct CountStepper: View {
+    let title: String
+    @Binding var value: Int
+    let range: ClosedRange<Int>
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(value.formatted())
+                .monospacedDigit()
+            Stepper(title, value: $value, in: range)
+                .labelsHidden()
+        }
+    }
+}
+
+/// A path, address or command: the label stays in the body font and only the value is monospaced.
+struct MonospacedField: View {
+    let title: String
+    var help: String?
+    @Binding var text: String
+    var prompt: String?
+
+    var body: some View {
+        SettingsRow(title, help: help) {
+            TextField(title, text: $text, prompt: prompt.map { Text($0) })
+                .labelsHidden()
+                .font(.body.monospaced())
+                .multilineTextAlignment(.trailing)
+        }
+    }
+}
+
 struct FolderField: View {
     let title: String
+    var help: String?
     @Binding var path: String
 
     var body: some View {
-        HStack {
-            TextField(title, text: $path)
-                .font(.body.monospaced())
-            Button(Words.chooseFolder) { choose() }
+        SettingsRow(title, help: help) {
+            HStack {
+                TextField(title, text: $path)
+                    .labelsHidden()
+                    .font(.body.monospaced())
+                    .multilineTextAlignment(.trailing)
+                Button(Words.chooseFolder) { choose() }
+            }
         }
     }
 
@@ -604,19 +666,22 @@ struct ComputerSettingsForm: View {
             }
         case .workWindows:
             Form {
-                Section(Words.workWindowsSection) {
-                    if model.draft?.schedules.isEmpty ?? true {
-                        Text(Words.noWorkWindows)
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(schedules) { $row in
+                ForEach(schedules) { $row in
+                    Section(row.schedule.name.isEmpty ? Words.unnamedWorkWindow : row.schedule.name) {
                         WorkWindowEditor(schedule: $row.schedule, days: facts.days) {
                             model.pendingScheduleRemoval = row
                         }
                     }
+                }
+                Section {
+                    if model.draft?.schedules.isEmpty ?? true {
+                        Text(Words.noWorkWindows)
+                            .foregroundStyle(.secondary)
+                    }
                     Button(Words.addWorkWindow, systemImage: "plus") {
                         model.draft?.addSchedule(days: facts.days)
                     }
+                } footer: {
                     Text(Words.workWindowHelp)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -691,11 +756,10 @@ struct ComputerEditor: View {
 
     var body: some View {
         TextField(Words.computerName, text: $computer.name)
-        VStack(alignment: .leading, spacing: 4) {
+        SettingsRow(Words.computerAddress, help: Words.computerAddressHelp) {
             TextField(Words.computerAddress, text: $computer.address)
-            Text(Words.computerAddressHelp)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .labelsHidden()
+                .multilineTextAlignment(.trailing)
         }
         LabeledContent(Words.computerCanDo) {
             VStack(alignment: .leading) {
@@ -713,29 +777,24 @@ struct ComputerEditor: View {
                 Text(schedule.name.isEmpty ? Words.unnamedWorkWindow : schedule.name).tag(schedule.key)
             }
         }
-        LabeledContent(Words.computerLibraries) {
+        SettingsRow(Words.computerLibraries, help: Words.computerLibrariesHelp) {
             VStack(alignment: .leading) {
                 ForEach(facts.libraries, id: \.key) { library in
                     Toggle(library.name, isOn: libraryBinding(library.key))
                         .disabled(libraryLocked(library.key))
                 }
-                Text(Words.computerLibrariesHelp)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
-        Stepper(Words.atOnce(computer.atOnce), value: $computer.atOnce, in: 1...16)
-        VStack(alignment: .leading, spacing: 4) {
-            Stepper("\(Words.computerPriority): \(computer.priority.formatted())", value: $computer.priority, in: -100...100)
-            Text(Words.computerPriorityHelp)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        SettingsRow(Words.jobsAtOnce) {
+            CountStepper(title: Words.jobsAtOnce, value: $computer.atOnce, range: 1...16)
         }
-        VStack(alignment: .leading, spacing: 4) {
+        SettingsRow(Words.computerPriority, help: Words.computerPriorityHelp) {
+            CountStepper(title: Words.computerPriority, value: $computer.priority, range: -100...100)
+        }
+        SettingsRow(Words.wakeAddress, help: Words.wakeAddressHelp) {
             TextField(Words.wakeAddress, text: $computer.wakeAddress, prompt: Text(Words.wakeAddressPrompt))
-            Text(Words.wakeAddressHelp)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .labelsHidden()
+                .multilineTextAlignment(.trailing)
         }
         DisclosureGroup(Words.connectionDetails) {
             Picker(Words.mediaAccess, selection: $computer.mediaAccess) {
@@ -743,24 +802,20 @@ struct ComputerEditor: View {
                     Text(Words.mediaAccessChoice(code)).tag(code)
                 }
             }
-            TextField(Words.mediaforceFolder, text: $computer.mediaforceFolder, prompt: Text(Words.optionalField))
-                .font(.body.monospaced())
-            TextField(Words.computerWorkingFolder, text: $computer.workingFolder, prompt: Text(Words.computerWorkingFolderPrompt))
-                .font(.body.monospaced())
-            VStack(alignment: .leading, spacing: 4) {
-                TextField(Words.scratchFolder, text: $computer.scratchFolder, prompt: Text(Words.scratchFolderPrompt))
-                    .font(.body.monospaced())
-                Text(Words.scratchFolderHelp)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            MonospacedField(title: Words.mediaforceFolder, text: $computer.mediaforceFolder, prompt: Words.optionalField)
+            MonospacedField(
+                title: Words.computerWorkingFolder, text: $computer.workingFolder, prompt: Words.computerWorkingFolderPrompt
+            )
+            MonospacedField(
+                title: Words.scratchFolder, help: Words.scratchFolderHelp, text: $computer.scratchFolder,
+                prompt: Words.scratchFolderPrompt
+            )
             ForEach(facts.libraries, id: \.key) { library in
-                TextField(
-                    Words.libraryFolderOnComputer(library.name),
+                MonospacedField(
+                    title: Words.libraryFolderOnComputer(library.name),
                     text: libraryFolderBinding(library.key),
-                    prompt: Text(Words.optionalField)
+                    prompt: Words.optionalField
                 )
-                .font(.body.monospaced())
             }
             ForEach(removedLibraryFolders, id: \.library) { folder in
                 LabeledContent(Words.removedLibraryFolder) {
@@ -773,15 +828,10 @@ struct ComputerEditor: View {
                     }
                 }
             }
-            TextField(Words.startCommand, text: $computer.startCommand, prompt: Text(Words.optionalField))
-                .font(.body.monospaced())
-            TextField(Words.stopCommand, text: $computer.stopCommand, prompt: Text(Words.optionalField))
-                .font(.body.monospaced())
-            HStack {
-                TextField(Words.startWait, value: $computer.startWaitSeconds, format: .number)
-                    .multilineTextAlignment(.trailing)
-                    .frame(maxWidth: 260)
-                Text(Words.seconds)
+            MonospacedField(title: Words.startCommand, text: $computer.startCommand, prompt: Words.optionalField)
+            MonospacedField(title: Words.stopCommand, text: $computer.stopCommand, prompt: Words.optionalField)
+            SettingsRow(Words.startWait) {
+                AmountField(title: Words.startWait, value: $computer.startWaitSeconds, format: .number, unit: Words.seconds)
             }
         }
     }
@@ -829,47 +879,37 @@ struct WorkWindowEditor: View {
     let remove: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                TextField(Words.workWindowName, text: $schedule.name)
-                Button(Words.removeWorkWindow, systemImage: "minus.circle", action: remove)
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.borderless)
-                    .help(Words.removeWorkWindow)
-            }
-            dayRow(Words.worksOn, allDay: false)
-            dayRow(Words.allDayOn, allDay: true)
-            HStack {
-                Picker(Words.startsAt, selection: $schedule.startHour) {
-                    ForEach(0..<24, id: \.self) { hour in Text(Words.hour(hour)).tag(hour) }
-                }
-                Picker(Words.endsAt, selection: $schedule.endHour) {
-                    ForEach(0..<24, id: \.self) { hour in Text(Words.hour(hour)).tag(hour) }
-                }
-            }
-            Toggle(Words.finishCurrentFile, isOn: Binding(
-                get: { schedule.finishCurrentFile == true },
-                set: { schedule.finishCurrentFile = $0 }
-            ))
-            Text(Words.finishCurrentFileHelp)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        TextField(Words.workWindowName, text: $schedule.name)
+        dayRow(Words.worksOn, allDay: false)
+        dayRow(Words.allDayOn, allDay: true)
+        Picker(Words.startsAt, selection: $schedule.startHour) {
+            ForEach(0..<24, id: \.self) { hour in Text(Words.hour(hour)).tag(hour) }
         }
-        .padding(.vertical, 4)
+        Picker(Words.endsAt, selection: $schedule.endHour) {
+            ForEach(0..<24, id: \.self) { hour in Text(Words.hour(hour)).tag(hour) }
+        }
+        Toggle(isOn: Binding(
+            get: { schedule.finishCurrentFile == true },
+            set: { schedule.finishCurrentFile = $0 }
+        )) {
+            Text(Words.finishCurrentFile)
+            Text(Words.finishCurrentFileHelp)
+        }
+        Button(Words.removeWorkWindow, systemImage: "minus.circle", role: .destructive, action: remove)
     }
 
     private func dayRow(_ title: String, allDay: Bool) -> some View {
-        HStack {
-            Text(title)
-                .frame(width: 60, alignment: .leading)
-            ForEach(days, id: \.self) { day in
-                Toggle(Words.day(day), isOn: Binding(
-                    get: { (allDay ? schedule.allDayDays : schedule.days).contains(day) },
-                    set: { _ in
-                        schedule = ComputerSettingsDraft.togglingDay(day, allDay: allDay, in: schedule, order: days)
-                    }
-                ))
-                .toggleStyle(.button)
+        SettingsRow(title) {
+            HStack(spacing: 4) {
+                ForEach(days, id: \.self) { day in
+                    Toggle(Words.day(day), isOn: Binding(
+                        get: { (allDay ? schedule.allDayDays : schedule.days).contains(day) },
+                        set: { _ in
+                            schedule = ComputerSettingsDraft.togglingDay(day, allDay: allDay, in: schedule, order: days)
+                        }
+                    ))
+                    .toggleStyle(.button)
+                }
             }
         }
     }
@@ -976,26 +1016,22 @@ struct MetadataSettingsForm: View {
         VStack(spacing: 0) {
             Form {
                 Section(Words.plexSection) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle(Words.usePlex, isOn: plexEnabled)
+                    Toggle(isOn: plexEnabled) {
+                        Text(Words.usePlex)
                         Text(Words.usePlexHelp)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
-                    TextField(Words.plexAddress, text: plexAddress, prompt: Text(Words.plexAddressPrompt))
-                        .font(.body.monospaced())
+                    MonospacedField(title: Words.plexAddress, text: plexAddress, prompt: Words.plexAddressPrompt)
                     AccessKeyStatus(name: facts.plex.keyName, found: facts.plex.keyFound)
                 }
-                Section(Words.tmdbSection) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle(Words.useTMDB, isOn: tmdbEnabled)
+                Section {
+                    Toggle(isOn: tmdbEnabled) {
+                        Text(Words.useTMDB)
                         Text(Words.useTMDBHelp)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                     AccessKeyStatus(name: facts.tmdb.keyName, found: facts.tmdb.keyFound)
-                }
-                Section {
+                } header: {
+                    Text(Words.tmdbSection)
+                } footer: {
                     Text(Words.metadataHelp)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1168,49 +1204,43 @@ struct CompressionSettingsForm: View {
                 }
             }
             Section(Words.sizeSection) {
-                HStack {
-                    TextField(Words.sizeGoal, value: values.sizeGoalMb, format: .number)
-                        .multilineTextAlignment(.trailing)
-                        .frame(maxWidth: 220)
-                    Text(Words.megabytes)
-                    Text(Words.forAnEpisodeOf)
-                    TextField(Words.minutes, value: values.sizeGoalMinutes, format: .number)
-                        .labelsHidden()
-                        .multilineTextAlignment(.trailing)
-                        .frame(maxWidth: 60)
-                    Text(Words.minutes)
+                SettingsRow(Words.sizeGoal, help: Words.sizeGoalScaling(facts.sizeGoalMode)) {
+                    HStack(spacing: 6) {
+                        AmountField(title: Words.sizeGoal, value: values.sizeGoalMb, format: .number, unit: Words.megabytes)
+                        Text(Words.forAnEpisodeOf)
+                        AmountField(title: Words.minutes, value: values.sizeGoalMinutes, format: .number, unit: Words.minutes)
+                    }
                 }
-                caption(Words.sizeGoalScaling(facts.sizeGoalMode))
-                numberRow(Words.sizeLimit, value: values.sizeLimitPercent, unit: Words.percent)
-                caption(Words.sizeLimitHelp)
-                numberRow(Words.largestSize, value: values.largestPercent, unit: Words.percentOfOriginal)
-                caption(Words.largestSizeHelp)
+                numberRow(Words.sizeLimit, help: Words.sizeLimitHelp, value: values.sizeLimitPercent, unit: Words.percent)
+                numberRow(
+                    Words.largestSize, help: Words.largestSizeHelp, value: values.largestPercent, unit: Words.percentOfOriginal
+                )
             }
             Section(Words.pictureSection) {
-                HStack {
-                    TextField(Words.tallestPicture, value: values.tallestPicture, format: .number)
-                        .multilineTextAlignment(.trailing)
-                        .frame(maxWidth: 260)
-                    Text(Words.pixelsTall)
+                SettingsRow(
+                    Words.tallestPicture,
+                    help: "\(Words.tallestPictureSummary(values.wrappedValue.tallestPicture)). \(Words.tallestPictureHelp)"
+                ) {
+                    AmountField(title: Words.tallestPicture, value: values.tallestPicture, format: .number, unit: Words.pixelsTall)
                 }
-                caption("\(Words.tallestPictureSummary(values.wrappedValue.tallestPicture)). \(Words.tallestPictureHelp)")
-                TextField(Words.grain, value: values.grain, format: .number)
-                    .multilineTextAlignment(.trailing)
-                    .frame(maxWidth: 260)
-                caption(Words.grainHelp)
+                SettingsRow(Words.grain, help: Words.grainHelp) {
+                    AmountField(title: Words.grain, value: values.grain, format: .number)
+                }
             }
             Section {
                 DisclosureGroup(Words.advancedCompression, isExpanded: $showsAdvanced) {
-                    Picker(Words.measurementPicker, selection: values.measurement) {
+                    Picker(selection: values.measurement) {
                         ForEach(choices(facts.measurements, current: values.wrappedValue.measurement), id: \.self) { code in
                             Text(Words.qualityMeasurement(code)).tag(code)
                         }
+                    } label: {
+                        Text(Words.measurementPicker)
+                        Text(Words.scoresHelp)
                     }
-                    numberRow(Words.appearanceTarget, value: values.appearanceTarget, unit: nil)
-                    numberRow(Words.appearanceMinimum, value: values.appearanceMinimum, unit: nil)
-                    numberRow(Words.detailTarget, value: values.detailTarget, unit: nil)
-                    numberRow(Words.detailMinimum, value: values.detailMinimum, unit: nil)
-                    caption(Words.scoresHelp)
+                    numberRow(Words.appearanceTarget, value: values.appearanceTarget)
+                    numberRow(Words.appearanceMinimum, value: values.appearanceMinimum)
+                    numberRow(Words.detailTarget, value: values.detailTarget)
+                    numberRow(Words.detailMinimum, value: values.detailMinimum)
                     Picker(Words.samplePicker, selection: values.sampleMethod) {
                         ForEach(choices(facts.sampleMethods, current: values.wrappedValue.sampleMethod), id: \.self) { code in
                             Text(Words.sampleMethod(code)).tag(code)
@@ -1221,19 +1251,10 @@ struct CompressionSettingsForm: View {
         }
     }
 
-    private func numberRow(_ title: String, value: Binding<Double>, unit: String?) -> some View {
-        HStack {
-            TextField(title, value: value, format: .number)
-                .multilineTextAlignment(.trailing)
-                .frame(maxWidth: 260)
-            if let unit { Text(unit) }
+    private func numberRow(_ title: String, help: String? = nil, value: Binding<Double>, unit: String? = nil) -> some View {
+        SettingsRow(title, help: help) {
+            AmountField(title: title, value: value, format: .number, unit: unit)
         }
-    }
-
-    private func caption(_ text: String) -> some View {
-        Text(text)
-            .font(.caption)
-            .foregroundStyle(.secondary)
     }
 
     /// A saved choice the server no longer offers stays shown, so the picker never appears empty.

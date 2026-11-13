@@ -810,6 +810,7 @@ extension Words {
     static let librariesSection = "Libraries"
     static let workingSpaceSection = "Working space"
     static let libraryName = "Name"
+    static let unnamedLibrary = "New library"
     static let libraryFolder = "Folder"
     static let libraryType = "Kind"
     static let plexPath = "Path reported by Plex"
@@ -971,9 +972,7 @@ extension Words {
         }
     }
 
-    static func atOnce(_ count: Int) -> String {
-        "Jobs at once: \(count.formatted())"
-    }
+    static let jobsAtOnce = "Jobs at once"
 
     static func day(_ code: String) -> String {
         switch code {

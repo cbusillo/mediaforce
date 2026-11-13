@@ -377,6 +377,5 @@ final class ComputerFixTests: XCTestCase {
         XCTAssertEqual(ComputerFix.primary(for: "remote_login_off"), .checkAgain)
         XCTAssertNil(ComputerFix.primary(for: "ready"))
         XCTAssertEqual(Words.computerAction(.setUp, needsPassword: true), "Set Up")
-        XCTAssertEqual(Words.atOnce(2), "Jobs at once: 2")
     }
 }
