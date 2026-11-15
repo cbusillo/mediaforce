@@ -162,11 +162,15 @@ app.
   - `folder_state.py`
   - `folder_actions.py`
   - `kind_approvals.py`
-    - one approval per kind of content (darker or bright live action), copied
-      from a current folder approval with a size per 45 minutes, and the
-      calibration loader that lets the approval resolver find it
-    - the background choice of the next waiting season a current folder, show,
-      or kind approval covers,
+    - one approval per kind of content (live action; cartoons are decided show
+      by show), copied from a current folder approval with a size per 45
+      minutes, its 4K choice (`POST /api/app/kinds/{kind}/picture`), and the
+      calibration loader that lets the approval resolver find it; a darker or
+      bright live action approval saved before #1385 is carried over to live
+      action once at startup, darker first
+    - the background choice of the next waiting season or movie title a
+      current folder, show, or kind approval covers, from libraries set to
+      compress,
       largest first and one at a time: never while work is paused or a run is
       queued or running (checked again inside the queueing transaction). Each
       file follows its newest runnable-job outcome across scopes, using saved
@@ -193,8 +197,10 @@ app.
     - the Mac app's sample facts and actions (`/api/app/samples/...`): a
       sample is made at the season's chosen size, else its first offered
       size, with its chosen balance of size and detail, else the balanced one;
-      made at the season's own size it keeps the season's resolution, and a
-      saved request that can no longer run is asked for anew
+      every size keeps the season's picture height, a season whose sample
+      episode is taller than the library's tallest picture offers keeping 4K
+      or bringing it down, and a saved request that can no longer run is
+      asked for anew
     - the background choice of samples that need making again: a sample
       whose comparison clips are gone or that failed is made again by itself
       at the season's size goal, until three samples in a row have failed,
@@ -208,7 +214,10 @@ app.
     - the one rule for which sample approval governs a file: the nearest folder
       holding an approval (the file, then its season, show and library); when
       no folder on that path holds any saved sample, the approval for the
-      season's kind of content, if the Director approved one
+      season's or movie title's kind of content, if the Director approved one;
+      under a kind's approval, 4K comes down to the library's tallest picture
+      unless the Director chose to keep it, which changes the approval's
+      contract
     - a production action runs under the nearest saved sample at or above its
       scope, approved or not, as the folder page shows it: a season following
       its show queues under the show's approval, and a sample still awaiting
@@ -416,7 +425,8 @@ Guidance:
   - independent source generations, output versions and immutable measurements
   - typed original-trait reads and advisory historical-plan recovery, separate from current-input evidence
 - `content_kinds.py`
-  - kinds of content: seasons grouped by number ranges of their original traits, and the read-only report
+  - kinds of content: TV seasons and movie titles (feature files only) grouped as cartoon by genres, else live action
+    once an original is measured, and the read-only report
 - `media_scopes.py`
   - canonical user grouping for TV, movie, and generic media roots
   - exact-item versus descendant matching, SQL-safe boundaries, and API scope payloads

@@ -74,8 +74,11 @@ struct MediaforceClient: Sendable {
         try await sampleAction(prefix, "approve", body: ["confirm": confirm, "reviewed_draft_hash": draftHash, "approval_scope": scope])
     }
 
-    func makeSample(_ prefix: String, size: String?, balance: String?) async throws -> SampleActionResult {
-        try await sampleAction(prefix, "make", body: ["size": size ?? NSNull(), "balance": balance ?? NSNull()])
+    /// Makes the sample at the chosen size, balance and, for a 4K season, height; nil leaves each as the season has it.
+    func makeSample(_ prefix: String, size: String?, balance: String?, keepFullHeight: Bool? = nil) async throws -> SampleActionResult {
+        try await sampleAction(prefix, "make", body: [
+            "size": size ?? NSNull(), "balance": balance ?? NSNull(), "keep_full_height": keepFullHeight ?? NSNull(),
+        ])
     }
 
     func compressSeason(_ prefix: String) async throws -> SampleActionResult {

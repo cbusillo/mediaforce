@@ -52,7 +52,7 @@ from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 from mediaforce.web.runtime.production_holds import queue_mode, record_holds, release_holds
 from mediaforce.web.runtime.production_approval import NEARER_APPROVAL_CODE, approval_needs_fresh_sample_response, \
     cached_calibration_loader, effective_production_approval, governed_by, nearer_approval_reason, \
-    policy_with_owner_settings, production_approval_contract, production_approval_identity, \
+    policy_with_owner_settings, production_approval_contract, production_approval_identity, with_kind_picture_height, \
     production_approval_matches, production_calibration, valid_production_approval_contract
 from mediaforce.web.runtime.left_out_files import LeftOutFile, cadence_left_out_files, drop_manifest_items, \
     left_out_payload, left_out_summary, manifest_rel_paths, nothing_queued_response, queue_result_without_files
@@ -888,7 +888,9 @@ def queue_folder_encode_action(
                 "Choose and confirm a compression goal before queueing production.",
             )
         # The owner's current sound choice and lifecycle win over the sample's snapshot of them.
-        production_policy = policy_with_owner_settings(calibration_policy, config, approval_prefix)
+        production_policy = with_kind_picture_height(
+            policy_with_owner_settings(calibration_policy, config, approval_prefix), calibration_payload, config,
+        )
         preflight_config = with_folder_policy_override(config, approval_prefix, production_policy)
         left_out, target_size_refusal = _target_size_left_out(connection, preflight_config, normalized_prefix)
         if target_size_refusal is not None:

@@ -291,15 +291,6 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     assert calls.pop()[4]["compression_intent"]["level"] == "balanced"
     assert make(_folder(compression_intent_options=[]), _status(), "smaller") == {"ok": False, "code": "choose_balance"}
 
-    # Made again at the season's own size, a sample keeps the season's resolution; a size the owner picks brings its own.
-    limited = _folder(resolved_operator_intent={
-        **_folder()["resolved_operator_intent"], "resolution": {"mode": "max_height", "max_height": 1080, "requires_confirmation": False},
-    })
-    assert make(limited, _status("needs_help", "make_sample", "missing_clips"), None)["ok"] is True
-    _kind, _prefix, note, _host, intent, _token = calls.pop()
-    assert intent["resolution"] == {"mode": "max_height", "max_height": 1080} and "1080p" in note
-    assert make(limited, _status(), "smaller")["ok"] is True
-    assert calls.pop()[4]["resolution"]["mode"] == "source"
 
     # A saved request that can no longer run is asked for anew rather than refused.
     refused_retry = make_sample(
@@ -386,18 +377,62 @@ def test_changing_a_reviewed_samples_balance_keeps_measured_direction_for_the_ne
     assert calls[-1][3]["compression_intent"] == chosen["compression_intent"]
 
 
+def _four_k(keeps: bool = False) -> dict[str, Any]:
+    """A season whose sample episode is 4K, in a library whose tallest picture is 1080p."""
+    resolution = {"mode": "source", "max_height": None} if keeps else {"mode": "max_height", "max_height": 1080}
+    folder = _folder(sample_item={"source_size_bytes": 3_853_264_012, "height": 2160}, tallest_picture=1080)
+    for option in folder["size_goal_options"]:
+        option["operator_intent"]["resolution"] = resolution
+    folder["resolved_operator_intent"] = {**folder["resolved_operator_intent"], "resolution": resolution,
+                                          "request": {**folder["resolved_operator_intent"]["request"], "resolution": resolution}}
+    return folder
+
+
+@pytest.mark.parametrize("keeps", [False, True])
+def test_a_4k_season_offers_keeping_4k_or_bringing_it_down_and_the_sample_is_made_at_that_height(keeps: bool) -> None:
+    calls: list[tuple[Any, ...]] = []
+
+    def make(folder: dict[str, Any], status: dict[str, Any], chosen_size: str | None, keep_height: bool | None) -> dict[str, Any]:
+        return make_sample(folder, status, chosen_size, ai_tune=lambda *args: calls.append(args) or {"ok": True},
+                           retry_saved=lambda *args: {"ok": True}, keep_full_height=keep_height)
+
+    four_k = _four_k(keeps)
+    assert sample_facts(four_k, _status())["picture"] == {"source_height": 2160, "limit": 1080, "keeps_full_height": keeps}
+    assert sample_facts(_folder(tallest_picture=1080, sample_item={"height": 1080}), _status())["picture"] is None
+    assert sample_facts(_folder(tallest_picture=0, sample_item={"height": 2160}), _status())["picture"] is None
+
+    kept = {"mode": "source", "max_height": None}
+    brought_down = {"mode": "max_height", "max_height": 1080}
+    # Without a choice the season's own height stands, whichever size is picked; a choice decides it.
+    for size, keep, resolution in [(None, None, kept if keeps else brought_down), ("smaller", None, kept if keeps else brought_down),
+                                   ("smaller", True, kept), (None, False, brought_down)]:
+        assert make(four_k, _status("needs_help", "make_sample", "missing_clips"), size, keep)["ok"] is True
+        note, intent = calls[-1][1], calls[-1][3]
+        assert intent["resolution"] == resolution
+        assert ("1080p" in note) == (resolution == brought_down)
+    # Making a reviewed sample again at the other height asks for it rather than repeating the measured request.
+    assert make(four_k, _status(), None, not keeps)["ok"] is True
+    assert calls[-1][3]["resolution"] == (brought_down if keeps else kept)
+    assert make(four_k, _status(), None, keeps)["ok"] is True
+    assert calls[-1][3]["resolution"] == (kept if keeps else brought_down) and "1.4 times" in calls[-1][1]
+    # A season that is not taller than the limit ignores the choice.
+    assert make(_folder(tallest_picture=1080), _status("needs_help", "make_sample", "missing_clips"), "smaller", True)["ok"]
+    assert calls[-1][3]["resolution"] == _option("smaller", 1)["operator_intent"]["resolution"]
+
+
 def test_native_make_route_forwards_the_chosen_size_and_balance() -> None:
-    calls: list[tuple[str, str | None, str | None]] = []
+    calls: list[tuple[str, str | None, str | None, bool | None]] = []
     app = FastAPI()
     register_app_window_routes(
         app, main_window_payload=dict, tv_shows_payload=dict, movies_payload=dict, other_media_payload=dict,
         sample_payload=lambda _prefix: None,
-        make_sample_action=lambda prefix, size, balance: calls.append((prefix, size, balance)) or {"ok": True},
+        make_sample_action=lambda prefix, size, balance, keep: calls.append((prefix, size, balance, keep)) or {"ok": True},
         approve_sample_action=lambda *_args: {}, compress_season_action=lambda _prefix: {},
     )
     endpoint = _route(app, "/api/app/samples/{prefix:path}/make", "POST")
-    assert _post(endpoint, {"size": "smaller", "balance": "reference"}) == (200, {"ok": True})
-    assert calls == [(PREFIX, "smaller", "reference")]
+    assert _post(endpoint, {"size": "smaller", "balance": "reference", "keep_full_height": True}) == (200, {"ok": True})
+    assert _post(endpoint, {"keep_full_height": "yes"}) == (200, {"ok": True})
+    assert calls == [(PREFIX, "smaller", "reference", True), (PREFIX, None, None, None)]
 
 
 def test_a_running_sample_says_when_it_should_be_ready_only_when_comparable_samples_tell() -> None:
@@ -430,16 +465,16 @@ def test_a_sample_that_needs_making_again_is_made_again_until_it_fails_too_often
     ]
 
 
-@pytest.mark.parametrize("scope", ["darker_live_action", "season", "bright_live_action"])
+@pytest.mark.parametrize("scope", ["live_action", "season", "cartoon"])
 def test_representative_approval_uses_the_explicit_reviewed_scope(scope: str) -> None:
     calls: list[str] = []
     result = approve_sample(
-        PREFIX, set(), "draft-1", scope=scope, representative_kind="darker_live_action",
+        PREFIX, set(), "draft-1", scope=scope, representative_kind="live_action",
         save_profile=lambda *_args: calls.append("save") or {"ok": True},
         queue_encode=lambda *_args: calls.append("queue") or {"ok": True},
         approve_kind=lambda kind, prefix, draft: calls.append(f"kind:{kind}:{prefix}:{draft}") or {"ok": True},
     )
-    if scope == "bright_live_action":
+    if scope == "cartoon":
         assert result == {"ok": False, "code": "approval_scope_changed"}
         assert calls == []
     else:
@@ -451,7 +486,7 @@ def test_representative_approval_uses_the_explicit_reviewed_scope(scope: str) ->
 def test_a_post_save_kind_refusal_reports_the_saved_season_and_real_queue_result(kind_code: str) -> None:
     calls: list[str] = []
     result = approve_sample(
-        PREFIX, set(), "draft-1", scope="darker_live_action", representative_kind="darker_live_action",
+        PREFIX, set(), "draft-1", scope="live_action", representative_kind="live_action",
         save_profile=lambda *_args: calls.append("save") or {"ok": True},
         queue_encode=lambda *_args: calls.append("queue") or {"ok": False, "code": "free_space_reserve"},
         approve_kind=lambda *_args: {"ok": False, "code": kind_code},
@@ -462,10 +497,10 @@ def test_a_post_save_kind_refusal_reports_the_saved_season_and_real_queue_result
 
 @pytest.mark.parametrize("state", ["needs_test", "waiting_for_kind", "making_test", "ready_to_compare", "waiting_for_measurement", "needs_help"])
 def test_first_kind_sample_uses_existing_sample_flow_only_when_it_can_start(state: str) -> None:
-    kinds = [{"kind": "bright_live_action", "approval": None, "sample_season": None,
+    kinds = [{"kind": "live_action", "approval": None, "sample_season": None,
               "shows": [{"sample_season": PREFIX}]}]
     cards = [{"prefix": PREFIX, **_status(state, None)}]
-    assert kind_sample_candidates(kinds, cards)["bright_live_action"] == ([PREFIX] if state in {"needs_test", "waiting_for_kind"} else [])
+    assert kind_sample_candidates(kinds, cards)["live_action"] == ([PREFIX] if state in {"needs_test", "waiting_for_kind"} else [])
     for settled in [{"approval": {"from_prefix": PREFIX}}, {"sample_season": PREFIX}, {"settings": [{"from_prefix": PREFIX}]}]:
         assert not kind_sample_candidates([kinds[0] | settled], cards)
 
@@ -473,21 +508,21 @@ def test_first_kind_sample_uses_existing_sample_flow_only_when_it_can_start(stat
 def test_first_kind_sample_candidates_keep_ranked_fallbacks() -> None:
     kinds = [{"kind": kind, "approval": None, "sample_season": None,
               "shows": [{"sample_season": prefix}, {"sample_season": other}]}
-             for kind, prefix, other in [("bright_live_action", PREFIX, "tv/Other Live/Season 1"),
+             for kind, prefix, other in [("live_action", PREFIX, "tv/Other Live/Season 1"),
                                          ("cartoon", "tv/Cartoon/Season 1", "tv/Other Cartoon/Season 1")]]
     cards = [{"prefix": prefix, **_status("needs_test", "make_sample")}
              for prefix in [PREFIX, "tv/Other Live/Season 1", "tv/Cartoon/Season 1", "tv/Other Cartoon/Season 1"]]
-    assert kind_sample_candidates(kinds, cards) == {"bright_live_action": [PREFIX, "tv/Other Live/Season 1"],
+    assert kind_sample_candidates(kinds, cards) == {"live_action": [PREFIX, "tv/Other Live/Season 1"],
                                                   "cartoon": ["tv/Cartoon/Season 1", "tv/Other Cartoon/Season 1"]}
     cards[0] = {"prefix": PREFIX, **_status("making_test", "make_sample")}
-    assert kind_sample_candidates(kinds, cards)["bright_live_action"] == ["tv/Other Live/Season 1"]
+    assert kind_sample_candidates(kinds, cards)["live_action"] == ["tv/Other Live/Season 1"]
 
 
 @pytest.mark.parametrize("changed", [False, True])
 def test_sample_sweep_falls_back_stops_after_success_and_keeps_other_kinds_moving(changed: bool) -> None:
     prefixes = ["tv/A/Season 1", "tv/B/Season 1", "tv/C/Season 1", "tv/Cartoon/Season 1"]
     cards = [{"prefix": prefix, **_status("needs_test", "make_sample")} for prefix in prefixes]
-    kinds = [{"kind": "bright_live_action", "shows": [{"sample_season": prefix} for prefix in prefixes[:3]]},
+    kinds = [{"kind": "live_action", "shows": [{"sample_season": prefix} for prefix in prefixes[:3]]},
              {"kind": "cartoon", "shows": [{"sample_season": prefixes[3]}]}]
     attempted: list[str] = []
 
@@ -507,7 +542,7 @@ def test_sample_sweep_falls_back_stops_after_success_and_keeps_other_kinds_movin
 @pytest.mark.parametrize("code", ["refused", "choose_size", "choose_balance"])
 def test_first_sample_start_failures_retry_then_ask_and_success_or_settings_clear_the_wait(code: str) -> None:
     cards = [{"prefix": PREFIX, **_status("needs_test", "make_sample")}]
-    kind = {"kind": "bright_live_action", "shows": [{"sample_season": PREFIX}]}
+    kind = {"kind": "live_action", "shows": [{"sample_season": PREFIX}]}
     successful = False
     attempted: list[str] = []
 
@@ -519,10 +554,10 @@ def test_first_sample_start_failures_retry_then_ask_and_success_or_settings_clea
         return {"ok": successful, "code": code}
 
     first = prepare_waiting_samples(cards, [kind], load_payloads=fresh, failed_in_a_row=lambda _prefix: 0, make=make)
-    assert first["bright_live_action"].prefix == PREFIX
-    assert first["bright_live_action"].reason == ("retry_backoff" if code == "refused" else code)
+    assert first["live_action"].prefix == PREFIX
+    assert first["live_action"].reason == ("retry_backoff" if code == "refused" else code)
     second = prepare_waiting_samples(cards, [kind], load_payloads=fresh, failed_in_a_row=lambda _prefix: 0, make=make, previous=first)
-    assert second["bright_live_action"].reason == ("sample_blocked" if code == "refused" else code)
+    assert second["live_action"].reason == ("sample_blocked" if code == "refused" else code)
     successful = True
     assert not prepare_waiting_samples(cards, [kind], load_payloads=fresh, failed_in_a_row=lambda _prefix: 0, make=make, previous=second)
     assert len(attempted) == 3
@@ -534,7 +569,7 @@ def test_first_sample_start_failures_retry_then_ask_and_success_or_settings_clea
 @pytest.mark.parametrize("code", ["choose_size", "choose_balance"])
 def test_a_first_sample_choice_the_season_cannot_offer_never_asks_and_retries_like_a_refusal(code: str) -> None:
     cards = [{"prefix": PREFIX, **_status("needs_test", "make_sample")}]
-    kinds = [{"kind": "bright_live_action", "shows": [{"sample_season": PREFIX}]}]
+    kinds = [{"kind": "live_action", "shows": [{"sample_season": PREFIX}]}]
 
     def nothing_to_choose(prefix: str) -> tuple[dict[str, Any], dict[str, Any]]:
         return _folder(prefix=prefix, size_goal_options=[], compression_intent_options=[]), _status("needs_test", "make_sample")
@@ -545,7 +580,7 @@ def test_a_first_sample_choice_the_season_cannot_offer_never_asks_and_retries_li
     first = prepare_waiting_samples(cards, kinds, load_payloads=nothing_to_choose, failed_in_a_row=lambda _prefix: 0, make=make)
     second = prepare_waiting_samples(cards, kinds, load_payloads=nothing_to_choose, failed_in_a_row=lambda _prefix: 0, make=make,
                                      previous=first)
-    assert (first["bright_live_action"].reason, second["bright_live_action"].reason) == ("retry_backoff", "sample_blocked")
+    assert (first["live_action"].reason, second["live_action"].reason) == ("retry_backoff", "sample_blocked")
 
 
 @pytest.mark.parametrize(("reason", "asked"), [("choose_size", "choose_size"), ("choose_balance", "make_sample"),
@@ -563,7 +598,7 @@ def test_the_season_a_first_sample_waits_on_asks_that_question_on_its_sample_pag
 
 def test_a_first_sample_that_could_not_be_attempted_stays_quiet_across_sweeps() -> None:
     cards = [{"prefix": PREFIX, **_status("needs_test", "make_sample")}]
-    kinds = [{"kind": "bright_live_action", "shows": [{"sample_season": PREFIX}]}]
+    kinds = [{"kind": "live_action", "shows": [{"sample_season": PREFIX}]}]
     attempted: list[str] = []
 
     def make(folder: Mapping[str, Any], _status_payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -573,4 +608,4 @@ def test_a_first_sample_that_could_not_be_attempted_stays_quiet_across_sweeps() 
     first = prepare_waiting_samples(cards, kinds, load_payloads=lambda _prefix: None, failed_in_a_row=lambda _prefix: 0, make=make)
     second = prepare_waiting_samples(cards, kinds, load_payloads=lambda _prefix: None, failed_in_a_row=lambda _prefix: 0, make=make, previous=first)
     assert not attempted
-    assert first["bright_live_action"].reason == second["bright_live_action"].reason == "retry_backoff"
+    assert first["live_action"].reason == second["live_action"].reason == "retry_backoff"

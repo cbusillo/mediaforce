@@ -105,6 +105,18 @@ struct SampleWork: View {
                     .disabled(working)
                     .fixedSize(horizontal: false, vertical: true)
                 }
+                if (facts.canChooseBalance || choices.askingSize), let picture = facts.picture {
+                    Picker(Words.fourK, selection: Binding(
+                        get: { choices.keepFullHeight ?? picture.keepsFullHeight },
+                        set: { choices.keepFullHeight = $0 }
+                    )) {
+                        Text(Words.bringDownTo(picture.limit)).tag(false)
+                        Text(Words.keepFourK).tag(true)
+                    }
+                    .pickerStyle(.radioGroup)
+                    .disabled(working)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
             } else if unreadable {
                 Text(Words.staleNotice(.failing, lastHeard: nil))
                     .foregroundStyle(.secondary)
@@ -191,7 +203,8 @@ struct SampleWork: View {
 
     private func make(size: String?) {
         act {
-            let result = try await $0.makeSample(prefix, size: size, balance: choices.balance(in: facts))
+            let result = try await $0.makeSample(prefix, size: size, balance: choices.balance(in: facts),
+                                                 keepFullHeight: choices.picture(in: facts))
             return choices.made(result, facts: facts)
         }
     }
