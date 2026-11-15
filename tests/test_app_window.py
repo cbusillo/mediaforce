@@ -533,8 +533,8 @@ def test_kind_decision_replaces_its_sample_row_but_keeps_other_season_decisions(
     prefix = "tv/Drama/Season 1"
     cards = [{"prefix": prefix, "page_state": {"key": state, "needs_you": True}},
              {"prefix": "tv/Other/Season 1", "page_state": {"key": "needs_help", "needs_you": True}}]
-    kinds = [{"kind": "darker_live_action", "sample_season": prefix, "needs_you": True},
-             {"kind": "bright_live_action", "sample_season": "tv/Other/Season 1", "needs_you": False}]
+    kinds = [{"kind": "live_action", "sample_season": prefix, "needs_you": True},
+             {"kind": "cartoon", "sample_season": "tv/Other/Season 1", "needs_you": False}]
     facts = app_window_payload(
         connection, library_types=LIBRARY_TYPES, season_cards=cards, computers=[], controller_storage=READY_STORAGE,
         storage_admits_work=True, observed_at=datetime.now(UTC), kinds=kinds,
@@ -547,7 +547,7 @@ def test_kind_decision_replaces_its_sample_row_but_keeps_other_season_decisions(
 
 def test_ready_kind_sample_is_one_decision(connection: DBClient) -> None:
     prefix = "tv/Drama/Season 1"
-    kind = {"kind": "darker_live_action", "sample_season": prefix, "sample_status": "pending_review", "sample_ready": True,
+    kind = {"kind": "live_action", "sample_season": prefix, "sample_status": "pending_review", "sample_ready": True,
             "one_time": False, "needs_you": True}
     facts = app_window_payload(
         connection, library_types=LIBRARY_TYPES,
@@ -564,7 +564,7 @@ def test_kind_sample_failure_is_one_reachable_decision(connection: DBClient) -> 
         connection, library_types=LIBRARY_TYPES,
         season_cards=[{"prefix": prefix, "page_state": {"key": "needs_help", "recovery_kind": "test", "needs_you": True}}],
         computers=[], controller_storage=READY_STORAGE, storage_admits_work=True, observed_at=datetime.now(UTC),
-        kinds=[{"kind": "darker_live_action", "sample_season": prefix, "sample_status": "failed",
+        kinds=[{"kind": "live_action", "sample_season": prefix, "sample_status": "failed",
                 "sample_ready": False, "needs_you": True}],
     )
     assert len(facts["work"]["kinds_needing_you"]) == 1
@@ -587,7 +587,7 @@ def test_kind_sample_failure_is_one_reachable_decision(connection: DBClient) -> 
 def test_a_kind_reaches_needs_you_only_once_it_has_something_to_watch_or_choose(
         connection: DBClient, status: str, ready: bool, settings: bool, asks: bool,
 ) -> None:
-    kind = {"kind": "bright_live_action", "sample_season": None, "sample_status": status, "sample_ready": ready,
+    kind = {"kind": "live_action", "sample_season": None, "sample_status": status, "sample_ready": ready,
             "one_time": False, "settings": [{"show": "tv/Psych"}] if settings else [], "needs_you": True}
     facts = app_window_payload(
         connection, library_types=LIBRARY_TYPES, season_cards=[], computers=[], controller_storage=READY_STORAGE,
@@ -605,7 +605,7 @@ def test_automatic_sample_retries_stay_quiet_until_the_existing_retry_limit(
     cards = [{"prefix": prefix, "page_state": {"key": "needs_help", "recovery_kind": "test", "primary_action": "retry_sample",
                                                "failure": "worker_restart", "needs_you": True}}]
     remaking = samples_to_remake(cards, lambda _prefix: SAMPLE_REMAKE_LIMIT if exhausted else 0)
-    kinds = [{"kind": "darker_live_action", "sample_season": prefix, "sample_status": "failed",
+    kinds = [{"kind": "live_action", "sample_season": prefix, "sample_status": "failed",
               "sample_ready": False, "needs_you": True}] if has_kind else []
     facts = app_window_payload(
         connection, library_types=LIBRARY_TYPES, season_cards=cards, kinds=kinds, remaking_samples=remaking,

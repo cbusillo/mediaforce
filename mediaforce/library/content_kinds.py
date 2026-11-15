@@ -2,6 +2,7 @@ import json
 from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from itertools import batched
 from pathlib import PurePosixPath
 from typing import Any, Literal
@@ -132,7 +133,13 @@ def look_group(library_types: Mapping[str, str], rel_path: str) -> str | None:
     Files sitting directly in a show folder are in no season; a movie's extras and unrecognised nested files are in
     no title, so a look never covers them.
     """
-    path = PurePosixPath(str(rel_path or "").strip().strip("/"))
+    return _look_group(tuple(library_types.items()), str(rel_path or ""))
+
+
+@lru_cache(maxsize=1 << 17)
+def _look_group(library_type_items: tuple[tuple[str, str], ...], rel_path: str) -> str | None:
+    library_types = dict(library_type_items)
+    path = PurePosixPath(rel_path.strip().strip("/"))
     if not path.parts:
         return None
     root = path.parts[0]
