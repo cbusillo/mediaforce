@@ -43,7 +43,7 @@ def test_seasons_group_into_shows_with_their_totals_biggest_show_first(connectio
         {**_card("tv/Futurama/Season 2", items=20, size=3000, reclaim=2000, key="ready_to_compare", tone="ready",
                  action="review_sample"),
          "page_state": {"key": "ready_to_compare", "tone": "ready", "primary_action": "review_sample", "failure": None,
-                        "recovery_kind": None, "approval_source": "kind", "approval_kind": "darker_live_action",
+                        "recovery_kind": None, "approval_source": "kind", "approval_kind": "cartoon",
                         "needs_you": True}},
         _card("tv/Futurama/Specials", items=2, size=500, reclaim=100),
         {"prefix": ""},
@@ -59,7 +59,7 @@ def test_seasons_group_into_shows_with_their_totals_biggest_show_first(connectio
     assert [season["season"] for season in futurama["seasons"]] == [2, 10, None]
     expected_season = {
         "prefix": "tv/Futurama/Season 2", "season": 2, "state": "ready_to_compare", "action": "review_sample",
-        "failure": None, "tone": "ready", "approval_source": "kind", "approval_kind": "darker_live_action",
+        "failure": None, "tone": "ready", "approval_source": "kind", "approval_kind": "cartoon",
         "episode_count": 20, "bytes": 3000, "needs_you": True, "checks_only": False,
     }
     assert {key: futurama["seasons"][0][key] for key in expected_season} == expected_season

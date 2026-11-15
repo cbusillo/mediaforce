@@ -220,7 +220,7 @@ struct MediaRow: Identifiable, Sendable {
             let parts = season.season.split(separator: "/").map(String.init)
             let show = byShow[parts.prefix(2).joined(separator: "/")]
             return MediaRow(id: season.season, name: "\(show?.name ?? parts.dropLast().last ?? ""), \(parts.last ?? "")",
-                            kind: .tv, detail: Words.leftOutReason(season.kind), bytes: season.waitingBytes, saved: nil,
+                            kind: .tv, detail: Words.leftOutReason, bytes: season.waitingBytes, saved: nil,
                             state: show?.state ?? .readyToCompress, posterPrefix: parts.prefix(2).joined(separator: "/"))
         }
         .sorted { $0.bytes > $1.bytes }

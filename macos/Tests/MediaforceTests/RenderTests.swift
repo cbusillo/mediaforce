@@ -180,9 +180,9 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
         switch path {
         case "/api/app/main-window": Self.busierDay
         case "/api/app/kinds": """
-            {"kinds": [{"kind": "bright_live_action", "one_time": false, "seasons": 1, "waiting_bytes": 1000,
+            {"kinds": [{"kind": "cartoon", "one_time": true, "seasons": 1, "waiting_bytes": 1000,
                         "shows": [], "settings": [], "approval": null, "sample_season": null},
-                       {"kind": "darker_live_action", "one_time": false, "seasons": 41, "waiting_bytes": 684000000000,
+                       {"kind": "live_action", "one_time": false, "seasons": 41, "waiting_bytes": 684000000000,
                         "shows": [{"prefix": "tv/Futurama", "seasons": 7, "waiting_bytes": 90000000000, "sample_season": "tv/Futurama/Season 5"},
                                   {"prefix": "tv/Lucifer", "seasons": 6, "waiting_bytes": 200000000000, "sample_season": "tv/Lucifer/Season 2"},
                                   {"prefix": "tv/ER", "seasons": 15, "waiting_bytes": 324000000000, "sample_season": "tv/ER/Season 1"},
@@ -222,7 +222,7 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
     static let busierDay: String = {
         var facts = try! JSONSerialization.jsonObject(with: Data(MainWindowTests.facts.utf8)) as! [String: Any]
         var work = facts["work"] as! [String: Any]
-        work["kinds_needing_you"] = [["kind": "darker_live_action", "sample_season": "tv/Futurama/Season 5",
+        work["kinds_needing_you"] = [["kind": "live_action", "sample_season": "tv/Futurama/Season 5",
                                       "sample_status": "completed", "sample_ready": true, "one_time": false,
                                       "settings_available": false, "sample_start_prefix": NSNull()]]
         facts["work"] = work

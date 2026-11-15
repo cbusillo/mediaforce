@@ -13,10 +13,12 @@ from mediaforce.tuning.calibration_jobs import load_latest_job, load_latest_jobs
 from mediaforce.tuning.quality_risk import build_quality_risk_contract
 from mediaforce.web.runtime.encode_runtime import OWNER_CHILD_STATUSES, unfinished_child_reason
 from mediaforce.web.runtime.folder_actions import quality_risk_blocks_production
+from mediaforce.library.content_kinds import look_group
 from mediaforce.web.runtime.folder_tuning_advice import review_gate
 from mediaforce.web.runtime.job_runtime import retryable_saved_sample_job, sample_target_size_failure
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
-    SampleWait, cached_calibration_loader, effective_production_approval, holds_approval, sample_wait, season_prefix_of
+    SampleWait, cached_calibration_loader, effective_production_approval, holds_approval, offered_library_types, sample_wait, \
+    season_prefix_of
 
 PageStateKey = Literal[
     "needs_test",
@@ -383,7 +385,9 @@ def _facts(
     if (season_prefix_of(config, prefix) == prefix
             and str(object_dict(sample_job).get("status") or "") not in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES):
         if approval is None:
-            wait = sample_wait(config, prefix, load_calibration)
+            # A season in a library not set to compress follows no look; it says so instead of offering a sample.
+            wait = (sample_wait(config, prefix, load_calibration) if look_group(offered_library_types(config), prefix) == prefix
+                    else SampleWait(measurement_reasons=("measurement_library_disabled",)))
         elif (approval.kind is not None and approval.current and calibration is not None
               and not holds_approval(calibration)):
             wait = SampleWait(kind=approval.kind)
