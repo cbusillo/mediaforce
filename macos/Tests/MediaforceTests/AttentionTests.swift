@@ -86,14 +86,14 @@ final class AttentionTests: XCTestCase {
 
     func testAKindDecisionNotifiesOnceCountsTheBadgeAndOpensTheKind() throws {
         let before = Attention.review(try facts(), remembered: nil).memory
-        let pending = try facts(kinds: [("darker_live_action", "tv/The Blacklist/Season 10")])
+        let pending = try facts(kinds: [("live_action", "tv/The Blacklist/Season 10")])
         let first = Attention.review(pending, remembered: before)
         XCTAssertEqual(first.badgeCount, 1)
         let sampleWaiting = try facts(waitingSamples: [("tv/E/Season 3", "ready_to_compare", "review_sample")])
         XCTAssertEqual(Words.workHeadline(pending), Words.workHeadline(sampleWaiting))
         XCTAssertNotEqual(Words.workHeadline(pending), Words.workHeadline(try facts()))
         XCTAssertNotNil(Words.workExplanation(pending))
-        XCTAssertEqual(first.notices.map(\.opens), [.kind("darker_live_action")])
+        XCTAssertEqual(first.notices.map(\.opens), [.kind("live_action")])
         let destination = try XCTUnwrap(first.notices.first?.opens)
         let decoded = try XCTUnwrap(Place(notificationValue: destination.notificationValue))
         XCTAssertEqual(decoded, destination)
@@ -112,28 +112,28 @@ final class AttentionTests: XCTestCase {
     }
 
     func testAKindNotifiesAgainWhenItsRemadeSampleIsReady() throws {
-        let failed = try facts(kinds: [("bright_live_action", "tv/Psych/Season 3")], kindStatus: "failed", kindReady: false)
+        let failed = try facts(kinds: [("live_action", "tv/Psych/Season 3")], kindStatus: "failed", kindReady: false)
         let waiting = Attention.review(failed, remembered: Attention.review(try facts(), remembered: nil).memory)
         XCTAssertEqual(waiting.notices.count, 1)
-        let ready = try facts(kinds: [("bright_live_action", "tv/Psych/Season 3")], kindStatus: "pending_review", kindReady: true)
+        let ready = try facts(kinds: [("live_action", "tv/Psych/Season 3")], kindStatus: "pending_review", kindReady: true)
         let after = Attention.review(ready, remembered: waiting.memory)
         XCTAssertEqual(after.badgeCount, 1)
-        XCTAssertEqual(after.notices.map(\.opens), [.kind("bright_live_action")])
+        XCTAssertEqual(after.notices.map(\.opens), [.kind("live_action")])
         let cartoons = try facts(kinds: [("cartoon", "tv/Futurama/Season 1")], kindStatus: "pending_review", kindReady: true, oneTime: true)
         XCTAssertEqual(Attention.waitingOnYou(cartoons), 1)
         XCTAssertNotEqual(Attention.waitingItems(cartoons).first?.body, after.notices.first?.body)
     }
 
     func testAFirstSampleChoiceIsBadgedAndOpensTheSeasonThatNeedsIt() throws {
-        let retrying = try facts(kinds: [("bright_live_action", nil)], kindStatus: "retry_backoff", kindReady: false)
-        let choice = try facts(kinds: [("bright_live_action", nil)], kindStatus: "choose_size", kindReady: false,
+        let retrying = try facts(kinds: [("live_action", nil)], kindStatus: "retry_backoff", kindReady: false)
+        let choice = try facts(kinds: [("live_action", nil)], kindStatus: "choose_size", kindReady: false,
                                startPrefix: "tv/Psych/Season 3")
         let after = Attention.review(choice, remembered: Attention.review(retrying, remembered: nil).memory)
         XCTAssertEqual(after.badgeCount, 1)
         XCTAssertEqual(after.notices.map(\.opens), [.sample("tv/Psych/Season 3")])
         XCTAssertTrue(Attention.review(choice, remembered: after.memory).notices.isEmpty)
         let unsuitable = try facts(waitingSamples: [("tv/Psych/Season 3", "ready_to_compare", "review_sample")],
-                                   kinds: [("bright_live_action", "tv/Psych/Season 3")], kindStatus: "pending_review", kindReady: false)
+                                   kinds: [("live_action", "tv/Psych/Season 3")], kindStatus: "pending_review", kindReady: false)
         XCTAssertEqual(Attention.waitingItems(unsuitable).count, 2)
         let noticed = Attention.review(unsuitable, remembered: Attention.review(try facts(), remembered: nil).memory)
         XCTAssertEqual(noticed.badgeCount, 1)

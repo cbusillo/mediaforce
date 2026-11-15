@@ -5,14 +5,14 @@ import XCTest
 @MainActor
 final class NeedsYouTests: XCTestCase {
     private static let kinds = """
-    {"kinds": [{"kind": "bright_live_action", "one_time": false, "seasons": 3, "waiting_bytes": 900000000000,
+    {"kinds": [{"kind": "live_action", "one_time": false, "seasons": 3, "waiting_bytes": 900000000000,
                 "shows": [{"prefix": "tv/Psych", "seasons": 2, "waiting_bytes": 600000000000, "sample_season": "tv/Psych/Season 3"},
                           {"prefix": "tv/Monk", "seasons": 1, "waiting_bytes": 300000000000, "sample_season": "tv/Monk/Season 1"}],
                 "settings": [{"show": "tv/Big Brother (US)", "from_prefix": "tv/Big Brother (US)", "size_goal_mode": "normalized",
                               "size_goal_mb": 220.0, "library_item_id": 10441}],
                 "approval": null, "sample_season": null},
-               {"kind": "4k", "one_time": true, "seasons": 1, "waiting_bytes": 5000000000,
-                "shows": [{"prefix": "tv/The Expanse", "seasons": 1, "waiting_bytes": 5000000000, "sample_season": "tv/The Expanse/Season 3"}],
+               {"kind": "cartoon", "one_time": true, "seasons": 1, "waiting_bytes": 5000000000,
+                "shows": [{"prefix": "tv/Futurama", "seasons": 1, "waiting_bytes": 5000000000, "sample_season": "tv/Futurama/Season 3"}],
                 "settings": [], "approval": null, "sample_season": null}],
      "left_out": []}
     """
@@ -23,10 +23,10 @@ final class NeedsYouTests: XCTestCase {
         var value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(MainWindowTests.facts.utf8)) as? [String: Any])
         var work = try XCTUnwrap(value["work"] as? [String: Any])
         work["kinds_needing_you"] = [
-            ["kind": "bright_live_action", "sample_season": NSNull(), "sample_status": "not_started", "sample_ready": false,
+            ["kind": "live_action", "sample_season": NSNull(), "sample_status": "not_started", "sample_ready": false,
              "one_time": false, "settings_available": true],
-            ["kind": "4k", "sample_season": NSNull(), "sample_status": "choose_size", "sample_ready": false, "one_time": true,
-             "sample_start_prefix": "tv/The Expanse/Season 3", "settings_available": false],
+            ["kind": "cartoon", "sample_season": NSNull(), "sample_status": "choose_size", "sample_ready": false, "one_time": true,
+             "sample_start_prefix": "tv/Futurama/Season 3", "settings_available": false],
         ]
         work["seasons_needing_you"] = [[
             "prefix": "tv/Suits/Season 6", "season": 6, "state": "needs_help", "action": "review_files",
@@ -80,20 +80,20 @@ final class NeedsYouTests: XCTestCase {
 
     func testAGroupWithAnApprovedShowIsAnsweredOnItsRowWithThatShowsSettings() throws {
         let kinds = try kinds()
-        let group = try XCTUnwrap(NeedsYouItem.items(try facts(), kinds: kinds).first { $0.id.hasPrefix("kind:bright_live_action:") })
+        let group = try XCTUnwrap(NeedsYouItem.items(try facts(), kinds: kinds).first { $0.id.hasPrefix("kind:live_action:") })
         let answer = try XCTUnwrap(group.asks.first?.answers.first)
         guard case .useSettings(let kind, let from) = answer.action else { return XCTFail("Not answered on its row") }
-        XCTAssertEqual(kind, "bright_live_action")
+        XCTAssertEqual(kind, "live_action")
         XCTAssertEqual(from, kinds.kinds.first?.firstSetting?.fromPrefix)
         XCTAssertEqual(group.bytes, kinds.kinds.first?.waitingBytes)
     }
 
     func testAFirstSampleSizeIsChosenOnTheSamplePageItNeeds() throws {
-        let row = try XCTUnwrap(NeedsYouItem.items(try facts(), kinds: try kinds()).first { $0.id.hasPrefix("kind:4k:") })
+        let row = try XCTUnwrap(NeedsYouItem.items(try facts(), kinds: try kinds()).first { $0.id.hasPrefix("kind:cartoon:") })
         let answers = try XCTUnwrap(row.asks.first).answers
         XCTAssertEqual(answers.count, 1)
         guard case .open(let place) = try XCTUnwrap(answers.first).action else { return XCTFail("Not opened") }
-        XCTAssertEqual(place, .sample("tv/The Expanse/Season 3"))
+        XCTAssertEqual(place, .sample("tv/Futurama/Season 3"))
     }
 
     func testEachFileQuestionIsAnsweredOnItsRow() throws {

@@ -233,7 +233,7 @@ extension NeedsYouItem {
         if pending.settingsAvailable == true {
             if let kind, let setting = kind.firstSetting {
                 ask = NeedsYouAsk(line: Words.useSettingsAsk(setting), look: NeedsYouAnswer(title: Words.watchFirst, action: .open(.kind(kind.kind))),
-                                  answers: [NeedsYouAnswer(title: Words.useForShows(kind.shows.count),
+                                  answers: [NeedsYouAnswer(title: Words.useForShows(kind),
                                                            action: .useSettings(kind: kind.kind, from: setting.fromPrefix))])
             } else {
                 ask = NeedsYouAsk(line: Words.useSettingsAsk(nil), answers: [NeedsYouAnswer(title: Words.chooseSettings, action: .open(.kind(pending.kind)))])
@@ -262,7 +262,7 @@ extension NeedsYouItem {
                                 bytes: kind?.shows.first { $0.prefix == showPrefix }?.waitingBytes,
                                 picture: .posters([showPrefix]), asks: [ask], opens: .kind(pending.kind))
         }
-        return NeedsYouItem(id: notice.id, title: group, context: kind.map { Words.count($0.shows.count, "show") },
+        return NeedsYouItem(id: notice.id, title: group, context: kind.map { Words.kindMembers($0).joined(separator: " · ") },
                             bytes: kind?.waitingBytes, picture: .posters(kind.map { $0.shows.prefix(3).map(\.prefix) } ?? []), asks: [ask],
                             opens: .kind(pending.kind))
     }

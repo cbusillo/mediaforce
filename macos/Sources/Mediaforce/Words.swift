@@ -1542,10 +1542,15 @@ extension Words {
         }
     }
 
-    static func kindSubtitle(_ kind: KindsFacts.Kind) -> String {
+    /// The shows and movies a look covers, counted apart: "3 shows", "2 movies" or both.
+    static func kindMembers(_ kind: KindsFacts.Kind) -> [String] {
         let movies = kind.shows.filter(\.isMovie).count
-        let shows = count(kind.shows.count - movies, "show")
-        return "\(movies > 0 ? "\(shows) · \(count(movies, "movie"))" : shows) · \(size(kind.waitingBytes))"
+        let shows = kind.shows.count - movies
+        return [shows > 0 || movies == 0 ? count(shows, "show") : nil, movies > 0 ? count(movies, "movie") : nil].compactMap { $0 }
+    }
+
+    static func kindSubtitle(_ kind: KindsFacts.Kind) -> String {
+        (kindMembers(kind) + [size(kind.waitingBytes)]).joined(separator: " · ")
     }
 
     static func useForKind(_ code: String) -> String {
@@ -1648,8 +1653,9 @@ extension Words {
         return "Use \(setting.name)'s settings, \(sizeSetting(setting))?"
     }
 
-    static func useForShows(_ shows: Int) -> String {
-        shows == 1 ? "Use for this show" : "Use for all \(shows) shows"
+    static func useForShows(_ kind: KindsFacts.Kind) -> String {
+        guard kind.shows.count != 1 else { return kind.shows[0].isMovie ? "Use for this movie" : "Use for this show" }
+        return "Use for all \(kindMembers(kind).joined(separator: " and "))"
     }
 
     /// A sample ready to watch, named by its season, or by its show and season when the row is a group's.
