@@ -184,8 +184,8 @@ from mediaforce.web.runtime.child_recovery import apply_child_recovery, preview_
 from mediaforce.web.runtime.size_exception import decide_size_exception
 from mediaforce.web.runtime.size_held import decide_size_held_file, remake_staged_files
 from mediaforce.web.runtime.folder_actions import child_recovery_approval, child_recovery_candidate_evidence
-from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_contract, \
-    production_approval_identity, production_calibration
+from mediaforce.web.runtime.production_approval import approved_output_sizes, effective_production_approval, \
+    production_approval_contract, production_approval_identity, production_calibration
 from mediaforce.web.runtime.ambiguous_motion import accept_ambiguous_motion_action, ambiguous_motion_files
 from mediaforce.web.runtime.motion_keep import keep_motion_held_originals, undo_motion_keep
 from mediaforce.encoding.put_back import reconcile_unfinished_put_backs
@@ -701,6 +701,7 @@ def create_app(
 
     app.state.config = config
     app.state.evidence_runner = evidence_runner
+    library_calculations = LibraryCalculations()
 
     @app.middleware("http")
     async def periodic_cleanup(
@@ -732,7 +733,7 @@ def create_app(
             return _load_scan_status(connection, config, prefix=None)
 
     def _dashboard_movie_library_details_payload() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
+        with open_db(config.paths.db_path) as connection, library_calculations.request(connection), kind_snapshot(connection, config, _load_calibration_state):
             movie_roots = {
                 root
                 for root, library_type in config.library_type_map.items()
@@ -1217,8 +1218,6 @@ def create_app(
     register_release_routes(app, work_snapshot=_release_work_snapshot)
 
     from mediaforce.library.original_registration import list_original_previews
-
-    library_calculations = LibraryCalculations()
 
     def _main_window_payload() -> dict[str, Any]:
         observed_at = datetime.now(UTC)
@@ -2736,6 +2735,7 @@ def _folder_cards_for_group(
         restrict_to_candidate_items=restrict_to_candidate_items,
         include_lifecycle=include_lifecycle,
         include_workflow_states=include_workflow_states,
+        approved_output_bytes=approved_output_sizes(config, _load_calibration_state),
     )
     return _attach_page_states(connection, config, _attach_media_scopes(connection, config, cards))
 

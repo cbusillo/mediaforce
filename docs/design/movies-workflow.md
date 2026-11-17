@@ -22,9 +22,12 @@ second encode path.
   opens directly after the selected title, with an explicit Collapse.
 - The list exposes state, title, file membership, size, reclaim estimate, age
   provenance, and the next action.
-- Reclaim is evidence-backed: an unmeasured movie reports no estimate rather
-  than borrowing TV or generic codec history. Known staged savings remain
-  visible independently.
+- Reclaim is evidence-backed: a movie's estimate is what its files would be
+  made at under the approval covering them, the size goal scaled to each
+  file's runtime but no more than the share of the original the approval
+  keeps, the same rule a TV season uses. A movie no approval covers reports no
+  estimate rather than borrowing TV or generic codec history. Known staged
+  savings remain visible independently.
 - The detail exposes every feature, edition, extra, and uncertain member as
   a reachable row.
 - Narrow layouts open the detail with an explicit Inspect control, without

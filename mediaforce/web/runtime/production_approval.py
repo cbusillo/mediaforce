@@ -36,10 +36,10 @@ from typing import Any, Protocol, runtime_checkable
 from mediaforce.core.audio_presets import PRESET_AUDIO_KEYS, owner_sound_keys
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.evidence import stable_json_hash
-from mediaforce.core.type_defs import int_value, object_dict
+from mediaforce.core.type_defs import float_value, int_value, object_dict
 from mediaforce.library.content_kinds import look_group
 from mediaforce.tuning.size_goals import ResolutionIntent, operator_intent_from_policy, resolution_intent_from_policy, \
-    tallest_picture
+    size_goal_from_policy, tallest_picture
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash, review_gate
 from mediaforce.web.runtime.production_holds import approval_identity
 
@@ -188,6 +188,37 @@ def production_calibration(
 def cached_calibration_loader(load_calibration_state: LoadCalibrationState) -> LoadCalibrationState:
     """Read each folder's calibration once while one action checks many files."""
     return _CachedCalibrationLoader(load_calibration_state)
+
+
+ApprovedOutputBytes = Callable[[str, float | None, int], int | None]
+
+
+def approved_output_bytes(approval: EffectiveApproval | None, *, runtime_seconds: float | None, source_size_bytes: int) -> int | None:
+    if approval is None or not approval.current:
+        return None
+    video_policy = object_dict(object_dict(approval.calibration.get("policy")).get("video"))
+    target_bytes = size_goal_from_policy(video_policy).resolve(runtime_seconds).target_size_bytes
+    if target_bytes is None:
+        return None
+    kept_percent = float_value(video_policy.get("max_encoded_percent"))
+    return min(target_bytes, int(source_size_bytes * kept_percent / 100)) if kept_percent > 0 else target_bytes
+
+
+def approved_output_sizes(config: MediaforceConfig, load_calibration_state: LoadCalibrationState) -> ApprovedOutputBytes:
+    load = cached_calibration_loader(load_calibration_state)
+    approvals: dict[tuple[str, str | None], EffectiveApproval | None] = {}
+
+    def output_bytes(rel_path: str, runtime_seconds: float | None, source_size_bytes: int) -> int | None:
+        if load(config, rel_path) is not None:
+            approval = effective_production_approval(config, rel_path, load)
+        else:
+            key = (PurePosixPath(rel_path).parent.as_posix(), season_prefix_of(config, rel_path))
+            if key not in approvals:
+                approvals[key] = effective_production_approval(config, rel_path, load)
+            approval = approvals[key]
+        return approved_output_bytes(approval, runtime_seconds=runtime_seconds, source_size_bytes=source_size_bytes)
+
+    return output_bytes
 
 
 class _CachedCalibrationLoader:
