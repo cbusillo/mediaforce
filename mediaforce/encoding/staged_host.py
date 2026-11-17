@@ -27,9 +27,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from mediaforce.core.type_defs import object_dict
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
-from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND, REMOTE_QUALITY_CONTAINED_MARKER, \
-    REMOTE_QUALITY_CONTAINMENT_SCRIPT
+from mediaforce.core.process_control import ManagedProcessController
+from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_OWNER_STEP, REMOTE_QUALITY_CONTAINED_MARKER, \
+    REMOTE_QUALITY_CONTAINMENT_SCRIPT, RemoteQualityTimeoutError, hold_for_unproven_run
 from mediaforce.hosts.transport import keep_awake_while_running
 
 STAGED_JOB_KEY = "staged_job"
@@ -52,8 +52,19 @@ class StagedScratchError(RuntimeError):
     """The host could not stage, verify or return a file through its scratch directory."""
 
 
-class ScratchStillInUseError(RuntimeError):
-    failure_kind = CONTAINMENT_UNPROVEN_FAILURE_KIND
+class ScratchStillInUseError(RemoteQualityTimeoutError):
+    def __init__(self, host: dict[str, Any], scratch_dir: PurePosixPath) -> None:
+        host_key = str(host.get("key") or host.get("host") or "").strip()
+        host_label = str(host.get("label") or "").strip() or host_key or "another computer"
+        super().__init__(
+            phase="encode", timeout_seconds=REMOTE_CONTROL_TIMEOUT_SECONDS, host_key=host_key, host_label=host_label,
+            remote_process_contained=False, scoped_temp_dir=str(scratch_dir), ended_early=True,
+            containment_detail="Its work folder could not be shown unused.",
+        )
+        self.args = (
+            f"Compressing on {host_label} stopped before it finished; its work on that computer was not "
+            f"confirmed stopped. {CONTAINMENT_UNPROVEN_OWNER_STEP}",
+        )
 
 
 def remove_once_unused_shell(directory: str) -> str:
@@ -253,10 +264,8 @@ def staged_job(
         yield job
     except BaseException as error:
         _release_keeper(keeper)
-        if not _removed_once_unused(remote, scratch_dir) and not isinstance(error, ProcessCancelledError):
-            raise ScratchStillInUseError(
-                "The encode on that computer stopped early and was not confirmed ended, so its work folder was kept."
-            ) from error
+        if not _removed_once_unused(remote, scratch_dir):
+            hold_for_unproven_run(error, ScratchStillInUseError(host, scratch_dir))
         raise
     _release_keeper(keeper)
     _removed_once_unused(remote, scratch_dir)

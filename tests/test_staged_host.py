@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 
 from mediaforce.encoding import runner, staged_host
 from mediaforce import remote
+from mediaforce.core.process_control import ProcessCancelledError
 from mediaforce.hosts.transport import EncodeConnectionLostError
 from mediaforce.encoding.staged_host import (
     KEEPER_PID_FILE,
@@ -331,6 +332,21 @@ class StagedHostTests(unittest.TestCase):
         with self.assertRaises(ScratchStillInUseError) as held:
             self._run_staged_job(free_kib=10 * 1024 * 1024, body_error=lost, writer_provable=False)
         self.assertIs(held.exception.__cause__, lost)
+        self._assert_holds_its_scratch_folder(held.exception)
+
+    def test_a_stop_whose_writer_is_unproven_stays_a_stop_and_carries_the_scratch_hold(self) -> None:
+        stop = ProcessCancelledError("Stopped by the owner")
+        with self.assertRaises(ProcessCancelledError) as stopped:
+            self._run_staged_job(free_kib=10 * 1024 * 1024, body_error=stop, writer_provable=False)
+        self.assertIs(stopped.exception, stop)
+        assert isinstance(stop.unproven_remote_run, ScratchStillInUseError)
+        self._assert_holds_its_scratch_folder(stop.unproven_remote_run)
+
+    def _assert_holds_its_scratch_folder(self, held: ScratchStillInUseError) -> None:
+        self.assertEqual(held.host_key, "stage-host")
+        self.assertFalse(held.remote_process_contained)
+        assert held.scoped_temp_dir is not None
+        self.assertTrue(PurePosixPath(held.scoped_temp_dir).name.startswith(SCRATCH_DIR_PREFIX))
 
     def test_an_encode_that_stops_early_removes_its_folder_once_its_writer_is_shown_ended(self) -> None:
         lost = EncodeConnectionLostError("Lost the connection to Stage Host. It will be tried again.")

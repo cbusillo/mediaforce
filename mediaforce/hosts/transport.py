@@ -30,20 +30,23 @@ MACOS_DARK_WAKE_SHELL_TEST = (
     '*"Capabilities are:"*Graphics*) false ;; *"Capabilities are:"*) true ;; *) false ;; esac'
 )
 
-# Seconds since the last keyboard, mouse or trackpad input; empty when the Mac cannot say.
-_SECONDS_SINCE_INPUT_SHELL = (
-    "ioreg -c IOHIDSystem -d 4 2>/dev/null | awk '/\"HIDIdleTime\" =/ { print int($NF / 1000000000); exit }'"
-)
+# Nanoseconds since the last keyboard, mouse or trackpad input; empty when the Mac cannot say.
+_INPUT_IDLE_NANOSECONDS_SHELL = "ioreg -c IOHIDSystem -d 4 2>/dev/null | awk '/\"HIDIdleTime\" =/ { print $NF; exit }'"
 
 # Declaring brief user activity brings a dark-woken Mac to full wake, which lights its display;
-# putting the display straight back to sleep keeps full wake. A Mac someone is using is already
-# in full wake, and one someone touched since the request keeps its display on: its input idle
-# time must cover the whole request (one second of slack for the clock). No power setting changes.
+# putting the display straight back to sleep keeps full wake. The display is put to sleep only on
+# proof that nobody touched the Mac during the request: input idle time read before and after it,
+# where the first reading already outlasts the whole request (whole seconds, rounded up) and the
+# second is longer still. Input during the request would make the second reading shorter than the
+# request itself. Without that proof the display is left alone. No power setting changes.
 REQUEST_FULL_WAKE_SHELL_LINE = (
     f'if {MACOS_DARK_WAKE_SHELL_TEST}; then '
-    'mediaforce_wake_asked=$(date +%s); caffeinate -u -t 2 </dev/null >/dev/null 2>&1; '
-    f'mediaforce_idle=$({_SECONDS_SINCE_INPUT_SHELL}); '
-    'if [ -n "$mediaforce_idle" ] && [ $((mediaforce_idle + 1)) -ge $(($(date +%s) - mediaforce_wake_asked)) ]; then '
+    f'mediaforce_from=$(date +%s); mediaforce_idle_before=$({_INPUT_IDLE_NANOSECONDS_SHELL}); '
+    'caffeinate -u -t 2 </dev/null >/dev/null 2>&1; '
+    f'mediaforce_idle_after=$({_INPUT_IDLE_NANOSECONDS_SHELL}); mediaforce_to=$(date +%s); '
+    'if [ -n "$mediaforce_idle_before" ] && [ -n "$mediaforce_idle_after" ] '
+    '&& [ "$mediaforce_idle_after" -gt "$mediaforce_idle_before" ] '
+    '&& [ "$mediaforce_idle_before" -ge $(((mediaforce_to - mediaforce_from + 1) * 1000000000)) ]; then '
     'pmset displaysleepnow >/dev/null 2>&1; fi; fi'
 )
 

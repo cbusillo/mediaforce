@@ -41,7 +41,7 @@ from mediaforce.tuning.calibration_jobs import COMPUTER_RETRY_RESULT_KEY, finish
 from mediaforce.tuning.target_size_search import MAX_TARGET_SIZE_CANDIDATES, TargetSizeSearchError
 from mediaforce.web.runtime.encode_runtime import running_staged_scratch_reservations
 from mediaforce.web.runtime.scratch_reservations import host_identity_tokens
-from mediaforce.encoding.staged_host import ScratchStillInUseError, StagedScratchError
+from mediaforce.encoding.staged_host import StagedScratchError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -614,8 +614,9 @@ def run_calibration_job(
                 },
             )
         terminal_status = completed_status
-    except ProcessCancelledError:
+    except ProcessCancelledError as cancel_error:
         terminal_status = "stopped"
+        unproven = cancel_error.unproven_remote_run
         with open_db(config.paths.db_path) as connection:
             deps.save_job_state(
                 connection,
@@ -626,7 +627,14 @@ def run_calibration_job(
                     "job_id": job_id,
                     "status": "stopped",
                     "finished_at": deps.now_iso(),
-                    "error": "Calibration queue job was stopped and cleaned up.",
+                    "error": "Calibration queue job was stopped and cleaned up." if unproven is None
+                    else quality_error_message(unproven),
+                    **({} if not isinstance(unproven, RemoteQualityTimeoutError) else {"result": {
+                        "failure_kind": unproven.failure_kind,
+                        "host_key": unproven.host_key,
+                        "remote_process_contained": False,
+                        "scoped_temp_dir": unproven.scoped_temp_dir,
+                    }}),
                 },
             )
     except TargetSizeSearchError as exc:
@@ -655,6 +663,7 @@ def run_calibration_job(
                 "failure_message": str(exc),
                 "host_key": exc.host_key,
                 "remote_process_contained": exc.remote_process_contained,
+                "scoped_temp_dir": exc.scoped_temp_dir,
             },
         )
     except Exception as exc:
@@ -725,7 +734,7 @@ def _lost_sample_computer(exc: BaseException, host: Mapping[str, Any]) -> bool:
     A refused login or changed host key also fails in the SSH client, but trying again cannot fix
     it, so it is not this and still asks the owner straight away.
     """
-    if execution_mode_for_host(dict(host)) != "ssh" or isinstance(exc, ScratchStillInUseError):
+    if execution_mode_for_host(dict(host)) != "ssh":
         return False
     for error in _exception_chain(exc):
         if isinstance(error, EncodeConnectionLostError):

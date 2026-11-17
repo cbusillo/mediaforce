@@ -52,8 +52,12 @@ case "$*" in
 esac
 """
 _FAKE_INPUT_IDLE = """#!/bin/sh
-printf '    | |   "HIDIdleTime" = %s\\n' "$FAKE_INPUT_IDLE_NS"
+reading=$(($(cat "$KEEP_AWAKE_LOG.ioreg" 2>/dev/null || echo 0) + 1))
+echo "$reading" > "$KEEP_AWAKE_LOG.ioreg"
+eval "idle=\\$FAKE_INPUT_IDLE_NS_$reading"
+[ -z "$idle" ] || printf '    | |   "HIDIdleTime" = %s\\n' "$idle"
 """
+UNTOUCHED_FOR_NS = 13 * 60 * 60 * 10 ** 9
 FULL_WAKE = "CPU Graphics Audio Network"
 DARK_WAKE = "CPU Network"
 
@@ -100,7 +104,8 @@ class RemoteKeepAwakeTests(unittest.TestCase):
             "KEEP_AWAKE_LOG": str(self.log),
             "FAKE_ENCODE_SECONDS": "0.2",
             "FAKE_CAPABILITIES": FULL_WAKE,
-            "FAKE_INPUT_IDLE_NS": str(13 * 60 * 60 * 10 ** 9),
+            "FAKE_INPUT_IDLE_NS_1": str(UNTOUCHED_FOR_NS),
+            "FAKE_INPUT_IDLE_NS_2": str(UNTOUCHED_FOR_NS + 2 * 10 ** 9),
             "TMPDIR": str(self.root),
         }
 
@@ -195,16 +200,25 @@ class RemoteKeepAwakeTests(unittest.TestCase):
         self.assertEqual(self._full_wake_requests(), ["declare activity", "displaysleepnow"])
         self._assert_released(keep_awake_pid)
 
-    def test_a_mac_someone_touched_during_the_wake_request_keeps_its_display_on(self) -> None:
-        self.env["FAKE_CAPABILITIES"] = DARK_WAKE
-        self.env["FAKE_INPUT_IDLE_NS"] = "0"
-        shell = self._start(self._remote_command_script(["true"]))
-        keep_awake_pid = self._assert_kept_awake_for(shell)
+    def test_a_mac_not_proven_untouched_through_the_wake_request_keeps_its_display_on(self) -> None:
+        readings = {
+            "touched half a second into the request": (UNTOUCHED_FOR_NS, 15 * 10 ** 8),
+            "touched just before the request": (10 ** 9, 3 * 10 ** 9),
+            "input idle time unreadable": ("", UNTOUCHED_FOR_NS),
+        }
+        for label, (before, after) in readings.items():
+            with self.subTest(label):
+                for leftover in (self.log, Path(f"{self.log}.ioreg")):
+                    leftover.unlink(missing_ok=True)
+                self.env.update({"FAKE_CAPABILITIES": DARK_WAKE, "FAKE_INPUT_IDLE_NS_1": str(before),
+                                 "FAKE_INPUT_IDLE_NS_2": str(after)})
+                shell = self._start(self._remote_command_script(["true"]))
+                keep_awake_pid = self._assert_kept_awake_for(shell)
 
-        shell.communicate(timeout=10)
+                shell.communicate(timeout=10)
 
-        self.assertEqual(self._full_wake_requests(), ["declare activity"])
-        self._assert_released(keep_awake_pid)
+                self.assertEqual(self._full_wake_requests(), ["declare activity"])
+                self._assert_released(keep_awake_pid)
 
     def test_work_on_a_mac_already_fully_awake_leaves_its_display_alone(self) -> None:
         shell = self._start(self._remote_command_script(["true"]))

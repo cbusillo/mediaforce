@@ -145,7 +145,7 @@ class RemoteQualityTimeoutError(RuntimeError):
             stalled: bool = False,
             scoped_temp_dir: str | None = None,
             containment_detail: str | None = None,
-            connection_lost: bool = False,
+            ended_early: bool = False,
     ) -> None:
         outcome = (
             "that run was stopped."
@@ -153,8 +153,8 @@ class RemoteQualityTimeoutError(RuntimeError):
             else f"the run on that computer was not confirmed stopped. {CONTAINMENT_UNPROVEN_OWNER_STEP}"
         )
         what_happened = (
-            "lost its connection"
-            if connection_lost
+            "stopped before it finished"
+            if ended_early
             else f"printed nothing for {_plain_duration(timeout_seconds)}"
             if stalled
             else f"ran past {_plain_duration(timeout_seconds)} without a result"
@@ -962,7 +962,7 @@ def _confirm_uncertain_quality_run_ended(
             remote_process_contained=False,
             scoped_temp_dir=scoped_temp_dir,
             containment_detail=f"{type(containment_error).__name__}: {containment_error}"[-2000:],
-            connection_lost=True,
+            ended_early=True,
         ) from None
     if ssh_connection_lost(result.returncode, result.stderr):
         raise EncodeConnectionLostError(
@@ -1090,7 +1090,7 @@ def _run_scoped_quality_command(
     try:
         result = _run_quality_command(cmd, process_controller=process_controller, host=host)
     except Exception as exc:
-        _cleanup_after_failed_quality_command(exc, scoped_temp_dir, host=host)
+        _cleanup_after_failed_quality_command(exc, scoped_temp_dir, host=host, phase=_quality_phase(cmd))
         raise
     return result, _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
 
@@ -1100,13 +1100,16 @@ def _cleanup_after_failed_quality_command(
         scoped_temp_dir: Path | None,
         *,
         host: dict[str, object] | None,
+        phase: str,
 ) -> None:
     if isinstance(exc, RemoteQualityTimeoutError) and not exc.remote_process_contained:
         # The run on that computer may still be writing there; the periodic sweeps remove it later.
         return
-    if not isinstance(exc, RemoteQualityTimeoutError | EncodeConnectionLostError) and not _run_shown_ended(
-            scoped_temp_dir, host=host):
-        return
+    if not isinstance(exc, RemoteQualityTimeoutError | EncodeConnectionLostError):
+        unproven = _unproven_run(scoped_temp_dir, host=host, phase=phase)
+        if unproven is not None:
+            hold_for_unproven_run(exc, unproven)
+            return
     cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
     if cleanup_error is None:
         return
@@ -1116,14 +1119,34 @@ def _cleanup_after_failed_quality_command(
     _attach_quality_cleanup_detail(exc, cleanup_error)
 
 
-def _run_shown_ended(scoped_temp_dir: Path | None, *, host: dict[str, object] | None) -> bool:
+def _unproven_run(
+        scoped_temp_dir: Path | None, *, host: dict[str, object] | None, phase: str,
+) -> RemoteQualityTimeoutError | None:
     if scoped_temp_dir is None or _quality_execution_mode(host) != "ssh":
-        return True
+        return None
+    host_payload = object_dict(host)
     try:
-        stop_timed_out_remote_quality_run(object_dict(host), str(scoped_temp_dir), wake_before_connect=False)
-    except (OSError, RuntimeError, subprocess.SubprocessError):
-        return False
-    return True
+        stop_timed_out_remote_quality_run(host_payload, str(scoped_temp_dir), wake_before_connect=False)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as containment_error:
+        host_key = str(host_payload.get("key") or host_payload.get("host") or "").strip()
+        return RemoteQualityTimeoutError(
+            phase=phase,
+            timeout_seconds=REMOTE_QUALITY_TIMEOUT_SECONDS,
+            host_key=host_key,
+            host_label=str(host_payload.get("label") or "").strip() or host_key or "another computer",
+            remote_process_contained=False,
+            scoped_temp_dir=str(scoped_temp_dir),
+            containment_detail=f"{type(containment_error).__name__}: {containment_error}"[-2000:],
+            ended_early=True,
+        )
+    return None
+
+
+def hold_for_unproven_run(stopped_by: BaseException, unproven: RemoteQualityTimeoutError) -> None:
+    if isinstance(stopped_by, ProcessCancelledError):
+        stopped_by.unproven_remote_run = unproven
+        return
+    raise unproven from stopped_by
 
 
 def _attach_quality_cleanup_detail(exc: Exception, cleanup_error: str) -> None:
