@@ -19,6 +19,8 @@ from mediaforce.web.runtime.encode_runtime import _selected_encode_schedule_clos
 from test_app_settings_library import _json_request, library_app  # noqa: F401  (`library_app` is the fixture)
 
 UNTOUCHED_SECTIONS = ("media", "video", "metadata", "folder_policy_overrides")
+SUMMER = {"name": "Summer", "from": "05-01", "to": "09-30", "days": ["mon", "tue", "wed", "thu", "fri"],
+          "all_day_days": ["sat", "sun"], "start_hour": 18, "end_hour": 15, "second_hours": None}
 
 
 def _endpoint(app: FastAPI, path: str, method: str) -> Any:
@@ -166,6 +168,16 @@ def test_new_schedule_never_takes_the_key_of_one_removed_in_the_same_save(comput
         (lambda body: body["schedules"][0].update(start_hour=24), "schedule_hours_invalid"),
         (lambda body: body["schedules"][0].update(end_hour="7"), "schedule_hours_invalid"),
         (lambda body: body["schedules"][0].update(days=[], all_day_days=[]), "schedule_days_missing"),
+        (lambda body: body["schedules"][0].update(second_hours=[9, 24]), "schedule_hours_invalid"),
+        (lambda body: body["schedules"][0].update(second_hours=[9]), "schedule_hours_invalid"),
+        (lambda body: body["schedules"][0].update(seasons=[{**SUMMER, "from": "13-01"}]), "schedule_season_dates_invalid"),
+        (lambda body: body["schedules"][0].update(seasons=[{**SUMMER, "to": "02-30"}]), "schedule_season_dates_invalid"),
+        (lambda body: body["schedules"][0].update(seasons=[{**SUMMER, "start_hour": "6"}]), "schedule_hours_invalid"),
+        (lambda body: body["schedules"][0].update(seasons=[{**SUMMER, "days": [], "all_day_days": []}]), "schedule_days_missing"),
+        (
+            lambda body: body["schedules"][0].update(seasons=[SUMMER, {**SUMMER, "from": "09-30", "to": "04-30"}]),
+            "schedule_seasons_overlap",
+        ),
         (lambda body: body.update(schedules=[]), "schedule_unknown"),
         (lambda body: body["computers"][1].update(schedule="weekdays"), "schedule_unknown"),
         (lambda body: body["computers"][1].update(address=""), "computer_address_missing"),
@@ -189,6 +201,30 @@ def test_refused_computer_save_writes_nothing_and_answers_with_a_code(
 
     assert _save(app, body) == (400, {"ok": False, "code": code})
     assert runtime_settings_path.read_bytes() == before
+
+
+def test_seasons_and_a_second_block_round_trip_through_the_computers_tab(computers_app: tuple[FastAPI, Path]) -> None:
+    app, runtime_settings_path = computers_app
+    body = _body(app)
+    winter = {**body["schedules"][0], "days": ["mon", "tue", "wed", "thu", "fri"], "all_day_days": ["sat", "sun"],
+              "start_hour": 20, "end_hour": 6, "second_hours": [9, 17], "seasons": [SUMMER]}
+    body["schedules"][0] = winter
+
+    assert _save(app, body)[0] == 200
+
+    assert _facts(app)["schedules"][0] == winter
+    stored = json.loads(runtime_settings_path.read_text())["encode_queue"]["schedule_profiles"][0]
+    assert (stored["second_hours"], stored["seasons"][0]["from"], stored["seasons"][0]["start_hour"]) == ([9, 17], "05-01", 18)
+
+
+def test_one_block_schedule_saves_without_seasons(computers_app: tuple[FastAPI, Path]) -> None:
+    app, runtime_settings_path = computers_app
+
+    assert _save(app, _body(app))[0] == 200
+
+    stored = json.loads(runtime_settings_path.read_text())["encode_queue"]["schedule_profiles"][0]
+    assert "second_hours" not in stored and "seasons" not in stored
+    assert _facts(app)["schedules"][0]["second_hours"] is None
 
 
 def test_second_computer_save_from_the_same_loaded_settings_is_refused(computers_app: tuple[FastAPI, Path]) -> None:

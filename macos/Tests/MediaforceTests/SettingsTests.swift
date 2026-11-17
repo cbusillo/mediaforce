@@ -171,6 +171,27 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(body["revision"] as? String, "c1")
     }
 
+    func testSeasonsAndSecondHoursGoBackAsTheServerSentThem() throws {
+        let facts = Self.computerFacts.replacingOccurrences(
+            of: #""start_hour": 22, "end_hour": 6}"#,
+            with: #""start_hour": 20, "end_hour": 6, "second_hours": [9, 17], "seasons": [{"name": "Summer", "from": "05-01", "to": "09-30", "days": ["mon"], "all_day_days": ["sun"], "start_hour": 18, "end_hour": 15, "second_hours": null}]}"#
+        )
+        let saved = try JSONDecoder.mediaforce.decode(ComputerSettingsFacts.self, from: Data(facts.utf8))
+        var draft = ComputerSettingsDraft(saved)
+        draft.schedules[0].schedule.seasons?[0].to = MonthDay(month: 2, day: 31).text
+        draft.schedules[0].schedule.addSeason()
+
+        let sent = try XCTUnwrap((try json(draft.saveBody)["schedules"] as? [NSDictionary])?.first)
+        XCTAssertEqual(sent["second_hours"] as? [Int], [9, 17])
+        let seasons = try XCTUnwrap(sent["seasons"] as? [NSDictionary])
+        XCTAssertEqual(seasons[0], [
+            "name": "Summer", "from": "05-01", "to": "02-29", "days": ["mon"], "all_day_days": ["sun"],
+            "start_hour": 18, "end_hour": 15,
+        ] as NSDictionary)
+        XCTAssertEqual(seasons[1]["second_hours"] as? [Int], [9, 17])
+        XCTAssertEqual(seasons[1]["start_hour"] as? Int, 20)
+    }
+
     func testChoosingEveryLibraryMeansAllLibraries() {
         let all = ["movies", "tv", "other"]
         XCTAssertEqual(ComputerSettingsDraft.togglingLibrary("tv", in: [], all: all), ["movies", "other"])
@@ -197,7 +218,7 @@ final class SettingsTests: XCTestCase {
             "computer_priority_invalid", "computer_at_once_invalid", "computer_start_wait_invalid",
             "computer_scratch_folder_not_absolute", "computer_library_folders_invalid",
             "computer_library_folder_unknown", "schedule_duplicate", "schedule_days_missing",
-            "schedule_hours_invalid", "schedule_unknown",
+            "schedule_hours_invalid", "schedule_unknown", "schedule_season_dates_invalid", "schedule_seasons_overlap",
         ]
         let words = codes.map { Words.computerSaveRefused($0) }
         XCTAssertEqual(Set(words).count, codes.count)

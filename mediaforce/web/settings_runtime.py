@@ -3,13 +3,14 @@ import json
 import math
 import re
 from collections.abc import Collection
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from mediaforce.core.audio_presets import AUDIO_PRESETS
 from mediaforce.core.config import DEFAULT_CATALOG_REFRESH_HOURS, FOLDER_POLICY_OVERRIDES_KEY, MediaforceConfig
-from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY
+from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY, LEAP_YEAR, season_covers, season_day
 from mediaforce.hosts.config import normalize_host_capabilities
 from mediaforce.library.library_settings import DEFAULT_LIBRARY_PROFILES, LIBRARY_PROFILE_OPTIONS, \
     LIBRARY_TYPE_OPTIONS, default_library_policy, library_production_supported, library_type_label, \
@@ -354,6 +355,8 @@ def settings_schedule_profile_rows_for_config(config: MediaforceConfig, *, min_r
                     "all_day_days_of_week": list(normalized["all_day_days_of_week"]),
                     "start_hour": str(normalized["start_hour"]),
                     "end_hour": str(normalized["end_hour"]),
+                    "second_hours": normalized.get("second_hours"),
+                    "seasons": normalized.get("seasons", []),
                     "finish_current_file": normalized["finish_current_file"],
                 }
             )
@@ -372,6 +375,8 @@ def index_schedule_profile_rows(rows: list[dict[str, Any]], *, min_rows: int = 1
             ),
             "start_hour": row.get("start_hour", str(DEFAULT_SCHEDULER_POLICY["start_hour"])),
             "end_hour": row.get("end_hour", str(DEFAULT_SCHEDULER_POLICY["end_hour"])),
+            "second_hours": row.get("second_hours"),
+            "seasons": row.get("seasons") or [],
             "finish_current_file": row.get("finish_current_file") is True,
         }
         for index, row in enumerate(rows)
@@ -552,6 +557,22 @@ def normalize_encode_queue_scheduler(raw: dict[str, Any] | None) -> dict[str, An
         mode = str(DEFAULT_SCHEDULER_POLICY["mode"])
     if timezone not in {"host_local", "controller_local", "utc"}:
         timezone = str(DEFAULT_SCHEDULER_POLICY["timezone"])
+    seasons = [
+        {"label": _text(season.get("label")), "from": season["from"], "to": season["to"],
+         **_normalize_window_hours(season, mode)}
+        for season in _items(payload.get("seasons"))
+        if season_day(season.get("from")) and season_day(season.get("to"))
+    ]
+    return {
+        "mode": mode,
+        "timezone": timezone,
+        "finish_current_file": payload.get("finish_current_file") is True,
+        **_normalize_window_hours(payload, mode),
+        **({"seasons": seasons} if seasons else {}),
+    }
+
+
+def _normalize_window_hours(payload: dict[str, Any], mode: str) -> dict[str, Any]:
     start_hour_value = payload.get("start_hour")
     if not isinstance(start_hour_value, (str, int, float, bool)):
         start_hour_value = None
@@ -572,16 +593,26 @@ def normalize_encode_queue_scheduler(raw: dict[str, Any] | None) -> dict[str, An
     ]
     if mode == "night" and not days_of_week and not all_day_days_of_week:
         days_of_week = list(SCHEDULE_DAY_ORDER)
-    normalized = {
-        "mode": mode,
-        "timezone": timezone,
-        "finish_current_file": payload.get("finish_current_file") is True,
+    second_hours = schedule_hour_pair(payload.get("second_hours"))
+    return {
         "start_hour": start_hour,
         "end_hour": end_hour,
         "days_of_week": days_of_week,
         "all_day_days_of_week": all_day_days_of_week,
+        **({"second_hours": second_hours} if second_hours else {}),
     }
-    return normalized
+
+
+def schedule_hour_pair(value: Any) -> list[int] | None:
+    if not isinstance(value, list) or len(value) != 2:
+        return None
+    if not all(_is_schedule_hour(hour) for hour in value):
+        return None
+    return [int(value[0]), int(value[1])]
+
+
+def _is_schedule_hour(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 23
 
 
 def normalize_submitted_library_policy(library_type: str, value: Any) -> dict[str, Any]:
@@ -1130,6 +1161,14 @@ def computer_settings_facts(
                 "all_day_days": list(row.get("all_day_days_of_week") or []),
                 "start_hour": _whole(row.get("start_hour"), int(str(DEFAULT_SCHEDULER_POLICY["start_hour"]))),
                 "end_hour": _whole(row.get("end_hour"), int(str(DEFAULT_SCHEDULER_POLICY["end_hour"]))),
+                "second_hours": row.get("second_hours"),
+                "seasons": [
+                    {"name": season["label"], "from": season["from"], "to": season["to"],
+                     "days": season["days_of_week"], "all_day_days": season["all_day_days_of_week"],
+                     "start_hour": season["start_hour"], "end_hour": season["end_hour"],
+                     "second_hours": season.get("second_hours")}
+                    for season in row.get("seasons") or []
+                ],
                 "finish_current_file": row.get("finish_current_file") is True,
             }
             for row in schedule_rows
@@ -1176,24 +1215,21 @@ def computer_section_settings(
     schedule_rows: list[dict[str, Any]] = []
     for item in schedules:
         key = _text(item.get("key"))
-        start_hour, end_hour = item.get("start_hour"), item.get("end_hour")
-        if not all(isinstance(hour, int) and not isinstance(hour, bool) and 0 <= hour <= 23
-                   for hour in (start_hour, end_hour)):
-            raise SettingsValidationError("Work schedule hours must be whole hours from 0 to 23.",
-                                          "schedule_hours_invalid")
         if key not in saved_keys:
             new_key = _new_schedule_key(_text(item.get("name")), used_keys)
             used_keys.add(new_key)
             if key:
                 renamed[key] = new_key
             key = new_key
+        seasons = [{"label": _text(season.get("name")), "from": _season_day_text(season.get("from")),
+                    "to": _season_day_text(season.get("to")), **_submitted_window_hours(season)}
+                   for season in _items(item.get("seasons"))]
+        _refuse_overlapping_seasons(seasons)
         schedule_rows.append({
             "key": key,
             "label": _text(item.get("name")),
-            "days_of_week": _strings(item.get("days")),
-            "all_day_days_of_week": _strings(item.get("all_day_days")),
-            "start_hour": start_hour,
-            "end_hour": end_hour,
+            **_submitted_window_hours(item),
+            **({"seasons": seasons} if seasons else {}),
             **({"finish_current_file": item["finish_current_file"] is True} if "finish_current_file" in item else {}),
         })
 
@@ -1244,6 +1280,42 @@ def computer_section_settings(
     )
     built["remote_hosts"] = [{**extra, **host} for extra, host in zip(carried, built["remote_hosts"], strict=True)]
     return built
+
+
+def _submitted_window_hours(item: dict[str, Any]) -> dict[str, Any]:
+    start_hour, end_hour, second_hours = item.get("start_hour"), item.get("end_hour"), item.get("second_hours")
+    if not (_is_schedule_hour(start_hour) and _is_schedule_hour(end_hour)) or (
+            second_hours is not None and schedule_hour_pair(second_hours) is None):
+        raise SettingsValidationError("Work schedule hours must be whole hours from 0 to 23.",
+                                      "schedule_hours_invalid")
+    days, all_day_days = _strings(item.get("days")), _strings(item.get("all_day_days"))
+    if not days and not all_day_days:
+        raise SettingsValidationError("Select at least one day for each work window.", "schedule_days_missing")
+    return {
+        "days_of_week": days,
+        "all_day_days_of_week": all_day_days,
+        "start_hour": start_hour,
+        "end_hour": end_hour,
+        **({"second_hours": second_hours} if second_hours is not None else {}),
+    }
+
+
+def _season_day_text(value: Any) -> str:
+    if season_day(value) is None:
+        raise SettingsValidationError("Each season needs a start and end date.", "schedule_season_dates_invalid")
+    return str(value)
+
+
+def _refuse_overlapping_seasons(seasons: list[dict[str, Any]]) -> None:
+    ranges: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    for season in seasons:
+        first, last = season_day(season["from"]), season_day(season["to"])
+        if first and last:
+            ranges.append((first, last))
+    for offset in range(366):
+        month_day = date(LEAP_YEAR, 1, 1) + timedelta(days=offset)
+        if sum(season_covers(first, last, month_day) for first, last in ranges) > 1:
+            raise SettingsValidationError("Two seasons cover the same date.", "schedule_seasons_overlap")
 
 
 def _strings(value: Any) -> list[str]:
@@ -1397,6 +1469,8 @@ def build_runtime_computer_settings(
                 "all_day_days_of_week": all_day_days_of_week,
                 "start_hour": start_hour_text,
                 "end_hour": end_hour_text,
+                "second_hours": row.get("second_hours"),
+                "seasons": row.get("seasons"),
                 "finish_current_file": row.get("finish_current_file"),
             }
         )
@@ -1410,6 +1484,7 @@ def build_runtime_computer_settings(
                 "all_day_days_of_week": list(normalized["all_day_days_of_week"]),
                 "start_hour": normalized["start_hour"],
                 "end_hour": normalized["end_hour"],
+                **{field: normalized[field] for field in ("second_hours", "seasons") if field in normalized},
                 **({"finish_current_file": normalized["finish_current_file"]} if "finish_current_file" in row else {}),
             }
         )

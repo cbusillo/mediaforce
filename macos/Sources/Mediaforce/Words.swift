@@ -936,6 +936,15 @@ extension Words {
     static let finishCurrentFile = "Finish the current file when the window closes"
     static let finishCurrentFileHelp = "No new files start after closing. With this off, an interrupted file starts over in the next window."
     static let workWindowHelp = "When Until is earlier than From, the window runs overnight. Times are each computer's own."
+    static let alsoFrom = "And from"
+    static let addSecondHours = "Add More Hours"
+    static let removeSecondHours = "Remove These Hours"
+    static let addSeason = "Add Season"
+    static let removeSeason = "Remove Season"
+    static let seasonName = "Season name"
+    static let seasonStarts = "Starts"
+    static let seasonEnds = "Ends"
+    static let seasonHelp = "A season's own days and hours replace the ones above on its dates, every year."
     static let keepComputer = "Keep computer"
     static let keepWorkWindow = "Keep work window"
 
@@ -978,6 +987,54 @@ extension Words {
         }
     }
 
+    static func month(_ month: Int) -> String {
+        [
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December",
+        ][month - 1]
+    }
+
+    /// "May to September" for whole months, otherwise "May 15 to September 30".
+    static func dateRange(from: MonthDay, to: MonthDay) -> String {
+        if from.isMonthStart && to.isMonthEnd { return "\(month(from.month)) to \(month(to.month))" }
+        return "\(month(from.month)) \(from.day) to \(month(to.month)) \(to.day)"
+    }
+
+    static func season(_ season: ComputerSettingsFacts.Season) -> String {
+        let range = dateRange(from: MonthDay(season.from), to: MonthDay(season.to))
+        return season.name.isEmpty ? range : "\(season.name) (\(range))"
+    }
+
+    /// The dates no season covers; named by months when there is one season, since the rest is then one range.
+    static func restOfYear(_ seasons: [ComputerSettingsFacts.Season]) -> String {
+        guard seasons.count == 1, let only = seasons.first else { return "Rest of the year" }
+        let start = MonthDay(only.to), end = MonthDay(only.from)
+        let after = start.isMonthEnd ? MonthDay(month: start.month % 12 + 1, day: 1) : MonthDay(month: start.month, day: start.day + 1)
+        let before = end.isMonthStart
+            ? MonthDay(month: (end.month + 10) % 12 + 1, day: 31)
+            : MonthDay(month: end.month, day: end.day - 1)
+        return "Rest of the year (\(dateRange(from: after, to: before)))"
+    }
+
+    /// "8 PM to 6 AM and 9 AM to 5 PM on weekdays, all day on weekends"
+    static func windowHours(_ hours: some WindowHours) -> String {
+        var blocks = ["\(hour(hours.startHour)) to \(hour(hours.endHour))"]
+        if let second = hours.secondHours, second.count == 2 { blocks.append("\(hour(second[0])) to \(hour(second[1]))") }
+        var parts: [String] = []
+        if !hours.days.isEmpty { parts.append("\(blocks.joined(separator: " and ")) on \(dayList(hours.days))") }
+        if !hours.allDayDays.isEmpty { parts.append("all day on \(dayList(hours.allDayDays))") }
+        return parts.joined(separator: ", ")
+    }
+
+    private static func dayList(_ days: [String]) -> String {
+        switch Set(days) {
+        case ["mon", "tue", "wed", "thu", "fri"]: "weekdays"
+        case ["sat", "sun"]: "weekends"
+        case ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]: "every day"
+        default: days.map(day).joined(separator: ", ")
+        }
+    }
+
     static func hour(_ hour: Int) -> String {
         let shown = hour % 12 == 0 ? 12 : hour % 12
         return "\(shown) \(hour < 12 ? "AM" : "PM")"
@@ -1017,6 +1074,8 @@ extension Words {
         case "schedule_key_missing", "schedule_key_reserved", "schedule_duplicate": "Two work windows got mixed up. Revert and make your changes again."
         case "schedule_days_missing": "Each work window needs at least one day."
         case "schedule_hours_invalid": "Each work window needs a start and end hour."
+        case "schedule_season_dates_invalid": "Each season needs a start and end date."
+        case "schedule_seasons_overlap": "Two seasons of a work window share a date. Change one so they don't overlap."
         case "schedule_unknown": "A computer uses a work window that was removed. Choose another work window for it."
         default: "Mediaforce couldn't save these settings. Check the computers and work windows."
         }

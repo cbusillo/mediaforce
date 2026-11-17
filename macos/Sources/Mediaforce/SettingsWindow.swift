@@ -816,14 +816,17 @@ struct WorkWindowEditor: View {
 
     var body: some View {
         TextField(Words.workWindowName, text: $schedule.name)
-        dayRow(Words.worksOn, allDay: false)
-        dayRow(Words.allDayOn, allDay: true)
-        Picker(Words.startsAt, selection: $schedule.startHour) {
-            ForEach(0..<24, id: \.self) { hour in Text(Words.hour(hour)).tag(hour) }
+        if let seasons = schedule.seasons, !seasons.isEmpty {
+            WindowHoursHeading(title: Words.restOfYear(seasons), hours: schedule)
         }
-        Picker(Words.endsAt, selection: $schedule.endHour) {
-            ForEach(0..<24, id: \.self) { hour in Text(Words.hour(hour)).tag(hour) }
+        WindowHoursFields(hours: $schedule, days: days)
+        ForEach(Array((schedule.seasons ?? []).indices), id: \.self) { index in
+            SeasonEditor(season: season(at: index), days: days) {
+                schedule.seasons?.remove(at: index)
+            }
         }
+        Button(Words.addSeason, systemImage: "plus") { schedule.addSeason() }
+            .help(Words.seasonHelp)
         Toggle(isOn: Binding(
             get: { schedule.finishCurrentFile == true },
             set: { schedule.finishCurrentFile = $0 }
@@ -834,14 +837,104 @@ struct WorkWindowEditor: View {
         Button(Words.removeWorkWindow, systemImage: "minus.circle", role: .destructive, action: remove)
     }
 
+    private func season(at index: Int) -> Binding<ComputerSettingsFacts.Season> {
+        Binding(
+            get: { schedule.seasons?[index] ?? ComputerSettingsFacts.Season(
+                name: "", from: "", to: "", days: [], allDayDays: [], startHour: 0, endHour: 0
+            ) },
+            set: { if schedule.seasons?.indices.contains(index) == true { schedule.seasons?[index] = $0 } }
+        )
+    }
+}
+
+struct WindowHoursHeading<Hours: WindowHours>: View {
+    let title: String
+    let hours: Hours
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.headline)
+            Text(Words.windowHours(hours)).foregroundStyle(.secondary)
+        }
+        .padding(.top, 6)
+    }
+}
+
+struct SeasonEditor: View {
+    @Binding var season: ComputerSettingsFacts.Season
+    let days: [String]
+    let remove: () -> Void
+
+    var body: some View {
+        WindowHoursHeading(title: Words.season(season), hours: season)
+        TextField(Words.seasonName, text: $season.name)
+        dateRow(Words.seasonStarts, text: $season.from)
+        dateRow(Words.seasonEnds, text: $season.to)
+        WindowHoursFields(hours: $season, days: days)
+        Button(Words.removeSeason, systemImage: "minus.circle", role: .destructive, action: remove)
+    }
+
+    private func dateRow(_ title: String, text: Binding<String>) -> some View {
+        SettingsRow(title) {
+            HStack(spacing: 6) {
+                Picker(title, selection: Binding(
+                    get: { MonthDay(text.wrappedValue).month },
+                    set: { text.wrappedValue = MonthDay(month: $0, day: MonthDay(text.wrappedValue).day).text }
+                )) {
+                    ForEach(1...12, id: \.self) { month in Text(Words.month(month)).tag(month) }
+                }
+                Picker(title, selection: Binding(
+                    get: { MonthDay(text.wrappedValue).day },
+                    set: { text.wrappedValue = MonthDay(month: MonthDay(text.wrappedValue).month, day: $0).text }
+                )) {
+                    ForEach(1...MonthDay.daysInMonth[MonthDay(text.wrappedValue).month - 1], id: \.self) { day in
+                        Text("\(day)").tag(day)
+                    }
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+    }
+}
+
+/// A work window's or season's days and its one or two blocks of hours.
+struct WindowHoursFields<Hours: WindowHours>: View {
+    @Binding var hours: Hours
+    let days: [String]
+
+    var body: some View {
+        dayRow(Words.worksOn, allDay: false)
+        dayRow(Words.allDayOn, allDay: true)
+        hourPicker(Words.startsAt, selection: $hours.startHour)
+        hourPicker(Words.endsAt, selection: $hours.endHour)
+        if let second = hours.secondHours, second.count == 2 {
+            hourPicker(Words.alsoFrom, selection: Binding(
+                get: { second[0] }, set: { hours.secondHours = [$0, hours.secondHours?.last ?? second[1]] }
+            ))
+            hourPicker(Words.endsAt, selection: Binding(
+                get: { second[1] }, set: { hours.secondHours = [hours.secondHours?.first ?? second[0], $0] }
+            ))
+            Button(Words.removeSecondHours, systemImage: "minus.circle") { hours.secondHours = nil }
+        } else {
+            Button(Words.addSecondHours, systemImage: "plus") { hours.secondHours = [9, 17] }
+        }
+    }
+
+    private func hourPicker(_ title: String, selection: Binding<Int>) -> some View {
+        Picker(title, selection: selection) {
+            ForEach(0..<24, id: \.self) { hour in Text(Words.hour(hour)).tag(hour) }
+        }
+    }
+
     private func dayRow(_ title: String, allDay: Bool) -> some View {
         SettingsRow(title) {
             HStack(spacing: 4) {
                 ForEach(days, id: \.self) { day in
                     Toggle(Words.day(day), isOn: Binding(
-                        get: { (allDay ? schedule.allDayDays : schedule.days).contains(day) },
+                        get: { (allDay ? hours.allDayDays : hours.days).contains(day) },
                         set: { _ in
-                            schedule = ComputerSettingsDraft.togglingDay(day, allDay: allDay, in: schedule, order: days)
+                            hours = ComputerSettingsDraft.togglingDay(day, allDay: allDay, in: hours, order: days)
                         }
                     ))
                     .toggleStyle(.button)
