@@ -41,7 +41,7 @@ from mediaforce.tuning.calibration_jobs import COMPUTER_RETRY_RESULT_KEY, finish
 from mediaforce.tuning.target_size_search import MAX_TARGET_SIZE_CANDIDATES, TargetSizeSearchError
 from mediaforce.web.runtime.encode_runtime import running_staged_scratch_reservations
 from mediaforce.web.runtime.scratch_reservations import host_identity_tokens
-from mediaforce.encoding.staged_host import StagedScratchError
+from mediaforce.encoding.staged_host import ScratchStillInUseError, StagedScratchError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -725,7 +725,7 @@ def _lost_sample_computer(exc: BaseException, host: Mapping[str, Any]) -> bool:
     A refused login or changed host key also fails in the SSH client, but trying again cannot fix
     it, so it is not this and still asks the owner straight away.
     """
-    if execution_mode_for_host(dict(host)) != "ssh":
+    if execution_mode_for_host(dict(host)) != "ssh" or isinstance(exc, ScratchStillInUseError):
         return False
     for error in _exception_chain(exc):
         if isinstance(error, EncodeConnectionLostError):

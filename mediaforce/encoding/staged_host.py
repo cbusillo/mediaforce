@@ -7,7 +7,9 @@ the host against that local file, pulls the output back, and removes the directo
 
 Scratch space is recovered three ways: the controller removes the directory when the job
 ends, a keeper connection removes it when the controller goes away, and a sweep before each
-job removes directories whose keeper is no longer running. The keeper also keeps a Mac host from
+job removes directories whose keeper is no longer running. Each first stops whatever still
+names the directory with the scoped quality-run stop, and removes it only once that stop proves
+nothing is left; otherwise the directory stays. The keeper also keeps a Mac host from
 idle-sleeping through the copy, the encode and the pull back.
 """
 
@@ -25,7 +27,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from mediaforce.core.type_defs import object_dict
-from mediaforce.core.process_control import ManagedProcessController
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND, REMOTE_QUALITY_CONTAINED_MARKER, \
+    REMOTE_QUALITY_CONTAINMENT_SCRIPT
 from mediaforce.hosts.transport import keep_awake_while_running
 
 STAGED_JOB_KEY = "staged_job"
@@ -46,6 +50,18 @@ RunRemoteCommand = Callable[..., subprocess.CompletedProcess[str]]
 
 class StagedScratchError(RuntimeError):
     """The host could not stage, verify or return a file through its scratch directory."""
+
+
+class ScratchStillInUseError(RuntimeError):
+    failure_kind = CONTAINMENT_UNPROVEN_FAILURE_KIND
+
+
+def remove_once_unused_shell(directory: str) -> str:
+    return (
+        f"if sh -c {shlex.quote(REMOTE_QUALITY_CONTAINMENT_SCRIPT)} sh {directory} 2>/dev/null"
+        f" | grep -qx {shlex.quote(REMOTE_QUALITY_CONTAINED_MARKER)}; then rm -rf {directory}"
+        f" && echo {shlex.quote(REMOTE_QUALITY_CONTAINED_MARKER)}; fi"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +118,7 @@ def sweep_script(scratch_root: PurePosixPath) -> str:
             '  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then continue; fi',
             '  if [ -z "$pid" ] && [ -z "$(find "$dir" -maxdepth 0 -mmin +'
             f'{ORPHAN_GRACE_MINUTES} 2>/dev/null)" ]; then continue; fi',
-            '  rm -rf "$dir"',
+            f'  {remove_once_unused_shell(chr(34) + "$dir" + chr(34))}',
             "done",
         ]
     )
@@ -112,7 +128,8 @@ def keeper_script(scratch_dir: PurePosixPath) -> str:
     """Hold the scratch directory for as long as this connection lives.
 
     ``cat`` blocks on stdin, so the shell exits when the controller closes the connection or
-    disappears. The exit trap stops anything still using the directory and removes it. ``cat``
+    disappears. The exit trap stops anything still using the directory and removes it once
+    that stop is proven. ``cat``
     runs in the background because a shell defers its traps while a foreground command blocks;
     ``wait`` returns as soon as a signal arrives.
     """
@@ -123,7 +140,7 @@ def keeper_script(scratch_dir: PurePosixPath) -> str:
             f"dir={directory}",
             "reader=",
             'cleanup() { [ -n "$reader" ] && kill "$reader" 2>/dev/null; '
-            'pkill -f -- "$dir/" 2>/dev/null || true; rm -rf "$dir"; }',
+            f'{remove_once_unused_shell(chr(34) + "$dir" + chr(34))}; }}',
             "trap cleanup EXIT",
             "trap 'exit 1' HUP INT TERM",
             'mkdir -p "$dir"',
@@ -234,12 +251,23 @@ def staged_job(
         _copy_source(job, source_path, source_size, ssh_target=ssh_target, ssh_options=ssh_options,
                      remote=remote, process_controller=process_controller, popen=popen)
         yield job
-    finally:
+    except BaseException as error:
         _release_keeper(keeper)
-        try:
-            remote(f"rm -rf {shlex.quote(str(scratch_dir))}")
-        except Exception:  # noqa: BLE001 - the keeper trap and the next sweep also remove it.
-            pass
+        if not _removed_once_unused(remote, scratch_dir) and not isinstance(error, ProcessCancelledError):
+            raise ScratchStillInUseError(
+                "The encode on that computer stopped early and was not confirmed ended, so its work folder was kept."
+            ) from error
+        raise
+    _release_keeper(keeper)
+    _removed_once_unused(remote, scratch_dir)
+
+
+def _removed_once_unused(remote: Callable[..., subprocess.CompletedProcess[str]], scratch_dir: PurePosixPath) -> bool:
+    try:
+        result = remote(remove_once_unused_shell(shlex.quote(str(scratch_dir))))
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and REMOTE_QUALITY_CONTAINED_MARKER in (result.stdout or "").split()
 
 
 def _copy_source(

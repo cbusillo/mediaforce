@@ -8,6 +8,7 @@ import tempfile
 import uuid
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -27,8 +28,8 @@ from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, manag
     process_result_reached_schedule_deadline
 from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.remote_cleanup import RemoteHostUnreachableError
-from mediaforce.hosts.transport import EncodeConnectionLostError, ssh_connection_dropped, ssh_host_unreachable
-from mediaforce.remote import execution_mode_for_host, last_sleep_was_dark_wake, run_remote_command
+from mediaforce.hosts.transport import EncodeConnectionLostError, ssh_connection_lost, ssh_host_unreachable
+from mediaforce.remote import execution_mode_for_host, run_remote_command, slept_from_dark_wake_since
 
 RESULT_RE = re.compile(
     r"crf\s+(?P<crf>[0-9.]+)\s+(?P<metric>VMAF|XPSNR)\s+(?P<score>[0-9.]+)",
@@ -902,6 +903,7 @@ def _run_quality_command(
             if mkdir_result.stderr.strip():
                 details = f"{details}\n{mkdir_result.stderr.strip()}".strip()
             raise QualityTempSetupError(details or f"Failed to prepare remote temp dir: {temp_dir}")
+    started_at = datetime.now(UTC)
     try:
         result = run_remote_command(
             object_dict(host),
@@ -934,18 +936,25 @@ def _run_quality_command(
         if output_tail is not None:
             error.add_note(f"Last output from that computer:\n{output_tail}")
         raise error from None
-    if temp_dir is not None and result.returncode == 255 and ssh_connection_dropped(result.returncode, result.stderr):
-        raise _dropped_quality_run_error(object_dict(host), cmd, temp_dir)
+    if temp_dir is not None and _ssh_may_have_left_the_run_going(result.returncode):
+        _confirm_uncertain_quality_run_ended(object_dict(host), cmd, temp_dir, result, started_at=started_at)
     return result
 
 
-def _dropped_quality_run_error(host: dict[str, Any], cmd: list[str], scoped_temp_dir: str) -> Exception:
+def _ssh_may_have_left_the_run_going(returncode: int) -> bool:
+    return returncode < 0 or returncode == 255
+
+
+def _confirm_uncertain_quality_run_ended(
+        host: dict[str, Any], cmd: list[str], scoped_temp_dir: str, result: subprocess.CompletedProcess[str],
+        *, started_at: datetime,
+) -> None:
     host_key = str(host.get("key") or host.get("host") or "").strip()
     host_label = str(host.get("label") or "").strip() or host_key or "another computer"
     try:
         stop_timed_out_remote_quality_run(host, scoped_temp_dir)
     except Exception as containment_error:  # noqa: BLE001 - any failure leaves the run unproven; its detail is kept.
-        return RemoteQualityTimeoutError(
+        raise RemoteQualityTimeoutError(
             phase=_quality_phase(cmd),
             timeout_seconds=REMOTE_QUALITY_TIMEOUT_SECONDS,
             host_key=host_key,
@@ -954,11 +963,12 @@ def _dropped_quality_run_error(host: dict[str, Any], cmd: list[str], scoped_temp
             scoped_temp_dir=scoped_temp_dir,
             containment_detail=f"{type(containment_error).__name__}: {containment_error}"[-2000:],
             connection_lost=True,
+        ) from None
+    if ssh_connection_lost(result.returncode, result.stderr):
+        raise EncodeConnectionLostError(
+            f"Lost the connection to {host_label} while measuring quality. It will be tried again.",
+            dark_wake_sleep=slept_from_dark_wake_since(host, started_at),
         )
-    return EncodeConnectionLostError(
-        f"Lost the connection to {host_label} while measuring quality. It will be tried again.",
-        dark_wake_sleep=last_sleep_was_dark_wake(host),
-    )
 
 
 def stop_timed_out_remote_quality_run(
@@ -1094,6 +1104,9 @@ def _cleanup_after_failed_quality_command(
     if isinstance(exc, RemoteQualityTimeoutError) and not exc.remote_process_contained:
         # The run on that computer may still be writing there; the periodic sweeps remove it later.
         return
+    if not isinstance(exc, RemoteQualityTimeoutError | EncodeConnectionLostError) and not _run_shown_ended(
+            scoped_temp_dir, host=host):
+        return
     cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
     if cleanup_error is None:
         return
@@ -1101,6 +1114,16 @@ def _cleanup_after_failed_quality_command(
         exc.note_temp_files_left(cleanup_error)
         return
     _attach_quality_cleanup_detail(exc, cleanup_error)
+
+
+def _run_shown_ended(scoped_temp_dir: Path | None, *, host: dict[str, object] | None) -> bool:
+    if scoped_temp_dir is None or _quality_execution_mode(host) != "ssh":
+        return True
+    try:
+        stop_timed_out_remote_quality_run(object_dict(host), str(scoped_temp_dir), wake_before_connect=False)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return False
+    return True
 
 
 def _attach_quality_cleanup_detail(exc: Exception, cleanup_error: str) -> None:

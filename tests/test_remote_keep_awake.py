@@ -35,6 +35,7 @@ echo caffeinate-noise
 echo caffeinate-noise >&2
 while [ "$#" -gt 0 ]; do
     [ "$1" = -w ] && watched=$2
+    [ "$1" = -t ] && sleep "$2"
     shift
 done
 while kill -0 "$watched" 2>/dev/null; do sleep 0.05; done
@@ -49,6 +50,9 @@ case "$*" in
     "-g systemstate") printf 'Current System Capabilities are: %s \\nCurrent Power State: 4\\n' "$FAKE_CAPABILITIES" ;;
     *) printf 'pmset %s\\n' "$*" >> "$KEEP_AWAKE_LOG" ;;
 esac
+"""
+_FAKE_INPUT_IDLE = """#!/bin/sh
+printf '    | |   "HIDIdleTime" = %s\\n' "$FAKE_INPUT_IDLE_NS"
 """
 FULL_WAKE = "CPU Graphics Audio Network"
 DARK_WAKE = "CPU Network"
@@ -84,7 +88,8 @@ class RemoteKeepAwakeTests(unittest.TestCase):
         self.root = Path(temp.name)
         tools = self.root / "bin"
         tools.mkdir()
-        for name, body in (("caffeinate", _FAKE_CAFFEINATE), ("ffmpeg", _FAKE_FFMPEG), ("pmset", _FAKE_PMSET)):
+        for name, body in (("caffeinate", _FAKE_CAFFEINATE), ("ffmpeg", _FAKE_FFMPEG), ("pmset", _FAKE_PMSET),
+                           ("ioreg", _FAKE_INPUT_IDLE)):
             tool = tools / name
             tool.write_text(body)
             tool.chmod(0o755)
@@ -95,6 +100,7 @@ class RemoteKeepAwakeTests(unittest.TestCase):
             "KEEP_AWAKE_LOG": str(self.log),
             "FAKE_ENCODE_SECONDS": "0.2",
             "FAKE_CAPABILITIES": FULL_WAKE,
+            "FAKE_INPUT_IDLE_NS": str(13 * 60 * 60 * 10 ** 9),
             "TMPDIR": str(self.root),
         }
 
@@ -187,6 +193,17 @@ class RemoteKeepAwakeTests(unittest.TestCase):
 
         self.assertEqual(stdout, b"done")
         self.assertEqual(self._full_wake_requests(), ["declare activity", "displaysleepnow"])
+        self._assert_released(keep_awake_pid)
+
+    def test_a_mac_someone_touched_during_the_wake_request_keeps_its_display_on(self) -> None:
+        self.env["FAKE_CAPABILITIES"] = DARK_WAKE
+        self.env["FAKE_INPUT_IDLE_NS"] = "0"
+        shell = self._start(self._remote_command_script(["true"]))
+        keep_awake_pid = self._assert_kept_awake_for(shell)
+
+        shell.communicate(timeout=10)
+
+        self.assertEqual(self._full_wake_requests(), ["declare activity"])
         self._assert_released(keep_awake_pid)
 
     def test_work_on_a_mac_already_fully_awake_leaves_its_display_alone(self) -> None:
@@ -344,47 +361,53 @@ class RemoteKeepAwakeTests(unittest.TestCase):
 
 
 
-_FAKE_IOREG = """#!/bin/sh
-[ -n "$FAKE_LAST_SLEEP_REASON" ] || exit 0
-printf '+-o Root  <class IORegistryEntry>\\n'
-printf '      "Last Sleep Reason" = "%s"\\n' "$FAKE_LAST_SLEEP_REASON"
-printf '      "Wake Type" = "Notification"\\n'
+_FAKE_POWER_LOG = """#!/bin/sh
+[ "$*" = "-g log" ] && printf '%s\\n' "$FAKE_POWER_LOG"
 """
+RUN_STARTED = datetime(2026, 11, 14, 11, 30, tzinfo=UTC)
 
 
-class LastSleepReasonTests(unittest.TestCase):
-    """After a Mac drops mid-work, its own record of why it last slept decides how the drop counts."""
+def _sleep_line(at: str, reason: str) -> str:
+    return f"{at} -0500 Sleep               \tEntering Sleep state due to '{reason}':TCPKeepAlive=active Using AC (Charge:80%) 900 secs"
+
+
+class SleepDuringRunTests(unittest.TestCase):
+    """After a Mac drops mid-work, its own power log says whether it slept from dark wake during that run."""
 
     @staticmethod
-    def _read(reason: str | None) -> tuple[bool, list[dict[str, Any]]]:
+    def _read(power_log: str) -> tuple[bool, list[dict[str, Any]]]:
         calls: list[dict[str, Any]] = []
         with TemporaryDirectory() as raw_root:
             tools = Path(raw_root)
-            (tools / "ioreg").write_text(_FAKE_IOREG)
-            (tools / "ioreg").chmod(0o755)
-            env = {**os.environ, "PATH": f"{tools}{os.pathsep}/usr/bin{os.pathsep}/bin",
-                   "FAKE_LAST_SLEEP_REASON": reason or ""}
+            (tools / "pmset").write_text(_FAKE_POWER_LOG)
+            (tools / "pmset").chmod(0o755)
+            env = {**os.environ, "PATH": f"{tools}{os.pathsep}{os.environ.get('PATH', '')}", "FAKE_POWER_LOG": power_log}
 
             def run_here(_host: dict[str, object], command: list[str], _timeout: int, **kwargs: Any) -> subprocess.CompletedProcess[str]:
                 calls.append(kwargs)
                 return subprocess.run(command, env=env, capture_output=True, text=True, check=False)
 
             with patch.object(remote, "run_remote_command", side_effect=run_here):
-                return remote.last_sleep_was_dark_wake({"host": "mac.example"}), calls
+                return remote.slept_from_dark_wake_since({"host": "mac.example"}, RUN_STARTED), calls
 
-    def test_a_dark_wake_sleep_is_told_apart_from_other_sleeps(self) -> None:
-        for reason, dark in (
-                ("Dark Wake Thermal Emergency", True),
-                ("Clamshell Sleep", False),
-                ("Idle Sleep", False),
-                ("Maintenance Sleep", False),
-                (None, False),
+    def test_only_a_dark_wake_sleep_during_this_run_counts(self) -> None:
+        earlier_dark_wake = _sleep_line("2026-11-14 05:53:43", "Dark Wake Thermal Emergency")
+        for label, log, slept in (
+                ("dark wake sleep during the run", "\n".join([
+                    earlier_dark_wake, _sleep_line("2026-11-14 05:59:00", "Maintenance Sleep"),
+                    _sleep_line("2026-11-14 06:49:31", "Dark Wake Thermal Emergency"),
+                ]), True),
+                ("dark wake sleep before the run", earlier_dark_wake, False),
+                ("other sleep during the run", "\n".join([
+                    earlier_dark_wake, _sleep_line("2026-11-14 06:49:31", "Clamshell Sleep"),
+                ]), False),
+                ("no sleep recorded", "2026-11-14 06:49:31 -0500 Wake  \tDarkWake to FullWake", False),
         ):
-            with self.subTest(reason=reason):
-                self.assertIs(self._read(reason)[0], dark)
+            with self.subTest(label):
+                self.assertIs(self._read(log)[0], slept)
 
-    def test_reading_the_reason_wakes_the_computer_that_dropped(self) -> None:
-        _dark, [call] = self._read("Dark Wake Thermal Emergency")
+    def test_reading_the_power_log_wakes_the_computer_that_dropped(self) -> None:
+        _slept, [call] = self._read("")
         self.assertNotEqual(call.get("wake_before_connect"), False)
 
 

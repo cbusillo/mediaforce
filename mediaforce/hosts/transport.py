@@ -1,5 +1,7 @@
+import re
 import shlex
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -28,12 +30,21 @@ MACOS_DARK_WAKE_SHELL_TEST = (
     '*"Capabilities are:"*Graphics*) false ;; *"Capabilities are:"*) true ;; *) false ;; esac'
 )
 
+# Seconds since the last keyboard, mouse or trackpad input; empty when the Mac cannot say.
+_SECONDS_SINCE_INPUT_SHELL = (
+    "ioreg -c IOHIDSystem -d 4 2>/dev/null | awk '/\"HIDIdleTime\" =/ { print int($NF / 1000000000); exit }'"
+)
+
 # Declaring brief user activity brings a dark-woken Mac to full wake, which lights its display;
 # putting the display straight back to sleep keeps full wake. A Mac someone is using is already
-# in full wake, so its display is never touched. No power setting changes.
+# in full wake, and one someone touched since the request keeps its display on: its input idle
+# time must cover the whole request (one second of slack for the clock). No power setting changes.
 REQUEST_FULL_WAKE_SHELL_LINE = (
     f'if {MACOS_DARK_WAKE_SHELL_TEST}; then '
-    'caffeinate -u -t 2 </dev/null >/dev/null 2>&1; pmset displaysleepnow >/dev/null 2>&1; fi'
+    'mediaforce_wake_asked=$(date +%s); caffeinate -u -t 2 </dev/null >/dev/null 2>&1; '
+    f'mediaforce_idle=$({_SECONDS_SINCE_INPUT_SHELL}); '
+    'if [ -n "$mediaforce_idle" ] && [ $((mediaforce_idle + 1)) -ge $(($(date +%s) - mediaforce_wake_asked)) ]; then '
+    'pmset displaysleepnow >/dev/null 2>&1; fi; fi'
 )
 
 # On a Mac, caffeinate holds a "prevent idle sleep" assertion that ends when the shell running the
@@ -45,14 +56,19 @@ _KEEP_AWAKE_SHELL_LINE = (
     f'(caffeinate -i -w "$$" </dev/null >/dev/null 2>&1 &); {REQUEST_FULL_WAKE_SHELL_LINE}; fi'
 )
 
-# The reason the Mac gave for its most recent sleep, as its power log words it.
-LAST_SLEEP_REASON_SHELL = (
-    'ioreg -n IOPMrootDomain -r -d 1 2>/dev/null | sed -n \'s/^.*"Last Sleep Reason" = "\\(.*\\)"$/\\1/p\''
+# The Mac's power log line for its most recent sleep: when it slept and why, in its own words.
+LAST_SLEEP_ENTRY_SHELL = "pmset -g log 2>/dev/null | grep 'Entering Sleep state due to' | tail -n 1"
+_SLEEP_ENTRY = re.compile(
+    r"^(?P<at>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4}) .*Entering Sleep state due to '(?P<reason>[^']*)'"
 )
 
 
-def is_dark_wake_sleep_reason(reason: str | None) -> bool:
-    return "dark wake" in (reason or "").lower()
+def slept_from_dark_wake_after(sleep_entry: str, since: datetime) -> bool:
+    match = _SLEEP_ENTRY.match(sleep_entry.strip())
+    if match is None:
+        return False
+    slept_at = datetime.strptime(match["at"], "%Y-%m-%d %H:%M:%S %z")
+    return slept_at >= since and "dark wake" in match["reason"].lower()
 
 
 class EncodeConnectionLostError(RuntimeError):

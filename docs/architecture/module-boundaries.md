@@ -316,13 +316,19 @@ Guidance:
     a computer do not keep it awake. A Mac that answers from dark wake (display
     and most cooling off; it sleeps again under load) is first brought to full
     wake by declaring brief user activity, then its display is put straight
-    back to sleep. No power setting is ever changed. The
+    back to sleep unless someone touched it during the request. No power
+    setting is ever changed. The
     direct SSH encode commands in `encoding/runner.py`, the staged keeper and
     the long Homebrew setup scripts in `setup_runtime.py` use the same wrapper
-  - a link that drops mid-work reads the Mac's own last sleep reason; a
-    dark-wake sleep retries without cooling that computer down, and a dropped
-    quality run is stopped through its scoped containment before its work
-    folder is reused, or held as unconfirmed
+  - a link that drops mid-work reads the Mac's power log; only a dark-wake
+    sleep during that run retries without cooling the computer down, still
+    within the attempt cap. Any uncertain end of a quality run (a dropped or
+    killed connection, an unexplained exit 255, a Stop) is stopped through its
+    scoped containment before its work folder is removed, or the folder is
+    kept and the file held as unconfirmed
+  - staged scratch folders (`encoding/staged_host.py`) follow the same rule
+    in all three cleanups: the controller, the keeper's exit and the sweep
+    remove a folder only once that scoped stop proves its writer ended
 - `status_helpers.py` and `status_runtime.py`
   - host probe scripts, capability checks, and status parsing
   - successful status probes remain distinct from full encode readiness, so a

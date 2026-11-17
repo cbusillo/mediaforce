@@ -464,7 +464,7 @@ class RemoteQualityTimeoutTests(unittest.TestCase):
             "quality_temp_dir": quality_temp_dir,
         }
         with patch("mediaforce.encoding.quality.run_remote_command", side_effect=fake_remote), \
-                patch("mediaforce.encoding.quality.last_sleep_was_dark_wake", return_value=slept_from_dark_wake):
+                patch("mediaforce.encoding.quality.slept_from_dark_wake_since", return_value=slept_from_dark_wake):
             try:
                 if run == "crf_search":
                     run_crf_search(
@@ -565,6 +565,34 @@ class RemoteQualityTimeoutTests(unittest.TestCase):
                     self.assertEqual(steps[1], ["sh", "-c", REMOTE_QUALITY_CONTAINMENT_SCRIPT, "sh", temp_dir])
                     self.assertEqual(steps[-1], ["rm", "-rf", temp_dir])
 
+    def test_every_uncertain_ssh_ending_keeps_the_temp_folder_until_the_run_is_shown_ended(self) -> None:
+        endings = {
+            "client killed": subprocess.CompletedProcess(["ssh"], -9, "", ""),
+            "exit 255 without a diagnostic": subprocess.CompletedProcess(["ssh"], 255, "", ""),
+            "exit 255 with an unrecognised diagnostic": subprocess.CompletedProcess(["ssh"], 255, "", "mux_client_request_session: read"),
+        }
+        for label, ending in endings.items():
+            for phase in ("crf_search", "sample_encode"):
+                with self.subTest(label, phase=phase):
+                    exc, calls = self._run_with_quality_failure(
+                        phase, ending, containment=RuntimeError("ssh: connect to host: Operation timed out"),
+                    )
+
+                    assert isinstance(exc, RemoteQualityTimeoutError)
+                    self.assertFalse(exc.remote_process_contained)
+                    self.assertEqual(exc.failure_kind, CONTAINMENT_UNPROVEN_FAILURE_KIND)
+                    self.assertNotIn("rm", [cmd[0] for _, cmd, _ in calls])
+
+    def test_an_unexplained_exit_255_is_the_runs_own_failure_once_it_is_shown_ended(self) -> None:
+        for phase in ("crf_search", "sample_encode"):
+            with self.subTest(phase=phase):
+                exc, calls = self._run_with_quality_failure(phase, subprocess.CompletedProcess(["ssh"], 255, "", ""))
+
+                self.assertNotIsInstance(exc, EncodeConnectionLostError | RemoteQualityTimeoutError)
+                temp_dir = next(cmd[2] for _, cmd, _ in calls if cmd[0] == "mkdir")
+                steps = [cmd for _, cmd, _ in calls if cmd[0] not in {"mkdir", "ab-av1"}]
+                self.assertEqual(steps, [["sh", "-c", REMOTE_QUALITY_CONTAINMENT_SCRIPT, "sh", temp_dir], ["rm", "-rf", temp_dir]])
+
     def test_a_dropped_link_whose_run_is_not_shown_stopped_is_unproven_and_keeps_its_temp_folder(self) -> None:
         for phase in ("crf_search", "sample_encode"):
             with self.subTest(phase=phase):
@@ -642,15 +670,19 @@ class RemoteQualityTimeoutTests(unittest.TestCase):
             return exc
         self.fail("the quality run should have failed")
 
-    def test_other_remote_quality_failures_still_remove_the_temp_folder(self) -> None:
-        for phase in ("crf_search", "sample_encode"):
-            with self.subTest(phase=phase):
-                exc, calls = self._run_with_quality_failure(phase, RuntimeError("connection lost"))
+    def test_other_remote_quality_failures_remove_the_temp_folder_only_once_the_run_is_shown_ended(self) -> None:
+        unconfirmed = subprocess.CompletedProcess(["ssh"], 1, "", "")
+        for failure in (RuntimeError("connection lost"), ProcessCancelledError("Stopped by the owner")):
+            for phase in ("crf_search", "sample_encode"):
+                for containment, removed in ((self.CONTAINED, True), (unconfirmed, False)):
+                    with self.subTest(type(failure).__name__, phase=phase, removed=removed):
+                        exc, calls = self._run_with_quality_failure(phase, failure, containment=containment)
 
-                self.assertNotIsInstance(exc, RemoteQualityTimeoutError)
-                temp_dir = next(cmd[2] for _, cmd, _ in calls if cmd[0] == "mkdir")
-                self.assertEqual(calls[-1][1], ["rm", "-rf", temp_dir])
-                self.assertNotIn(["sh", "-c"], [cmd[:2] for _, cmd, _ in calls])
+                        self.assertIs(exc, failure)
+                        temp_dir = next(cmd[2] for _, cmd, _ in calls if cmd[0] == "mkdir")
+                        steps = [cmd for _, cmd, _ in calls if cmd[0] not in {"mkdir", "ab-av1"}]
+                        expected = [["sh", "-c", REMOTE_QUALITY_CONTAINMENT_SCRIPT, "sh", temp_dir]]
+                        self.assertEqual(steps, expected + [["rm", "-rf", temp_dir]] if removed else expected)
 
     def test_removing_the_remote_temp_folder_keeps_the_callers_schedule_deadline(self) -> None:
         host = dict(self.HOST)

@@ -56,7 +56,7 @@ from mediaforce.encoding.free_space import CapacityCache, large_job_requires_ser
 from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND, CONTAINMENT_UNPROVEN_OWNER_STEP, \
     REMOTE_QUALITY_TIMEOUT_FAILURE_KIND, QualityTempSetupError, RemoteQualityTimeoutError, \
     analyze_quality_policy_failure, quality_error_message, stop_timed_out_remote_quality_run
-from mediaforce.encoding.staged_host import STAGED_JOB_KEY, StagedScratchError, host_scratch_root, measure_scratch_free_bytes, \
+from mediaforce.encoding.staged_host import STAGED_JOB_KEY, ScratchStillInUseError, StagedScratchError, host_scratch_root, measure_scratch_free_bytes, \
     required_scratch_bytes
 from mediaforce.hosts.types import is_stop_signal_exit, is_storage_io_failure, is_vmaf_model_load_failure
 from mediaforce.encoding.cadence import CadenceResolutionError
@@ -2247,13 +2247,13 @@ def transition_encode_job_failure(
                  or _encode_failure_is_retryable(failure_kind, error_message, assigned_host))
     if auto_policy_retry:
         retryable = True
-    host_related = (_encode_failure_is_host_related(failure_kind, error_message, assigned_host)
-                    and not _slept_from_dark_wake(failure))
-    retry_beyond_attempt_cap = storage_outage or _encode_failure_retries_after_attempt_cap(
+    slept_from_dark_wake = _slept_from_dark_wake(failure)
+    host_related = _encode_failure_is_host_related(failure_kind, error_message, assigned_host) and not slept_from_dark_wake
+    retry_beyond_attempt_cap = storage_outage or (not slept_from_dark_wake and _encode_failure_retries_after_attempt_cap(
         failure_kind,
         error_message,
         assigned_host,
-    )
+    ))
     # An unrecognised error is often a raw tool log: the owner sees a plain summary, and the
     # raw text stays on the job for diagnosis.
     owner_error = UNKNOWN_ENCODE_FAILURE_MESSAGE if failure_kind == "unknown" else error_message
@@ -5561,7 +5561,7 @@ def _encode_retry_artifact_cleanup_error_message(
 def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
     message = str(exc).lower()
     host_payload = object_dict(job.get("host"))
-    if isinstance(exc, HostReadinessError | RemoteQualityTimeoutError):
+    if isinstance(exc, HostReadinessError | RemoteQualityTimeoutError | ScratchStillInUseError):
         return exc.failure_kind
     if isinstance(exc, ProcessDeadlineEnforcementError):
         return "containment_unproven"

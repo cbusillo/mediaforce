@@ -1035,7 +1035,7 @@ class TargetSizeProductionTests(unittest.TestCase):
                     "mediaforce.execution._build_ffmpeg_command",
                     return_value=["ffmpeg", "-i", str(source_path), str(staging_path)],
                 ), patch("mediaforce.execution._run_encode_command", return_value=failed_process), patch(
-                    "mediaforce.encoding.manifest.last_sleep_was_dark_wake", return_value=True,
+                    "mediaforce.encoding.manifest.slept_from_dark_wake_since", return_value=True,
                 ) as sleep_reason:
                     with self.assertRaises(RuntimeError) as raised:
                         execution.encode_one_item(
@@ -1052,7 +1052,8 @@ class TargetSizeProductionTests(unittest.TestCase):
                 if isinstance(raised.exception, EncodeConnectionLostError):
                     self.assertIn("Encoder", str(raised.exception))
                     self.assertTrue(raised.exception.dark_wake_sleep)
-                    sleep_reason.assert_called_once_with(host)
+                    [(read_host, _run_started)] = [call.args for call in sleep_reason.call_args_list]
+                    self.assertEqual(read_host, host)
                 else:
                     sleep_reason.assert_not_called()
 

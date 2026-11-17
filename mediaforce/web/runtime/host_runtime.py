@@ -416,12 +416,14 @@ def ensure_encode_host_ready(
         if refreshed is not None:
             refreshed = _recover_host_mounts(config, host, refreshed)
             if refreshed.available:
+                _confirm_full_wake(config, host, refreshed)
                 return True
         time.sleep(lifecycle_poll_seconds)
     refreshed = fresh_host_status_for_key(config, host_key)
     if refreshed is not None:
         refreshed = _recover_host_mounts(config, host, refreshed)
         if refreshed.available:
+            _confirm_full_wake(config, host, refreshed)
             return True
     detail = refreshed.detail if refreshed is not None else None
     message = refreshed.message if refreshed is not None else f"Timed out waiting for {host_key}"

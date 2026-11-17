@@ -969,6 +969,25 @@ def test_a_mac_that_stays_in_dark_wake_is_not_given_work(
     assert refused.value.failure_kind == "host_unavailable"
 
 
+@pytest.mark.parametrize("start_timeout_seconds", [60, 0])
+def test_a_computer_started_by_its_start_command_must_also_be_fully_awake(
+        config: MediaforceConfig, empty_host_status_cache: None, start_timeout_seconds: int,
+) -> None:
+    host = {**config.raw["remote_hosts"][0], "start_command": "wake-worker"}
+    off = status()
+    off.missing_mounts = []
+    checks = iter([[off]])
+    with patch_attr(host_runtime, "collect_host_statuses", side_effect=lambda _config: next(checks, [_dark_woken()])), \
+            patch_attr(host_runtime, "run_host_lifecycle_command",
+                       return_value=subprocess.CompletedProcess(["wake-worker"], 0, "", "")) as start, \
+            patch_attr(host_runtime, "run_remote_command") as wake_request, \
+            patch_attr(host_runtime, "host_lifecycle_start_timeout_seconds", return_value=start_timeout_seconds):
+        with pytest.raises(HostReadinessError):
+            host_runtime.ensure_encode_host_ready(config, host, lifecycle_command_timeout_seconds=1, lifecycle_poll_seconds=0)
+    start.assert_called_once()
+    wake_request.assert_called()
+
+
 @pytest.mark.parametrize("work", ["encode", "sample"])
 def test_a_fully_awake_computer_is_given_work_without_a_wake_request(
         config: MediaforceConfig, empty_host_status_cache: None, work: str,

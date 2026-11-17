@@ -3331,10 +3331,19 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     "Lost the connection to Remote A. It will be tried again.", dark_wake_sleep=dark_wake_sleep,
                 )
 
-                updated = self._remote_job_failing_at_attempt_cap(f"job-lost-link-{dark_wake_sleep}", lost)
+                updated = self._remote_job_failing(
+                    f"job-lost-link-{dark_wake_sleep}", lost, attempt_count=web_app.ENCODE_JOB_MAX_ATTEMPTS - 1,
+                )
 
                 self.assertEqual(updated["status"], "retry_backoff")
                 self.assertEqual(updated["host_cooldown_until"] is None, dark_wake_sleep)
+
+    def test_dark_wake_sleeps_still_stop_at_the_attempt_cap(self) -> None:
+        lost = EncodeConnectionLostError("Lost the connection to Remote A. It will be tried again.", dark_wake_sleep=True)
+
+        updated = self._remote_job_failing_at_attempt_cap("job-lost-link-at-cap", lost)
+
+        self.assertNotEqual(updated["status"], "retry_backoff")
 
     def test_refused_ssh_access_stops_at_the_attempt_cap_with_its_own_reason(self) -> None:
         for job_id, diagnostic in (
@@ -3349,6 +3358,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 self.assertEqual(updated["error"], diagnostic)
 
     def _remote_job_failing_at_attempt_cap(self, job_id: str, exc: Exception) -> dict[str, Any]:
+        return self._remote_job_failing(job_id, exc, attempt_count=web_app.ENCODE_JOB_MAX_ATTEMPTS)
+
+    def _remote_job_failing(self, job_id: str, exc: Exception, *, attempt_count: int) -> dict[str, Any]:
         source_path = self._create_source_file(f"{job_id}.mkv")
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_library_item(connection, source_path, status="encoding")
@@ -3362,7 +3374,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 manifest_name=f"{job_id}.json",
                 host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
                 status="running",
-                attempt_count=web_app.ENCODE_JOB_MAX_ATTEMPTS,
+                attempt_count=attempt_count,
             )
             job = load_encode_job(connection, job_id)
             assert job is not None
