@@ -1,8 +1,9 @@
-"""A Mac encode computer stays awake exactly as long as Mediaforce's work runs on it.
+"""A Mac encode computer stays fully awake exactly as long as Mediaforce's work runs on it.
 
 The remote scripts run in a real ``/bin/sh``. A stand-in ``caffeinate`` on ``PATH`` records the
-process it was asked to watch and, like the real one, exits once that process is gone, so the
-tests need neither macOS nor SSH.
+process it was asked to watch and, like the real one, exits once that process is gone; a stand-in
+``pmset`` reports full or dark wake and records display sleep requests, so the tests need neither
+macOS nor SSH.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, SCHED
 from mediaforce.encoding import runner
 from mediaforce.encoding.staged_host import STAGED_JOB_KEY, StagedJob, staged_job
 from mediaforce.hosts import setup_runtime
+from mediaforce import remote
 from mediaforce.hosts.transport import keep_awake_while_running, run_remote_command
 from mediaforce.hosts.types import HostSetupResult
 
@@ -33,6 +35,7 @@ echo caffeinate-noise
 echo caffeinate-noise >&2
 while [ "$#" -gt 0 ]; do
     [ "$1" = -w ] && watched=$2
+    [ "$1" = -t ] && sleep "$2"
     shift
 done
 while kill -0 "$watched" 2>/dev/null; do sleep 0.05; done
@@ -41,6 +44,22 @@ while kill -0 "$watched" 2>/dev/null; do sleep 0.05; done
 _FAKE_FFMPEG = """#!/bin/sh
 sleep "$FAKE_ENCODE_SECONDS"
 """
+
+_FAKE_PMSET = """#!/bin/sh
+case "$*" in
+    "-g systemstate") printf 'Current System Capabilities are: %s \\nCurrent Power State: 4\\n' "$FAKE_CAPABILITIES" ;;
+    *) printf 'pmset %s\\n' "$*" >> "$KEEP_AWAKE_LOG" ;;
+esac
+"""
+_FAKE_INPUT_IDLE = """#!/bin/sh
+reading=$(($(cat "$KEEP_AWAKE_LOG.ioreg" 2>/dev/null || echo 0) + 1))
+echo "$reading" > "$KEEP_AWAKE_LOG.ioreg"
+eval "idle=\\$FAKE_INPUT_IDLE_NS_$reading"
+[ -z "$idle" ] || printf '    | |   "HIDIdleTime" = %s\\n' "$idle"
+"""
+UNTOUCHED_FOR_NS = 13 * 60 * 60 * 10 ** 9
+FULL_WAKE = "CPU Graphics Audio Network"
+DARK_WAKE = "CPU Network"
 
 
 def _wait_until(condition: Any, timeout: float = 10.0) -> bool:
@@ -73,7 +92,8 @@ class RemoteKeepAwakeTests(unittest.TestCase):
         self.root = Path(temp.name)
         tools = self.root / "bin"
         tools.mkdir()
-        for name, body in (("caffeinate", _FAKE_CAFFEINATE), ("ffmpeg", _FAKE_FFMPEG)):
+        for name, body in (("caffeinate", _FAKE_CAFFEINATE), ("ffmpeg", _FAKE_FFMPEG), ("pmset", _FAKE_PMSET),
+                           ("ioreg", _FAKE_INPUT_IDLE)):
             tool = tools / name
             tool.write_text(body)
             tool.chmod(0o755)
@@ -83,6 +103,9 @@ class RemoteKeepAwakeTests(unittest.TestCase):
             "PATH": f"{tools}{os.pathsep}{os.environ.get('PATH', '')}",
             "KEEP_AWAKE_LOG": str(self.log),
             "FAKE_ENCODE_SECONDS": "0.2",
+            "FAKE_CAPABILITIES": FULL_WAKE,
+            "FAKE_INPUT_IDLE_NS_1": str(UNTOUCHED_FOR_NS),
+            "FAKE_INPUT_IDLE_NS_2": str(UNTOUCHED_FOR_NS + 2 * 10 ** 9),
             "TMPDIR": str(self.root),
         }
 
@@ -110,10 +133,25 @@ class RemoteKeepAwakeTests(unittest.TestCase):
         if not self.log.exists():
             return []
         starts = []
-        for line in self.log.read_text().splitlines():
+        for line in self._wake_requests():
             pid, *args = line.split()
-            starts.append((int(pid), int(args[args.index("-w") + 1])))
+            if "-w" in args:
+                starts.append((int(pid), int(args[args.index("-w") + 1])))
         return starts
+
+    def _wake_requests(self) -> list[str]:
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def _full_wake_requests(self) -> list[str]:
+        """What the work asked of the Mac besides the hold: declared activity and display sleep, in order."""
+        requests = []
+        for line in self._wake_requests():
+            program, *args = line.split()
+            if "-u" in args:
+                requests.append("declare activity")
+            elif program == "pmset":
+                requests.append(" ".join(args))
+        return requests
 
     def _assert_kept_awake_for(self, shell: subprocess.Popen[bytes]) -> int:
         self.assertTrue(_wait_until(lambda: bool(self._keep_awake_starts())), "the work must keep the computer awake")
@@ -151,13 +189,54 @@ class RemoteKeepAwakeTests(unittest.TestCase):
         self.assertNotIn(b"caffeinate", stderr)
         self._assert_released(keep_awake_pid)
 
+    def test_work_on_a_mac_in_dark_wake_brings_it_to_full_wake_with_its_display_back_off(self) -> None:
+        self.env["FAKE_CAPABILITIES"] = DARK_WAKE
+        shell = self._start(self._remote_command_script(["sh", "-c", "sleep 0.3; printf done"]))
+        keep_awake_pid = self._assert_kept_awake_for(shell)
+
+        stdout, _stderr = shell.communicate(timeout=10)
+
+        self.assertEqual(stdout, b"done")
+        self.assertEqual(self._full_wake_requests(), ["declare activity", "displaysleepnow"])
+        self._assert_released(keep_awake_pid)
+
+    def test_a_mac_not_proven_untouched_through_the_wake_request_keeps_its_display_on(self) -> None:
+        readings = {
+            "touched half a second into the request": (UNTOUCHED_FOR_NS, 15 * 10 ** 8),
+            "touched just before the request": (10 ** 9, 3 * 10 ** 9),
+            "input idle time unreadable": ("", UNTOUCHED_FOR_NS),
+        }
+        for label, (before, after) in readings.items():
+            with self.subTest(label):
+                for leftover in (self.log, Path(f"{self.log}.ioreg")):
+                    leftover.unlink(missing_ok=True)
+                self.env.update({"FAKE_CAPABILITIES": DARK_WAKE, "FAKE_INPUT_IDLE_NS_1": str(before),
+                                 "FAKE_INPUT_IDLE_NS_2": str(after)})
+                shell = self._start(self._remote_command_script(["true"]))
+                keep_awake_pid = self._assert_kept_awake_for(shell)
+
+                shell.communicate(timeout=10)
+
+                self.assertEqual(self._full_wake_requests(), ["declare activity"])
+                self._assert_released(keep_awake_pid)
+
+    def test_work_on_a_mac_already_fully_awake_leaves_its_display_alone(self) -> None:
+        shell = self._start(self._remote_command_script(["true"]))
+        keep_awake_pid = self._assert_kept_awake_for(shell)
+
+        shell.communicate(timeout=10)
+
+        self.assertEqual(self._full_wake_requests(), [])
+        self._assert_released(keep_awake_pid)
+
     def test_a_probe_that_leaves_the_computer_asleep_does_not_keep_it_awake(self) -> None:
+        self.env["FAKE_CAPABILITIES"] = DARK_WAKE
         shell = self._start(self._remote_command_script(["true"], wake_before_connect=False))
 
         shell.communicate(timeout=10)
 
         self.assertEqual(shell.returncode, 0)
-        self.assertEqual(self._keep_awake_starts(), [])
+        self.assertEqual(self._wake_requests(), [])
 
     def test_killing_the_work_shell_releases_the_computer(self) -> None:
         shell = self._start(self._remote_command_script(["sleep", "60"]))
@@ -294,6 +373,56 @@ class RemoteKeepAwakeTests(unittest.TestCase):
 
         self._assert_released(keep_awake_pid)
 
+
+
+_FAKE_POWER_LOG = """#!/bin/sh
+[ "$*" = "-g log" ] && printf '%s\\n' "$FAKE_POWER_LOG"
+"""
+RUN_STARTED = datetime(2026, 11, 14, 11, 30, tzinfo=UTC)
+
+
+def _sleep_line(at: str, reason: str) -> str:
+    return f"{at} -0500 Sleep               \tEntering Sleep state due to '{reason}':TCPKeepAlive=active Using AC (Charge:80%) 900 secs"
+
+
+class SleepDuringRunTests(unittest.TestCase):
+    """After a Mac drops mid-work, its own power log says whether it slept from dark wake during that run."""
+
+    @staticmethod
+    def _read(power_log: str) -> tuple[bool, list[dict[str, Any]]]:
+        calls: list[dict[str, Any]] = []
+        with TemporaryDirectory() as raw_root:
+            tools = Path(raw_root)
+            (tools / "pmset").write_text(_FAKE_POWER_LOG)
+            (tools / "pmset").chmod(0o755)
+            env = {**os.environ, "PATH": f"{tools}{os.pathsep}{os.environ.get('PATH', '')}", "FAKE_POWER_LOG": power_log}
+
+            def run_here(_host: dict[str, object], command: list[str], _timeout: int, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                calls.append(kwargs)
+                return subprocess.run(command, env=env, capture_output=True, text=True, check=False)
+
+            with patch.object(remote, "run_remote_command", side_effect=run_here):
+                return remote.slept_from_dark_wake_since({"host": "mac.example"}, RUN_STARTED), calls
+
+    def test_only_a_dark_wake_sleep_during_this_run_counts(self) -> None:
+        earlier_dark_wake = _sleep_line("2026-11-14 05:53:43", "Dark Wake Thermal Emergency")
+        for label, log, slept in (
+                ("dark wake sleep during the run", "\n".join([
+                    earlier_dark_wake, _sleep_line("2026-11-14 05:59:00", "Maintenance Sleep"),
+                    _sleep_line("2026-11-14 06:49:31", "Dark Wake Thermal Emergency"),
+                ]), True),
+                ("dark wake sleep before the run", earlier_dark_wake, False),
+                ("other sleep during the run", "\n".join([
+                    earlier_dark_wake, _sleep_line("2026-11-14 06:49:31", "Clamshell Sleep"),
+                ]), False),
+                ("no sleep recorded", "2026-11-14 06:49:31 -0500 Wake  \tDarkWake to FullWake", False),
+        ):
+            with self.subTest(label):
+                self.assertIs(self._read(log)[0], slept)
+
+    def test_reading_the_power_log_wakes_the_computer_that_dropped(self) -> None:
+        _slept, [call] = self._read("")
+        self.assertNotEqual(call.get("wake_before_connect"), False)
 
 
 class SetupKeepAwakeTests(unittest.TestCase):

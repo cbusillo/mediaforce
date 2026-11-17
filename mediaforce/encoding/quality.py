@@ -8,8 +8,10 @@ import tempfile
 import uuid
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from mediaforce.encoding.ffmpeg import ab_av1_hwaccel_input_args
 from mediaforce.core.evidence import stable_json_hash
@@ -26,8 +28,8 @@ from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, manag
     process_result_reached_schedule_deadline
 from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.remote_cleanup import RemoteHostUnreachableError
-from mediaforce.hosts.transport import ssh_host_unreachable
-from mediaforce.remote import execution_mode_for_host, run_remote_command
+from mediaforce.hosts.transport import EncodeConnectionLostError, ssh_connection_lost, ssh_host_unreachable
+from mediaforce.remote import execution_mode_for_host, run_remote_command, slept_from_dark_wake_since
 
 RESULT_RE = re.compile(
     r"crf\s+(?P<crf>[0-9.]+)\s+(?P<metric>VMAF|XPSNR)\s+(?P<score>[0-9.]+)",
@@ -143,6 +145,7 @@ class RemoteQualityTimeoutError(RuntimeError):
             stalled: bool = False,
             scoped_temp_dir: str | None = None,
             containment_detail: str | None = None,
+            ended_early: bool = False,
     ) -> None:
         outcome = (
             "that run was stopped."
@@ -150,7 +153,9 @@ class RemoteQualityTimeoutError(RuntimeError):
             else f"the run on that computer was not confirmed stopped. {CONTAINMENT_UNPROVEN_OWNER_STEP}"
         )
         what_happened = (
-            f"printed nothing for {_plain_duration(timeout_seconds)}"
+            "stopped before it finished"
+            if ended_early
+            else f"printed nothing for {_plain_duration(timeout_seconds)}"
             if stalled
             else f"ran past {_plain_duration(timeout_seconds)} without a result"
         )
@@ -167,7 +172,18 @@ class RemoteQualityTimeoutError(RuntimeError):
         self.output_tail = output_tail
         self.scoped_temp_dir = scoped_temp_dir
         self.containment_detail = containment_detail
+        self.ended_early = ended_early
         self.temp_cleanup_error: str | None = None
+
+    def shown_ended(self) -> "RemoteQualityTimeoutError":
+        ended = RemoteQualityTimeoutError(
+            phase=self.phase, timeout_seconds=self.timeout_seconds, host_key=self.host_key, host_label=self.host_label,
+            remote_process_contained=True, output_tail=self.output_tail, stalled=self.stalled,
+            scoped_temp_dir=self.scoped_temp_dir, ended_early=self.ended_early,
+        )
+        for note in getattr(self, "__notes__", ()):
+            ended.add_note(note)
+        return ended
 
     def note_temp_files_left(self, cleanup_error: str) -> None:
         """Tell the owner in plain words; the raw detail names paths and SSH, so it stays a diagnostic."""
@@ -898,8 +914,9 @@ def _run_quality_command(
             if mkdir_result.stderr.strip():
                 details = f"{details}\n{mkdir_result.stderr.strip()}".strip()
             raise QualityTempSetupError(details or f"Failed to prepare remote temp dir: {temp_dir}")
+    started_at = datetime.now(UTC)
     try:
-        return run_remote_command(
+        result = run_remote_command(
             object_dict(host),
             cmd,
             REMOTE_QUALITY_TIMEOUT_SECONDS,
@@ -930,6 +947,39 @@ def _run_quality_command(
         if output_tail is not None:
             error.add_note(f"Last output from that computer:\n{output_tail}")
         raise error from None
+    if temp_dir is not None and _ssh_may_have_left_the_run_going(result.returncode):
+        _confirm_uncertain_quality_run_ended(object_dict(host), cmd, temp_dir, result, started_at=started_at)
+    return result
+
+
+def _ssh_may_have_left_the_run_going(returncode: int) -> bool:
+    return returncode < 0 or returncode == 255
+
+
+def _confirm_uncertain_quality_run_ended(
+        host: dict[str, Any], cmd: list[str], scoped_temp_dir: str, result: subprocess.CompletedProcess[str],
+        *, started_at: datetime,
+) -> None:
+    host_key = str(host.get("key") or host.get("host") or "").strip()
+    host_label = str(host.get("label") or "").strip() or host_key or "another computer"
+    try:
+        stop_timed_out_remote_quality_run(host, scoped_temp_dir)
+    except Exception as containment_error:  # noqa: BLE001 - any failure leaves the run unproven; its detail is kept.
+        raise RemoteQualityTimeoutError(
+            phase=_quality_phase(cmd),
+            timeout_seconds=REMOTE_QUALITY_TIMEOUT_SECONDS,
+            host_key=host_key,
+            host_label=host_label,
+            remote_process_contained=False,
+            scoped_temp_dir=scoped_temp_dir,
+            containment_detail=f"{type(containment_error).__name__}: {containment_error}"[-2000:],
+            ended_early=True,
+        ) from None
+    if ssh_connection_lost(result.returncode, result.stderr):
+        raise EncodeConnectionLostError(
+            f"Lost the connection to {host_label} while measuring quality. It will be tried again.",
+            dark_wake_sleep=slept_from_dark_wake_since(host, started_at),
+        )
 
 
 def stop_timed_out_remote_quality_run(
@@ -1051,7 +1101,7 @@ def _run_scoped_quality_command(
     try:
         result = _run_quality_command(cmd, process_controller=process_controller, host=host)
     except Exception as exc:
-        _cleanup_after_failed_quality_command(exc, scoped_temp_dir, host=host)
+        _cleanup_after_failed_quality_command(exc, scoped_temp_dir, host=host, phase=_quality_phase(cmd))
         raise
     return result, _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
 
@@ -1061,10 +1111,16 @@ def _cleanup_after_failed_quality_command(
         scoped_temp_dir: Path | None,
         *,
         host: dict[str, object] | None,
+        phase: str,
 ) -> None:
     if isinstance(exc, RemoteQualityTimeoutError) and not exc.remote_process_contained:
         # The run on that computer may still be writing there; the periodic sweeps remove it later.
         return
+    if not isinstance(exc, RemoteQualityTimeoutError | EncodeConnectionLostError):
+        unproven = _unproven_run(scoped_temp_dir, host=host, phase=phase)
+        if unproven is not None:
+            hold_for_unproven_run(exc, unproven)
+            return
     cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
     if cleanup_error is None:
         return
@@ -1072,6 +1128,36 @@ def _cleanup_after_failed_quality_command(
         exc.note_temp_files_left(cleanup_error)
         return
     _attach_quality_cleanup_detail(exc, cleanup_error)
+
+
+def _unproven_run(
+        scoped_temp_dir: Path | None, *, host: dict[str, object] | None, phase: str,
+) -> RemoteQualityTimeoutError | None:
+    if scoped_temp_dir is None or _quality_execution_mode(host) != "ssh":
+        return None
+    host_payload = object_dict(host)
+    try:
+        stop_timed_out_remote_quality_run(host_payload, str(scoped_temp_dir), wake_before_connect=False)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as containment_error:
+        host_key = str(host_payload.get("key") or host_payload.get("host") or "").strip()
+        return RemoteQualityTimeoutError(
+            phase=phase,
+            timeout_seconds=REMOTE_QUALITY_TIMEOUT_SECONDS,
+            host_key=host_key,
+            host_label=str(host_payload.get("label") or "").strip() or host_key or "another computer",
+            remote_process_contained=False,
+            scoped_temp_dir=str(scoped_temp_dir),
+            containment_detail=f"{type(containment_error).__name__}: {containment_error}"[-2000:],
+            ended_early=True,
+        )
+    return None
+
+
+def hold_for_unproven_run(stopped_by: BaseException, unproven: RemoteQualityTimeoutError) -> None:
+    if isinstance(stopped_by, ProcessCancelledError):
+        stopped_by.unproven_remote_run = unproven
+        return
+    raise unproven from stopped_by
 
 
 def _attach_quality_cleanup_detail(exc: Exception, cleanup_error: str) -> None:

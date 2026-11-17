@@ -12,11 +12,15 @@ from unittest.mock import Mock, patch
 
 from mediaforce.encoding import runner, staged_host
 from mediaforce import remote
+from mediaforce.core.process_control import ProcessCancelledError
+from mediaforce.encoding.quality import RemoteQualityTimeoutError
+from mediaforce.hosts.transport import EncodeConnectionLostError
 from mediaforce.encoding.staged_host import (
     KEEPER_PID_FILE,
     SCRATCH_DIR_PREFIX,
     STAGED_JOB_KEY,
     StagedJob,
+    ScratchStillInUseError,
     StagedScratchError,
     host_scratch_root,
     keeper_script,
@@ -27,6 +31,21 @@ from mediaforce.encoding.staged_host import (
     staged_job_for_host,
     sweep_script,
 )
+
+
+def _without_process_listing(root: Path) -> dict[str, str]:
+    """A shell environment whose ps fails, so nothing can prove a writer ended."""
+    tools = root / "no-ps"
+    tools.mkdir()
+    (tools / "ps").write_text("#!/bin/sh\nexit 1\n")
+    (tools / "ps").chmod(0o755)
+    return {**os.environ, "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"}
+
+
+def _start_writer(scratch_dir: Path) -> subprocess.Popen[bytes]:
+    """Stands in for an encoder left running after its connection dropped: its command line names the folder."""
+    return subprocess.Popen(["sh", "-c", "sleep 60; :", "encoder", str(scratch_dir / "output.mkv")],
+                            start_new_session=True)
 
 
 def _wait_until(condition: Any, timeout: float = 10.0) -> bool:
@@ -98,6 +117,66 @@ class ScratchScriptTests(unittest.TestCase):
             self.assertTrue(unrelated.exists())
             self.assertFalse(dead.exists())
             self.assertFalse(abandoned.exists())
+
+    def test_sweep_stops_a_dead_jobs_surviving_writer_before_removing_its_folder(self) -> None:
+        with TemporaryDirectory() as raw_root:
+            dead = Path(raw_root) / f"{SCRATCH_DIR_PREFIX}dead"
+            dead.mkdir()
+            finished = subprocess.Popen(["true"])
+            finished.wait()
+            (dead / KEEPER_PID_FILE).write_text(str(finished.pid))
+            writer = _start_writer(dead)
+            self.addCleanup(writer.kill)
+
+            subprocess.run(["sh", "-c", sweep_script(PurePosixPath(raw_root))], capture_output=True, timeout=30)
+
+            self.assertIsNotNone(writer.poll())
+            self.assertFalse(dead.exists())
+
+    def test_sweep_keeps_a_dead_jobs_folder_while_its_writer_cannot_be_shown_stopped(self) -> None:
+        with TemporaryDirectory() as raw_root:
+            dead = Path(raw_root) / f"{SCRATCH_DIR_PREFIX}dead"
+            dead.mkdir()
+            finished = subprocess.Popen(["true"])
+            finished.wait()
+            (dead / KEEPER_PID_FILE).write_text(str(finished.pid))
+
+            subprocess.run(["sh", "-c", sweep_script(PurePosixPath(raw_root))], capture_output=True, timeout=30,
+                           env=_without_process_listing(Path(raw_root)))
+
+            self.assertTrue(dead.exists())
+
+    def test_keeper_keeps_the_directory_while_its_writer_cannot_be_shown_stopped(self) -> None:
+        with TemporaryDirectory() as raw_root:
+            scratch_dir = PurePosixPath(raw_root) / f"{SCRATCH_DIR_PREFIX}job"
+            keeper = subprocess.Popen(
+                ["sh", "-c", keeper_script(scratch_dir)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                env=_without_process_listing(Path(raw_root)),
+            )
+            assert keeper.stdout is not None and keeper.stdin is not None
+            keeper.stdout.readline()
+
+            keeper.stdin.close()
+            keeper.wait(timeout=30)
+
+            self.assertTrue(Path(str(scratch_dir)).exists())
+
+    def test_keeper_stops_a_surviving_writer_before_removing_the_directory(self) -> None:
+        with TemporaryDirectory() as raw_root:
+            scratch_dir = PurePosixPath(raw_root) / f"{SCRATCH_DIR_PREFIX}job"
+            keeper = subprocess.Popen(
+                ["sh", "-c", keeper_script(scratch_dir)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            )
+            assert keeper.stdout is not None and keeper.stdin is not None
+            keeper.stdout.readline()
+            writer = _start_writer(Path(str(scratch_dir)))
+            self.addCleanup(writer.kill)
+
+            keeper.stdin.close()
+            keeper.wait(timeout=30)
+
+            self.assertIsNotNone(writer.poll())
+            self.assertFalse(Path(str(scratch_dir)).exists())
 
     def test_sweep_tolerates_a_missing_root(self) -> None:
         result = subprocess.run(["sh", "-c", sweep_script(PurePosixPath("/nonexistent/mediaforce-scratch"))])
@@ -194,7 +273,10 @@ class StagedHostTests(unittest.TestCase):
         self.assertEqual(staged_job_for_host({STAGED_JOB_KEY: job.to_payload()}), job)
         self.assertIsNone(staged_job_for_host({"key": "plain-host"}))
 
-    def _run_staged_job(self, *, free_kib: int, corrupt: bool = False) -> tuple[list[str], list[str]]:
+    def _run_staged_job(
+            self, *, free_kib: int, corrupt: bool = False, body_error: Exception | None = None,
+            writer_provable: bool = True,
+    ) -> tuple[list[str], list[str]]:
         """Drive staged_job with local shells standing in for the SSH connections."""
         scripts: list[str] = []
         copies: list[str] = []
@@ -203,6 +285,7 @@ class StagedHostTests(unittest.TestCase):
             source = root / "Episode.MP4"
             source.write_bytes(b"source-bytes" * 1000)
             scratch_root = root / "scratch"
+            env = None if writer_provable else _without_process_listing(root)
 
             def run_remote(_host: Any, command: list[str], _timeout: int, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
                 script = command[-1]
@@ -213,13 +296,13 @@ class StagedHostTests(unittest.TestCase):
                     staged = next(scratch_root.glob(f"{SCRATCH_DIR_PREFIX}*/source.mp4"))
                     digest = hashlib.sha256(staged.read_bytes() + (b"!" if corrupt else b"")).hexdigest()
                     return subprocess.CompletedProcess(command, 0, f"{digest}\n", "")
-                return subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+                return subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=env)
 
             def local_popen(argv: list[str], **kwargs: Any) -> Any:
                 remote_command = argv[-1]
                 copies.append(remote_command)
                 kwargs.pop("start_new_session", None)
-                return subprocess.Popen(["sh", "-c", remote_command], **kwargs)
+                return subprocess.Popen(["sh", "-c", remote_command], env=env, **kwargs)
 
             host = {"key": "stage-host", "scratch_root": str(scratch_root)}
             try:
@@ -231,15 +314,64 @@ class StagedHostTests(unittest.TestCase):
                     self.assertEqual(staged_source.read_bytes(), source.read_bytes())
                     self.assertEqual(staged_source.suffix, ".mp4")
                     self.assertEqual(Path(str(job.output_path)).suffix, ".mkv")
+                    if body_error is not None:
+                        raise body_error
             finally:
-                self.assertTrue(_wait_until(lambda: not list(scratch_root.glob(f"{SCRATCH_DIR_PREFIX}*"))))
+                if writer_provable:
+                    self.assertTrue(_wait_until(lambda: not list(scratch_root.glob(f"{SCRATCH_DIR_PREFIX}*"))))
+                else:
+                    self.assertTrue(list(scratch_root.glob(f"{SCRATCH_DIR_PREFIX}*")))
         return scripts, copies
 
     def test_staged_job_copies_verifies_and_always_removes_the_scratch_directory(self) -> None:
         scripts, copies = self._run_staged_job(free_kib=10 * 1024 * 1024)
         self.assertTrue(scripts[0].startswith("root="), "the sweep must run before the job stages anything")
-        self.assertTrue(any(script.startswith("rm -rf ") for script in scripts))
         self.assertTrue(any(copy.startswith("cat > ") for copy in copies))
+
+    def test_an_encode_that_stops_early_keeps_its_folder_and_holds_while_its_writer_is_unproven(self) -> None:
+        lost = EncodeConnectionLostError("Lost the connection to Stage Host. It will be tried again.")
+        with self.assertRaises(ScratchStillInUseError) as held:
+            self._run_staged_job(free_kib=10 * 1024 * 1024, body_error=lost, writer_provable=False)
+        self.assertIs(held.exception.__cause__, lost)
+        self._assert_holds_its_scratch_folder(held.exception)
+
+    def test_a_stop_whose_writer_is_unproven_stays_a_stop_and_carries_the_scratch_hold(self) -> None:
+        stop = ProcessCancelledError("Stopped by the owner")
+        with self.assertRaises(ProcessCancelledError) as stopped:
+            self._run_staged_job(free_kib=10 * 1024 * 1024, body_error=stop, writer_provable=False)
+        self.assertIs(stopped.exception, stop)
+        assert isinstance(stop.unproven_remote_run, ScratchStillInUseError)
+        self._assert_holds_its_scratch_folder(stop.unproven_remote_run)
+
+    def test_a_quality_hold_inside_the_scratch_folder_is_resolved_once_the_folder_is_shown_unused(self) -> None:
+        def nested_hold() -> RemoteQualityTimeoutError:
+            return RemoteQualityTimeoutError(
+                phase="crf_search", timeout_seconds=60, host_key="stage-host", host_label="Stage Host",
+                remote_process_contained=False, scoped_temp_dir="scratch/.mediaforce-ab-av1-run", ended_early=True,
+            )
+
+        failed = nested_hold()
+        with self.assertRaises(RemoteQualityTimeoutError) as resolved:
+            self._run_staged_job(free_kib=10 * 1024 * 1024, body_error=failed)
+        self.assertTrue(resolved.exception.remote_process_contained)
+        self.assertIs(resolved.exception.__cause__, failed)
+
+        stop = ProcessCancelledError("Stopped by the owner")
+        stop.unproven_remote_run = nested_hold()
+        with self.assertRaises(ProcessCancelledError):
+            self._run_staged_job(free_kib=10 * 1024 * 1024, body_error=stop)
+        self.assertIsNone(stop.unproven_remote_run)
+
+    def _assert_holds_its_scratch_folder(self, held: ScratchStillInUseError) -> None:
+        self.assertEqual(held.host_key, "stage-host")
+        self.assertFalse(held.remote_process_contained)
+        assert held.scoped_temp_dir is not None
+        self.assertTrue(PurePosixPath(held.scoped_temp_dir).name.startswith(SCRATCH_DIR_PREFIX))
+
+    def test_an_encode_that_stops_early_removes_its_folder_once_its_writer_is_shown_ended(self) -> None:
+        lost = EncodeConnectionLostError("Lost the connection to Stage Host. It will be tried again.")
+        with self.assertRaises(EncodeConnectionLostError):
+            self._run_staged_job(free_kib=10 * 1024 * 1024, body_error=lost)
 
     def test_staged_job_refuses_when_scratch_space_is_short(self) -> None:
         with self.assertRaisesRegex(StagedScratchError, "scratch folder has"):

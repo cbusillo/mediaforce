@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from sqlalchemy import delete
@@ -32,7 +32,7 @@ from mediaforce.ops.runtime_install import update_hold_reason
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission, controller_storage_admission_issue
 from mediaforce.hosts.config import configured_remote_host_execution_mode, ssh_target_for_host
 from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
-from mediaforce.hosts.transport import SSH_ACCESS_REFUSED_MARKERS, ssh_host_unreachable
+from mediaforce.hosts.transport import SSH_ACCESS_REFUSED_MARKERS, EncodeConnectionLostError, ssh_host_unreachable
 from mediaforce.core.db import DBClient, DBRow, is_database_busy_failure, open_db
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import calibration_jobs
@@ -56,12 +56,12 @@ from mediaforce.encoding.free_space import CapacityCache, large_job_requires_ser
 from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND, CONTAINMENT_UNPROVEN_OWNER_STEP, \
     REMOTE_QUALITY_TIMEOUT_FAILURE_KIND, QualityTempSetupError, RemoteQualityTimeoutError, \
     analyze_quality_policy_failure, quality_error_message, stop_timed_out_remote_quality_run
-from mediaforce.encoding.staged_host import STAGED_JOB_KEY, StagedScratchError, host_scratch_root, measure_scratch_free_bytes, \
+from mediaforce.encoding.staged_host import SCRATCH_DIR_PREFIX, STAGED_JOB_KEY, StagedScratchError, host_scratch_root, measure_scratch_free_bytes, \
     required_scratch_bytes
 from mediaforce.hosts.types import is_stop_signal_exit, is_storage_io_failure, is_vmaf_model_load_failure
 from mediaforce.encoding.cadence import CadenceResolutionError
 from mediaforce.encoding.free_space import ReserveInputError
-from mediaforce.encoding.staging import EncodeConnectionLostError, FinishedOutputNotVisibleError, \
+from mediaforce.encoding.staging import FinishedOutputNotVisibleError, \
     StagedOutputHeldForReviewError, UnreadableEncodeOutputError, partial_output_path, safe_unlink
 from mediaforce.encoding.remote_cleanup import RemoteHostUnreachableError, confirm_computer_runs_no_quality_run, \
     end_remote_output_writers
@@ -284,6 +284,7 @@ QUALITY_RUN_RECHECK_NOTE = "Mediaforce will check that computer again and try th
 QUALITY_CONTAINMENT_PROGRESS_KEY = "quality_containment"
 UNCONFIRMED_RUN_ASK_AFTER = timedelta(hours=24)
 SCOPED_QUALITY_TEMP_DIR_NAME = re.compile(r"\.mediaforce-ab-av1-[0-9a-f]{32}")
+SCRATCH_WORK_DIR_NAME = re.compile(re.escape(SCRATCH_DIR_PREFIX) + r"[0-9a-f]{32}")
 # Failures a retry cannot change: a measured result, a plan or evidence contract, or a finished
 # output kept for review (a retry's cleanup would delete it).
 CERTAIN_ENCODE_FAILURES: tuple[type[Exception], ...] = (
@@ -421,21 +422,29 @@ def _remote_cleanup_receipt(
 
 
 def _quality_containment_scope(config: MediaforceConfig, job: Mapping[str, Any], items: list[dict[str, Any]]) -> str:
-    """The timed-out quality run's own work folder, once it still matches this attempt, computer and outputs."""
+    """The unconfirmed run's own work folder, once it still matches this attempt, computer and outputs."""
     host = object_dict(job.get("host"))
     context = object_dict(object_dict(job.get("progress")).get(QUALITY_CONTAINMENT_PROGRESS_KEY))
     scope = str(context.get("scoped_temp_dir") or "")
-    if execution_mode_for_host(host) != "ssh" or host_media_access_for_host(host) != "mounted":
+    if execution_mode_for_host(host) != "ssh":
         raise RuntimeError("This run needs a separate recovery check on the computer where it started.")
     if not scope:
         raise RuntimeError("Mediaforce did not save which work folder that run used, so its stop cannot be confirmed.")
     if (not job.get("started_at") or int_value(job.get("attempt_count")) < 1
             or context.get("host_key") != _recorded_host_key(host)
-            or not SCOPED_QUALITY_TEMP_DIR_NAME.fullmatch(Path(scope).name)
-            or Path(scope).parent != config.staging_root_for_host(host)
+            or not _is_its_own_work_folder(config, host, scope)
             or context.get("receipt") != _remote_cleanup_receipt(config, job, items, quality_scope=scope)):
         raise RuntimeError("The saved quality run does not match this attempt, computer and work folder.")
     return scope
+
+
+def _is_its_own_work_folder(config: MediaforceConfig, host: dict[str, Any], scope: str) -> bool:
+    folder = PurePosixPath(scope)
+    if host_media_access_for_host(host) == "mounted" and SCOPED_QUALITY_TEMP_DIR_NAME.fullmatch(folder.name):
+        return Path(scope).parent == config.staging_root_for_host(host)
+    scratch_root = host_scratch_root(host)
+    return (scratch_root is not None and SCRATCH_WORK_DIR_NAME.fullmatch(folder.name) is not None
+            and folder.parent == scratch_root)
 
 
 def _recorded_host_key(host: Mapping[str, Any]) -> str:
@@ -672,6 +681,7 @@ def reconcile_encode_jobs(
         restart_recovery: bool = False,
 ) -> None:
     now = datetime.now(tz=UTC)
+    _release_stopped_holds_whose_run_ended(connection, config, deps, now)
     running_rows = connection.execute(
         select(encode_jobs.c.job_id)
         .where(encode_jobs.c.status == "running")
@@ -2247,12 +2257,13 @@ def transition_encode_job_failure(
                  or _encode_failure_is_retryable(failure_kind, error_message, assigned_host))
     if auto_policy_retry:
         retryable = True
-    host_related = _encode_failure_is_host_related(failure_kind, error_message, assigned_host)
-    retry_beyond_attempt_cap = storage_outage or _encode_failure_retries_after_attempt_cap(
+    slept_from_dark_wake = _slept_from_dark_wake(failure)
+    host_related = _encode_failure_is_host_related(failure_kind, error_message, assigned_host) and not slept_from_dark_wake
+    retry_beyond_attempt_cap = storage_outage or (not slept_from_dark_wake and _encode_failure_retries_after_attempt_cap(
         failure_kind,
         error_message,
         assigned_host,
-    )
+    ))
     # An unrecognised error is often a raw tool log: the owner sees a plain summary, and the
     # raw text stays on the job for diagnosis.
     owner_error = UNKNOWN_ENCODE_FAILURE_MESSAGE if failure_kind == "unknown" else error_message
@@ -2395,6 +2406,41 @@ def _release_jobs_stranded_by_an_outage(connection: DBClient, deps: EncodeQueueR
         _save_swept_job(connection, job, snapshot, deps)
 
 
+STOPPED_HOLD_CHECK_INTERVAL = timedelta(minutes=1)
+
+
+def _release_stopped_holds_whose_run_ended(
+        connection: DBClient, config: MediaforceConfig, deps: EncodeQueueRuntimeDeps, now: datetime,
+) -> None:
+    rows = connection.execute(
+        select(encode_jobs.c.job_id)
+        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+        .where(encode_jobs.c.status == "stopped")
+        .where(encode_jobs.c.last_failure_kind == CONTAINMENT_UNPROVEN_FAILURE_KIND)
+    ).mappings().fetchall()
+    for row in rows:
+        job = load_encode_job(connection, str(row["job_id"]))
+        if job is None:
+            continue
+        progress = object_dict(job.get("progress"))
+        context = object_dict(progress.get(QUALITY_CONTAINMENT_PROGRESS_KEY))
+        checked_at = deps.parse_iso(context.get("checked_at"))
+        if not context.get("scoped_temp_dir") or (checked_at is not None and now - checked_at < STOPPED_HOLD_CHECK_INTERVAL):
+            continue
+        snapshot = stable_json_hash(job)
+        connection.commit()
+        try:
+            _show_quality_run_ended(config, job, _encode_job_estimate_items(job, manifest_items_cache={}, strict_indexes=True))
+        except (OSError, ValueError, KeyError, TypeError, IndexError, RuntimeError, subprocess.SubprocessError):
+            progress[QUALITY_CONTAINMENT_PROGRESS_KEY] = {**context, "checked_at": now.isoformat(timespec="seconds")}
+            job["progress"] = progress
+        else:
+            progress.pop(QUALITY_CONTAINMENT_PROGRESS_KEY, None)
+            job.update({"progress": progress, "last_failure_kind": None,
+                        "error": "Encode queue job was stopped; its remote processes have ended."})
+        _save_swept_job(connection, job, snapshot, deps)
+
+
 def _check_held_quality_runs_again(connection: DBClient, config: MediaforceConfig, deps: EncodeQueueRuntimeDeps) -> None:
     rows = connection.execute(
         select(encode_jobs.c.job_id)
@@ -2463,6 +2509,23 @@ def _wait_to_check_held_quality_run(job: dict[str, Any], deps: EncodeQueueRuntim
         "error": original.replace(CONTAINMENT_UNPROVEN_OWNER_STEP, QUALITY_RUN_RECHECK_NOTE),
         "progress": progress,
     })
+
+
+def _held_for_unproven_run(
+        interruption: ProcessCancelledError, job: dict[str, Any],
+) -> tuple[Exception, str, str] | None:
+    unproven = interruption.unproven_remote_run
+    if unproven is None:
+        return None
+    return unproven, _classify_encode_failure(unproven, job), quality_error_message(unproven)
+
+
+def _hold_stopped_file_for_unproven_run(config: MediaforceConfig, job: dict[str, Any], unproven: Exception) -> None:
+    job["last_failure_kind"] = CONTAINMENT_UNPROVEN_FAILURE_KIND
+    job["error"] = quality_error_message(unproven)
+    _record_quality_containment(
+        config, job, failure_kind=CONTAINMENT_UNPROVEN_FAILURE_KIND, failure=unproven, error_message=job["error"],
+    )
 
 
 def _record_quality_containment(
@@ -4897,6 +4960,8 @@ def run_encode_job(
     failure_kind: str | None = None
     error: str | None = None
     failure: Exception | None = None
+    # An owner's Stop whose run on the computer was not confirmed ended stays a Stop and holds the file.
+    stop_left_unproven_run: Exception | None = None
     started_host_for_job = bool(object_dict(job.get("host")).get("scratch_admission_started"))
     try:
         process_controller.throw_if_cancelled()
@@ -4924,13 +4989,18 @@ def run_encode_job(
             schedule_deadline_thread.join()
         process_controller.throw_if_cancelled()
         final_status = "completed"
-    except ScheduleWindowClosedError:
-        schedule_interrupted = True
-        error = SCHEDULE_CLOSE_ERROR_MESSAGE
-    except ReclaimCancelledError:
+    except ScheduleWindowClosedError as closed:
+        if (held := _held_for_unproven_run(closed, job)) is not None:
+            failure, failure_kind, error = held
+        else:
+            schedule_interrupted = True
+            error = SCHEDULE_CLOSE_ERROR_MESSAGE
+    except ReclaimCancelledError as reclaimed:
         if _encode_job_outputs_completed_by_id(config, job_id):
             final_status = "completed"
             error = None
+        elif (held := _held_for_unproven_run(reclaimed, job)) is not None:
+            failure, failure_kind, error = held
         else:
             failure_kind = "stale_lease"
             error = STALE_LEASE_RECLAIM_MESSAGE
@@ -4938,7 +5008,11 @@ def run_encode_job(
         if _encode_job_outputs_completed_by_id(config, job_id):
             final_status = "completed"
             error = None
+        elif (isinstance(cancel_error, ControllerShutdownCancelledError)
+              and (held := _held_for_unproven_run(cancel_error, job)) is not None):
+            failure, failure_kind, error = held
         else:
+            stop_left_unproven_run = cancel_error.unproven_remote_run
             final_status = "stopped"
             restart_stop = isinstance(cancel_error, ControllerShutdownCancelledError)
             with open_db(config.paths.db_path) as connection:
@@ -5025,6 +5099,8 @@ def run_encode_job(
                                 f"its earlier encode on {host_label} is confirmed to have ended."
                             ),
                         })
+                    if stop_left_unproven_run is not None:
+                        _hold_stopped_file_for_unproven_run(config, job, stop_left_unproven_run)
                     save_encode_job(connection, job)
                     sync_encode_job_parent(connection, job, deps)
                 elif error is not None:
@@ -5178,6 +5254,10 @@ def _finalize_encode_job_progress(
         return progress
     progress.update({"progress_state": terminal_state, "updated_at": deps.now_iso()})
     return progress
+
+
+def _slept_from_dark_wake(failure: Exception | None) -> bool:
+    return isinstance(failure, EncodeConnectionLostError) and failure.dark_wake_sleep
 
 
 def _encode_failure_is_host_related(failure_kind: str, error_message: str, host_payload: dict[str, Any]) -> bool:

@@ -14,7 +14,7 @@ from typing import BinaryIO
 
 
 class ProcessCancelledError(RuntimeError):
-    pass
+    unproven_remote_run: Exception | None = None
 
 
 class ScheduleWindowClosedError(ProcessCancelledError):

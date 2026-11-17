@@ -4,6 +4,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,8 +34,8 @@ from mediaforce.hosts.status_helpers import _classify_ssh_failure, _default_publ
     _local_tool_status_snapshot, _needs_initial_ssh_key_install, \
     _private_key_path_for_public_key, _should_retry_remote_status_exception, \
     _should_retry_remote_status_failure, _ssh_access_must_be_fixed_first
-from mediaforce.hosts.transport import _run_remote_ssh as _run_remote_ssh_impl, \
-    copy_remote_file_to_local as copy_remote_file_to_local_impl, \
+from mediaforce.hosts.transport import LAST_SLEEP_ENTRY_SHELL, _run_remote_ssh as _run_remote_ssh_impl, \
+    copy_remote_file_to_local as copy_remote_file_to_local_impl, slept_from_dark_wake_after, \
     run_remote_command as run_remote_command_impl, ssh_client_options as _ssh_client_options_impl
 from mediaforce.hosts.wake_runtime import _ensure_remote_awake_for_ssh as _ensure_remote_awake_for_ssh_impl, \
     _learn_remote_wake_mac as _learn_remote_wake_mac_impl, \
@@ -78,6 +79,7 @@ __all__ = [
     "reset_remote_host_trust",
     "run_host_lifecycle_command",
     "run_remote_command",
+    "slept_from_dark_wake_since",
     "ssh_client_options",
 ]
 
@@ -455,6 +457,17 @@ def run_remote_command(
         remote_shell_path_export_line=remote_shell_path_export_line,
         run_remote_ssh=_run_remote_ssh,
     )
+
+
+_SLEEP_REASON_READ_TIMEOUT_SECONDS = 20
+
+
+def slept_from_dark_wake_since(host: dict[str, object], since: datetime) -> bool:
+    try:
+        result = run_remote_command(host, ["sh", "-c", LAST_SLEEP_ENTRY_SHELL], _SLEEP_REASON_READ_TIMEOUT_SECONDS)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and slept_from_dark_wake_after(result.stdout, since)
 
 
 def copy_remote_file_to_local(

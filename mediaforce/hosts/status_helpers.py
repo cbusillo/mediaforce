@@ -13,6 +13,7 @@ from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQU
 from mediaforce.hosts.config import _host_supports_capability, host_media_access_for_host, \
     _parse_utc_offset_minutes, remote_shell_path_export_line, stream_host_has_remote_source_roots
 from mediaforce.hosts.mount_runtime import mount_output_field
+from mediaforce.hosts.transport import MACOS_DARK_WAKE_SHELL_TEST
 from mediaforce.hosts.types import VMAF_MODEL_MISSING_ISSUE, VMAF_SELF_TEST_ARGS
 from mediaforce.hosts.types import AB_AV1_MISSING_ISSUE, FFMPEG_MISSING_ISSUE, HostStatus, \
     LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE, SAMPLE_AV1_ENCODER_MISSING_ISSUE, SAMPLE_METRIC_MISSING_ISSUE, \
@@ -219,6 +220,7 @@ def _status_from_paths(
         setup_supported: bool = False,
         setup_requires_password: bool = False,
         require_paths: bool = True,
+        dark_wake: bool = False,
 ) -> HostStatus:
     missing_paths = [path for path, mounted in mounted_paths.items() if not mounted]
     missing_mount_list = list(missing_mounts or [])
@@ -255,6 +257,7 @@ def _status_from_paths(
         missing_mounts=missing_mount_list,
         setup_supported=setup_supported,
         setup_requires_password=setup_requires_password,
+        dark_wake=dark_wake,
     )
 
 
@@ -504,6 +507,7 @@ def _remote_status_script(
     lines.extend([
         'if [ -n "$AB_AV1_BIN" ]; then printf "tool|ab_av1|1\\n"; else printf "tool|ab_av1|0\\n"; fi',
         'printf "meta|platform|%s\\n" "$PLATFORM_NAME"',
+        f'if [ "$PLATFORM_NAME" = macos ] && {MACOS_DARK_WAKE_SHELL_TEST}; then printf "meta|dark_wake|1\\n"; fi',
         'TIMEZONE_NAME=""',
         'if [ -L /etc/localtime ]; then TIMEZONE_PATH="$(readlink /etc/localtime 2>/dev/null || true)"; case "$TIMEZONE_PATH" in */zoneinfo.default/*) TIMEZONE_NAME="${TIMEZONE_PATH#*/zoneinfo.default/}" ;; */zoneinfo/*) TIMEZONE_NAME="${TIMEZONE_PATH#*/zoneinfo/}" ;; esac; fi',
         'if [ -z "$TIMEZONE_NAME" ] && [ -r /etc/timezone ]; then TIMEZONE_NAME="$(head -n 1 /etc/timezone 2>/dev/null | tr -d "[:space:]" || true)"; fi',

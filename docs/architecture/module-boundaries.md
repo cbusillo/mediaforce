@@ -313,13 +313,34 @@ Guidance:
   - remote work that wakes a computer also keeps it awake while it runs: on a
     Mac, `caffeinate -i -w` watches the shell running the work and ends with
     it, however it ends; elsewhere nothing changes, and probes that do not wake
-    a computer do not keep it awake. No power setting is ever changed. The
+    a computer do not keep it awake. A Mac that answers from dark wake (display
+    and most cooling off; it sleeps again under load) is first brought to full
+    wake by declaring brief user activity, then its display is put straight
+    back to sleep only when its input idle time proves nobody touched it
+    during the request (`caffeinate -u` does not reset that idle time, proven
+    on the M2 MBP). Input in the few milliseconds between the last idle
+    reading and display sleep is not seen. No power setting is ever changed. The
     direct SSH encode commands in `encoding/runner.py`, the staged keeper and
     the long Homebrew setup scripts in `setup_runtime.py` use the same wrapper
+  - a link that drops mid-work reads the Mac's power log; only a dark-wake
+    sleep during that run retries without cooling the computer down, still
+    within the attempt cap. Any uncertain end of a quality run (a dropped or
+    killed connection, an unexplained exit 255, a Stop) is stopped through its
+    scoped containment before its work folder is removed, or the folder is
+    kept and the file held as unconfirmed with that folder saved as its scope.
+    An owner's Stop stays a Stop and holds the file; any other interruption
+    waits for the queue's recheck to prove the run ended before retrying
+  - staged scratch folders (`encoding/staged_host.py`) follow the same rule
+    in all three cleanups: the controller, the keeper's exit and the sweep
+    remove a folder only once that scoped stop proves its writer ended; an
+    unproven scratch folder is saved as the hold's scope, and the same
+    recheck releases the file once its computer shows the writer ended
 - `status_helpers.py` and `status_runtime.py`
   - host probe scripts, capability checks, and status parsing
   - successful status probes remain distinct from full encode readiness, so a
     reachable host with recoverable storage is not reported as unreachable
+  - a Mac's check reports dark wake; work readiness brings it to full wake
+    before giving it work and waits when it cannot
 - `wake_helpers.py` and `wake_runtime.py`
   - wake-on-LAN, MAC learning, and wake waits
 - `mount_runtime.py`
