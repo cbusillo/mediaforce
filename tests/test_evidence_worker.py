@@ -757,7 +757,7 @@ class EvidenceWorkerTests(unittest.TestCase):
             ).mappings().fetchall()
 
         self.assertEqual(prepared["required_count"], 1)
-        self.assertEqual(prepared["work"]["status"], "paused")
+        self.assertEqual(prepared["work"]["status"], "queued")
         self.assertEqual(prepared["work"]["item_count"], 1)
         self.assertEqual(
             [dict(row) for row in rows],
@@ -796,23 +796,23 @@ class EvidenceWorkerTests(unittest.TestCase):
         self.assertFalse(summary["is_paused"])
         self.assertEqual(summary["status"], "queued")
 
-    def test_operator_decision_checks_still_start_paused(self) -> None:
+    def test_sample_cadence_checks_start_without_pressing_start(self) -> None:
         item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
 
         with open_db(self.config.paths.db_path) as connection:
-            for item in connection.execute(select(library_items)).mappings().fetchall():
-                sync_library_item_evidence_state(connection, item, CADENCE_EVIDENCE_KIND)
-            queue_decision_evidence_work(
-                connection,
-                self.config,
-                "tv/show",
-                library_item_ids=[item_id],
-                evidence_kind=CADENCE_EVIDENCE_KIND,
-                work_reason="sample_safety",
-            )
-            summary = evidence_queue_summary(connection)
+            blocker = cadence_evidence_blocker(connection, self.config, "tv/show", library_item_ids=[item_id],
+                decision_label="queueing this sample", work_reason="sample_safety")
+            payload = app_window_payload(connection, library_types=self.config.library_type_map, season_cards=[],
+                computers=[], controller_storage={"mounts": []}, storage_admits_work=True,
+                observed_at=datetime(2026, 11, 17, tzinfo=UTC))
+            claim = claim_next_evidence_work(connection, worker_id="evidence-autostart", lease_seconds=30)
 
-        self.assertTrue(summary["is_paused"])
+        assert blocker is not None
+        self.assertEqual(blocker["code"], "cadence_analysis_required")
+        self.assertFalse(blocker["evidence_work"]["is_paused"])
+        self.assertEqual(payload["work"]["paused_check_seasons"], [])
+        assert claim is not None
+        self.assertEqual(claim.library_item_id, item_id)
 
     def test_ready_evidence_work_starts_the_runner_only_when_runnable(self) -> None:
         item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
@@ -898,9 +898,9 @@ class EvidenceWorkerTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             cadence_evidence_blocker(connection, self.config, "tv/show/item-1.mkv", library_item_ids=[queued_id],
                 decision_label="queueing this sample", work_reason="sample_safety")
-            paused_batch = evidence_queue_summary(connection)["batch_id"]
+            paused_batch = pause_evidence_queue(connection)["batch_id"]
             queue_decision_evidence_work(connection, self.config, "tv/show/item-2.mkv", library_item_ids=[merged_id],
-                evidence_kind=CADENCE_EVIDENCE_KIND, work_reason="encode_safety", start_new_batch=True)
+                evidence_kind=CADENCE_EVIDENCE_KIND, work_reason="encode_safety")
             connection.execute(update(library_item_evidence_state).where(
                 library_item_evidence_state.c.library_item_id == failed_id,
                 library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
@@ -1793,7 +1793,7 @@ class EvidenceWorkerTests(unittest.TestCase):
                 for kind in (CADENCE_EVIDENCE_KIND, MEDIA_FINGERPRINT_EVIDENCE_KIND):
                     queue_decision_evidence_work(connection, self.config, "tv", library_item_ids=[item_id],
                         evidence_kind=kind, work_reason="manual_check", require_measurement=True,
-                        priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE, start_new_batch=True)
+                        priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE)
             resume_evidence_queue(connection)
 
     def _insert_item(

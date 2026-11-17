@@ -476,7 +476,6 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
                         work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
                         require_measurement=True,
                         priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE,
-                        start_new_batch=True,
                         manage_transaction=False,
                         restart_terminal=True,
                     )

@@ -287,7 +287,7 @@ warning instead of blocking the catalog scan.
 Scans update inventory with `ffprobe` metadata only. Cadence and media
 fingerprint analysis is remembered as canonical evidence and refreshed through
 bounded evidence batches. A background worker runs unpaused batches, such as
-the checks production is waiting on; a batch prepared by hand starts paused,
+the checks a sample or production is waiting on; a batch prepared by hand starts paused,
 and a catalog scan never starts analysis. For a small folder pilot:
 
 ```bash

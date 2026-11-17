@@ -401,7 +401,7 @@ def queue_original_approval(config: MediaforceConfig, preview_id: str, manifest_
                 try:
                     queue_decision_evidence_work(connection, config, item["rel_path"], library_item_ids=[item["item_id"]],
                         evidence_kind="media_fingerprint", work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
-                        require_measurement=True, start_new_batch=True, manage_transaction=False)
+                        require_measurement=True, manage_transaction=False)
                 except EvidenceQueueConflict:
                     continue
     return pending
