@@ -915,7 +915,7 @@ class LibraryLifecycleTests(unittest.TestCase):
             {**validation, "remake_intent": {**validation["remake_intent"], "state": "requested"}})})
         self.assertEqual(requested.lane, "blocked")
 
-    def test_folder_cards_keep_held_candidates_without_estimating_savings(self) -> None:
+    def test_folder_cards_keep_held_candidates_with_no_estimate_rather_than_none_saved(self) -> None:
         config = self._config()
         with open_db(config.paths.db_path) as connection:
             self._insert_item(connection, "tv/Show/Season 1/Episode 01.mkv", age_days=5)
@@ -934,7 +934,7 @@ class LibraryLifecycleTests(unittest.TestCase):
 
         self.assertEqual(len(cards), 1)
         self.assertEqual(cards[0].estimated_savings_bytes, 0)
-        self.assertEqual(cards[0].projected_reclaim_bytes, 0)
+        self.assertEqual(cards[0].estimate_unavailable_count, 1)
         self.assertEqual(cards[0].lifecycle["held_candidate_count"], 1)
         self.assertEqual(cards[0].workflow_state["state"], "held")
         self.assertEqual(cards[0].workflow_state["blockers"], [])

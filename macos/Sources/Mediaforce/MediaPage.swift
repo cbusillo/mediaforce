@@ -207,10 +207,8 @@ struct MediaRow: Identifiable, Sendable {
     // Whose poster a row shows when it isn't its own, as a season shows its show's.
     var posterPrefix: String?
 
-    var savedBytes: Int64 { (saved ?? 0) > 0 ? saved ?? 0 : 0 }
-    // The server sends 0 both for a finished title and for files not measured yet, so 0 is an estimate only where
-    // there is no active work.
-    var estimateKnown: Bool { savedBytes > 0 || (saved == 0 && state == .noActiveWork) }
+    var savedBytes: Int64 { max(saved ?? 0, 0) }
+    var estimateKnown: Bool { saved != nil }
     var stateRank: Int { state.rawValue }
 
     /// One row per season, named with its show, in the show's state, biggest first.

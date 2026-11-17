@@ -40,8 +40,9 @@ from mediaforce.web.runtime.kind_approvals import APPROVABLE_KINDS, APPROVAL_NOT
     NO_FOLDER_APPROVAL_CODE, SOURCE_KIND_DIFFERS_CODE, approve_kind, approve_kind_action, background_queue_blocker, choose_kind_picture_height, kind_snapshot, kinds_payload, load_kind_approval, \
     migrate_kind_approvals, next_kind_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
 from mediaforce.web.runtime.page_state import PageStateFacts, PageStateSources, card_page_states, decide_page_state
-from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_contract, \
-    production_approval_matches, production_calibration, with_kind_picture_height
+from mediaforce.web.runtime.folder_cards import list_folder_cards
+from mediaforce.web.runtime.production_approval import approved_output_sizes, effective_production_approval, \
+    production_approval_contract, production_approval_matches, production_calibration, with_kind_picture_height
 
 APPROVED_SEASON = "tv/Drama/Season 1"
 SEASON = "tv/Thriller/Season 2"
@@ -375,6 +376,38 @@ def test_movies_follow_the_live_action_look_like_waiting_seasons_but_never_extra
         assert result["ok"], result
         assert manifests[0]["selection"]["production_approval_kind"] == LIVE_ACTION
         assert [item["library_item_id"] for item in manifests[0]["items"]] == [feature]
+
+
+@pytest.mark.parametrize("availability", ["production", "browse_only"])
+def test_a_movie_under_the_live_action_look_is_estimated_like_a_season_of_its_runtime(tmp_path: Path, availability: str) -> None:
+    config = _config(tmp_path)
+    config.raw["media"]["libraries"].append({"key": "movies", "path": str(tmp_path / "movies"), "type": "movie", "availability": availability})
+    config.raw["media"].update({"staging_root": str(tmp_path / "staging"), "output_container": "mkv"})
+    title = "movies/Heat (1995)"
+    _waiting_episode(config, EPISODE, 2_000_000_000)
+    _waiting_episode(config, f"{title}/Heat.mkv", 2_000_000_000)
+    approval = _approved(config)
+    approval["policy"]["video"].update({"size_goal_mode": "normalized", "target_size_mb": 300.0, "target_runtime_minutes": 45.0,
+                                        "max_encoded_percent": 80.0})
+    approval["accepted_policy_hash"] = calibration_policy_hash(approval)
+    approve_kind(config, LIVE_ACTION, APPROVED_SEASON, approval, approved_at="now")
+    load = _loader({}, {SEASON: LIVE_ACTION, title: LIVE_ACTION})
+
+    with open_db(config.paths.db_path) as connection:
+        cards = list_folder_cards(
+            connection, config=config, minimum_recommended_savings_bytes=None,
+            folder_group=lambda rel_path: (group, group, "", "Season") if (group := look_group(config.library_type_map, rel_path)) else None,
+            age_days=lambda _path: 0.0, estimate_savings_bytes=lambda **_kwargs: 1,
+            review_badge_for_prefix=lambda _prefix: {"label": None, "tone": None, "detail": None},
+            include_lifecycle=False, include_workflow_states=False, approved_output_bytes=approved_output_sizes(config, load),
+        )
+    reset_engine_cache()
+
+    estimates = {card.prefix: (card.estimated_savings_bytes, card.estimate_unavailable_count) for card in cards}
+    season_estimate = estimates.pop(SEASON)
+    assert season_estimate[0] > 0 and season_estimate[1] == 0
+    # A movie in a library not set to compress is not waiting work, so it has no estimate at all.
+    assert estimates == ({title: season_estimate} if availability == "production" else {})
 
 
 @pytest.mark.parametrize("compressing", [False, True])

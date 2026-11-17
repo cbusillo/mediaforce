@@ -146,9 +146,11 @@ library in one list.
 TV shows, Movies and VR & 3D each open their list. Above it sit the library's
 size, how much is still original, and Can save: the rows' estimates added up,
 read "At least" while any row that can still be compressed has no estimate and
-"About" once all do, as the Library's estimated total savings is. The server
-sends 0 both for a finished title and for files not measured yet, so the app
-counts 0 as an estimate only for a row with no active work. Each row's Can save
+"About" once all do, as the Library's estimated total savings is. A file
+waiting to be compressed is estimated at what it would be made at under the
+approval covering it; a TV file no approval covers borrows the library's past
+savings only while it can be compressed now, and otherwise has no estimate, so
+the server sends 0 only where nothing is left to save. Each row's Can save
 column says "About" its estimate, "Not known yet", or nothing where there is
 nothing to estimate.
 
@@ -159,7 +161,7 @@ gives its facts, read from the same season cards as the main window's
 samples and only while the page is open: `shows`, biggest first, each with
 `show_prefix`, `show`, `season_count`, `episode_count`, `bytes`,
 `estimated_saved_bytes` (the seasons' projected savings, or null while any
-season's details are still loading) and `seasons` in season order. Each season
+season's details are still loading or any season has a file with no estimate) and `seasons` in season order. Each season
 has its `prefix`, `season` number (null for a folder without one), the page
 state codes `state`, `action`, `failure` and `tone`, its `episode_count`
 and `bytes`, `needs_you` (a sample judgment or file problem needs the Director,
@@ -176,7 +178,7 @@ gives its facts, built from the same titles as the web movie library's details
 and read only while the page is open: `movies`, biggest first, each with
 `prefix`, `title`, `library` (the movie library's name), `file_count`,
 `bytes`, `estimated_saved_bytes` (the title's projected savings, or null while
-its details load or no sample measured it) and one `state` code. `state` is
+its details load or no approval or sample covers it) and one `state` code. `state` is
 the web movie library's state group, checked in its order: `view_only`,
 `finished`, `cannot_start`, `needs_file_choice`, `motion_held`,
 `needs_attention`, `compressing`, `ready` or `no_work`. The app groups those
