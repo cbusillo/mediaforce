@@ -18,7 +18,9 @@ struct MainWindowFacts: Decodable, Sendable {
     struct Work: Decodable, Sendable {
         let state: String
         let pausedByOwner: Bool
-        let checksPaused: Bool
+        // The seasons or titles whose files wait on paused original-file checks, each named once.
+        var pausedCheckSeasons: [Season] = []
+        var checksPaused: Bool { !pausedCheckSeasons.isEmpty }
         let stopReasons: [String]
         let runningCount: Int
         // The seasons or titles being compressed now, each named once.
@@ -29,14 +31,14 @@ struct MainWindowFacts: Decodable, Sendable {
         var seasonsNeedingYou: [TVShowsFacts.Season] = []
 
         private enum CodingKeys: String, CodingKey {
-            case state, pausedByOwner, checksPaused, stopReasons, runningCount, runningSeasons, waitingCount, originalCheckWaitReasons, seasonsNeedingYou, kindsNeedingYou
+            case state, pausedByOwner, pausedCheckSeasons, stopReasons, runningCount, runningSeasons, waitingCount, originalCheckWaitReasons, seasonsNeedingYou, kindsNeedingYou
         }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             state = try container.decode(String.self, forKey: .state)
             pausedByOwner = try container.decode(Bool.self, forKey: .pausedByOwner)
-            checksPaused = try container.decodeIfPresent(Bool.self, forKey: .checksPaused) ?? false
+            pausedCheckSeasons = try container.decodeIfPresent([Season].self, forKey: .pausedCheckSeasons) ?? []
             stopReasons = try container.decode([String].self, forKey: .stopReasons)
             runningCount = try container.decode(Int.self, forKey: .runningCount)
             runningSeasons = try container.decodeIfPresent([Season].self, forKey: .runningSeasons) ?? []

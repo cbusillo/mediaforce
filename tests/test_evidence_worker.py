@@ -921,6 +921,9 @@ class EvidenceWorkerTests(unittest.TestCase):
         resume_encode_queue_action(connection_factory=lambda: open_db(self.config.paths.db_path), config=self.config,
             now_iso=lambda: "2026-10-29T12:00:00+00:00")
         with open_db(self.config.paths.db_path) as connection:
+            resumed = app_window_payload(connection, library_types=self.config.library_type_map, season_cards=[],
+                computers=[], controller_storage={"mounts": []}, storage_admits_work=True,
+                observed_at=datetime(2026, 10, 29, tzinfo=UTC))
             claim = claim_next_evidence_work(connection, worker_id="native-resume", lease_seconds=30)
             terminal = connection.execute(select(
                 library_item_evidence_state.c.library_item_id,
@@ -938,7 +941,8 @@ class EvidenceWorkerTests(unittest.TestCase):
         self.assertEqual(claim.batch_id, paused_batch)
         self.assertIn(claim.library_item_id, {queued_id, merged_id})
         self.assertEqual(terminal, [(failed_id, "failed", 3), (cancelled_id, "cancelled", 2)])
-        self.assertTrue(payload["work"]["checks_paused"])
+        self.assertEqual([season["prefix"] for season in payload["work"]["paused_check_seasons"]], ["tv/show"])
+        self.assertEqual(resumed["work"]["paused_check_seasons"], [])
 
     def test_cadence_decision_blocker_does_not_requeue_measured_blocked_cadence(self) -> None:
         item_id, _path = self._insert_item(

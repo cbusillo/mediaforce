@@ -238,7 +238,7 @@ extension Words {
         if work.runningCount > 0 { return "Compressing" }
         if work.waitingCount > 0 { return "Waiting to start" }
         if !work.originalCheckWaitReasons.isEmpty { return "Waiting to check new originals" }
-        if work.checksPaused { return checksPausedBar }
+        if work.checksPaused { return checksPausedHeadline }
         return Attention.waitingOnYou(facts) > 0 ? "Waiting for you" : "All caught up"
     }
 
@@ -249,7 +249,8 @@ extension Words {
             sentences.append("Nothing new starts until you resume. Work already running finishes first.")
         }
         if work.checksPaused {
-            sentences.append("Checks are paused. Files needing these checks wait until you resume.")
+            let whose = work.pausedCheckSeasons.count == 1 ? "Its" : "Their"
+            sentences.append("\(checksPaused(work)) \(whose) files wait until you resume.")
         }
         if work.stopReasons.contains("storage_unavailable") {
             sentences.append(work.pausedByOwner
@@ -479,12 +480,23 @@ extension Words {
     static let openItem = "Open"
     static let cancel = "Cancel"
     static let resume = "Resume"
-    static let pausedBar = "Mediaforce is paused. Nothing new starts."
-    static let checksPausedBar = "Checks are paused."
+    /// The bar across every page: the owner's pause when there is one, otherwise the paused original-file checks.
+    static func pausedBar(_ work: MainWindowFacts.Work?) -> String {
+        guard let work, !work.pausedByOwner, work.checksPaused else { return "Mediaforce is paused. Nothing new starts." }
+        return checksPaused(work)
+    }
+    static let checksPausedHeadline = "Original-file checks are paused"
+
+    /// The paused original-file checks, naming the first season or title whose files wait on them.
+    static func checksPaused(_ work: MainWindowFacts.Work) -> String {
+        guard let first = work.pausedCheckSeasons.first else { return "\(checksPausedHeadline)." }
+        let more = work.pausedCheckSeasons.count - 1
+        return "\(checksPausedHeadline) for \(season(first.show, first.season))\(more > 0 ? " and \(more) more" : "")."
+    }
     static let appName = "Mediaforce"
     static let openMediaforce = "Open Mediaforce"
     static let settingsEllipsis = "Settings…"
-    static let resumeHelp = "Resume compression and paused checks."
+    static let resumeHelp = "Resume compression and original-file checks."
     static let menuNotConnected = "Mediaforce isn't answering. Open it to see why."
 
     /// The line under the menu bar switch: what Mediaforce is doing, or why it isn't.
@@ -500,7 +512,7 @@ extension Words {
             return more > 0 ? "Compressing \(name) and \(more) more" : "Compressing \(name)"
         }
         if work.waitingCount > 0 { return "Waiting to start" }
-        if work.checksPaused { return checksPausedBar }
+        if work.checksPaused { return checksPausedHeadline }
         return Attention.waitingOnYou(facts) > 0 ? waitingForYou : "Up to date"
     }
     static let tryAgain = "Try Again"

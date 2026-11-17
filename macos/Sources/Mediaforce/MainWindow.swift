@@ -260,8 +260,7 @@ struct PausedBar: View {
         HStack(spacing: 8) {
             Image(systemName: "pause.circle.fill")
                 .foregroundStyle(Color.accentColor)
-            Text(model.facts?.work.checksPaused == true && model.facts?.work.pausedByOwner == false
-                 ? Words.checksPausedBar : Words.pausedBar)
+            Text(Words.pausedBar(model.facts?.work))
             Spacer(minLength: 0)
             Button(Words.resume) { Task { await model.setRunning(true) } }
                 .controlSize(.small)
