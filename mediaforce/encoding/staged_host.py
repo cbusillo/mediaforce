@@ -27,7 +27,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from mediaforce.core.type_defs import object_dict
-from mediaforce.core.process_control import ManagedProcessController
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_OWNER_STEP, REMOTE_QUALITY_CONTAINED_MARKER, \
     REMOTE_QUALITY_CONTAINMENT_SCRIPT, RemoteQualityTimeoutError, hold_for_unproven_run
 from mediaforce.hosts.transport import keep_awake_while_running
@@ -266,6 +266,11 @@ def staged_job(
         _release_keeper(keeper)
         if not _removed_once_unused(remote, scratch_dir):
             hold_for_unproven_run(error, ScratchStillInUseError(host, scratch_dir))
+            raise
+        if isinstance(error, ProcessCancelledError):
+            error.unproven_remote_run = None
+        elif isinstance(error, RemoteQualityTimeoutError) and not error.remote_process_contained:
+            raise error.shown_ended() from error
         raise
     _release_keeper(keeper)
     _removed_once_unused(remote, scratch_dir)

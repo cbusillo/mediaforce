@@ -317,7 +317,9 @@ Guidance:
     and most cooling off; it sleeps again under load) is first brought to full
     wake by declaring brief user activity, then its display is put straight
     back to sleep only when its input idle time proves nobody touched it
-    during the request. No power setting is ever changed. The
+    during the request (`caffeinate -u` does not reset that idle time, proven
+    on the M2 MBP). Input in the few milliseconds between the last idle
+    reading and display sleep is not seen. No power setting is ever changed. The
     direct SSH encode commands in `encoding/runner.py`, the staged keeper and
     the long Homebrew setup scripts in `setup_runtime.py` use the same wrapper
   - a link that drops mid-work reads the Mac's power log; only a dark-wake

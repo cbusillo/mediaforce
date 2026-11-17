@@ -172,7 +172,18 @@ class RemoteQualityTimeoutError(RuntimeError):
         self.output_tail = output_tail
         self.scoped_temp_dir = scoped_temp_dir
         self.containment_detail = containment_detail
+        self.ended_early = ended_early
         self.temp_cleanup_error: str | None = None
+
+    def shown_ended(self) -> "RemoteQualityTimeoutError":
+        ended = RemoteQualityTimeoutError(
+            phase=self.phase, timeout_seconds=self.timeout_seconds, host_key=self.host_key, host_label=self.host_label,
+            remote_process_contained=True, output_tail=self.output_tail, stalled=self.stalled,
+            scoped_temp_dir=self.scoped_temp_dir, ended_early=self.ended_early,
+        )
+        for note in getattr(self, "__notes__", ()):
+            ended.add_note(note)
+        return ended
 
     def note_temp_files_left(self, cleanup_error: str) -> None:
         """Tell the owner in plain words; the raw detail names paths and SSH, so it stays a diagnostic."""

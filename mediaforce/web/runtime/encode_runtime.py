@@ -681,6 +681,7 @@ def reconcile_encode_jobs(
         restart_recovery: bool = False,
 ) -> None:
     now = datetime.now(tz=UTC)
+    _release_stopped_holds_whose_run_ended(connection, config, deps, now)
     running_rows = connection.execute(
         select(encode_jobs.c.job_id)
         .where(encode_jobs.c.status == "running")
@@ -2402,6 +2403,41 @@ def _release_jobs_stranded_by_an_outage(connection: DBClient, deps: EncodeQueueR
             continue
         snapshot = stable_json_hash(job)
         _requeue_restart_stopped_job(job, deps)
+        _save_swept_job(connection, job, snapshot, deps)
+
+
+STOPPED_HOLD_CHECK_INTERVAL = timedelta(minutes=1)
+
+
+def _release_stopped_holds_whose_run_ended(
+        connection: DBClient, config: MediaforceConfig, deps: EncodeQueueRuntimeDeps, now: datetime,
+) -> None:
+    rows = connection.execute(
+        select(encode_jobs.c.job_id)
+        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+        .where(encode_jobs.c.status == "stopped")
+        .where(encode_jobs.c.last_failure_kind == CONTAINMENT_UNPROVEN_FAILURE_KIND)
+    ).mappings().fetchall()
+    for row in rows:
+        job = load_encode_job(connection, str(row["job_id"]))
+        if job is None:
+            continue
+        progress = object_dict(job.get("progress"))
+        context = object_dict(progress.get(QUALITY_CONTAINMENT_PROGRESS_KEY))
+        checked_at = deps.parse_iso(context.get("checked_at"))
+        if not context.get("scoped_temp_dir") or (checked_at is not None and now - checked_at < STOPPED_HOLD_CHECK_INTERVAL):
+            continue
+        snapshot = stable_json_hash(job)
+        connection.commit()
+        try:
+            _show_quality_run_ended(config, job, _encode_job_estimate_items(job, manifest_items_cache={}, strict_indexes=True))
+        except (OSError, ValueError, KeyError, TypeError, IndexError, RuntimeError, subprocess.SubprocessError):
+            progress[QUALITY_CONTAINMENT_PROGRESS_KEY] = {**context, "checked_at": now.isoformat(timespec="seconds")}
+            job["progress"] = progress
+        else:
+            progress.pop(QUALITY_CONTAINMENT_PROGRESS_KEY, None)
+            job.update({"progress": progress, "last_failure_kind": None,
+                        "error": "Encode queue job was stopped; its remote processes have ended."})
         _save_swept_job(connection, job, snapshot, deps)
 
 

@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 from mediaforce.encoding import runner, staged_host
 from mediaforce import remote
 from mediaforce.core.process_control import ProcessCancelledError
+from mediaforce.encoding.quality import RemoteQualityTimeoutError
 from mediaforce.hosts.transport import EncodeConnectionLostError
 from mediaforce.encoding.staged_host import (
     KEEPER_PID_FILE,
@@ -341,6 +342,25 @@ class StagedHostTests(unittest.TestCase):
         self.assertIs(stopped.exception, stop)
         assert isinstance(stop.unproven_remote_run, ScratchStillInUseError)
         self._assert_holds_its_scratch_folder(stop.unproven_remote_run)
+
+    def test_a_quality_hold_inside_the_scratch_folder_is_resolved_once_the_folder_is_shown_unused(self) -> None:
+        def nested_hold() -> RemoteQualityTimeoutError:
+            return RemoteQualityTimeoutError(
+                phase="crf_search", timeout_seconds=60, host_key="stage-host", host_label="Stage Host",
+                remote_process_contained=False, scoped_temp_dir="scratch/.mediaforce-ab-av1-run", ended_early=True,
+            )
+
+        failed = nested_hold()
+        with self.assertRaises(RemoteQualityTimeoutError) as resolved:
+            self._run_staged_job(free_kib=10 * 1024 * 1024, body_error=failed)
+        self.assertTrue(resolved.exception.remote_process_contained)
+        self.assertIs(resolved.exception.__cause__, failed)
+
+        stop = ProcessCancelledError("Stopped by the owner")
+        stop.unproven_remote_run = nested_hold()
+        with self.assertRaises(ProcessCancelledError):
+            self._run_staged_job(free_kib=10 * 1024 * 1024, body_error=stop)
+        self.assertIsNone(stop.unproven_remote_run)
 
     def _assert_holds_its_scratch_folder(self, held: ScratchStillInUseError) -> None:
         self.assertEqual(held.host_key, "stage-host")

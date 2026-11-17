@@ -4093,17 +4093,41 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             containment_detail="fixture stop could not reach the computer", ended_early=True,
         )
 
-    def test_a_stop_that_leaves_a_run_unconfirmed_on_its_computer_stays_stopped_and_holds_its_file(self) -> None:
-        scope = self._scoped_quality_run()
-        stop = ProcessCancelledError("Stopped by the owner")
-        stop.unproven_remote_run = self._unconfirmed_quality_run(scope)
-        computer = _SleepingComputer(self._QUALITY_TIMEOUT_SSH_HOST)
-        with self._quality_timeout_computer(computer.run_remote_command), open_db(self.config.paths.db_path) as connection:
-            job = self._run_job_ending_with(connection, "stopped-episode", stop, host=self._QUALITY_TIMEOUT_HOST)
+    def test_a_stop_that_leaves_a_run_unconfirmed_holds_its_file_until_the_computer_shows_it_ended(self) -> None:
+        quality_dir = self._scoped_quality_run()
+        scratch_dir = str(PurePosixPath(self._SCRATCH_ROOT) / f"{SCRATCH_DIR_PREFIX}{'c' * 32}")
+        for label, host, scope, unproven in (
+                ("quality run", self._QUALITY_TIMEOUT_HOST, quality_dir, self._unconfirmed_quality_run(quality_dir)),
+                ("scratch encode", self._SCRATCH_HOST, scratch_dir,
+                 ScratchStillInUseError(dict(self._SCRATCH_HOST), PurePosixPath(scratch_dir))),
+        ):
+            with self.subTest(label):
+                stop = ProcessCancelledError("Stopped by the owner")
+                stop.unproven_remote_run = unproven
+                computer = _SleepingComputer(self._QUALITY_TIMEOUT_SSH_HOST)
+                deps = replace(web_app._encode_queue_runtime_deps(), scratch_ready_hosts={})
+                with self._quality_timeout_computer(computer.run_remote_command), \
+                        patch.object(encode_runtime, "STOPPED_HOLD_CHECK_INTERVAL", timedelta(0)), \
+                        open_db(self.config.paths.db_path) as connection:
+                    job = self._run_job_ending_with(connection, f"stopped-{label.split()[0]}", stop, host=host)
+                    self.assertEqual(job["status"], "stopped")
+                    self.assertEqual(job["last_failure_kind"], encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND)
+                    self.assertEqual(job["progress"]["quality_containment"]["scoped_temp_dir"], scope)
 
-        self.assertEqual(job["status"], "stopped")
-        self.assertEqual(job["last_failure_kind"], encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND)
-        self.assertEqual(job["progress"]["quality_containment"]["scoped_temp_dir"], scope)
+                    encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
+                    away = load_encode_job(connection, job["job_id"])
+                    assert away is not None
+                    self.assertEqual(away["last_failure_kind"], encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND)
+
+                    computer.awake = True
+                    encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
+                    released = load_encode_job(connection, job["job_id"])
+                    assert released is not None
+
+                self.assertEqual(computer.quality_runs_stopped, [scope])
+                self.assertEqual(released["status"], "stopped")
+                self.assertIsNone(released["last_failure_kind"])
+                self.assertNotIn("quality_containment", released["progress"] or {})
 
     def test_any_other_interruption_that_leaves_a_run_unconfirmed_waits_for_it_before_retrying(self) -> None:
         scope = self._scoped_quality_run()
