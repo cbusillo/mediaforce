@@ -42,6 +42,13 @@ exclude = [
     "/**/*.sqlite3",
 ]
 
+# The notarized app release: project.version is its version. Raise build for every release attempt;
+# Sparkle installs only a higher build. public-key is the Sparkle EdDSA key every release ships.
+[tool.mediaforce.release]
+build = 2
+feed = "https://cbusillo.github.io/mediaforce/appcast.xml"
+public-key = ""
+
 [tool.ruff]
 target-version = "py313"
 

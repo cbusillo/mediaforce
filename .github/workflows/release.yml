@@ -1,0 +1,225 @@
+---
+# Builds, notarizes and publishes one Mediaforce release from the green main commit it runs on, then
+# points the Sparkle feed at it. An agent dispatches it for an accepted release request; see
+# docs/development/release-flow.md.
+name: Release
+
+"on":
+  workflow_dispatch:
+
+permissions: {}
+
+# One release at a time, so a stale run can never replace a newer feed.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, notarize and publish
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    timeout-minutes: 120
+    environment: release
+    permissions:
+      checks: read
+      contents: write
+    outputs:
+      feed: ${{ steps.identity.outputs.feed }}
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+
+      - name: Read the release identity
+        id: identity
+        run: uv run python -m scripts.release_app identity | tee -a "$GITHUB_OUTPUT"
+
+      - name: Refuse an unchecked commit, a used tag or a feed that is already newer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.identity.outputs.tag }}
+          FEED: ${{ steps.identity.outputs.feed }}
+        run: |
+          set -euo pipefail
+          acceptance="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?check_name=acceptance" \
+            --jq '[.check_runs[].conclusion] | if length > 0 and all(. == "success") then "success" else "missing" end')"
+          [ "$acceptance" = success ] || { echo "CI acceptance has not passed on $GITHUB_SHA" >&2; exit 1; }
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            [ -n "$(git ls-remote --tags "https://github.com/$GITHUB_REPOSITORY" "refs/tags/$TAG")" ]; then
+            echo "$TAG already exists; raise the build in pyproject.toml for a new attempt" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/feed"
+          status="$(curl -sS -o "$RUNNER_TEMP/feed/previous.xml" -w '%{http_code}' "$FEED?run=$GITHUB_RUN_ID")"
+          case "$status" in
+            200) echo "PREVIOUS_FEED=$RUNNER_TEMP/feed/previous.xml" >> "$GITHUB_ENV" ;;
+            404) echo "No feed is published yet." ;;
+            *) echo "The live feed answered $status; refusing to replace what cannot be read" >&2; exit 1 ;;
+          esac
+
+      - name: Check the Sparkle key matches the key the app ships
+        env:
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+          PUBLIC_KEY: ${{ steps.identity.outputs.public_key }}
+        run: |
+          set -euo pipefail
+          derived="$(printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | swift scripts/sparkle-public-key.swift)"
+          [ -n "$PUBLIC_KEY" ] && [ "$derived" = "$PUBLIC_KEY" ] ||
+            { echo "SPARKLE_EDDSA_PRIVATE_KEY does not match public-key in pyproject.toml" >&2; exit 1; }
+
+      - name: Install the Developer ID certificate in a temporary keychain
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/release.keychain-db"
+          password="$(openssl rand -hex 24)"
+          echo "::add-mask::$password"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          existing=()
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            existing+=("${line//\"/}")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$keychain" "${existing[@]}"
+          echo "RELEASE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
+      - name: Build the app with its server
+        run: bash scripts/build-mac-app.sh release "$RUNNER_TEMP/build" "$RUNNER_TEMP/runtime-cache"
+
+      - name: Notarize, staple and archive
+        env:
+          APP_STORE_CONNECT_API_KEY_P8_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ARCHIVE: Mediaforce-${{ steps.identity.outputs.version }}-${{ steps.identity.outputs.build }}.zip
+        run: |
+          set -euo pipefail
+          export NOTARY_KEY="$RUNNER_TEMP/notary.p8"
+          printf '%s' "$APP_STORE_CONNECT_API_KEY_P8_BASE64" | base64 --decode > "$NOTARY_KEY"
+          mkdir -p "$RUNNER_TEMP/release"
+          bash scripts/build-mac-app.sh notarize "$RUNNER_TEMP/build/Mediaforce.app" "$RUNNER_TEMP/release/$ARCHIVE"
+          rm "$NOTARY_KEY"
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Start the notarized app's server
+        run: bash scripts/build-mac-app.sh smoke "$RUNNER_TEMP/build/Mediaforce.app"
+
+      - name: Sign the update and write the feed
+        env:
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+          TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          set -euo pipefail
+          sign_update=.build/mac-app/SourcePackages/artifacts/sparkle/Sparkle/bin/sign_update
+          archive="$RUNNER_TEMP/release/$ARCHIVE"
+          signature="$(printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | "$sign_update" --ed-key-file - -p "$archive")"
+          ( cd "$RUNNER_TEMP/release" && shasum -a 256 "$ARCHIVE" > SHA256SUMS )
+          mkdir -p "$RUNNER_TEMP/site"
+          uv run python -m scripts.release_app appcast --app "$RUNNER_TEMP/build/Mediaforce.app" \
+            --archive "$archive" --signature "$signature" \
+            --url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ARCHIVE" \
+            --notes-url "https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG" \
+            ${PREVIOUS_FEED:+--previous "$PREVIOUS_FEED"} --output "$RUNNER_TEMP/site/appcast.xml"
+          echo "SIGNATURE=$signature" >> "$GITHUB_ENV"
+          cat "$RUNNER_TEMP/site/appcast.xml"
+
+      - name: Upload a draft release and check its bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+          TAG: ${{ steps.identity.outputs.tag }}
+          TITLE: Mediaforce ${{ steps.identity.outputs.version }} (${{ steps.identity.outputs.build }})
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
+            --title "$TITLE" --generate-notes \
+            "$RUNNER_TEMP/release/$ARCHIVE" "$RUNNER_TEMP/release/SHA256SUMS"
+          mkdir "$RUNNER_TEMP/uploaded"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/uploaded"
+          ( cd "$RUNNER_TEMP/uploaded" && shasum -a 256 -c SHA256SUMS )
+          cmp "$RUNNER_TEMP/release/SHA256SUMS" "$RUNNER_TEMP/uploaded/SHA256SUMS"
+          printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | .build/mac-app/SourcePackages/artifacts/sparkle/Sparkle/bin/sign_update \
+            --verify --ed-key-file - "$RUNNER_TEMP/uploaded/$ARCHIVE" "$SIGNATURE"
+
+      - name: Publish the release and check anyone can download it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          mkdir "$RUNNER_TEMP/public"
+          curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/public/$ARCHIVE" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ARCHIVE"
+          cmp "$RUNNER_TEMP/release/$ARCHIVE" "$RUNNER_TEMP/public/$ARCHIVE"
+
+      - name: Hand the feed to Pages
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ runner.temp }}/site
+
+      - name: Remove the temporary keychain
+        if: always()
+        run: |
+          if [ -n "${RELEASE_KEYCHAIN:-}" ]; then
+            security delete-keychain "$RELEASE_KEYCHAIN"
+          fi
+
+  # The feed goes out last, after the release it names is public. If this job fails, re-run it alone:
+  # it republishes the same feed and never rebuilds the release.
+  feed:
+    name: Publish the update feed
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy the feed
+        id: deploy
+        uses: actions/deploy-pages@v4
+
+      - name: Check the served feed
+        env:
+          FEED: ${{ needs.release.outputs.feed }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 30); do
+            if curl -fsS "$FEED?run=$RUN_ID-$RANDOM" -o served.xml && grep -q "<sparkle:version>" served.xml; then
+              cat served.xml
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "The feed is not served at $FEED" >&2
+          exit 1

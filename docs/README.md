@@ -70,7 +70,7 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 
 ## Developer workflows
 
-- [Releases](development/release-flow.md): how agents deploy `main` to the controller, and read-only work evidence.
+- [Releases](development/release-flow.md): how agents deploy `main` to the controller, publish notarized releases, and read work evidence.
 - [Bundled delivery proposal](development/bundled-server-plan.md): server bundle,
   Sparkle, rollback and publishing design.
 - `docs/development/targeted-child-recovery.md`: exact child recovery for host-setup failures in an active encode batch.
