@@ -1,4 +1,6 @@
 import json
+import re
+from datetime import date
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Collection, Mapping, NamedTuple
@@ -25,6 +27,8 @@ DEFAULT_SCHEDULER_POLICY = {
     "end_hour": 8,
     "timezone": "controller_local",
 }
+SEASON_DAY_PATTERN = re.compile(r"(\d{2})-(\d{2})")
+LEAP_YEAR = 2000
 DISPLAY_ENCODE_JOB_KINDS = ("single", "folder")
 RUNNABLE_ENCODE_JOB_KINDS = ("single", "shard")
 ACTIVE_ENCODE_JOB_STATUSES = ("queued", "retry_backoff", "running")
@@ -59,6 +63,23 @@ _PERSISTED_ENCODE_HOST_KEYS = (
 _ENCODE_JOB_HOST_REPAIR_LENGTH_THRESHOLD = 65_536
 
 
+def season_day(value: object) -> tuple[int, int] | None:
+    match = SEASON_DAY_PATTERN.fullmatch(value) if isinstance(value, str) else None
+    if match is None:
+        return None
+    month, day = int(match.group(1)), int(match.group(2))
+    try:
+        date(LEAP_YEAR, month, day)
+    except ValueError:
+        return None
+    return month, day
+
+
+def season_covers(first: tuple[int, int], last: tuple[int, int], local_date: date) -> bool:
+    month_day = (local_date.month, local_date.day)
+    if first <= last:
+        return first <= month_day <= last
+    return month_day >= first or month_day <= last
 
 
 def unfinished_breakdown_groups(progress: Any) -> list[dict[str, Any]]:

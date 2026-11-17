@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.timezones import system_timezone, valid_timezone_name
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
+from mediaforce.encoding.encode_queue import season_covers, season_day
 from mediaforce.encoding.plain_failure import plain_failure_summary
 
 SCHEDULE_DAY_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -61,6 +62,41 @@ def schedule_policy_deps() -> SchedulePolicyDeps:
 class _ScheduleInterval:
     starts_at: datetime
     ends_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _DayHours:
+    window_days: frozenset[str]
+    all_day_days: frozenset[str]
+    blocks: tuple[tuple[int, int], ...]
+
+    def always_open(self) -> bool:
+        every_day = frozenset(SCHEDULE_DAY_ORDER)
+        if self.all_day_days == every_day:
+            return True
+        return any(start == end for start, end in self.blocks) and self.window_days | self.all_day_days == every_day
+
+
+@dataclass(frozen=True, slots=True)
+class _SeasonHours:
+    first: tuple[int, int]
+    last: tuple[int, int]
+    hours: _DayHours
+
+
+@dataclass(frozen=True, slots=True)
+class _WindowHours:
+    default: _DayHours
+    seasons: tuple[_SeasonHours, ...]
+
+    def on(self, local_date: date) -> _DayHours:
+        return next(
+            (season.hours for season in self.seasons if season_covers(season.first, season.last, local_date)),
+            self.default,
+        )
+
+    def always_open(self) -> bool:
+        return all(hours.always_open() for hours in (self.default, *(season.hours for season in self.seasons)))
 
 
 def encode_queue_scheduler_policy(config: MediaforceConfig, deps: SchedulePolicyDeps) -> dict[str, Any]:
@@ -154,25 +190,11 @@ def evaluate_encode_schedule_transition(
     current_utc = _current_utc(now or datetime.now(UTC))
     schedule_timezone = _schedule_timezone(policy, host_payload)
     current_local_date = current_utc.astimezone(schedule_timezone).date()
-    window_days = _schedule_days(policy, "days_of_week")
-    all_day_days = _schedule_days(policy, "all_day_days_of_week")
-    if not window_days and not all_day_days:
-        window_days = frozenset(SCHEDULE_DAY_ORDER)
-    start_hour = _schedule_hour(policy, "start_hour", deps)
-    end_hour = _schedule_hour(policy, "end_hour", deps)
-    if start_hour == end_hour and (window_days | all_day_days) == set(SCHEDULE_DAY_ORDER):
-        return EncodeScheduleTransition(is_open=True)
-    if all_day_days == set(SCHEDULE_DAY_ORDER):
+    hours = _window_hours(policy, deps)
+    if hours.always_open():
         return EncodeScheduleTransition(is_open=True)
 
-    intervals = _schedule_intervals(
-        anchor_date=current_local_date,
-        schedule_timezone=schedule_timezone,
-        window_days=window_days,
-        all_day_days=all_day_days,
-        start_hour=start_hour,
-        end_hour=end_hour,
-    )
+    intervals = _schedule_intervals(anchor_date=current_local_date, schedule_timezone=schedule_timezone, hours=hours)
     cycle_start = _local_boundary(current_local_date, 0, schedule_timezone)
     cycle_end = _local_boundary(current_local_date + timedelta(days=7), 0, schedule_timezone)
     if any(interval.starts_at <= cycle_start and interval.ends_at >= cycle_end for interval in intervals):
@@ -227,17 +249,8 @@ def max_encode_schedule_window_seconds(
     current_utc = _current_utc(now or datetime.now(UTC))
     schedule_timezone = _schedule_timezone(policy, host_payload)
     current_local_date = current_utc.astimezone(schedule_timezone).date()
-    window_days = _schedule_days(policy, "days_of_week")
-    all_day_days = _schedule_days(policy, "all_day_days_of_week")
-    if not window_days and not all_day_days:
-        window_days = frozenset(SCHEDULE_DAY_ORDER)
     intervals = _schedule_intervals(
-        anchor_date=current_local_date,
-        schedule_timezone=schedule_timezone,
-        window_days=window_days,
-        all_day_days=all_day_days,
-        start_hour=_schedule_hour(policy, "start_hour", deps),
-        end_hour=_schedule_hour(policy, "end_hour", deps),
+        anchor_date=current_local_date, schedule_timezone=schedule_timezone, hours=_window_hours(policy, deps),
     )
     durations = [
         (interval.ends_at - interval.starts_at).total_seconds()
@@ -270,6 +283,28 @@ def _schedule_timezone(policy: dict[str, Any], host_payload: dict[str, Any] | No
     return ZoneInfo(timezone_name) if timezone_name else system_timezone()
 
 
+def _window_hours(policy: dict[str, Any], deps: SchedulePolicyDeps) -> _WindowHours:
+    seasons = []
+    for raw_season in object_list(policy.get("seasons")):
+        season = object_dict(raw_season)
+        first, last = season_day(season.get("from")), season_day(season.get("to"))
+        if first and last:
+            seasons.append(_SeasonHours(first, last, _day_hours(season, deps)))
+    return _WindowHours(_day_hours(policy, deps), tuple(seasons))
+
+
+def _day_hours(policy: dict[str, Any], deps: SchedulePolicyDeps) -> _DayHours:
+    window_days = _schedule_days(policy, "days_of_week")
+    all_day_days = _schedule_days(policy, "all_day_days_of_week")
+    if not window_days and not all_day_days:
+        window_days = frozenset(SCHEDULE_DAY_ORDER)
+    blocks = [(_schedule_hour(policy, "start_hour", deps), _schedule_hour(policy, "end_hour", deps))]
+    second_hours = object_list(policy.get("second_hours"))
+    if len(second_hours) == 2:
+        blocks.append((_clamped_hour(second_hours[0]), _clamped_hour(second_hours[1])))
+    return _DayHours(window_days, all_day_days, tuple(blocks))
+
+
 def _schedule_days(policy: dict[str, Any], key: str) -> frozenset[str]:
     return frozenset({
         str(day).strip().lower()
@@ -282,6 +317,10 @@ def _schedule_hour(policy: dict[str, Any], key: str, deps: SchedulePolicyDeps) -
     value = policy.get(key)
     if value is None:
         value = deps.default_scheduler_policy[key]
+    return _clamped_hour(value)
+
+
+def _clamped_hour(value: object) -> int:
     return max(0, min(23, int(str(value))))
 
 
@@ -290,30 +329,36 @@ def _schedule_intervals(
         *,
         anchor_date: date,
         schedule_timezone: tzinfo,
-        window_days: frozenset[str],
-        all_day_days: frozenset[str],
-        start_hour: int,
-        end_hour: int,
+        hours: _WindowHours,
 ) -> tuple[_ScheduleInterval, ...]:
     intervals: list[_ScheduleInterval] = []
     for day_offset in range(-1, 16):
         local_date = anchor_date + timedelta(days=day_offset)
-        day_name = SCHEDULE_DAY_ORDER[local_date.weekday()]
-        if day_name in all_day_days or (day_name in window_days and start_hour == end_hour):
-            intervals.append(_local_interval(local_date, 0, local_date + timedelta(days=1), 0, schedule_timezone))
-            continue
+        intervals.extend(_day_intervals(local_date, hours.on(local_date), schedule_timezone))
+    return tuple(_merge_schedule_intervals(intervals))
+
+
+def _day_intervals(local_date: date, hours: _DayHours, schedule_timezone: tzinfo) -> list[_ScheduleInterval]:
+    day_name = SCHEDULE_DAY_ORDER[local_date.weekday()]
+    previous_day_name = SCHEDULE_DAY_ORDER[(local_date.weekday() - 1) % len(SCHEDULE_DAY_ORDER)]
+    next_date = local_date + timedelta(days=1)
+    if day_name in hours.all_day_days:
+        return [_local_interval(local_date, 0, next_date, 0, schedule_timezone)]
+    intervals: list[_ScheduleInterval] = []
+    for start_hour, end_hour in hours.blocks:
         if start_hour == end_hour:
+            if day_name in hours.window_days:
+                intervals.append(_local_interval(local_date, 0, next_date, 0, schedule_timezone))
             continue
         if start_hour < end_hour:
-            if day_name in window_days:
+            if day_name in hours.window_days:
                 intervals.append(_local_interval(local_date, start_hour, local_date, end_hour, schedule_timezone))
             continue
-        previous_day_name = SCHEDULE_DAY_ORDER[(local_date.weekday() - 1) % len(SCHEDULE_DAY_ORDER)]
-        if end_hour > 0 and (day_name in window_days or previous_day_name in window_days):
+        if end_hour > 0 and (day_name in hours.window_days or previous_day_name in hours.window_days):
             intervals.append(_local_interval(local_date, 0, local_date, end_hour, schedule_timezone))
-        if day_name in window_days:
-            intervals.append(_local_interval(local_date, start_hour, local_date + timedelta(days=1), 0, schedule_timezone))
-    return tuple(_merge_schedule_intervals(intervals))
+        if day_name in hours.window_days:
+            intervals.append(_local_interval(local_date, start_hour, next_date, 0, schedule_timezone))
+    return intervals
 
 
 def _local_interval(

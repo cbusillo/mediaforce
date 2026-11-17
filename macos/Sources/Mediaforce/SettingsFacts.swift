@@ -139,20 +139,72 @@ struct ComputerSettingsFacts: Decodable, Sendable, Equatable {
     }
 
     /// A new schedule's key is a placeholder the server replaces; computers choose it by that key until then.
-    struct Schedule: Codable, Sendable, Equatable {
+    /// Its own days and hours apply on every date none of its seasons cover.
+    struct Schedule: Codable, Sendable, Equatable, WindowHours {
         var key: String
         var name: String
         var days: [String]
         var allDayDays: [String]
         var startHour: Int
         var endHour: Int
+        var secondHours: [Int]? = nil
+        var seasons: [Season]? = nil
         var finishCurrentFile: Bool? = nil
+
+        mutating func addSeason() {
+            seasons = (seasons ?? []) + [Season(
+                name: "", from: "05-01", to: "09-30", days: days, allDayDays: allDayDays,
+                startHour: startHour, endHour: endHour, secondHours: secondHours
+            )]
+        }
+    }
+
+    /// `from` and `to` are month and day, such as "05-01", both included; a season may run past the year's end.
+    struct Season: Codable, Sendable, Equatable, WindowHours {
+        var name: String
+        var from: String
+        var to: String
+        var days: [String]
+        var allDayDays: [String]
+        var startHour: Int
+        var endHour: Int
+        var secondHours: [Int]? = nil
     }
 
     struct Library: Decodable, Sendable, Equatable {
         let key: String
         let name: String
     }
+}
+
+/// The days and hours a work window is open: days with one or two blocks of hours, and days open all day.
+protocol WindowHours {
+    var days: [String] { get set }
+    var allDayDays: [String] { get set }
+    var startHour: Int { get set }
+    var endHour: Int { get set }
+    var secondHours: [Int]? { get set }
+}
+
+/// A season's start or end as a month and day of a leap year, so February 29 is a choice.
+struct MonthDay: Equatable {
+    static let daysInMonth = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    var month: Int
+    var day: Int
+
+    init(month: Int, day: Int) {
+        self.month = min(max(month, 1), 12)
+        self.day = min(max(day, 1), Self.daysInMonth[self.month - 1])
+    }
+
+    init(_ text: String) {
+        let parts = text.split(separator: "-").compactMap { Int($0) }
+        self.init(month: parts.first ?? 1, day: parts.count > 1 ? parts[1] : 1)
+    }
+
+    var text: String { String(format: "%02d-%02d", month, day) }
+    var isMonthStart: Bool { day == 1 }
+    var isMonthEnd: Bool { day == Self.daysInMonth[month - 1] || (month == 2 && day == 28) }
 }
 
 struct ComputerSettingsSave: Encodable, Sendable, Equatable {
@@ -239,9 +291,9 @@ struct ComputerSettingsDraft: Equatable {
     }
 
     /// A day runs either in the window or all day, never both.
-    static func togglingDay(
-        _ day: String, allDay: Bool, in schedule: ComputerSettingsFacts.Schedule, order: [String]
-    ) -> ComputerSettingsFacts.Schedule {
+    static func togglingDay<Hours: WindowHours>(
+        _ day: String, allDay: Bool, in schedule: Hours, order: [String]
+    ) -> Hours {
         var schedule = schedule
         let chosen = allDay ? schedule.allDayDays : schedule.days
         if chosen.contains(day) {

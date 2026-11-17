@@ -312,6 +312,22 @@ window whose key is not saved is new: it gets a key from its name that no
 saved work window has and no stored computer names, and computers that chose
 it by its placeholder key follow. Hours must be whole hours from 0 to 23.
 
+A work window is open on its `days` from `start_hour` to `end_hour` (overnight
+when the end is earlier), and all day on its `all_day_days`. An optional
+`second_hours`, `[start, end]`, adds a second block on the same days, such as
+8 PM to 6 AM and 9 AM to 5 PM. Optional `seasons` replace those days and hours
+on some dates every year: each season has a `name`, `from` and `to` as month
+and day (`"05-01"`, both included, wrapping the year's end when `to` is
+earlier), and its own `days`, `all_day_days`, `start_hour`, `end_hour` and
+`second_hours`. Dates no season covers use the window's own fields, so a
+window without seasons or `second_hours` behaves as it always has. Each hour
+follows the rules of its own date: a summer night that runs past midnight into
+October 1 closes at that day's winter hours. Seasons may not share a date. The
+runtime settings store the same shape with `label`, `days_of_week` and
+`all_day_days_of_week`; one evaluator in `encode_scheduler` reads it for
+opening and closing, the Computers page's week, and whether a file fits before
+closing. `finish_current_file` belongs to the window, not to a season.
+
 The Plex and TMDB tab is the web page's metadata panel: Plex on or off and its
 server address, TMDB on or off, and for each its access key.
 `GET /api/app/settings/metadata` gives `plex` (`enabled`, `address`,
