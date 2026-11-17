@@ -87,9 +87,10 @@ def archive_location(release: str) -> str:
 
 def fetch(location: str, folder: Path) -> Path:
     target = folder / location.rsplit("/", 1)[-1]
+    # noinspection HttpUrlsUsage
     if location.startswith(("https://", "http://")):
-        with urlopen(location, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response, target.open("wb") as stream:
-            shutil.copyfileobj(response, stream)
+        with urlopen(location, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
+            target.write_bytes(response.read())
     else:
         shutil.copyfile(Path(location).expanduser(), target)
     return target

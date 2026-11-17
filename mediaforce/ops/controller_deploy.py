@@ -1,4 +1,4 @@
-"""Staged controller install and app update. Invoke only in an authorized deploy window."""
+"""Staged installation of a release on the controller, and the app's own update. Invoke only in an authorized deploy window."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -257,7 +257,7 @@ def install_release(
     require_own_support(app, config.paths.db_path, home)
     if read_update_intent(support) is not None:
         raise RuntimeError("an app update is unfinished; reconcile or roll it back first")
-    # The release flow's own pause request can start the hourly cleanup, so the install waits for it.
+    # The release flow's own pause request can start the hourly cleanup, so installing waits for it.
     with runtime_activity(support, wait_seconds=DEPLOY_LOCK_WAIT_SECONDS) as acquired:
         if not acquired:
             raise RuntimeError(f"cleanup or another deploy stayed active for {DEPLOY_LOCK_WAIT_SECONDS // 60} minutes; retry after it finishes")

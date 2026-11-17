@@ -70,8 +70,9 @@ class Controller:
         self.running = None
 
     def start(self, plist: Path) -> None:
-        self.running = "previous" if plist.read_bytes() == self.previous_payload else "release"
-        self.started.append(self.running)
+        started = "previous" if plist.read_bytes() == self.previous_payload else "release"
+        self.running = started
+        self.started.append(started)
 
     def api(self, _base: str, route: str, *, post: bool = False) -> dict[str, Any]:
         if self.running is None:
@@ -136,7 +137,7 @@ def test_install_keeps_old_code_off_a_database_the_release_may_have_migrated(con
     mac = controller
     stage = mac.support / "deployments/fixture-stage"
     release_started = mac.outcome in {"healthy", "resume-lost", "unhealthy", "wrong-build"}
-    # Only a database no release ever opened, and that a stopped install has not paused, gets the old service back.
+    # Only a database no release ever opened, and that a stopped installation has not paused, gets the old service back.
     restored = mac.outcome in {"backup-failed", "app-install-failed", "app-folder-locked"} and not mac.stopped
     if mac.outcome == "healthy":
         _install(mac)
