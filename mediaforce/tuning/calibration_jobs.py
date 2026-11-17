@@ -1,5 +1,5 @@
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 from typing import TypeVar
@@ -14,7 +14,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from mediaforce.core.db import DBClient
 from mediaforce.core.db import DBRow
 from mediaforce.core.db_tables import calibration_jobs
-from mediaforce.core.type_defs import JSONValue, object_dict
+from mediaforce.core.type_defs import JSONValue, int_value, object_dict
+from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND
 from mediaforce.library.media_scopes import resolve_media_scope, scope_prefix_overlap_filter
 
 T = TypeVar("T")
@@ -26,6 +27,7 @@ SUCCESSFUL_SAMPLE_JOB_STATUSES = ("completed", "pending_review", "superseded")
 # A queued job's result holds this while it waits to try again after losing its computer: how many
 # times it has tried again, when it may next start, and which computer it waits for.
 COMPUTER_RETRY_RESULT_KEY = "computer_retry"
+ENDED_JOB_STATUSES = ("failed", "stopped")
 
 
 def load_latest_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
@@ -156,6 +158,30 @@ def load_latest_sample_job(connection: DBClient, prefix: str) -> dict[str, Any] 
         .limit(1)
     ).mappings().fetchone()
     return _hydrate_job(row) if row is not None else None
+
+
+def holds_an_unproven_run(job: Mapping[str, Any]) -> bool:
+    result = object_dict(job.get("result"))
+    return (str(job.get("status") or "") in ENDED_JOB_STATUSES
+            and result.get("failure_kind") == CONTAINMENT_UNPROVEN_FAILURE_KIND
+            and result.get("remote_process_contained") is not True)
+
+
+def load_jobs_holding_unproven_runs(connection: DBClient) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        _calibration_job_select()
+        .where(calibration_jobs.c.status.in_(ENDED_JOB_STATUSES))
+        .where(calibration_jobs.c.result_json.contains(CONTAINMENT_UNPROVEN_FAILURE_KIND))
+    ).mappings().fetchall()
+    return [job for job in map(_hydrate_job, rows) if holds_an_unproven_run(job)]
+
+
+def load_job_holding_sample(connection: DBClient, prefix: str, library_item_id: int) -> dict[str, Any] | None:
+    for job in load_jobs_holding_unproven_runs(connection):
+        held_item_id = int_value(object_dict(job.get("sample_item")).get("library_item_id"))
+        if job["prefix"] == prefix or 0 < library_item_id == held_item_id:
+            return job
+    return None
 
 
 def load_job(connection: DBClient, job_id: str) -> dict[str, Any] | None:
@@ -334,6 +360,15 @@ def finish_running_job(
         select(calibration_jobs.c.status).where(calibration_jobs.c.job_id == job_id)
     ).scalar_one_or_none()
     return str(current) if current is not None else None
+
+
+def keep_unproven_run_on_ended_job(connection: DBClient, job_id: str, *, error: str, result: dict[str, Any]) -> None:
+    connection.execute(
+        update(calibration_jobs)
+        .where(calibration_jobs.c.job_id == job_id)
+        .where(calibration_jobs.c.status.in_(ENDED_JOB_STATUSES))
+        .values(error=error, result_json=json.dumps(result, sort_keys=True))
+    )
 
 
 def queued_jobs_waiting_to_retry(connection: DBClient, *, lane: str, now: datetime) -> tuple[str, ...]:

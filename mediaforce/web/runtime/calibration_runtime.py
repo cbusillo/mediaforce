@@ -36,7 +36,8 @@ from mediaforce.tuning.content_intent_observations import (
     content_intent_stream_plan_id,
 )
 from mediaforce.tuning.av1_cold_start import unavailable_av1_cold_start_prediction
-from mediaforce.tuning.calibration_jobs import COMPUTER_RETRY_RESULT_KEY, finish_running_job, \
+from mediaforce.tuning.calibration_jobs import COMPUTER_RETRY_RESULT_KEY, finish_running_job, holds_an_unproven_run, \
+    keep_unproven_run_on_ended_job, \
     requeue_running_job_for_retry
 from mediaforce.tuning.target_size_search import MAX_TARGET_SIZE_CANDIDATES, TargetSizeSearchError
 from mediaforce.web.runtime.encode_runtime import running_staged_scratch_reservations
@@ -766,6 +767,8 @@ def _fail_unless_ended(
         status = finish_running_job(
             connection, job_id, status="failed", finished_at=finished_at, error=error, result=result,
         )
+        if status is not None and holds_an_unproven_run({"status": status, "result": result}):
+            keep_unproven_run_on_ended_job(connection, job_id, error=error, result=object_dict(result))
         if status is not None:
             return status
         # No saved row to guard, so save the whole job as before.

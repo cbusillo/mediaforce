@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy import update
 
 from mediaforce.tuning.calibration_jobs import RUNNING_JOB_STATUSES, claim_next_queued_calibration_job, \
-    queued_job_hosts, queued_jobs_waiting_to_retry, \
+    holds_an_unproven_run, queued_job_hosts, queued_jobs_waiting_to_retry, \
     load_active_overlapping_job, \
     load_latest_failed_sample_job, \
     load_latest_failed_target_size_sample_job, load_latest_job, load_latest_overlapping_job, \
@@ -515,7 +515,7 @@ def retryable_saved_sample_job(job: dict[str, Any]) -> bool:
     mode = str(job.get("mode") or job.get("lane") or "sample").strip()
     if mode != "sample":
         return False
-    if sample_target_size_failure(job) is not None:
+    if sample_target_size_failure(job) is not None or holds_an_unproven_run(job):
         return False
     action = str(job.get("action") or "").strip()
     return action in {"baseline", "ai_tune"}

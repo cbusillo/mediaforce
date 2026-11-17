@@ -337,6 +337,10 @@ Guidance:
     by its open file); an unproven scratch folder is saved as the hold's
     scope, and the same recheck releases the file once its computer shows the
     writer ended
+  - a sample whose run was left unconfirmed keeps that scope in its result;
+    while it does, neither a retry nor a new sample for that folder or file
+    starts, and the same queue recheck clears the hold once the run is shown
+    ended
 - `status_helpers.py` and `status_runtime.py`
   - host probe scripts, capability checks, and status parsing
   - successful status probes remain distinct from full encode readiness, so a

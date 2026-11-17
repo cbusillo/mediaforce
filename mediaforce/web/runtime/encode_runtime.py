@@ -53,6 +53,8 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict, objec
 from mediaforce.encoding.duration_estimate import EncodeDurationEstimate, EncodeDurationSample, \
     estimate_encode_job_duration, estimate_fits_before_schedule_close, load_encode_duration_samples
 from mediaforce.encoding.free_space import CapacityCache, large_job_requires_serialization
+from mediaforce.tuning.calibration_jobs import load_job as load_calibration_job, load_jobs_holding_unproven_runs, \
+    save_job as save_calibration_job
 from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND, CONTAINMENT_UNPROVEN_OWNER_STEP, \
     REMOTE_QUALITY_TIMEOUT_FAILURE_KIND, QualityTempSetupError, RemoteQualityTimeoutError, \
     analyze_quality_policy_failure, quality_error_message, stop_timed_out_remote_quality_run
@@ -281,6 +283,7 @@ OUTPUT_NOT_VISIBLE_FAILURE_KIND = "output_not_visible"
 REMOTE_QUALITY_TIMEOUT_RETRY_NOTE = "It will be tried again."
 REMOTE_QUALITY_TIMEOUT_EXHAUSTED_NOTE = "It kept running too long, so this file needs you."
 QUALITY_RUN_RECHECK_NOTE = "Mediaforce will check that computer again and try this file once that run has ended."
+SAMPLE_RUN_SHOWN_ENDED_NOTE = "Mediaforce has since confirmed that run ended."
 QUALITY_CONTAINMENT_PROGRESS_KEY = "quality_containment"
 UNCONFIRMED_RUN_ASK_AFTER = timedelta(hours=24)
 SCOPED_QUALITY_TEMP_DIR_NAME = re.compile(r"\.mediaforce-ab-av1-[0-9a-f]{32}")
@@ -682,6 +685,7 @@ def reconcile_encode_jobs(
 ) -> None:
     now = datetime.now(tz=UTC)
     _release_stopped_holds_whose_run_ended(connection, config, deps, now)
+    _release_sample_holds_whose_run_ended(connection, config, deps, now)
     running_rows = connection.execute(
         select(encode_jobs.c.job_id)
         .where(encode_jobs.c.status == "running")
@@ -2439,6 +2443,55 @@ def _release_stopped_holds_whose_run_ended(
             job.update({"progress": progress, "last_failure_kind": None,
                         "error": "Encode queue job was stopped; its remote processes have ended."})
         _save_swept_job(connection, job, snapshot, deps)
+
+
+def _release_sample_holds_whose_run_ended(
+        connection: DBClient, config: MediaforceConfig, deps: EncodeQueueRuntimeDeps, now: datetime,
+) -> None:
+    for job in load_jobs_holding_unproven_runs(connection):
+        result = object_dict(job.get("result"))
+        checked_at = deps.parse_iso(result.get("checked_at"))
+        if checked_at is not None and now - checked_at < STOPPED_HOLD_CHECK_INTERVAL:
+            continue
+        connection.commit()
+        try:
+            _show_sample_run_ended(config, job)
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
+            checked = {**job, "result": {**result, "checked_at": now.isoformat(timespec="seconds")}}
+        else:
+            shown_ended = {key: value for key, value in result.items() if key != "checked_at"}
+            checked = {
+                **job,
+                "result": {**shown_ended, "failure_kind": REMOTE_QUALITY_TIMEOUT_FAILURE_KIND, "remote_process_contained": True},
+                "error": str(job.get("error") or "").replace(CONTAINMENT_UNPROVEN_OWNER_STEP, SAMPLE_RUN_SHOWN_ENDED_NOTE),
+            }
+        _save_unchanged_sample_job(connection, job, checked, deps)
+
+
+def _show_sample_run_ended(config: MediaforceConfig, job: Mapping[str, Any]) -> None:
+    host = object_dict(job.get("host"))
+    result = object_dict(job.get("result"))
+    host_key = _recorded_host_key(host)
+    configured = [object_dict(entry) for entry in config.remote_hosts if ssh_target_for_host(object_dict(entry)) == host_key]
+    scope = str(result.get("scoped_temp_dir") or "")
+    if not host_key or len(configured) != 1 or result.get("host_key") != host_key:
+        raise RuntimeError("Mediaforce's record of which computer made that sample is missing or does not match.")
+    computer = {**configured[0], **host}
+    if execution_mode_for_host(computer) != "ssh" or not scope or not _is_its_own_work_folder(config, computer, scope):
+        raise RuntimeError("The saved sample run does not match its computer and work folder.")
+    stop_timed_out_remote_quality_run(computer, scope, wake_before_connect=False)
+
+
+def _save_unchanged_sample_job(
+        connection: DBClient, job: dict[str, Any], checked: dict[str, Any], deps: EncodeQueueRuntimeDeps,
+) -> None:
+    connection.commit()
+    connection.exec_driver_sql("BEGIN IMMEDIATE")
+    if load_calibration_job(connection, str(job["job_id"])) != job:
+        connection.rollback()
+        return
+    save_calibration_job(connection, {**checked, "updated_at": deps.now_iso()})
+    connection.commit()
 
 
 def _check_held_quality_runs_again(connection: DBClient, config: MediaforceConfig, deps: EncodeQueueRuntimeDeps) -> None:

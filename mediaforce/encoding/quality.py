@@ -222,9 +222,10 @@ REMOTE_QUALITY_TEMP_FILES_LEFT_NOTE = "Its temporary files could not be removed;
 # It prints the marker only when a fresh listing shows nothing naming the folder, none of the
 # collected processes still running (an exited zombie is not running), and lsof shows no process
 # with a file open under the folder. That last check finds a writer whose command line never named
-# the folder, such as `cat > <folder>/source` after its shell exec'd cat; such a process is not
-# signalled, the folder just stays. lsof exits 1 both when nothing is open and on some errors, so
-# only an exit of 0 or 1 with nothing on stderr counts; a missing lsof or any warning is no proof.
+# the folder, such as `cat > <folder>/source` once its shell has run cat in its place; such a
+# process is left running and the folder just stays. lsof exits 1 both when nothing is open and
+# on some errors, so only an exit of 0 or 1 with nothing on stderr counts; a missing lsof or any
+# warning is no proof.
 # Every step fails closed: a failed ps, a listing that does not show this script itself, or a
 # failed awk is never proof.
 # Processes in this script's own group (its shells, whose arguments also name the folder) are

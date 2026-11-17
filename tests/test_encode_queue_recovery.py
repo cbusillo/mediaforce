@@ -91,7 +91,8 @@ from mediaforce.encoding.staged_host import SCRATCH_DIR_PREFIX, ScratchStillInUs
 from mediaforce.hosts.types import SOURCE_ROOT_READ_MISSING_ISSUE, STAGING_ROOT_WRITE_MISSING_ISSUE, \
     VMAF_MODEL_MISSING_ISSUE, is_vmaf_model_load_failure
 from mediaforce.remote import HostReadinessError, HostStatus
-from mediaforce.tuning.calibration_jobs import list_queue_summary, \
+from mediaforce.tuning.calibration_jobs import holds_an_unproven_run, list_queue_summary, \
+    load_job as load_calibration_job, \
     load_active_overlapping_job as load_active_overlapping_calibration_job, \
     load_latest_job as load_latest_calibration_job, \
     load_latest_overlapping_job as load_latest_overlapping_calibration_job, \
@@ -4128,6 +4129,52 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 self.assertEqual(released["status"], "stopped")
                 self.assertIsNone(released["last_failure_kind"])
                 self.assertNotIn("quality_containment", released["progress"] or {})
+
+    def test_a_held_sample_is_released_only_once_its_own_computer_shows_its_run_ended(self) -> None:
+        quality_dir = self._scoped_quality_run()
+        scratch_dir = str(PurePosixPath(self._SCRATCH_ROOT) / f"{SCRATCH_DIR_PREFIX}{'d' * 32}")
+        elsewhere = f"/Users/encoder/elsewhere/.mediaforce-ab-av1-{'e' * 32}"
+        mounted = {"media_access": "mounted"}
+        scratch = {"media_access": "stream", "scratch_root": self._SCRATCH_ROOT}
+        for label, configured, scope, releasable in (
+                ("quality run", mounted, quality_dir, True),
+                ("scratch encode", scratch, scratch_dir, True),
+                ("folder that is not its computer's", mounted, elsewhere, False),
+        ):
+            with self.subTest(label):
+                self.config.raw["remote_hosts"] = [{"host": self._QUALITY_TIMEOUT_SSH_HOST, "label": "Remote A", **configured}]
+                held: dict[str, Any] = {
+                    "job_id": f"sample-{label.split()[0]}", "prefix": f"tv/held-{label.split()[0]}", "status": "stopped",
+                    "lane": "sample", "action": "ai_tune", "sample_item": {"library_item_id": 7},
+                    "host": {"key": self._QUALITY_TIMEOUT_SSH_HOST, "label": "Remote A", "mode": "ssh"},
+                    "result": {"failure_kind": encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND, "remote_process_contained": False,
+                               "scoped_temp_dir": scope, "host_key": self._QUALITY_TIMEOUT_SSH_HOST},
+                    "error": str(self._unconfirmed_quality_run(scope)),
+                    "created_at": "2026-11-17T10:00:00+00:00", "finished_at": "2026-11-17T10:05:00+00:00",
+                }
+                computer = _SleepingComputer(self._QUALITY_TIMEOUT_SSH_HOST)
+                deps = replace(web_app._encode_queue_runtime_deps(), scratch_ready_hosts={})
+                with self._quality_timeout_computer(computer.run_remote_command), \
+                        patch.object(encode_runtime, "STOPPED_HOLD_CHECK_INTERVAL", timedelta(0)), \
+                        open_db(self.config.paths.db_path) as connection:
+                    save_calibration_job(connection, held)
+                    connection.commit()
+
+                    encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
+                    away = load_calibration_job(connection, held["job_id"])
+                    assert away is not None
+                    self.assertTrue(holds_an_unproven_run(away))
+
+                    computer.awake = True
+                    encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
+                    checked = load_calibration_job(connection, held["job_id"])
+                    assert checked is not None
+
+                self.assertEqual(checked["status"], "stopped")
+                self.assertEqual(holds_an_unproven_run(checked), not releasable)
+                self.assertEqual(computer.quality_runs_stopped, [scope] if releasable else [])
+                if releasable:
+                    self.assertNotIn(encoding_quality.CONTAINMENT_UNPROVEN_OWNER_STEP, checked["error"])
 
     def test_any_other_interruption_that_leaves_a_run_unconfirmed_waits_for_it_before_retrying(self) -> None:
         scope = self._scoped_quality_run()

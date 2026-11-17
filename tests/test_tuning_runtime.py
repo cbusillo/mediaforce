@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
@@ -61,6 +62,8 @@ from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_
 from mediaforce.tuning.calibration_jobs import list_queue_summary, load_job, \
     load_latest_failed_target_size_sample_job, sample_failures_in_a_row, save_job, update_job_telemetry
 from mediaforce.tuning.compression_intent import CompressionIntentV1
+from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND, REMOTE_QUALITY_TIMEOUT_FAILURE_KIND
+from mediaforce.web.runtime.job_runtime import retryable_saved_sample_job
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from mediaforce.web.app import _build_multimodal_review_pack, _build_seed_policy_payload, _maybe_seed_baseline_policy, _build_tuning_runtime_toolbelt, _folder_display_policy, _request_triggers_periodic_cleanup, _run_periodic_cleanup, _multimodal_review_pack_public_view, _operator_requested_experiment, _planned_audio_review_context, _review_pack_dir, _upsert_override
 from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary, clear_archive_cleanup_action
@@ -595,9 +598,9 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(policy["video"]["target_vmaf"], 85.0)
         self.assertEqual(policy["video"]["max_height"], 1080)
 
-    def test_folder_ai_tune_confirm_retries_latest_stopped_sample_without_pending_proposal(self) -> None:
-        saved_jobs: list[dict[str, object]] = []
-        host = HostStatus(
+    @staticmethod
+    def _sample_host() -> HostStatus:
+        return HostStatus(
             key="cbusillo@localhost",
             label="M4 Studio",
             mode="ssh",
@@ -607,7 +610,9 @@ class TuningRuntimeTests(unittest.TestCase):
             message="Mounted and ready",
             missing_paths=[],
         )
-        retryable_job = {
+
+    def _stopped_sample(self, host: HostStatus) -> dict[str, Any]:
+        return {
             "job_id": "job-old",
             "status": "stopped",
             "lane": "sample",
@@ -639,7 +644,10 @@ class TuningRuntimeTests(unittest.TestCase):
             "error": "Calibration queue job was stopped and cleaned up.",
         }
 
-        deps = FolderAiTuneDeps(
+    def _sample_retry_deps(
+            self, retryable_job: dict[str, Any], host: HostStatus, saved_jobs: list[dict[str, object]],
+    ) -> FolderAiTuneDeps:
+        return FolderAiTuneDeps(
             resolve_sample_host=lambda _config, host_key: host if host_key == host.key else None,
             load_job_state=lambda _connection, _config, prefix: dict(retryable_job) if prefix == "tv/show" else None,
             load_retryable_sample_job_state=lambda _connection, _config, prefix: dict(retryable_job)
@@ -679,6 +687,12 @@ class TuningRuntimeTests(unittest.TestCase):
             record_tuning_session=lambda *_args, **_kwargs: "session-1",
         )
 
+    def test_folder_ai_tune_confirm_retries_latest_stopped_sample_without_pending_proposal(self) -> None:
+        saved_jobs: list[dict[str, object]] = []
+        host = self._sample_host()
+        retryable_job = self._stopped_sample(host)
+        deps = self._sample_retry_deps(retryable_job, host, saved_jobs)
+
         result = folder_ai_tune_confirm_action(self.config, deps, "tv/show", "")
 
         self.assertTrue(result["ok"])
@@ -693,6 +707,38 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertNotIn("heartbeat_at", saved_jobs[0])
         self.assertNotIn("progress", saved_jobs[0])
         self.assertNotEqual(saved_jobs[0]["job_id"], retryable_job["job_id"])
+
+    def test_a_held_sample_is_not_retried_or_replaced_until_its_run_is_shown_ended(self) -> None:
+        saved_jobs: list[dict[str, object]] = []
+        host = self._sample_host()
+        held = self._stopped_sample(host)
+        held["result"] = {"failure_kind": CONTAINMENT_UNPROVEN_FAILURE_KIND, "remote_process_contained": False,
+                          "scoped_temp_dir": f"/staging/.mediaforce-ab-av1-{'a' * 32}", "host_key": host.key}
+        with open_db(self.config.paths.db_path) as connection:
+            save_job(connection, held)
+            connection.commit()
+        retry_deps = self._sample_retry_deps(held, host, saved_jobs)
+        with_its_file = replace(retry_deps, sample_item=lambda *_args, **_kwargs: dict(held["sample_item"]))
+
+        refusals = {
+            "retry": folder_ai_tune_confirm_action(self.config, retry_deps, "tv/show", ""),
+            "new sample of the same file from its season": folder_ai_tune_preview_action(
+                self.config, with_its_file, "tv/show/Season 1", "", host.key),
+        }
+
+        for label, refusal in refusals.items():
+            with self.subTest(label):
+                self.assertFalse(refusal["ok"])
+        self.assertEqual(saved_jobs, [])
+        self.assertFalse(retryable_saved_sample_job(held))
+
+        with open_db(self.config.paths.db_path) as connection:
+            save_job(connection, {**held, "result": {**held["result"], "failure_kind": REMOTE_QUALITY_TIMEOUT_FAILURE_KIND,
+                                                     "remote_process_contained": True}})
+            connection.commit()
+
+        self.assertTrue(folder_ai_tune_confirm_action(self.config, retry_deps, "tv/show", "")["ok"])
+        self.assertEqual([job["status"] for job in saved_jobs], ["queued"])
 
     def test_saved_sample_work_blocks_unconfirmed_legacy_size_goal(self) -> None:
         issue = _unconfirmed_legacy_size_issue(

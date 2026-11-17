@@ -9,7 +9,7 @@ from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.encoding.encode_queue import list_child_encode_jobs, load_encode_job
 from mediaforce.encoding.plain_failure import plain_failure_summary
 from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND
-from mediaforce.tuning.calibration_jobs import load_latest_job, load_latest_jobs_for_prefixes
+from mediaforce.tuning.calibration_jobs import holds_an_unproven_run, load_latest_job, load_latest_jobs_for_prefixes
 from mediaforce.tuning.quality_risk import build_quality_risk_contract
 from mediaforce.web.runtime.encode_runtime import OWNER_CHILD_STATUSES, unfinished_child_reason
 from mediaforce.web.runtime.folder_actions import quality_risk_blocks_production
@@ -235,6 +235,8 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
     if lane == "blocked" and not awaits_review:
         return PageState("needs_help", "attention", recovery_kind="files", primary_action="review_files")
     if sample_status in SAMPLE_FAILED_STATUSES and not _settled_by_approval(sample_job, calibration):
+        if holds_an_unproven_run(sample_job):
+            return PageState("sample_waiting", "quiet", source_job=_source_job(sample_job, "sample"))
         failure = _sample_failure(sample_job)
         return PageState(
             "needs_help",

@@ -223,6 +223,12 @@ PORTED_CASES: list[tuple[str, dict[str, Any], dict[str, Any]]] = [
         {"key": "needs_help", "recovery_kind": "test"},
     ),
     (
+        "a stopped sample waits while its run on a computer is not shown ended",
+        {"sample_job": _sample("stopped", error="Sample run not confirmed stopped",
+                               result={"failure_kind": "containment_unproven", "remote_process_contained": False})},
+        {"key": "sample_waiting", "tone": "quiet", "primary_action": None},
+    ),
+    (
         "a stopped sample that can be retried as it was",
         {"sample_job": _sample("failed", error="Sample worker stopped unexpectedly")},
         {"key": "needs_help", "recovery_kind": "test", "primary_action": "retry_sample", "failure": "stopped"},

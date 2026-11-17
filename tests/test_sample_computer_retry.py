@@ -16,7 +16,7 @@ from mediaforce.core.process_control import ManagedProcessController
 from mediaforce.encoding.quality import QualitySearchError, RemoteQualityTimeoutError
 from mediaforce.execution import resolve_stream_budget_ledger
 from mediaforce.hosts.types import HostReadinessError, HostStatus
-from mediaforce.tuning.calibration_jobs import load_job, save_job, update_job_telemetry
+from mediaforce.tuning.calibration_jobs import holds_an_unproven_run, load_job, save_job, update_job_telemetry
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from mediaforce.web import app as web_app
 from mediaforce.web.runtime import job_runtime
@@ -316,6 +316,20 @@ class SampleComputerRetryTests(unittest.TestCase):
                 self._run(self._deps(search=self._owner_stops_then(error)))
 
                 self.assertEqual(self._job()["status"], "stopped")
+
+    def test_a_run_left_unconfirmed_after_the_owners_stop_still_holds_the_stopped_sample(self) -> None:
+        self._save_job(status="running")
+        unconfirmed = RemoteQualityTimeoutError(
+            phase="sample_encode", timeout_seconds=60, host_key=HOST["key"], host_label=COMPUTER,
+            remote_process_contained=False, scoped_temp_dir=f"/staging/.mediaforce-ab-av1-{'a' * 32}",
+        )
+
+        self._run(self._deps(search=self._owner_stops_then(unconfirmed)))
+
+        job = self._job()
+        self.assertEqual(job["status"], "stopped")
+        self.assertTrue(holds_an_unproven_run(job))
+        self.assertEqual(job["result"]["scoped_temp_dir"], unconfirmed.scoped_temp_dir)
 
     def test_the_owners_stop_is_not_undone_by_a_retry(self) -> None:
         with self.subTest("stop ends the link"):

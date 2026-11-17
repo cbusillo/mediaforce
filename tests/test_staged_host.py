@@ -185,7 +185,8 @@ class ScratchScriptTests(unittest.TestCase):
             self.assertIsNotNone(writer.poll())
             self.assertFalse(Path(str(scratch_dir)).exists())
 
-    def _folder_removals(self, root: Path, scratch_dir: Path) -> dict[str, Callable[[dict[str, str] | None], None]]:
+    @staticmethod
+    def _folder_removals(root: Path, scratch_dir: Path) -> dict[str, Callable[[dict[str, str] | None], None]]:
         """The controller's, the keeper's exit and the sweep's removal of one job's folder."""
         def controller(env: dict[str, str] | None) -> None:
             subprocess.run(["sh", "-c", remove_once_unused_shell(shlex.quote(str(scratch_dir)))], env=env,

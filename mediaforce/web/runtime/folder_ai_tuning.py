@@ -13,7 +13,7 @@ from mediaforce.advising.policy import (
 from mediaforce.advising.routing import AdvisorRouting
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
-from mediaforce.core.type_defs import float_value, object_dict, object_list
+from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.execution import resolve_stream_budget_ledger
 from mediaforce.tuning.quality_risk import (
     append_quality_risk_record,
@@ -27,6 +27,7 @@ from mediaforce.tuning.content_intent_observations import (
     ContentIntentObservationRecordResult,
     record_visual_content_intent_observation,
 )
+from mediaforce.tuning.calibration_jobs import load_job_holding_sample
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.tuning.stream_budget import StreamBudgetProjectionBlocker, stream_budget_projection_blocker
 from mediaforce.web.runtime.folder_tuning_advice import (
@@ -673,6 +674,8 @@ def folder_ai_tune_preview_action(
         sample_item = deps.sample_item(connection, config, normalized_prefix)
         if sample_item is None:
             raise HTTPException(status_code=404, detail=f"No sample item found for {normalized_prefix}")
+        if (held_refusal := _held_sample_refusal(connection, normalized_prefix, sample_item)) is not None:
+            return held_refusal
         cadence_blocker = cadence_evidence_blocker(
             connection,
             config,
@@ -796,6 +799,8 @@ def folder_ai_tune_confirm_action(
         sample_item = deps.sample_item(connection, config, normalized_prefix)
         if sample_item is None:
             raise HTTPException(status_code=404, detail=f"No sample item found for {normalized_prefix}")
+        if (held_refusal := _held_sample_refusal(connection, normalized_prefix, sample_item)) is not None:
+            return held_refusal
         cadence_blocker = cadence_evidence_blocker(
             connection,
             config,
@@ -941,6 +946,25 @@ def folder_ai_tune_confirm_action(
     }
 
 
+def _held_sample_refusal(
+        connection: DBClient, normalized_prefix: str, sample_item: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    held = load_job_holding_sample(
+        connection, normalized_prefix, int_value(object_dict(sample_item).get("library_item_id")),
+    )
+    if held is None:
+        return None
+    host = object_dict(held.get("host"))
+    computer = str(host.get("label") or host.get("key") or "").strip() or "its computer"
+    return {
+        "ok": False,
+        "message": (
+            f"Checking that {computer} finished its earlier run of this sample. "
+            "It can be made again once that run has ended."
+        ),
+    }
+
+
 def _retry_latest_sample_job(
         config: MediaforceConfig,
         deps: FolderAiTuneDeps,
@@ -948,6 +972,9 @@ def _retry_latest_sample_job(
 ) -> dict[str, Any]:
     with open_db(config.paths.db_path) as connection:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
+        current_sample_item = deps.sample_item(connection, config, normalized_prefix)
+        if (held_refusal := _held_sample_refusal(connection, normalized_prefix, current_sample_item)) is not None:
+            return held_refusal
         existing_job = deps.load_retryable_sample_job_state(connection, config, normalized_prefix)
         if existing_job is None:
             return {"ok": False, "message": "Ask the bench for a draft first."}
@@ -972,7 +999,6 @@ def _retry_latest_sample_job(
         host = deps.resolve_sample_host(config, host_key)
 
         stored_sample_item = object_dict(existing_job.get("sample_item"))
-        current_sample_item = deps.sample_item(connection, config, normalized_prefix)
         if current_sample_item is not None:
             stored_sample_item = object_dict(current_sample_item)
         elif not stored_sample_item or not int(stored_sample_item.get("library_item_id") or 0):
