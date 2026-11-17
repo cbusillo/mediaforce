@@ -68,9 +68,9 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(listing.estimatedSavedBytes, 30)
         XCTAssertFalse(listing.estimateIsPartial, "Every movie has an estimate, so the Movies total is complete")
 
-        PartialLibraryServer.mode = .unmeasured
+        PartialLibraryServer.mode = .populated
         await listing.refresh(client, kind: .movies)
-        XCTAssertNil(listing.estimatedSavedBytes, "A movie still to compress at 0 has not been measured")
+        XCTAssertNil(listing.estimatedSavedBytes, "A movie with no estimate leaves the Movies total unknown")
         XCTAssertTrue(listing.estimateIsPartial)
         XCTAssertEqual(Words.canSave(try XCTUnwrap(listing.rows.first)), Words.notKnownYet)
     }
@@ -144,7 +144,7 @@ final class LibraryTests: XCTestCase {
 }
 
 private final class PartialLibraryServer: URLProtocol, @unchecked Sendable {
-    enum Mode { case populated, failing, empty, complete, partial, truncated, unmeasured, viewOnlyOther }
+    enum Mode { case populated, failing, empty, complete, partial, truncated, viewOnlyOther }
     nonisolated(unsafe) static var mode = Mode.populated
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -168,7 +168,7 @@ private final class PartialLibraryServer: URLProtocol, @unchecked Sendable {
                 body = "{\"movies\": []}"
                 break
             }
-            let estimate = Self.mode == .populated ? "null" : Self.mode == .unmeasured ? "0" : "30"
+            let estimate = Self.mode == .populated ? "null" : "30"
             body = """
             {"movies": [{"prefix": "films/Example", "title": "A movie", "file_count": 1,
                          "bytes": 70, "state": "ready", "estimated_saved_bytes": \(estimate)}]}

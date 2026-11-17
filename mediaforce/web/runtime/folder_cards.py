@@ -19,6 +19,7 @@ from mediaforce.library.workflow_state import build_folder_workflow_states_for_s
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES
 from mediaforce.library.workflow_state import WorkflowPayload
 from mediaforce.library.motion_holds import queue_motion_holds
+from mediaforce.web.runtime.production_approval import ApprovedOutputBytes
 
 FolderGroup = tuple[str, str, str, str]
 FolderBadge = dict[str, str | None]
@@ -239,8 +240,8 @@ def preview_folder_cards(
             card.known_saved_bytes += known_saved_bytes
         if status != "promoted" and production_included:
             card.pending_count += 1
-            if known_saved_bytes is None and _eligible_for_estimate(status, decision, motion_holds):
-                if decision is not None and decision.media_domain == "movie":
+            if known_saved_bytes is None and not _saves_nothing(status, decision, motion_holds):
+                if not _estimated_from_library_history(status, decision):
                     card.estimate_unavailable_count += 1
                 else:
                     card.estimated_savings_bytes += _estimated_pending_savings_bytes(
@@ -351,6 +352,7 @@ def list_folder_cards(
         restrict_to_candidate_items: bool = False,
         include_lifecycle: bool = True,
         include_workflow_states: bool = True,
+        approved_output_bytes: ApprovedOutputBytes = lambda _rel_path, _runtime, _size: None,
 ) -> list[FolderCard]:
     decisions = (
         candidate_decisions
@@ -374,6 +376,7 @@ def list_folder_cards(
             library_items.c.source_path,
             library_items.c.mtime_ns,
             library_items.c.size_bytes,
+            library_items.c.duration_seconds,
             library_items.c.status,
             library_items.c.video_codec,
             library_items.c.audio_summary_json,
@@ -451,10 +454,12 @@ def list_folder_cards(
                 card.sort_score += known_saved_bytes / (1024 ** 3)
             elif decision is not None and decision.target_size_blocker is not None:
                 card.estimate_unavailable_count += 1
-            elif _eligible_for_estimate(status, decision, motion_holds):
-                if decision is not None and decision.media_domain == "movie":
-                    card.estimate_unavailable_count += 1
-                else:
+            elif not _saves_nothing(status, decision, motion_holds):
+                approved_output = approved_output_bytes(rel_path, row["duration_seconds"], size_bytes)
+                estimated_savings: int | None = None
+                if approved_output is not None:
+                    estimated_savings = max(0, size_bytes - approved_output)
+                elif _estimated_from_library_history(status, decision):
                     estimated_savings = _estimated_pending_savings_bytes(
                         size_bytes=size_bytes,
                         video_codec=codec,
@@ -463,6 +468,9 @@ def list_folder_cards(
                         folder_history=folder_history.get(prefix),
                         codec_history=_codec_history_for_decision(codec_history, decision, codec),
                     )
+                if estimated_savings is None:
+                    card.estimate_unavailable_count += 1
+                else:
                     card.estimated_savings_bytes += estimated_savings
                     card.sort_score += estimated_savings / (1024 ** 3)
         card.statuses[status] = card.statuses.get(status, 0) + 1
@@ -671,15 +679,21 @@ def _apply_lifecycle(
         card.sort_score = age_days * 1_000_000 + card.projected_reclaim_bytes / (1024 ** 3)
 
 
-def _eligible_for_estimate(status: str, decision: CandidateDecision | None, motion_holds: MotionHolds) -> bool:
-    if status not in ENCODE_CANDIDATE_STATUSES:
-        return True
-    # A file held for its motion pattern, or kept original by the owner, stays original, so it saves nothing.
-    return decision is None or (
-        decision.eligible
-        and decision.item_id not in motion_holds.held
-        and decision.item_id not in motion_holds.kept
+# A file held for its motion pattern, or kept original by the owner, stays original.
+def _saves_nothing(status: str, decision: CandidateDecision | None, motion_holds: MotionHolds) -> bool:
+    return (
+        status in ENCODE_CANDIDATE_STATUSES
+        and decision is not None
+        and (decision.item_id in motion_holds.held or decision.item_id in motion_holds.kept)
     )
+
+
+def _estimated_from_library_history(status: str, decision: CandidateDecision | None) -> bool:
+    if decision is None:
+        return True
+    if decision.media_domain == "movie":
+        return False
+    return status not in ENCODE_CANDIDATE_STATUSES or decision.eligible
 
 
 def _decision_age_days(decision: CandidateDecision | None) -> float | None:
