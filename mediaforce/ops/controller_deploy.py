@@ -349,17 +349,25 @@ def _require_server(base_url: str, build: str | None, config: MediaforceConfig, 
 
 
 def _restore_previous(job: ReleaseInstall, failure: Exception) -> None:
-    try:
-        saved_app = job.stage / MAC_APP_NAME
-        if saved_app.exists():
-            install_app(saved_app, job.install)
-        else:
-            shutil.rmtree(job.install, ignore_errors=True)
-        _atomic_write(job.previous.plist, job.saved.payload)
-        start_saved_launch_item(job.previous.plist)
-        wait_until_healthy(job.base_url, job.startup_timeout)
-    except Exception as cleanup:
-        failure.add_note(f"restarting the previous service also failed: {cleanup}")
+    for step, words in ((_restart_previous_service, "restarting the previous service"), (_restore_previous_app, "restoring the previous app")):
+        try:
+            step(job)
+        except Exception as cleanup:
+            failure.add_note(f"{words} also failed: {cleanup}")
+
+
+def _restart_previous_service(job: ReleaseInstall) -> None:
+    _atomic_write(job.previous.plist, job.saved.payload)
+    start_saved_launch_item(job.previous.plist)
+    wait_until_healthy(job.base_url, job.startup_timeout)
+
+
+def _restore_previous_app(job: ReleaseInstall) -> None:
+    saved_app = job.stage / MAC_APP_NAME
+    if saved_app.exists():
+        install_app(saved_app, job.install)
+    else:
+        shutil.rmtree(job.install, ignore_errors=True)
 
 
 def install_app(app: Path, destination: Path) -> None:

@@ -105,7 +105,7 @@ def controller(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Contr
     actual_install = controller_deploy.install_app
 
     def install(app: Path, destination: Path) -> None:
-        if mac.outcome == "app-install-failed" and app == mac.release:
+        if mac.outcome == "app-install-failed" and app == mac.release or mac.outcome == "app-folder-locked":
             raise OSError("Applications folder not writable")
         actual_install(app, destination)
 
@@ -126,7 +126,7 @@ def _install(mac: Controller) -> None:
                                       stopped=mac.stopped)
 
 
-OUTCOMES = ["healthy", "backup-failed", "app-install-failed", "listener-stuck", "unhealthy", "wrong-build", "resume-lost"]
+OUTCOMES = ["healthy", "backup-failed", "app-install-failed", "app-folder-locked", "listener-stuck", "unhealthy", "wrong-build", "resume-lost"]
 
 
 @pytest.mark.parametrize("controller", [
@@ -137,7 +137,7 @@ def test_install_keeps_old_code_off_a_database_the_release_may_have_migrated(con
     stage = mac.support / "deployments/fixture-stage"
     release_started = mac.outcome in {"healthy", "resume-lost", "unhealthy", "wrong-build"}
     # Only a database no release ever opened, and that a stopped install has not paused, gets the old service back.
-    restored = mac.outcome in {"backup-failed", "app-install-failed"} and not mac.stopped
+    restored = mac.outcome in {"backup-failed", "app-install-failed", "app-folder-locked"} and not mac.stopped
     if mac.outcome == "healthy":
         _install(mac)
     else:
