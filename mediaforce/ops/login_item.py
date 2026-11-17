@@ -10,9 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from mediaforce.ops.runtime_install import (
-    SERVICE_LABEL, RuntimeProtectionError, bundle_service, require_release_directory, runtime_directory,
-)
+from mediaforce.ops.runtime_install import SERVICE_LABEL, bundle_service
 
 
 LOGIN_ITEM_LABEL = SERVICE_LABEL
@@ -107,20 +105,13 @@ def render_login_item_plist(paths: LoginItemPaths) -> bytes:
 
 def install_login_item(paths: LoginItemPaths) -> str:
     _require_supported_platform()
-    if paths.bundled:
-        _require_bundled_install(paths)
-    else:
-        try:
-            require_release_directory(paths.project_root, paths.home)
-        except RuntimeProtectionError as exc:
-            raise LoginItemError(f"{exc}; use scripts/deploy-controller.sh (legacy recovery: release-flow.md)") from exc
+    if not paths.bundled:
+        raise LoginItemError("the background service runs from the installed Mediaforce app; see release-flow.md")
+    _require_bundled_install(paths)
     _require_program(paths.program)
     paths.plist.parent.mkdir(parents=True, exist_ok=True)
     paths.log_dir.mkdir(parents=True, exist_ok=True)
-    if paths.bundled:
-        paths.working_directory.mkdir(parents=True, exist_ok=True)
-    else:
-        _carry_forward_runtime_env(paths)
+    paths.working_directory.mkdir(parents=True, exist_ok=True)
     rendered = render_login_item_plist(paths)
     existed = paths.plist.exists()
     if paths.plist.exists() and paths.plist.read_bytes() == rendered:
@@ -176,13 +167,13 @@ def login_item_status(paths: LoginItemPaths, *, runner: CommandRunner | None = N
         return 3, [
             "login item: installed plist is stale",
             f"  plist    {paths.plist}",
-            "  next     run service enable from this app" if paths.bundled else "  next     run `uv run mediaforce service enable`",
+            "  next     run service enable from the installed app",
         ]
     if not paths.program.is_file() or not os.access(paths.program, os.X_OK):
         return 3, [
             "login item: program is unavailable",
             f"  program  {paths.program}",
-            "  next     run `uv sync`, then enable the login item again",
+            "  next     install the release again (docs/development/release-flow.md)",
         ]
     command_runner = runner or _run_command
     result = command_runner(["/bin/launchctl", "print", _launch_target(paths.label)])
@@ -228,11 +219,6 @@ def run_login_item_command(
     # Service commands address the installed controller, regardless of the caller's checkout.
     root = project_root.expanduser().resolve()
     requested_bundle = root.suffix == ".app"
-    if not requested_bundle:
-        try:
-            require_release_directory(root, home)
-        except RuntimeProtectionError:
-            root = runtime_directory(home) / "current"
     plist = LoginItemPaths(project_root=root, home=home).plist
     saved_label = None
     if plist.exists():
@@ -380,32 +366,6 @@ def _require_same_bundle_install(paths: LoginItemPaths, installed: dict[str, obj
         raise LoginItemError("another copy of this app still owns the service; use that copy")
 
 
-def _carry_forward_runtime_env(paths: LoginItemPaths) -> None:
-    target = paths.project_root / ".env"
-    if target.is_file() or not paths.plist.exists():
-        return
-    if target.exists():
-        raise LoginItemError(f"the runtime credential path is not a file: {target}")
-    try:
-        installed = plistlib.loads(paths.plist.read_bytes())
-    except (OSError, plistlib.InvalidFileException) as exc:
-        raise LoginItemError(
-            f"could not identify the existing runtime credential file from {paths.plist}; create {target} first"
-        ) from exc
-    previous_root_value = installed.get("WorkingDirectory")
-    if not isinstance(previous_root_value, str) or not previous_root_value.strip():
-        raise LoginItemError(f"the existing login item has no working directory; create {target} first")
-    previous_root = Path(previous_root_value).expanduser().resolve()
-    if previous_root == paths.project_root.resolve():
-        return
-    source = previous_root / ".env"
-    if not source.is_file():
-        raise LoginItemError(
-            f"the existing runtime has no credential file at {source}; create {target} before switching runtimes"
-        )
-    _atomic_write(target, source.read_bytes(), mode=0o600)
-
-
 def _bootout(runner: CommandRunner, target: str) -> None:
     result = runner(["/bin/launchctl", "bootout", target])
     if result.returncode not in BOOTOUT_ACCEPTED_EXIT_CODES:
@@ -476,7 +436,7 @@ def _require_supported_platform() -> None:
 
 def _require_program(path: Path) -> None:
     if not path.is_file() or not os.access(path, os.X_OK):
-        raise LoginItemError(f"program is unavailable at {path}; run `uv sync` first")
+        raise LoginItemError(f"program is unavailable at {path}")
 
 
 def _show_logs(path: Path, *, follow: bool, lines: int) -> int:

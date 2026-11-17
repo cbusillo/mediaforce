@@ -8,7 +8,6 @@ from unittest.mock import Mock, patch
 from mediaforce.ops.login_item import LOGIN_ITEM_LABEL, LoginItemError, LoginItemPaths, disable_login_item, \
     enable_login_item, install_login_item, login_item_status, render_login_item_plist, rotate_login_item_logs, \
     run_login_item_command, uninstall_login_item
-from mediaforce.ops.runtime_install import runtime_directory
 
 
 class LoginItemTests(unittest.TestCase):
@@ -16,13 +15,21 @@ class LoginItemTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
         self.home = self.root / "home"
-        self.project_root = runtime_directory(self.home) / "releases" / "candidate"
-        (self.project_root / ".git").mkdir(parents=True)
-        self.program = self.project_root / ".venv" / "bin" / "mediaforce-web"
+        self.project_root = self.root / "Applications" / "Mediaforce.app"
+        self.program = self.project_root / "Contents" / "MacOS" / "mediaforce-server"
         self.program.parent.mkdir(parents=True)
         self.program.write_text("#!/bin/sh\n")
         self.program.chmod(0o755)
-        self.paths = LoginItemPaths(project_root=self.project_root, home=self.home)
+        (self.program.parent / "Mediaforce").write_bytes(b"signed app")
+        (self.project_root / "Contents" / "Info.plist").write_bytes(plistlib.dumps({"CFBundleVersion": "1"}))
+        self.support = self.root / "support"
+        self.config = self.root / "config.toml"
+        self.config.write_text(f'[state]\ndb_path = "{self.support}/library.sqlite3"\nrun_manifest_dir = "{self.support}/runs"\n'
+                               f'web_state_dir = "{self.support}/web"\n[media]\nsource_roots = {{}}\n')
+        self.paths = LoginItemPaths(project_root=self.project_root, home=self.home, config_path=self.config)
+        signature = patch("mediaforce.ops.login_item._verify_signed_bundle")
+        signature.start()
+        self.addCleanup(signature.stop)
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -31,8 +38,8 @@ class LoginItemTests(unittest.TestCase):
         payload = plistlib.loads(render_login_item_plist(self.paths))
 
         self.assertEqual(payload["Label"], LOGIN_ITEM_LABEL)
-        self.assertEqual(payload["ProgramArguments"], [str(self.program), "--no-reload"])
-        self.assertEqual(payload["WorkingDirectory"], str(self.project_root))
+        self.assertEqual(payload["ProgramArguments"], [str(self.program), "--no-reload", "--config", str(self.config)])
+        self.assertEqual(payload["WorkingDirectory"], str(self.support))
         self.assertTrue(payload["KeepAlive"])
         self.assertEqual(payload["ThrottleInterval"], 30)
         self.assertNotIn("uv", payload["ProgramArguments"])
@@ -58,34 +65,6 @@ class LoginItemTests(unittest.TestCase):
         self.assertEqual(second, "unchanged")
         self.assertEqual(self.paths.plist.stat().st_mtime_ns, first_mtime)
         self.assertTrue(self.paths.log_dir.is_dir())
-
-    def test_install_carries_env_forward_when_runtime_checkout_changes(self) -> None:
-        previous_root = self.root / "previous-runtime"
-        previous_env = previous_root / ".env"
-        previous_env.parent.mkdir(parents=True)
-        previous_env.write_text("MEDIAFORCE_PLEX_TOKEN=plex-secret\nMEDIAFORCE_TMDB_TOKEN=tmdb-secret\n")
-        previous_paths = LoginItemPaths(project_root=previous_root, home=self.home)
-        self.paths.plist.parent.mkdir(parents=True)
-        self.paths.plist.write_bytes(render_login_item_plist(previous_paths))
-
-        with patch("mediaforce.ops.login_item._require_supported_platform"):
-            install_login_item(self.paths)
-
-        target_env = self.project_root / ".env"
-        self.assertEqual(target_env.read_bytes(), previous_env.read_bytes())
-        self.assertEqual(target_env.stat().st_mode & 0o777, 0o600)
-
-    def test_install_rejects_runtime_switch_without_existing_or_target_env(self) -> None:
-        previous_root = self.root / "previous-runtime"
-        previous_root.mkdir()
-        previous_paths = LoginItemPaths(project_root=previous_root, home=self.home)
-        self.paths.plist.parent.mkdir(parents=True)
-        self.paths.plist.write_bytes(render_login_item_plist(previous_paths))
-
-        with patch("mediaforce.ops.login_item._require_supported_platform"), self.assertRaisesRegex(
-                LoginItemError, "existing runtime has no credential file"
-        ):
-            install_login_item(self.paths)
 
     def test_enable_orders_launchctl_operations(self) -> None:
         calls: list[list[str]] = []
@@ -198,7 +177,8 @@ class LoginItemTests(unittest.TestCase):
 
     def test_status_detects_stale_plist(self) -> None:
         self.paths.plist.parent.mkdir(parents=True)
-        self.paths.plist.write_text("stale")
+        stale = plistlib.loads(render_login_item_plist(self.paths))
+        self.paths.plist.write_bytes(plistlib.dumps({**stale, "ThrottleInterval": 1}))
 
         with patch("mediaforce.ops.login_item._require_supported_platform"):
             status, lines = login_item_status(self.paths, runner=Mock())

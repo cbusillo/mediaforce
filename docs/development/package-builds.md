@@ -42,9 +42,8 @@ is a required pull-request signal rather than a manual release convention.
 
 ## Embedded Mac server
 
-The approved bundled-server plan is being delivered in steps. The existing
-controller deploy remains the installed delivery path until the separate
-update/rollback and release cutover work is complete.
+The controller runs the server inside the app; [release flow](release-flow.md)
+covers installing and updating it.
 
 Build a signed app with its own universal Python runtime and locked server
 packages using the existing Mac build entrypoint:
@@ -75,9 +74,9 @@ the existing `com.mediaforce.web` LaunchAgent and log paths. Its working
 directory is the configured database's parent. Service setup verifies the
 signed bundle and refuses to replace another runtime, build or config. A moved
 copy of the same signed app can repair its saved path once the old copy is
-absent; status and stop commands still address the saved service. Use the later
-safe update transaction for that transition; this build command does not
-perform a deployment. Closing the UI leaves the background service running.
+absent; status and stop commands still address the saved service. Replacing
+another service is the [install script](release-flow.md#installing-a-release-on-the-controller)'s
+job; this build command does not perform a deployment. Closing the UI leaves the background service running.
 The existing runtime lock prevents another app copy from opening the same
 runtime or database, even on a different port.
 For service commands, put `--config` before `service` and the bundled
@@ -120,6 +119,9 @@ ships, `notarize APP ARCHIVE` has Apple notarize and staple it and writes the
 zip, and `smoke APP` starts its server with a throwaway config on its own port.
 `notarize` reads an App Store Connect API key from `NOTARY_KEY` (the `.p8`
 file), `NOTARY_KEY_ID` and `NOTARY_ISSUER`; it also works on a proof copy.
+`scripts/deploy-controller.sh` installs a notarized proof copy over a proof
+service when given its `--feed`, `--public-key` and `--install` folder; the
+live app takes none of them.
 
 Wheels are chosen for the app's minimum macOS. A build-machine library folder
 left as a search path in a wheel's native code is removed before signing.

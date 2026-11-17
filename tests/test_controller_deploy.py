@@ -1,103 +1,240 @@
+from __future__ import annotations
+
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
+from http.client import RemoteDisconnected
+import json
 import os
 import plistlib
+import shutil
 import sqlite3
 import subprocess
+import threading
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
+from urllib.error import URLError
 
 import pytest
 from sqlalchemy import Column, MetaData, Table, Text
 
-from mediaforce.ops import controller_deploy, login_item, runtime_install
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db
+from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
+from mediaforce.ops import controller_deploy, login_item, runtime_install
+
+LABEL = "com.mediaforce.web.proof"
 
 
-def _independent_clone(root: Path) -> None:
-    (root / ".git").mkdir(parents=True)
-    program = root / ".venv/bin/mediaforce-web"
-    program.parent.mkdir(parents=True)
-    program.write_text("#!/bin/sh\n")
-    program.chmod(0o755)
+def _app(path: Path, *, build: str, code: bytes) -> Path:
+    (path / "Contents/MacOS").mkdir(parents=True)
+    (path / "Contents/Info.plist").write_bytes(plistlib.dumps(
+        {"CFBundleVersion": build, "MediaforceServiceLabel": LABEL, "MediaforceServerPort": "8787"}))
+    (path / "Contents/MacOS/Mediaforce").write_bytes(code)
+    (path / "Contents/MacOS/mediaforce-server").write_text("#!/bin/sh\n")
+    return path
 
 
-def test_prepare_release_installs_outside_source_worktree(tmp_path: Path) -> None:
-    source = tmp_path / "development/worktrees/task"
-    home = tmp_path / "home"
-    sha = "a" * 40
-    installed: list[Path] = []
-
-    def run(command: list[str], *, cwd: Path | None = None) -> str:
-        if command[1] == "rev-parse":
-            return sha
-        if command[1] == "clone":
-            _independent_clone(Path(command[-1]))
-        if command[0] == "uv":
-            assert cwd is not None
-            installed.append(cwd)
-        if command[0] == "bash":
-            assert cwd is not None
-            controller_deploy.built_mac_app(cwd).mkdir(parents=True)
-            installed.append(cwd)
-        return ""
-
-    with patch.object(controller_deploy, "_run", side_effect=run):
-        candidate = controller_deploy.prepare_release(source, "main", home)
-    assert not candidate.is_relative_to(source.parent)
-    assert installed and all(path == candidate for path in installed)
-    assert controller_deploy.built_mac_app(candidate).is_dir()
-    runtime_install.require_release_directory(candidate, home)
-    payload = plistlib.loads(login_item.render_login_item_plist(login_item.LoginItemPaths(candidate, home)))
-    assert Path(payload["WorkingDirectory"]) == candidate
-    assert Path(payload["ProgramArguments"][0]).is_relative_to(candidate)
+def _config(path: Path, support: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'[state]\ndb_path = "{support}/library.sqlite3"\nrun_manifest_dir = "{support}/runs"\n'
+                    f'web_state_dir = "{support}/web"\n[media]\nsource_roots = {{}}\n')
+    return path
 
 
-def test_prepare_refuses_install_root_redirected_into_worktrees(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    runtime = runtime_install.runtime_directory(home)
-    runtime.parent.mkdir(parents=True)
-    disposable = tmp_path / "worktrees"
-    disposable.mkdir()
-    runtime.symlink_to(disposable, target_is_directory=True)
-    with patch.object(controller_deploy, "_run", return_value="b" * 40):
-        with pytest.raises(RuntimeError):
-            controller_deploy.prepare_release(tmp_path / "source", "main", home)
-    assert list(disposable.iterdir()) == []
+class Controller:
+    def __init__(self, tmp_path: Path, *, previous: str, stopped: bool, outcome: str) -> None:
+        self.home, self.support = tmp_path / "home", tmp_path / "support"
+        self.install = tmp_path / "Applications/Mediaforce.app"
+        self.release = _app(tmp_path / "download/Mediaforce.app", build="2", code=b"release app")
+        self.outcome, self.stopped = outcome, stopped
+        self.legacy_root = self.support / "runtime/releases/legacy-clone"
+        if previous == "legacy":
+            self.config = _config(self.legacy_root / "config/defaults.toml", self.support)
+            (self.legacy_root / ".env").write_text("MEDIAFORCE_FIXTURE=1\n")
+            _app(self.install, build="legacy", code=b"legacy app")
+            item = login_item.LoginItemPaths(self.legacy_root, self.home, saved_label=LABEL)
+        else:
+            self.config = _config(tmp_path / "persistent/config.toml", self.support)
+            item = login_item.LoginItemPaths(_app(self.install, build="1", code=b"old app"), self.home, self.config)
+        self.plist = item.plist
+        self.plist.parent.mkdir(parents=True)
+        self.previous_payload = login_item.render_login_item_plist(item)
+        self.plist.write_bytes(self.previous_payload)
+        self.running: str | None = None if stopped else "previous"
+        self.started: list[str] = []
+        self.resumed = 0
+
+    def disable(self, paths: login_item.LoginItemPaths) -> None:
+        assert paths.label == LABEL
+        self.running = None
+
+    def start(self, plist: Path) -> None:
+        self.running = "previous" if plist.read_bytes() == self.previous_payload else "release"
+        self.started.append(self.running)
+
+    def api(self, _base: str, route: str, *, post: bool = False) -> dict[str, Any]:
+        if self.running is None:
+            raise URLError("connection refused")
+        if route.startswith("/api/dashboard?"):
+            assert not self.stopped, "a stopped install never asks the old server"
+            return {"encode_queue": {"state": {"is_paused": True}, "running_count": 0},
+                    "calibration_queue": {"sample": {"running_count": 0}, "full": {"running_count": 0}}}
+        if route == "/api/dashboard/scan-job" and self.running == "release" and self.outcome == "unhealthy":
+            raise URLError("candidate unavailable")
+        if post:
+            self.resumed += 1
+            if self.outcome == "resume-lost":
+                raise RemoteDisconnected("response lost")
+        database = str((self.support / "library.sqlite3").resolve())
+        build = {"previous": None, "release": "2"}[self.running]
+        if self.outcome == "other-database" and self.running == "previous":
+            database = "/elsewhere/library.sqlite3"
+        if self.outcome == "wrong-build" and self.running == "release":
+            build = "1"
+        return {"counts": {"pending_encode": 0}, "server": {"build": build, "database": database}}
 
 
-def test_launch_item_refuses_development_worktree_before_writing(tmp_path: Path) -> None:
-    root, home = tmp_path / "worktrees/task", tmp_path / "home"
-    _independent_clone(root)
-    (root / ".git").rmdir()
-    (root / ".git").write_text("gitdir: elsewhere")
-    paths = login_item.LoginItemPaths(root, home)
-    with patch.object(login_item, "_require_supported_platform"):
-        with pytest.raises(login_item.LoginItemError):
-            login_item.install_login_item(paths)
-    assert not paths.plist.exists()
+@pytest.fixture
+def controller(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Controller]:
+    previous, stopped, outcome = request.param
+    mac = Controller(tmp_path, previous=previous, stopped=stopped, outcome=outcome)
+    with open_db(mac.support / "library.sqlite3") as connection:
+        connection.exec_driver_sql("create table retained_work (id integer)")
+        connection.exec_driver_sql("insert into retained_work values (42)")
+    actual_install = controller_deploy.install_app
+
+    def install(app: Path, destination: Path) -> None:
+        if mac.outcome == "app-install-failed" and app == mac.release:
+            raise OSError("Applications folder not writable")
+        actual_install(app, destination)
+
+    backup = patch.object(controller_deploy, "backup_database", side_effect=OSError("backup volume unavailable")) \
+        if outcome == "backup-failed" else patch.object(controller_deploy, "backup_database", controller_deploy.backup_database)
+    with patch.object(controller_deploy, "_api", mac.api), patch.object(controller_deploy, "disable_login_item", mac.disable), \
+            patch.object(controller_deploy, "start_saved_launch_item", mac.start), \
+            patch.object(controller_deploy, "_verify_signed_bundle"), patch.object(controller_deploy, "install_app", install), \
+            patch.object(controller_deploy, "_copy_app", lambda source, target: shutil.copytree(source, target, symlinks=True)), \
+            patch.object(controller_deploy, "_listener_is_closed", return_value=outcome != "listener-stuck"), \
+            patch.object(controller_deploy, "require_storage_admission"), patch.object(controller_deploy.time, "sleep"), backup:
+        yield mac
+
+
+def _install(mac: Controller) -> None:
+    controller_deploy.install_release(mac.release, mac.support / "deployments/fixture-stage", mac.home,
+                                      evidence={"CFBundleVersion": "2"}, install=mac.install, startup_timeout=0,
+                                      stopped=mac.stopped)
+
+
+OUTCOMES = ["healthy", "backup-failed", "app-install-failed", "listener-stuck", "unhealthy", "wrong-build", "resume-lost"]
+
+
+@pytest.mark.parametrize("controller", [
+    (previous, stopped, outcome) for previous in ("legacy", "bundled") for stopped in (False, True) for outcome in OUTCOMES
+], indirect=True, ids=lambda parameters: "-".join(str(part) for part in parameters))
+def test_install_keeps_old_code_off_a_database_the_release_may_have_migrated(controller: Controller) -> None:
+    mac = controller
+    stage = mac.support / "deployments/fixture-stage"
+    release_started = mac.outcome in {"healthy", "resume-lost", "unhealthy", "wrong-build"}
+    # Only a database no release ever opened, and that a stopped install has not paused, gets the old service back.
+    restored = mac.outcome in {"backup-failed", "app-install-failed"} and not mac.stopped
+    if mac.outcome == "healthy":
+        _install(mac)
+    else:
+        with pytest.raises((RuntimeError, OSError)):
+            _install(mac)
+    assert mac.started == (["release"] if release_started else ["previous"] if restored else [])
+    assert mac.running == ("release" if mac.outcome in {"healthy", "resume-lost"} else "previous" if restored else None)
+    installed = (mac.install / "Contents/MacOS/Mediaforce").read_bytes()
+    assert installed == b"release app" if release_started else installed in {b"legacy app", b"old app"}
+    assert (mac.plist.read_bytes() == mac.previous_payload) is not release_started
+    assert (stage / "launch-item.before.plist").read_bytes() == mac.previous_payload
+    assert (stage / "Mediaforce.app/Contents/MacOS/Mediaforce").read_bytes() in {b"legacy app", b"old app"}
+    assert runtime_install.retained_deploy_stage(mac.support) == (stage if mac.outcome in {"healthy", "resume-lost"} else None)
+    assert mac.resumed == (1 if mac.outcome in {"healthy", "resume-lost"} else 0)
+    if mac.outcome in {"listener-stuck", "backup-failed"}:
+        assert not (stage / "before.sqlite").exists()
+        return
+    with sqlite3.connect(stage / "before.sqlite") as saved:
+        assert saved.execute("select id from retained_work").fetchall() == [(42,)]
+
+
+@pytest.mark.parametrize("controller", [("legacy", False, "healthy")], indirect=True)
+def test_first_install_carries_the_clone_runtime_config_and_credentials(controller: Controller) -> None:
+    mac = controller
+    _install(mac)
+    arguments = plistlib.loads(mac.plist.read_bytes())["ProgramArguments"]
+    assert arguments == [str(mac.install / "Contents/MacOS/mediaforce-server"), "--no-reload", "--config", str(mac.config),
+                         "--credentials", str(mac.legacy_root / ".env")]
+    protected = runtime_install.protected_runtime_roots(mac.support)
+    assert mac.legacy_root.resolve() in protected and mac.config.parent.resolve() in protected
+    assert mac.resumed == 1
+
+
+@pytest.mark.parametrize("controller", [("bundled", False, "other-database")], indirect=True)
+def test_install_refuses_a_running_server_on_another_database_before_changing_anything(controller: Controller) -> None:
+    mac = controller
+    with pytest.raises(RuntimeError, match="not the saved config's database"):
+        _install(mac)
+    assert mac.running == "previous" and mac.started == [] and not (mac.support / "deployments").exists()
+
+
+@pytest.mark.parametrize("controller", [("bundled", False, "healthy")], indirect=True)
+def test_install_refuses_an_older_release_than_the_installed_build(controller: Controller) -> None:
+    mac = controller
+    shutil.rmtree(mac.install)
+    _app(mac.install, build="3", code=b"old app")
+    with pytest.raises(RuntimeError, match="older release"):
+        _install(mac)
+    assert mac.running == "previous" and mac.started == []
+
+
+@pytest.mark.parametrize("controller", [("bundled", True, "healthy")], indirect=True)
+def test_install_refuses_while_an_app_update_is_unfinished(controller: Controller) -> None:
+    mac = controller
+    (mac.support / "runtime").mkdir(parents=True)
+    (mac.support / "runtime" / runtime_install.UPDATE_INTENT_NAME).write_text(json.dumps({"phase": "prepared"}))
+    with pytest.raises(RuntimeError, match="update is unfinished"):
+        _install(mac)
+    assert mac.started == []
+
+
+@pytest.mark.parametrize("label,install", [("com.mediaforce.web", "elsewhere"), (LABEL, "applications")])
+def test_only_the_live_app_installs_in_applications(tmp_path: Path, label: str, install: str) -> None:
+    app = tmp_path / "Mediaforce.app"
+    (app / "Contents").mkdir(parents=True)
+    (app / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleVersion": "2", "MediaforceServiceLabel": label}))
+    destination = controller_deploy.APPLICATIONS_APP if install == "applications" else tmp_path / "install/Mediaforce.app"
+    with pytest.raises(RuntimeError, match="only the live app"):
+        controller_deploy.install_release(app, tmp_path / "stage", tmp_path, evidence={}, install=destination)
 
 
 def test_runtime_registration_retains_both_sides_of_switch(tmp_path: Path) -> None:
-    old, new, later = (tmp_path / name for name in ("old-worktree", "new-release", "later-release"))
+    old, new, later = (tmp_path / name for name in ("old-runtime", "new-config", "later-config"))
     runtime_install.register_runtime_roots(tmp_path, old, new)
     runtime_install.register_runtime_roots(tmp_path, new, later)
-    roots = runtime_install.protected_runtime_roots(runtime_install.runtime_directory(tmp_path).parent)
-    assert all(root in roots for root in (old, new, later))
+    roots = runtime_install.protected_runtime_roots(tmp_path)
+    assert all(root.resolve() in roots for root in (old, new, later))
 
 
-def test_service_commands_from_worktree_address_installed_release(tmp_path: Path) -> None:
+def test_service_commands_from_a_checkout_address_the_installed_app(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    candidate = runtime_install.runtime_directory(home) / "releases/candidate"
-    _independent_clone(candidate)
-    config_path = tmp_path / "persistent/config.toml"
-    paths = login_item.LoginItemPaths(candidate, home, config_path=config_path)
+    app = _app(tmp_path / "Applications/Mediaforce.app", build="2", code=b"app")
+    config = _config(tmp_path / "persistent/config.toml", tmp_path / "support")
+    paths = login_item.LoginItemPaths(app, home, config, saved_label="com.mediaforce.web")
     paths.plist.parent.mkdir(parents=True)
     paths.plist.write_bytes(login_item.render_login_item_plist(paths))
     with patch.object(login_item, "enable_login_item", return_value="unchanged") as enable:
         assert login_item.run_login_item_command("restart", project_root=tmp_path / "worktrees/task", home=home) == 0
-    assert enable.call_args.args[0].project_root == candidate
-    assert enable.call_args.args[0].config_path == config_path
+    assert enable.call_args.args[0].project_root == app
+    assert enable.call_args.args[0].config_path == config
+
+
+def test_service_install_refuses_a_checkout(tmp_path: Path) -> None:
+    paths = login_item.LoginItemPaths(tmp_path / "worktrees/task", tmp_path / "home")
+    with patch.object(login_item, "_require_supported_platform"), pytest.raises(login_item.LoginItemError):
+        login_item.install_login_item(paths)
+    assert not paths.plist.exists()
 
 
 @pytest.mark.parametrize("journal_mode", ["delete", "wal"])
@@ -127,251 +264,54 @@ def test_deploy_refuses_unpaused_or_running_work(paused: bool, encodes: int, sam
         controller_deploy.require_paused_idle_dashboard(dashboard)
 
 
-@pytest.mark.parametrize(
-    "outcome", [
-        "healthy", "unhealthy", "slow", "storage-stalled", "storage-unchecked", "resume-lost", "backup-failed", "prepare-failed",
-        "app-install-failed", "trim-failed",
-    ],
-)
-@pytest.mark.parametrize("stopped,initially_paused", [(False, True), (True, False), (True, True)])
-@pytest.mark.parametrize("legacy_rollback", [False, True])
-def test_deploy_switch_preserves_previous_runtime_and_backup(
-    tmp_path: Path, outcome: str, stopped: bool, initially_paused: bool, legacy_rollback: bool,
-) -> None:
-    from http.client import RemoteDisconnected
-    from urllib.error import URLError
-    from mediaforce.core.utils import timestamp
-    from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
+@pytest.mark.parametrize("outcome", ["healthy", "storage-stalled", "storage-unchecked"])
+def test_storage_admission_needs_a_second_fresh_pass_by_the_new_server(tmp_path: Path, outcome: str) -> None:
     from mediaforce.hosts.controller_mount import ControllerMountProbe
     from mediaforce.web.runtime import controller_storage_recovery as recovery
 
-    home, old = tmp_path / "home", tmp_path / "worktrees/legacy"
-    candidate = runtime_install.runtime_directory(home) / "releases/candidate"
-    if not legacy_rollback:
-        old = candidate.parent / "previous"
-    older = [candidate.parent / f"older-{index}" for index in range(4)]
-    for index, release in enumerate(older):
-        _independent_clone(release)
-        os.utime(release, (index + 1, index + 1))
-    if outcome == "trim-failed":
-        (candidate.parent / "unknown-directory").mkdir()
-    database = tmp_path / "configured-state/library.sqlite3"
-    stage = database.parent / "deployments/fixture-stage"
-    _independent_clone(old)
-    (old / "retained-output").write_text("keep")
-    os.utime(old, (0, 0))
-    _independent_clone(candidate)
-    paths = login_item.LoginItemPaths(old, home)
-    paths.plist.parent.mkdir(parents=True)
-    original = login_item.render_login_item_plist(paths)
-    paths.plist.write_bytes(original)
-    database.parent.mkdir(parents=True, exist_ok=True)
-    with open_db(database) as connection:
-        connection.exec_driver_sql("create table jobs (id integer)")
-        connection.exec_driver_sql("insert into jobs values (42)")
-        state = load_queue_state(connection)
-        state.update(is_paused=initially_paused, updated_at=timestamp())
-        save_queue_state(connection, state)
-    config = _stopped_config(tmp_path, database)
-    dashboard = {
-        "encode_queue": {"state": {"is_paused": True}, "running_count": 0},
-        "calibration_queue": {"sample": {"running_count": 0}, "full": {"running_count": 0}},
-    }
-    resume_requests: list[bool] = []
-    resume_queue = not stopped or not initially_paused
-    service_running = not stopped
     clock = [0.0]
-    storage_config = MediaforceConfig(
+    config = MediaforceConfig(
         raw={"media": {"source_roots": {"tv": "/Volumes/media/tv"}, "staging_root": "/Volumes/media/staging"}},
-        paths=ConfigPaths(project_root=tmp_path, config_path=tmp_path / "config.toml", db_path=database,
+        paths=ConfigPaths(project_root=tmp_path, config_path=tmp_path / "config.toml", db_path=tmp_path / "library.sqlite3",
                           run_manifest_dir=tmp_path / "runs", web_state_dir=tmp_path / "web",
                           review_dir=tmp_path / "review", runtime_settings_path=tmp_path / "storage-settings.json"),
     )
-
-    storage_passes: list[float] = []
+    passes: list[float] = []
 
     def wall_clock() -> datetime:
         return datetime(2026, 11, 8, tzinfo=timezone.utc) + timedelta(seconds=clock[0])
 
     def storage_pass(*, mounted: bool = True) -> None:
         probe = ControllerMountProbe(mounted, mounted, Path("/Volumes/media"), failure_kind=None if mounted else "mount_absent")
-        with patch.object(recovery.sys, "platform", "darwin"), patch.object(
-            recovery, "probe_controller_volume", return_value=probe,
-        ):
-            recovery.process_controller_storage_recovery_once(storage_config)
-        storage_passes.append(clock[0])
+        with patch.object(recovery.sys, "platform", "darwin"), patch.object(recovery, "probe_controller_volume", return_value=probe):
+            recovery.process_controller_storage_recovery_once(config)
+        passes.append(clock[0])
 
-    def candidate_storage_loop() -> None:
-        # Runs every 30 seconds after the candidate starts. A stalled loop finishes only its first pass, and that
-        # pass lands after the health check (#1337). An unchecked one never runs, leaving the old failure record.
-        if outcome == "storage-unchecked" or (outcome == "storage-stalled" and storage_passes):
-            return
-        if not storage_passes or clock[0] - storage_passes[-1] >= 30:
-            storage_pass()
-
-    def api(_base_url: str, route: str, *, post: bool = False) -> dict:
-        if stopped and route.startswith("/api/dashboard?"):
-            raise AssertionError("stopped deployment must not query the old server")
-        if route == "/api/dashboard/scan-job":
-            if outcome == "unhealthy":
-                raise URLError("candidate unavailable")
-            if outcome == "slow" and clock[0] < 60:
-                raise RemoteDisconnected("migration still running")
-        if route == "/api/hosts":
-            candidate_storage_loop()
-            return {
-                "controller_storage": recovery.controller_storage_recovery_snapshot(storage_config),
-                "controller_storage_admission": recovery.controller_storage_admission(storage_config),
-            }
-        if post:
-            resume_requests.append(True)
-            if outcome == "resume-lost":
-                raise RemoteDisconnected("response lost")
-        return dashboard
-
-    def switch(target_paths: login_item.LoginItemPaths) -> str:
-        nonlocal service_running
-        service_running = True
-        if stopped:
-            with sqlite3.connect(database) as database_read:
-                assert database_read.execute("select is_paused from encode_queue_state").fetchone() == (1,)
-        target_paths.plist.write_bytes(login_item.render_login_item_plist(target_paths))
-        return "updated"
-
-    def stop_service(_paths: login_item.LoginItemPaths) -> None:
-        nonlocal service_running
-        service_running = False
-
-    def restore_service(*_args: object) -> None:
-        nonlocal service_running
-        service_running = True
+    def api(_base: str, route: str, *, post: bool = False) -> dict[str, Any]:
+        assert route == "/api/hosts" and not post
+        # The new server checks every 30 seconds. A stalled loop finishes only its first pass; an unchecked one never
+        # runs, leaving the old server's failure record.
+        if outcome != "storage-unchecked" and not (outcome == "storage-stalled" and passes):
+            if not passes or clock[0] - passes[-1] >= 30:
+                storage_pass()
+        return {"controller_storage": recovery.controller_storage_recovery_snapshot(config),
+                "controller_storage_admission": recovery.controller_storage_admission(config)}
 
     def sleep(seconds: float) -> None:
         clock[0] += seconds
 
-    def git(command: list[str], *, cwd: Path | None = None) -> str:
-        assert cwd == old
-        return {"status": "", "rev-parse": "previous-sha"}[command[1]]
-
-    installed_apps: list[Path] = []
-    def install_app(release: Path) -> None:
-        installed_apps.append(release)
-        if outcome == "app-install-failed":
-            raise OSError("Applications folder not writable")
-
-    actual_backup = controller_deploy.backup_database
-    def backup(source: Path, destination: Path, *, pause_queue: bool = False) -> None:
-        # The real _deploy must back up the original state before it pauses the source.
-        with sqlite3.connect(source) as source_connection:
-            assert source_connection.execute("select is_paused from encode_queue_state").fetchone() == (int(initially_paused),)
-        if outcome == "backup-failed":
-            raise OSError("backup volume unavailable")
-        actual_backup(source, destination, pause_queue=pause_queue)
-
-    with patch.object(controller_deploy, "_api", side_effect=api), patch.object(
-        controller_deploy, "_run", side_effect=git
-    ), patch.object(controller_deploy, "prepare_release", return_value=candidate,
-                    side_effect=RuntimeError("preparation failed") if outcome == "prepare-failed" else None), patch.object(
-        controller_deploy, "disable_login_item", side_effect=stop_service
-    ), patch.object(controller_deploy, "enable_login_item", side_effect=switch), patch.object(
-        controller_deploy, "backup_database", side_effect=backup
-    ), patch.object(controller_deploy, "install_mac_app", side_effect=install_app), patch.object(
-        controller_deploy, "_bootstrap", side_effect=restore_service
-    ), patch.object(
-        controller_deploy, "_run_command", return_value=subprocess.CompletedProcess([], 0, "", "")
-    ), patch.object(controller_deploy, "_launch_domain", return_value="gui/fixture"), patch.object(
-        controller_deploy, "_launch_target", return_value="gui/fixture/service"
-    ), patch.object(controller_deploy.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, b"", b"")), patch.object(
-        controller_deploy.time, "sleep", side_effect=sleep
-    ), patch.object(controller_deploy.time, "monotonic", side_effect=lambda: clock[0]), patch.object(
-        recovery, "_utc_now", side_effect=wall_clock,
-    ), patch.object(controller_deploy, "_utc_now", side_effect=wall_clock):
-        storage_pass(mounted=False)  # the previous service's last record: share missing
-        storage_passes.clear()
+    with patch.object(controller_deploy, "_api", side_effect=api), patch.object(controller_deploy.time, "sleep", side_effect=sleep), \
+            patch.object(controller_deploy.time, "monotonic", side_effect=lambda: clock[0]), \
+            patch.object(recovery, "_utc_now", side_effect=wall_clock):
+        storage_pass(mounted=False)
+        passes.clear()
         clock[0] += 1
-        if outcome in {"healthy", "slow"} or (outcome == "resume-lost" and not resume_queue):
-            controller_deploy._deploy(tmp_path / "source", "main", stage, home, "http://fixture", database=database, startup_timeout=90, stopped_config=config if stopped else None)
+        started_at = wall_clock()
+        if outcome == "healthy":
+            controller_deploy.require_storage_admission("http://fixture", started_at)
         else:
-            failure = {
-                "storage-stalled": "needs a fresh availability check", "storage-unchecked": "storage check is not keeping",
-            }.get(outcome)
-            with pytest.raises((RuntimeError, OSError), match=failure):
-                controller_deploy._deploy(tmp_path / "source", "main", stage, home, "http://fixture", database=database, startup_timeout=90, stopped_config=config if stopped else None)
-    assert service_running is (outcome not in {"unhealthy", "storage-stalled", "storage-unchecked"} and (not stopped or outcome not in {"backup-failed", "prepare-failed"}))
-    healthy_candidate = outcome in {"healthy", "slow", "resume-lost", "app-install-failed", "trim-failed"}
-    assert resume_requests == ([True] if healthy_candidate and resume_queue else [])
-    assert installed_apps == ([candidate] if healthy_candidate else [])
-    assert (old / "retained-output").read_text() == "keep"
-    trimmed = outcome in {"healthy", "slow"} or (outcome == "resume-lost" and not resume_queue)
-    assert [release.exists() for release in older] == (
-        [False, False, legacy_rollback, True] if trimmed else [True] * len(older)
-    )
-    if outcome == "prepare-failed":
-        assert not stage.exists()
-        return
-    assert (stage / "launch-item.before.plist").read_bytes() == original
-    if outcome == "backup-failed":
-        assert paths.plist.read_bytes() == original
-        return
-    with sqlite3.connect(stage / "before.sqlite") as connection:
-        assert connection.execute("select * from jobs").fetchall() == [(42,)]
-    roots = runtime_install.protected_runtime_roots(database.parent)
-    assert old in roots and candidate in roots
-    assert runtime_install.retained_deploy_stage(database.parent) == (stage if healthy_candidate else None)
-
-
-def _built_app(release: Path, marker: str) -> None:
-    contents = controller_deploy.built_mac_app(release) / "Contents"
-    contents.mkdir(parents=True)
-    (contents / "Info.plist").write_text(marker)
-
-
-@pytest.mark.parametrize("extra_count", [0, 4])
-@pytest.mark.parametrize("invalid", [None, "missing-stage", "missing-rollback", "same-release", "redirected-release", "worktree", "candidate-mismatch"])
-def test_trim_requires_known_running_and_rollback_before_removing_clones(
-    tmp_path: Path, extra_count: int, invalid: str | None,
-) -> None:
-    home = tmp_path / "home"
-    support = tmp_path / "custom-support"
-    running = runtime_install.runtime_directory(home) / "releases/running"
-    previous = running.parent / "previous"
-    extras = [running.parent / f"extra-{index}" for index in range(extra_count)]
-    for index, release in enumerate([running, previous, *extras]):
-        _independent_clone(release)
-        os.utime(release, (index, index))
-    finder_file = running.parent / ".DS_Store"
-    finder_file.write_bytes(b"Finder metadata")
-    stage = support / "deployments/active"
-    stage.mkdir(parents=True)
-    paths = login_item.LoginItemPaths(running, home)
-    paths.plist.parent.mkdir(parents=True)
-    paths.plist.write_bytes(login_item.render_login_item_plist(paths))
-    rollback = previous
-    if invalid == "missing-rollback":
-        rollback = running.parent / "missing"
-    elif invalid == "same-release":
-        rollback = running
-    elif invalid == "redirected-release":
-        (running.parent / "alias").symlink_to(previous, target_is_directory=True)
-    elif invalid == "worktree":
-        (previous / ".git").rmdir()
-        (previous / ".git").write_text("gitdir: elsewhere")
-    (stage / "launch-item.before.plist").write_bytes(
-        login_item.render_login_item_plist(login_item.LoginItemPaths(rollback, home))
-    )
-    (stage / "candidate.txt").write_text(str(previous if invalid == "candidate-mismatch" else running))
-    if invalid != "missing-stage":
-        runtime_install.retain_deploy_stage(support, stage)
-    if invalid:
-        with pytest.raises(RuntimeError):
-            controller_deploy.trim_releases(home, support)
-        assert all(release.exists() for release in extras)
-    else:
-        controller_deploy.trim_releases(home, support)
-        assert [release.exists() for release in extras] == [False] * max(0, extra_count - 1) + [True] * min(1, extra_count)
-    assert running.is_dir() and previous.is_dir()
-    assert finder_file.read_bytes() == b"Finder metadata"
-    assert (stage / "launch-item.before.plist").is_file()
+            with pytest.raises(RuntimeError, match="storage check is not keeping"):
+                controller_deploy.require_storage_admission("http://fixture", started_at)
 
 
 def _app_at(path: Path, marker: str) -> None:
@@ -380,28 +320,34 @@ def _app_at(path: Path, marker: str) -> None:
     (path / "Contents/stale-resource").write_text(marker)
 
 
+def _copy_tree(source: Path, target: Path) -> None:
+    shutil.copytree(source, target, symlinks=True)
+
+
 @pytest.mark.parametrize("previous", ["none", "installed", "left-aside-by-interrupted-run"])
-def test_mac_app_install_replaces_previous_copy(tmp_path: Path, previous: str) -> None:
-    release, applications = tmp_path / "release", tmp_path / "Applications"
-    _built_app(release, "new")
+def test_app_install_replaces_previous_copy(tmp_path: Path, previous: str) -> None:
+    release, applications = tmp_path / "release/Mediaforce.app", tmp_path / "Applications"
+    _app_at(release, "new")
+    (release / "Contents/stale-resource").unlink()
     installed = applications / controller_deploy.MAC_APP_NAME
     applications.mkdir()
     if previous == "installed":
         _app_at(installed, "old")
     if previous == "left-aside-by-interrupted-run":
         _app_at(applications / f".{controller_deploy.MAC_APP_NAME}.replaced", "old")
-    controller_deploy.install_mac_app(release, applications)
+    with patch.object(controller_deploy, "_copy_app", _copy_tree):
+        controller_deploy.install_app(release, installed)
     assert (installed / "Contents/Info.plist").read_text() == "new"
     assert not (installed / "Contents/stale-resource").exists()
     assert sorted(path.name for path in applications.iterdir()) == [controller_deploy.MAC_APP_NAME]
-    assert (controller_deploy.built_mac_app(release) / "Contents/Info.plist").read_text() == "new"
+    assert (release / "Contents/Info.plist").read_text() == "new"
 
 
 @pytest.mark.parametrize("previous", ["installed", "left-aside-by-interrupted-run"])
 @pytest.mark.parametrize("failing_step", ["copy", "move-in"])
-def test_failed_mac_app_install_keeps_previous_app(tmp_path: Path, previous: str, failing_step: str) -> None:
-    release, applications = tmp_path / "release", tmp_path / "Applications"
-    _built_app(release, "new")
+def test_failed_app_install_keeps_previous_app(tmp_path: Path, previous: str, failing_step: str) -> None:
+    release, applications = tmp_path / "release/Mediaforce.app", tmp_path / "Applications"
+    _app_at(release, "new")
     installed = applications / controller_deploy.MAC_APP_NAME
     applications.mkdir()
     _app_at(installed if previous == "installed" else applications / f".{controller_deploy.MAC_APP_NAME}.replaced", "old")
@@ -413,86 +359,44 @@ def test_failed_mac_app_install_keeps_previous_app(tmp_path: Path, previous: str
         os.rename(path, target)
         return target
 
-    failure = (
-        patch.object(controller_deploy.shutil, "copytree", side_effect=OSError("disk full"))
-        if failing_step == "copy" else patch.object(Path, "rename", rename)
-    )
-    with failure, pytest.raises(OSError):
-        controller_deploy.install_mac_app(release, applications)
+    copy = patch.object(controller_deploy, "_copy_app", side_effect=OSError("disk full")) if failing_step == "copy" \
+        else patch.object(controller_deploy, "_copy_app", _copy_tree)
+    with copy, patch.object(Path, "rename", rename) if failing_step == "move-in" else patch.object(Path, "rename", Path.rename), \
+            pytest.raises(OSError):
+        controller_deploy.install_app(release, installed)
     assert (installed / "Contents/Info.plist").read_text() == "old"
 
 
-@pytest.mark.parametrize("shared_metadata", ["commondir", "objects/info/alternates"])
-def test_launch_item_refuses_clone_with_shared_git_storage(tmp_path: Path, shared_metadata: str) -> None:
-    home = tmp_path / "home"
-    candidate = runtime_install.runtime_directory(home) / "releases/candidate"
-    _independent_clone(candidate)
-    shared = candidate / ".git" / shared_metadata
-    shared.parent.mkdir(parents=True, exist_ok=True)
-    shared.write_text("/disposable/git/storage")
-    with pytest.raises(runtime_install.RuntimeProtectionError):
-        runtime_install.require_release_directory(candidate, home)
-
-
-def test_first_service_install_can_use_prepared_independent_release(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    candidate = runtime_install.runtime_directory(home) / "releases/candidate"
-    _independent_clone(candidate)
-    with patch.object(login_item, "_require_supported_platform"):
-        assert login_item.run_login_item_command("install", project_root=candidate, home=home) == 0
-    plist = login_item.LoginItemPaths(candidate, home).plist
-    assert Path(plistlib.loads(plist.read_bytes())["WorkingDirectory"]) == candidate
-
-
-@pytest.mark.parametrize("tool", ["git", "uv"])
-def test_release_commands_cannot_inherit_disposable_project_targets(tmp_path: Path, tool: str) -> None:
-    candidate, disposable = tmp_path / "candidate", tmp_path / "worktree"
-    environment = {
-        "PATH": "/fixture/bin", "VIRTUAL_ENV": str(disposable / ".venv"),
-        "UV_PROJECT_ENVIRONMENT": str(disposable / ".venv"), "UV_PROJECT": str(disposable),
-        "UV_WORKING_DIR": str(disposable), "GIT_DIR": str(disposable / ".git"),
-        "GIT_WORK_TREE": str(disposable),
-    }
-    with patch.dict(controller_deploy.os.environ, environment, clear=True), patch.object(
-        controller_deploy.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "ok", "")
-    ) as run:
-        controller_deploy._run([tool, "fixture-command"], cwd=candidate)
-    invoked_environment = run.call_args.kwargs["env"]
-    assert run.call_args.kwargs["cwd"] == candidate
-    assert "VIRTUAL_ENV" not in invoked_environment
-    if tool == "uv":
-        assert Path(invoked_environment["UV_PROJECT_ENVIRONMENT"]).parent == candidate
-        assert "UV_PROJECT" not in invoked_environment and "UV_WORKING_DIR" not in invoked_environment
-    else:
-        assert not any(key.startswith("GIT_") for key in invoked_environment)
-
-
-def test_a_deploy_waits_for_the_cleanup_its_own_pause_started(tmp_path: Path) -> None:
-    import threading
-
-    database = tmp_path / "support" / "library.sqlite3"
+def test_an_install_waits_for_the_cleanup_its_own_pause_started(tmp_path: Path) -> None:
+    support = tmp_path / "support"
+    app = _app(tmp_path / "download/Mediaforce.app", build="2", code=b"release app")
+    config = _config(tmp_path / "persistent/config.toml", support)
+    item = login_item.LoginItemPaths(_app(tmp_path / "Applications/Mediaforce.app", build="1", code=b"old"), tmp_path, config)
+    item.plist.parent.mkdir(parents=True)
+    item.plist.write_bytes(login_item.render_login_item_plist(item))
     started, finish = threading.Event(), threading.Event()
 
     def cleanup() -> None:
-        with runtime_install.runtime_activity(database.parent, cleanup=True) as acquired:
+        with runtime_install.runtime_activity(support, cleanup=True) as acquired:
             assert acquired
             started.set()
             finish.wait(5)
 
-    def deploy() -> None:
-        controller_deploy.deploy(tmp_path, "main", tmp_path / "stage", tmp_path, "http://test", database=database)
+    def install() -> None:
+        controller_deploy.install_release(app, support / "deployments/stage", tmp_path, evidence={},
+                                          install=tmp_path / "Applications/Mediaforce.app")
 
     holder = threading.Thread(target=cleanup)
     holder.start()
     started.wait(5)
-    with patch.object(controller_deploy, "_deploy") as deployed:
+    with patch.object(controller_deploy, "_switch") as switched:
         with patch.object(controller_deploy, "DEPLOY_LOCK_WAIT_SECONDS", 0.2), pytest.raises(RuntimeError, match="stayed active"):
-            deploy()
-        deployed.assert_not_called()
+            install()
+        switched.assert_not_called()
         threading.Timer(0.3, finish.set).start()
-        deploy()
+        install()
     holder.join()
-    deployed.assert_called_once()
+    switched.assert_called_once()
 
 
 def _stopped_config(root: Path, database: Path) -> MediaforceConfig:
@@ -530,35 +434,7 @@ def test_stopped_deploy_refuses_unknown_or_open_listener(result: subprocess.Comp
             controller_deploy.require_closed_listener()
 
 
-def test_stopped_deploy_holds_and_releases_runtime_lease(tmp_path: Path) -> None:
-    from collections.abc import Callable
-    from typing import Any
-
-    from mediaforce.web.runtime_lock import assert_mediaforce_runtime_lock_held, MediaforceRuntimeLockOwnershipError
-
-    database = tmp_path / "library.sqlite3"
-    with open_db(database):
-        pass
-    config = _stopped_config(tmp_path, database)
-
-    def switch(*_args: object, stopped_config: MediaforceConfig,
-               release_stopped_runtime: Callable[[], None], **_kwargs: Any) -> None:
-        lease = assert_mediaforce_runtime_lock_held()
-        assert stopped_config is config
-        release_stopped_runtime()
-        with pytest.raises(MediaforceRuntimeLockOwnershipError):
-            lease.assert_active()
-
-    with patch("mediaforce.ops.controller_deploy.load_config", return_value=config), patch.object(
-        controller_deploy, "_deploy", side_effect=switch
-    ):
-        controller_deploy.deploy(tmp_path / "source", "main", tmp_path / "stage", tmp_path / "home", "http://fixture",
-                                 database=database, stopped=True)
-
-
 def test_paused_rollback_backup_preserves_work_and_leaves_source_queue_unchanged(tmp_path: Path) -> None:
-    from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
-
     source, backup = tmp_path / "source.sqlite", tmp_path / "before.sqlite"
     retained_job = "retained-job"
     work_id = 42

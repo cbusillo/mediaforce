@@ -70,24 +70,6 @@ def require_own_support(app: Path, database: Path, home: Path) -> None:
         raise RuntimeProtectionError(f"a proof build must use its own config and database, not {database}")
 
 
-def runtime_directory(home: Path) -> Path:
-    return support_root(home) / "runtime"
-
-
-def require_release_directory(project_root: Path, home: Path) -> None:
-    releases = runtime_directory(home) / "releases"
-    root = project_root.absolute()
-    if root.parent != releases.absolute() or root.resolve() != root:
-        raise RuntimeProtectionError(f"controller runtime {root} must be a real directory directly under {releases}")
-    if (
-        (root / ".git").is_symlink()
-        or not (root / ".git").is_dir()
-        or (root / ".git/commondir").exists()
-        or (root / ".git/objects/info/alternates").exists()
-    ):
-        raise RuntimeProtectionError(f"controller runtime {root} must be an independent clone, not a development worktree")
-
-
 def protected_runtime_roots(support_dir: Path) -> tuple[Path, ...]:
     runtime = support_dir / "runtime"
     registry = runtime / "protected-roots.json"
@@ -102,11 +84,11 @@ def protected_runtime_roots(support_dir: Path) -> tuple[Path, ...]:
     return (runtime.resolve(), *(Path(value).resolve() for value in values))
 
 
-def register_runtime_roots(home: Path, *roots: Path, support_dir: Path | None = None) -> None:
+def register_runtime_roots(support_dir: Path, *roots: Path) -> None:
     from mediaforce.ops.login_item import _atomic_write
 
-    runtime = (support_dir or runtime_directory(home).parent) / "runtime"
-    existing = (*protected_runtime_roots(runtime.parent), runtime_directory(home))
+    runtime = support_dir / "runtime"
+    existing = protected_runtime_roots(support_dir)
     runtime.mkdir(parents=True, exist_ok=True)
     values = sorted({str(root.resolve()) for root in (*existing, *roots)})
     _atomic_write(runtime / "protected-roots.json", json.dumps(values, indent=2).encode())

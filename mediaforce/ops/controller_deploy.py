@@ -1,14 +1,10 @@
-"""Staged controller deployment. Invoke only in an authorized deploy window."""
+"""Staged controller install and app update. Invoke only in an authorized deploy window."""
 from __future__ import annotations
 
-import argparse
-from collections.abc import Callable
-from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 from http.client import HTTPException
-import os
 import plistlib
 import shutil
 import sqlite3
@@ -17,7 +13,6 @@ import time
 from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
-from uuid import uuid4
 
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import open_db, open_readonly_db
@@ -26,39 +21,25 @@ from mediaforce.encoding.delivery_lock import delivery_lock
 from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, load_queue_state, save_queue_state
 from mediaforce.ops.login_item import (
     CommandRunner, LoginItemPaths, _atomic_write, _bootstrap, _bundle_code_hash, _launch_domain, _launch_target,
-    _require_success, _run_command, _verify_signed_bundle, disable_login_item, enable_login_item,
+    _require_success, _run_command, _verify_signed_bundle, disable_login_item, render_login_item_plist,
 )
 from mediaforce.ops.runtime_install import (
-    UPDATE_INTENT_NAME, bundle_build, bundle_service, read_update_intent, register_runtime_roots, require_own_support,
-    require_release_directory, retain_deploy_stage, retained_deploy_stage, runtime_activity, runtime_directory,
+    SERVICE_LABEL, UPDATE_INTENT_NAME, bundle_build, bundle_service, read_update_intent, register_runtime_roots,
+    require_own_support, retain_deploy_stage, runtime_activity,
 )
 from mediaforce.web.runtime.controller_storage_recovery import READY_FRESHNESS_SECONDS
+from mediaforce.web.runtime.release_work import release_work_payload
 from mediaforce.web.runtime_lock import exclusive_mediaforce_runtime_lock, reserve_mediaforce_database_identity
 
 
 DEFAULT_STARTUP_TIMEOUT = 180
 DEPLOY_LOCK_WAIT_SECONDS = 600
 MAC_APP_NAME = "Mediaforce.app"
-APPLICATIONS = Path("/Applications")
-KEPT_RELEASES = 3
+APPLICATIONS_APP = Path("/Applications") / MAC_APP_NAME
 STORAGE_CHECK_SECONDS = 60
 UPDATE_FAILED_NAME = "failed-update-builds.json"
 # An update drains running files only when every one is expected to finish within this.
 DRAIN_START_SECONDS = 15 * 60
-
-
-def _run(command: list[str], *, cwd: Path | None = None) -> str:
-    environment = os.environ.copy()
-    environment.pop("VIRTUAL_ENV", None)
-    if command[0] == "uv":
-        if cwd is None:
-            raise ValueError("dependency setup requires an explicit release directory")
-        environment["UV_PROJECT_ENVIRONMENT"] = str(cwd / ".venv")
-        environment.pop("UV_PROJECT", None)
-        environment.pop("UV_WORKING_DIR", None)
-    if command[0] == "git":
-        environment = {key: value for key, value in environment.items() if not key.startswith("GIT_")}
-    return subprocess.run(command, cwd=cwd, env=environment, check=True, text=True, capture_output=True).stdout.strip()
 
 
 def _api(base_url: str, route: str, *, post: bool = False) -> dict:
@@ -105,91 +86,6 @@ def _storage_pass_since(base_url: str, since: datetime, *, checked: bool, wait_s
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def prepare_release(source: Path, target: str, home: Path) -> Path:
-    sha = _run(["git", "rev-parse", "--verify", f"{target}^{{commit}}"], cwd=source)
-    if len(sha) != 40 or any(character not in "0123456789abcdef" for character in sha):
-        raise RuntimeError("target did not resolve to a full commit SHA")
-    root = runtime_directory(home) / "releases" / f"{sha}-{uuid4().hex[:8]}"
-    if root.exists() or root.is_symlink():
-        raise RuntimeError(f"release already exists; preserve it and reconcile before retrying: {root}")
-    if root.absolute() != root.resolve():
-        raise RuntimeError("runtime install path contains a symlink; refusing deployment")
-    root.parent.mkdir(parents=True, exist_ok=True)
-    # --no-local prevents object hardlinks/alternates back into disposable source trees.
-    _run(["git", "clone", "--no-local", "--no-checkout", str(source), str(root)])
-    require_release_directory(root, home)
-    _run(["git", "fetch", "--no-tags", str(source), sha], cwd=root)
-    _run(["git", "checkout", "--detach", sha], cwd=root)
-    _run(["uv", "sync", "--project", str(root), "--locked", "--no-dev"], cwd=root)
-    _run(["bash", str(root / "scripts/build-mac-app.sh"), "build", str(built_mac_app(root).parent)], cwd=root)
-    if not (root / ".venv/bin/mediaforce-web").is_file():
-        raise RuntimeError("prepared runtime lacks its entrypoint")
-    if not built_mac_app(root).is_dir():
-        raise RuntimeError("prepared runtime lacks its Mac app")
-    return root
-
-
-def built_mac_app(release: Path) -> Path:
-    return release / ".build/release-app" / MAC_APP_NAME
-
-
-def install_mac_app(release: Path, applications: Path = APPLICATIONS) -> None:
-    installed = applications / MAC_APP_NAME
-    incoming = applications / f".{MAC_APP_NAME}.incoming"
-    replaced = applications / f".{MAC_APP_NAME}.replaced"
-    _restore_interrupted_replacement(installed, replaced)
-    shutil.rmtree(incoming, ignore_errors=True)
-    shutil.copytree(built_mac_app(release), incoming, symlinks=True)
-    if _is_present(installed):
-        shutil.rmtree(replaced, ignore_errors=True)
-        installed.rename(replaced)
-    try:
-        incoming.rename(installed)
-    except OSError:
-        _restore_interrupted_replacement(installed, replaced)
-        raise
-    shutil.rmtree(replaced, ignore_errors=True)
-
-
-def _restore_interrupted_replacement(installed: Path, replaced: Path) -> None:
-    if not _is_present(installed) and _is_present(replaced):
-        replaced.rename(installed)
-
-
-def _is_present(path: Path) -> bool:
-    return path.exists() or path.is_symlink()
-
-
-def trim_releases(home: Path, support_dir: Path) -> None:
-    stage = retained_deploy_stage(support_dir)
-    if stage is None or stage.absolute() != stage.resolve():
-        raise RuntimeError("cannot verify the recorded rollback stage; releases retained")
-    previous = Path(plistlib.loads((stage / "launch-item.before.plist").read_bytes())["WorkingDirectory"])
-    candidate = Path((stage / "candidate.txt").read_text())
-    plist = LoginItemPaths(project_root=candidate, home=home).plist
-    running = Path(plistlib.loads(plist.read_bytes())["WorkingDirectory"])
-    require_release_directory(running, home)
-    if (
-        candidate != running or previous == running or not previous.is_absolute()
-        or previous.absolute() != previous.resolve() or not previous.is_dir()
-    ):
-        raise RuntimeError(
-            f"cannot verify running and rollback releases; releases retained: "
-            f"stage={stage}, candidate={candidate}, running={running}, rollback={previous}"
-        )
-    releases = [path for path in running.parent.iterdir() if not path.is_file() or path.is_symlink()]
-    for release in releases:
-        require_release_directory(release, home)
-    releases.sort(key=lambda path: (path.stat().st_mtime_ns, path.name), reverse=True)
-    kept = {running, previous} & set(releases)
-    for release in releases:
-        if len(kept) < KEPT_RELEASES:
-            kept.add(release)
-    for release in releases:
-        if release not in kept:
-            shutil.rmtree(release)
 
 
 def backup_database(database: Path, destination: Path, *, pause_queue: bool = False) -> None:
@@ -277,100 +173,219 @@ def pause_stopped_queue(config: MediaforceConfig) -> None:
         save_queue_state(connection, state)
 
 
-def deploy(
-    source: Path, target: str, stage: Path, home: Path, base_url: str,
-    *, database: Path, config_path: Path | None = None, startup_timeout: int = DEFAULT_STARTUP_TIMEOUT,
-    stopped: bool = False,
+# A verified release replaces whatever the saved service runs: the clone-based runtime on its first install, or a
+# bundled app that cannot update itself. One staged transaction: paused and idle, the port closed, a checked backup,
+# the app installed, its server started through the same launch item and checked before work resumes. Old code
+# starts again only while the database is provably untouched.
+
+
+@dataclass(frozen=True, slots=True)
+class SavedService:
+    payload: bytes
+    config_path: Path
+    credentials_path: Path | None
+    legacy_root: Path | None
+    build: str | None
+
+    @classmethod
+    def read(cls, plist: Path) -> SavedService:
+        payload = plist.read_bytes()
+        item = plistlib.loads(payload)
+        arguments = item["ProgramArguments"]
+        program = Path(arguments[0])
+        bundled = program.name == "mediaforce-server"
+        legacy_root = None if bundled else Path(item["WorkingDirectory"])
+        config = _argument(arguments, "--config") or (legacy_root and legacy_root / "config/defaults.toml")
+        credentials = _argument(arguments, "--credentials")
+        if credentials is None and legacy_root is not None and (legacy_root / ".env").is_file():
+            credentials = legacy_root / ".env"
+        if config is None or not config.is_absolute():
+            raise RuntimeError(f"the saved service at {plist} names no absolute config")
+        build = bundle_build(program.parents[2]) if bundled and program.exists() else None
+        return cls(payload, config, credentials, legacy_root, build)
+
+    @property
+    def protected_roots(self) -> tuple[Path, ...]:
+        return tuple(path for path in (self.legacy_root, self.config_path.parent,
+                                       self.credentials_path and self.credentials_path.parent) if path is not None)
+
+
+def _argument(arguments: list[str], option: str) -> Path | None:
+    return Path(arguments[arguments.index(option) + 1]) if option in arguments else None
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseInstall:
+    app: Path
+    install: Path
+    stage: Path
+    home: Path
+    saved: SavedService
+    config: MediaforceConfig
+    stopped: bool
+    startup_timeout: int
+
+    @property
+    def port(self) -> int:
+        return bundle_service(self.app)[1]
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    @property
+    def previous(self) -> LoginItemPaths:
+        return LoginItemPaths(self.app, self.home)
+
+    @property
+    def service(self) -> LoginItemPaths:
+        return LoginItemPaths(self.install, self.home, self.saved.config_path, self.saved.credentials_path,
+                              saved_label=self.previous.label)
+
+
+def install_release(
+    app: Path, stage: Path, home: Path, *, evidence: dict[str, str], install: Path = APPLICATIONS_APP,
+    startup_timeout: int = DEFAULT_STARTUP_TIMEOUT, stopped: bool = False,
 ) -> None:
-    # The release flow's own pause request can start the hourly cleanup, so the deploy waits for it (#1109).
-    with runtime_activity(database.parent, wait_seconds=DEPLOY_LOCK_WAIT_SECONDS) as acquired:
+    if (bundle_service(app)[0] == SERVICE_LABEL) != (install == APPLICATIONS_APP):
+        raise RuntimeError(f"only the live app installs at {APPLICATIONS_APP}, and it installs nowhere else")
+    saved = SavedService.read(LoginItemPaths(app, home).plist)
+    if saved.build is not None and int(saved.build) > int(bundle_build(app) or 0):
+        raise RuntimeError(f"build {saved.build} is installed; an older release never runs on its database")
+    config = load_config(saved.config_path)
+    support = config.paths.db_path.parent
+    require_own_support(app, config.paths.db_path, home)
+    if read_update_intent(support) is not None:
+        raise RuntimeError("an app update is unfinished; reconcile or roll it back first")
+    # The release flow's own pause request can start the hourly cleanup, so the install waits for it.
+    with runtime_activity(support, wait_seconds=DEPLOY_LOCK_WAIT_SECONDS) as acquired:
         if not acquired:
             raise RuntimeError(f"cleanup or another deploy stayed active for {DEPLOY_LOCK_WAIT_SECONDS // 60} minutes; retry after it finishes")
-        with ExitStack() as stopped_runtime:
-            config = load_config(config_path) if stopped else None
-            if config is not None:
-                if config.paths.db_path.resolve() != database.resolve():
-                    raise RuntimeError("stopped deployment database does not match the installed configuration")
-                stopped_runtime.enter_context(exclusive_mediaforce_runtime_lock(config, owner_payload={"operation": "stopped-deploy"}))
-                reserve_mediaforce_database_identity(config)
-            _deploy(source, target, stage, home, base_url, database=database, config_path=config_path,
-                    startup_timeout=startup_timeout, stopped_config=config, release_stopped_runtime=stopped_runtime.close)
+        _switch(ReleaseInstall(app, install, stage, home, saved, config, stopped, startup_timeout), evidence)
 
 
-def _deploy(
-    source: Path, target: str, stage: Path, home: Path, base_url: str,
-    *, database: Path, config_path: Path | None = None, startup_timeout: int = DEFAULT_STARTUP_TIMEOUT,
-    stopped_config: MediaforceConfig | None = None, release_stopped_runtime: Callable[[], None] | None = None,
-) -> None:
-    resume_queue = stopped_config is None
-    if stopped_config is None:
-        require_paused_idle_dashboard(_api(base_url, "/api/dashboard?preview_limit=0"))
-    plist = LoginItemPaths(project_root=source, home=home).plist
-    expected_stage_parent = database.parent / "deployments"
-    if stage.absolute() != stage.resolve() or stage.parent != expected_stage_parent:
-        raise RuntimeError(f"deploy stage must be a real directory directly under {expected_stage_parent}")
-    previous_payload = plist.read_bytes()
-    previous_item = plistlib.loads(previous_payload)
-    previous_root = Path(previous_item["WorkingDirectory"])
-    if not previous_root.is_absolute() or _run(["git", "status", "--porcelain"], cwd=previous_root):
-        raise RuntimeError("existing runtime checkout is dirty or its identity is invalid")
+def _switch(job: ReleaseInstall, evidence: dict[str, str]) -> None:
+    support = job.config.paths.db_path.parent
+    _require_fresh_stage(job.stage, support)
+    _require_readable(job.saved.credentials_path)
+    if not job.stopped:
+        _require_running_server(job)
+    job.stage.mkdir(parents=True)
+    _atomic_write(job.stage / "launch-item.before.plist", job.saved.payload)
+    _atomic_write(job.stage / "release.json", json.dumps(evidence, indent=2).encode())
+    if _is_present(job.install):
+        _copy_app(job.install, job.stage / MAC_APP_NAME)
+    register_runtime_roots(support, *job.saved.protected_roots)
+    if not job.stopped:
+        require_paused_idle_dashboard(_api(job.base_url, "/api/dashboard?preview_limit=0"))
+    disable_login_item(job.previous)
+    candidate_started = port_closed = False
+    try:
+        wait_for_closed_listener(job.port)
+        port_closed = True
+        resume_queue, pending_encode = _back_up_stopped_database(job)
+        install_app(job.app, job.install)
+        _verify_signed_bundle(job.install)
+        _atomic_write(job.service.plist, render_login_item_plist(job.service))
+        candidate_started = True
+        started_at = _utc_now()
+        start_saved_launch_item(job.service.plist)
+        wait_until_healthy(job.base_url, job.startup_timeout)
+        _require_server(job.base_url, bundle_build(job.install), job.config, pending_encode)
+        require_storage_admission(job.base_url, started_at)
+    except Exception as failure:
+        if candidate_started or not port_closed or job.stopped:
+            # Migrations, uncertain listener custody or a database the stopped install already touched require
+            # reconciliation; old code never starts on them.
+            disable_login_item(job.previous)
+        else:
+            _restore_previous(job, failure)
+        raise
+    retain_deploy_stage(support, job.stage)
+    if resume_queue:
+        # A lost resume response is uncertain; leave the healthy release running.
+        _api(job.base_url, "/api/encode-queue/resume", post=True)
+
+
+def _require_fresh_stage(stage: Path, support: Path) -> None:
+    if stage.absolute() != stage.resolve() or stage.parent != support / "deployments":
+        raise RuntimeError(f"deploy stage must be a real directory directly under {support / 'deployments'}")
     if stage.exists():
         raise RuntimeError("deploy stage already exists; use a fresh stage")
-    if stopped_config is not None:
-        arguments = previous_item["ProgramArguments"]
-        previous_config = Path(arguments[arguments.index("--config") + 1]).resolve() if "--config" in arguments else None
-        if previous_config != (config_path.resolve() if config_path else None):
-            raise RuntimeError("stopped deployment configuration does not match the installed launch item")
-        disable_login_item(LoginItemPaths(project_root=previous_root, home=home, config_path=config_path))
-        require_stopped_idle_controller(stopped_config)
-    candidate = prepare_release(source, target, home)
-    stage.mkdir(parents=True, exist_ok=False)
-    _atomic_write(stage / "launch-item.before.plist", previous_payload)
-    _atomic_write(stage / "previous-commit.txt", _run(["git", "rev-parse", "HEAD"], cwd=previous_root).encode())
-    paths = LoginItemPaths(project_root=candidate, home=home, config_path=config_path)
-    # Both sides are protected before launchd changes. Old worktrees remain locked and intact.
-    register_runtime_roots(home, previous_root, candidate, support_dir=database.parent)
-    _atomic_write(stage / "candidate.txt", str(candidate).encode())
-    if stopped_config is None:
-        require_paused_idle_dashboard(_api(base_url, "/api/dashboard?preview_limit=0"))
-    else:
-        resume_queue = not require_stopped_idle_controller(stopped_config)
-    disable_login_item(paths)
-    candidate_started = False
-    port_closed = False
+
+
+def _require_readable(credentials: Path | None) -> None:
+    if credentials is None:
+        return
+    with credentials.open("rb"):
+        pass
+
+
+def _require_running_server(job: ReleaseInstall) -> None:
+    require_paused_idle_dashboard(_api(job.base_url, "/api/dashboard?preview_limit=0"))
+    database = str(job.config.paths.db_path.resolve())
+    running = (_api(job.base_url, "/api/release/work").get("server") or {}).get("database")
+    if running != database:
+        raise RuntimeError(f"the running server uses {running}, not the saved config's database {database}")
+
+
+def _back_up_stopped_database(job: ReleaseInstall) -> tuple[bool, int]:
+    config = job.config
+    with exclusive_mediaforce_runtime_lock(config, owner_payload={"operation": "release-install"}):
+        reserve_mediaforce_database_identity(config)
+        was_paused = require_stopped_idle_controller(config, port=job.port)
+        backup_database(config.paths.db_path, job.stage / "before.sqlite", pause_queue=job.stopped)
+        if job.stopped:
+            pause_stopped_queue(config)
+        pending_encode = release_work_payload(config.paths.db_path)["counts"]["pending_encode"]
+    return not (job.stopped and was_paused), pending_encode
+
+
+def _require_server(base_url: str, build: str | None, config: MediaforceConfig, pending_encode: int) -> None:
+    work = _api(base_url, "/api/release/work")
+    expected = {"build": build, "database": str(config.paths.db_path.resolve())}
+    if work.get("server") != expected or work["counts"]["pending_encode"] != pending_encode:
+        raise UpdateRefused(f"the started server is not build {build} with the same queued work: {work}")
+
+
+def _restore_previous(job: ReleaseInstall, failure: Exception) -> None:
     try:
-        wait_for_closed_listener(8777)
-        port_closed = True
-        backup_database(database, stage / "before.sqlite", pause_queue=stopped_config is not None)
-        candidate_started = True
-        if stopped_config is not None:
-            pause_stopped_queue(stopped_config)
-        if release_stopped_runtime is not None:
-            release_stopped_runtime()
-        started_at = _utc_now()
-        enable_login_item(paths)
-        wait_until_healthy(base_url, startup_timeout)
-        require_storage_admission(base_url, started_at)
-    except Exception:
-        if not candidate_started and port_closed and stopped_config is None:
-            if plist.read_bytes() != previous_payload:
-                raise RuntimeError("previous plist changed; reconcile before restarting")
-            start_saved_launch_item(plist)
+        saved_app = job.stage / MAC_APP_NAME
+        if saved_app.exists():
+            install_app(saved_app, job.install)
         else:
-            # Migrations or uncertain listener custody require reconciliation.
-            disable_login_item(paths)
+            shutil.rmtree(job.install, ignore_errors=True)
+        _atomic_write(job.previous.plist, job.saved.payload)
+        start_saved_launch_item(job.previous.plist)
+        wait_until_healthy(job.base_url, job.startup_timeout)
+    except Exception as cleanup:
+        failure.add_note(f"restarting the previous service also failed: {cleanup}")
+
+
+def install_app(app: Path, destination: Path) -> None:
+    incoming = destination.with_name(f".{destination.name}.incoming")
+    replaced = destination.with_name(f".{destination.name}.replaced")
+    _restore_interrupted_replacement(destination, replaced)
+    shutil.rmtree(incoming, ignore_errors=True)
+    _copy_app(app, incoming)
+    if _is_present(destination):
+        shutil.rmtree(replaced, ignore_errors=True)
+        destination.rename(replaced)
+    try:
+        incoming.rename(destination)
+    except OSError:
+        _restore_interrupted_replacement(destination, replaced)
         raise
-    retain_deploy_stage(database.parent, stage)
-    try:
-        install_mac_app(candidate)
-    finally:
-        # A lost resume response is uncertain; leave the healthy candidate running.
-        if resume_queue:
-            _api(base_url, "/api/encode-queue/resume", post=True)
-    try:
-        trim_releases(home, database.parent)
-    except Exception as exc:
-        raise RuntimeError(f"controller deployed successfully; release trim failed for stage {stage}: {exc}") from exc
+    shutil.rmtree(replaced, ignore_errors=True)
+
+
+def _restore_interrupted_replacement(installed: Path, replaced: Path) -> None:
+    if not _is_present(installed) and _is_present(replaced):
+        replaced.rename(installed)
+
+
+def _is_present(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
 
 
 # The bundled app's update: the same staged transaction, run around Sparkle's automatic installer (Director decision,
@@ -549,10 +564,7 @@ def _finish(update: AppUpdate, intent: dict) -> None:
         _atomic_write(update.paths.plist, plistlib.dumps({**saved, "MediaforceAppCodeHash": _bundle_code_hash(update.app)}))
         start_saved_launch_item(update.paths.plist)
         wait_until_healthy(update.base_url, DEFAULT_STARTUP_TIMEOUT)
-        work = _api(update.base_url, "/api/release/work")
-        expected = {"build": intent["to"], "database": str(update.config.paths.db_path.resolve())}
-        if work.get("server") != expected or work["counts"]["pending_encode"] != intent["pending_encode"]:
-            raise UpdateRefused(f"the started server is not the prepared build with the same queued work: {work}")
+        _require_server(update.base_url, intent["to"], update.config, intent["pending_encode"])
         require_storage_admission(update.base_url, started_at)
     except Exception as exc:
         disable_login_item(update.paths)
@@ -671,27 +683,3 @@ def _failed(update: AppUpdate) -> list[str]:
 
 def _copy_app(source: Path, destination: Path) -> None:
     subprocess.run(["/usr/bin/ditto", str(source), str(destination)], check=True, capture_output=True)
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", type=Path, required=True)
-    parser.add_argument("--target", required=True, help="exact reviewed main commit")
-    parser.add_argument("--stage", type=Path, required=True, help="fresh deploy evidence/backup folder")
-    parser.add_argument("--config", type=Path, help="same configuration used by the installed controller")
-    parser.add_argument("--stopped", action="store_true", help="deploy while the controller is stopped, after verifying idle work records")
-    parser.add_argument("--startup-timeout", type=int, default=DEFAULT_STARTUP_TIMEOUT, help="seconds allowed for startup and migrations")
-    args = parser.parse_args()
-    if args.startup_timeout <= 0:
-        parser.error("--startup-timeout must be positive")
-    config = load_config(args.config)
-    deploy(
-        args.source.resolve(), args.target, args.stage.expanduser(), Path.home(), "http://127.0.0.1:8777",
-        database=config.paths.db_path, config_path=args.config.expanduser().resolve() if args.config else None,
-        startup_timeout=args.startup_timeout,
-        stopped=args.stopped,
-    )
-
-
-if __name__ == "__main__":
-    main()
