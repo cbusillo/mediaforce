@@ -332,9 +332,11 @@ Guidance:
     waits for the queue's recheck to prove the run ended before retrying
   - staged scratch folders (`encoding/staged_host.py`) follow the same rule
     in all three cleanups: the controller, the keeper's exit and the sweep
-    remove a folder only once that scoped stop proves its writer ended; an
-    unproven scratch folder is saved as the hold's scope, and the same
-    recheck releases the file once its computer shows the writer ended
+    remove a folder only once that scoped stop proves its writer ended and
+    `lsof` shows nothing open under it (the source copy's `cat` is named only
+    by its open file); an unproven scratch folder is saved as the hold's
+    scope, and the same recheck releases the file once its computer shows the
+    writer ended
 - `status_helpers.py` and `status_runtime.py`
   - host probe scripts, capability checks, and status parsing
   - successful status probes remain distinct from full encode readiness, so a

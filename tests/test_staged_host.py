@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shlex
 import subprocess
 import time
 import unittest
 from pathlib import Path, PurePosixPath
-from tempfile import TemporaryDirectory
+from collections.abc import Callable
+from tempfile import TemporaryDirectory, mkdtemp
 from typing import Any
 from unittest.mock import Mock, patch
 
@@ -26,6 +28,7 @@ from mediaforce.encoding.staged_host import (
     keeper_script,
     measure_scratch_free_bytes,
     remote_ffmpeg_command,
+    remove_once_unused_shell,
     required_scratch_bytes,
     staged_job,
     staged_job_for_host,
@@ -35,10 +38,14 @@ from mediaforce.encoding.staged_host import (
 
 def _without_process_listing(root: Path) -> dict[str, str]:
     """A shell environment whose ps fails, so nothing can prove a writer ended."""
-    tools = root / "no-ps"
-    tools.mkdir()
-    (tools / "ps").write_text("#!/bin/sh\nexit 1\n")
-    (tools / "ps").chmod(0o755)
+    return _with_tool(root, "ps", "exit 1")
+
+
+def _with_tool(root: Path, name: str, body: str) -> dict[str, str]:
+    """A shell environment that finds this stand-in for ``name`` first."""
+    tools = Path(mkdtemp(dir=root))
+    (tools / name).write_text(f"#!/bin/sh\n{body}\n")
+    (tools / name).chmod(0o755)
     return {**os.environ, "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"}
 
 
@@ -177,6 +184,73 @@ class ScratchScriptTests(unittest.TestCase):
 
             self.assertIsNotNone(writer.poll())
             self.assertFalse(Path(str(scratch_dir)).exists())
+
+    def _folder_removals(self, root: Path, scratch_dir: Path) -> dict[str, Callable[[dict[str, str] | None], None]]:
+        """The controller's, the keeper's exit and the sweep's removal of one job's folder."""
+        def controller(env: dict[str, str] | None) -> None:
+            subprocess.run(["sh", "-c", remove_once_unused_shell(shlex.quote(str(scratch_dir)))], env=env,
+                           capture_output=True, timeout=30)
+
+        def keeper_exit(env: dict[str, str] | None) -> None:
+            keeper = subprocess.Popen(["sh", "-c", keeper_script(PurePosixPath(scratch_dir))], stdin=subprocess.PIPE,
+                                      stdout=subprocess.PIPE, env=env)
+            assert keeper.stdout is not None and keeper.stdin is not None
+            keeper.stdout.readline()
+            keeper.stdin.close()
+            keeper.wait(timeout=30)
+
+        def sweep(env: dict[str, str] | None) -> None:
+            finished = subprocess.Popen(["true"])
+            finished.wait()
+            (scratch_dir / KEEPER_PID_FILE).write_text(str(finished.pid))
+            subprocess.run(["sh", "-c", sweep_script(PurePosixPath(root))], env=env, capture_output=True, timeout=30)
+
+        return {"controller": controller, "keeper exit": keeper_exit, "sweep": sweep}
+
+    def test_a_copy_writer_whose_command_never_names_the_folder_keeps_it_until_the_copy_ends(self) -> None:
+        for caller in ("controller", "keeper exit", "sweep"):
+            with self.subTest(caller), TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                scratch_dir = root / f"{SCRATCH_DIR_PREFIX}job"
+                scratch_dir.mkdir()
+                staged_source = scratch_dir / "source.mkv"
+                cleanup = self._folder_removals(root, scratch_dir)[caller]
+                # The copy's shell runs `cat > <folder>/source` and execs cat, so only the open file names the folder.
+                copy = subprocess.Popen(["sh", "-c", 'exec cat > "$1"', "copy", str(staged_source)],
+                                        stdin=subprocess.PIPE, start_new_session=True)
+                self.addCleanup(copy.kill)
+                assert copy.stdin is not None
+                copy.stdin.write(b"partial source")
+                copy.stdin.flush()
+                self.assertTrue(_wait_until(lambda: staged_source.exists() and staged_source.stat().st_size > 0))
+
+                cleanup(None)
+
+                self.assertTrue(staged_source.exists())
+                self.assertIsNone(copy.poll())
+
+                copy.stdin.close()
+                copy.wait(timeout=10)
+                cleanup(None)
+
+                self.assertFalse(scratch_dir.exists())
+
+    def test_a_folder_stays_while_open_files_cannot_be_listed(self) -> None:
+        cases = {
+            "lsof is missing": "echo 'lsof: command not found' >&2; exit 127",
+            "lsof warns it could not look": "echo \"lsof: WARNING: can't opendir($3): Permission denied\" >&2; exit 1",
+            "lsof is killed": "kill -9 $$",
+        }
+        for caller in ("controller", "keeper exit", "sweep"):
+            for label, body in cases.items():
+                with self.subTest(caller=caller, lsof=label), TemporaryDirectory() as raw_root:
+                    root = Path(raw_root)
+                    scratch_dir = root / f"{SCRATCH_DIR_PREFIX}job"
+                    scratch_dir.mkdir()
+
+                    self._folder_removals(root, scratch_dir)[caller](_with_tool(root, "lsof", body))
+
+                    self.assertTrue(scratch_dir.exists())
 
     def test_sweep_tolerates_a_missing_root(self) -> None:
         result = subprocess.run(["sh", "-c", sweep_script(PurePosixPath("/nonexistent/mediaforce-scratch"))])

@@ -9,7 +9,7 @@ Scratch space is recovered three ways: the controller removes the directory when
 ends, a keeper connection removes it when the controller goes away, and a sweep before each
 job removes directories whose keeper is no longer running. Each first stops whatever still
 names the directory with the scoped quality-run stop, and removes it only once that stop proves
-nothing is left; otherwise the directory stays. The keeper also keeps a Mac host from
+nothing is left and nothing has a file open in it; otherwise the directory stays. The keeper also keeps a Mac host from
 idle-sleeping through the copy, the encode and the pull back.
 """
 

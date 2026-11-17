@@ -219,9 +219,14 @@ REMOTE_QUALITY_TEMP_FILES_LEFT_NOTE = "Its temporary files could not be removed;
 # is not seen; confirming ab-av1's children behave this way is part of the owner-watched host
 # session.
 #
-# It prints the marker only when a fresh listing shows nothing naming the folder and none of the
-# collected processes still running (an exited zombie is not running). Every step fails closed: a
-# failed ps, a listing that does not show this script itself, or a failed awk is never proof.
+# It prints the marker only when a fresh listing shows nothing naming the folder, none of the
+# collected processes still running (an exited zombie is not running), and lsof shows no process
+# with a file open under the folder. That last check finds a writer whose command line never named
+# the folder, such as `cat > <folder>/source` after its shell exec'd cat; such a process is not
+# signalled, the folder just stays. lsof exits 1 both when nothing is open and on some errors, so
+# only an exit of 0 or 1 with nothing on stderr counts; a missing lsof or any warning is no proof.
+# Every step fails closed: a failed ps, a listing that does not show this script itself, or a
+# failed awk is never proof.
 # Processes in this script's own group (its shells, whose arguments also name the folder) are
 # never collected.
 REMOTE_QUALITY_CONTAINMENT_SCRIPT = """target=$1
@@ -289,6 +294,14 @@ settled() {
   [ -z "$running" ] || return 1
   return 0
 }
+nothing_open_under_target() {
+  [ -e "$target" ] || return 0
+  report=$( { errors=$(lsof -n -P -Fp +D "$target" 2>&1 >&3); echo "lsof-exit $? ${errors:+stderr}"; } 3>&1 ) || return 1
+  printf '%s\\n' "$report" | awk '
+    /^p[0-9]+$/ { held = 1 }
+    $1 == "lsof-exit" { answered = NF == 2 && ($2 == 0 || $2 == 1) }
+    END { exit held || !answered }'
+}
 listing=$(snapshot) || exit 3
 own_group=$(printf '%s\\n' "$listing" | awk -v self="$self" '$1 == self { print $3 }') || exit 3
 [ -n "$own_group" ] || exit 3
@@ -309,6 +322,7 @@ if [ "$state" -eq 1 ]; then
   settled; state=$?
 fi
 [ "$state" -eq 0 ] || exit $((state + 2))
+nothing_open_under_target || exit 6
 echo """ + REMOTE_QUALITY_CONTAINED_MARKER
 LOCAL_QUALITY_PATH_PREFIX = "/opt/homebrew/opt/ffmpeg-full/bin:/usr/local/opt/ffmpeg-full/bin"
 DEFAULT_LOCAL_QUALITY_TEMP_ROOT_NAME = "mediaforce-quality-temp"
