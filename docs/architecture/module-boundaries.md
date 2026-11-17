@@ -313,13 +313,22 @@ Guidance:
   - remote work that wakes a computer also keeps it awake while it runs: on a
     Mac, `caffeinate -i -w` watches the shell running the work and ends with
     it, however it ends; elsewhere nothing changes, and probes that do not wake
-    a computer do not keep it awake. No power setting is ever changed. The
+    a computer do not keep it awake. A Mac that answers from dark wake (display
+    and most cooling off; it sleeps again under load) is first brought to full
+    wake by declaring brief user activity, then its display is put straight
+    back to sleep. No power setting is ever changed. The
     direct SSH encode commands in `encoding/runner.py`, the staged keeper and
     the long Homebrew setup scripts in `setup_runtime.py` use the same wrapper
+  - a link that drops mid-work reads the Mac's own last sleep reason; a
+    dark-wake sleep retries without cooling that computer down, and a dropped
+    quality run is stopped through its scoped containment before its work
+    folder is reused, or held as unconfirmed
 - `status_helpers.py` and `status_runtime.py`
   - host probe scripts, capability checks, and status parsing
   - successful status probes remain distinct from full encode readiness, so a
     reachable host with recoverable storage is not reported as unreachable
+  - a Mac's check reports dark wake; work readiness brings it to full wake
+    before giving it work and waits when it cannot
 - `wake_helpers.py` and `wake_runtime.py`
   - wake-on-LAN, MAC learning, and wake waits
 - `mount_runtime.py`

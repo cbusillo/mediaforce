@@ -86,6 +86,7 @@ from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.media_scopes import media_scope_from_prefix
 from mediaforce.library.run_manifests import select_encode_candidates
 from mediaforce.hosts import status_runtime as host_status_runtime
+from mediaforce.hosts.transport import EncodeConnectionLostError
 from mediaforce.hosts.types import SOURCE_ROOT_READ_MISSING_ISSUE, STAGING_ROOT_WRITE_MISSING_ISSUE, \
     VMAF_MODEL_MISSING_ISSUE, is_vmaf_model_load_failure
 from mediaforce.remote import HostReadinessError, HostStatus
@@ -3315,13 +3316,25 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "ssh_transport")
 
     def test_lost_connection_to_encode_computer_retries_with_a_plain_reason(self) -> None:
-        lost = staging_runtime.EncodeConnectionLostError("Lost the connection to Remote A. It will be tried again.")
+        lost = EncodeConnectionLostError("Lost the connection to Remote A. It will be tried again.")
 
         updated = self._remote_job_failing_at_attempt_cap("job-lost-link", lost)
 
         self.assertEqual(updated["last_failure_kind"], "ssh_transport")
         self.assertEqual(updated["status"], "retry_backoff")
         self.assertEqual(updated["error"], str(lost))
+
+    def test_a_mac_that_slept_from_dark_wake_mid_file_is_retried_without_cooling_down(self) -> None:
+        for dark_wake_sleep in (True, False):
+            with self.subTest(dark_wake_sleep=dark_wake_sleep):
+                lost = EncodeConnectionLostError(
+                    "Lost the connection to Remote A. It will be tried again.", dark_wake_sleep=dark_wake_sleep,
+                )
+
+                updated = self._remote_job_failing_at_attempt_cap(f"job-lost-link-{dark_wake_sleep}", lost)
+
+                self.assertEqual(updated["status"], "retry_backoff")
+                self.assertEqual(updated["host_cooldown_until"] is None, dark_wake_sleep)
 
     def test_refused_ssh_access_stops_at_the_attempt_cap_with_its_own_reason(self) -> None:
         for job_id, diagnostic in (
@@ -3353,13 +3366,17 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
             job = load_encode_job(connection, job_id)
             assert job is not None
-            web_app._transition_encode_job_failure(
-                connection,
-                self.config,
-                job,
-                failure_kind=encode_runtime._classify_encode_failure(exc, job),
-                error_message=str(exc),
-            )
+            asleep = subprocess.CompletedProcess(["ssh"], 255, "", "ssh: connect to host remote-a port 22: Host is down")
+            with patch.object(encode_runtime, "run_remote_command", return_value=asleep):
+                encode_runtime.transition_encode_job_failure(
+                    connection,
+                    self.config,
+                    job,
+                    web_app._encode_queue_runtime_deps(),
+                    failure_kind=encode_runtime._classify_encode_failure(exc, job),
+                    error_message=str(exc),
+                    failure=exc,
+                )
             updated = load_encode_job(connection, job_id)
         assert updated is not None
         return updated

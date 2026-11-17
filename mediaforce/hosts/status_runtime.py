@@ -392,6 +392,7 @@ def _remote_host_status(
         setup_supported=_host_setup_supported(platform_name),
         setup_requires_password=_remote_setup_needs_password(capability_issues),
         require_paths=require_paths,
+        dark_wake=payload.get("dark_wake") == "1",
     )
 
 

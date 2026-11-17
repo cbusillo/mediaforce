@@ -17,11 +17,13 @@ from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
 from mediaforce.web.runtime.host_recovery import host_absence_state, host_recovery_snapshot, retry_host_connection
 from mediaforce.web.runtime.host_status import publish_host_status
+from mediaforce.hosts.transport import REQUEST_FULL_WAKE_SHELL_LINE
 from mediaforce.remote import HostReadinessError, HostStatus, collect_host_statuses, host_status_targets_current_machine, \
-    normalize_host_media_access, remote_mount_recovery_supported, run_host_lifecycle_command
+    normalize_host_media_access, remote_mount_recovery_supported, run_host_lifecycle_command, run_remote_command
 
 
 SAMPLE_HOST_OUTSIDE_WINDOW_DETAIL = "Outside its work window"
+_FULL_WAKE_REQUEST_TIMEOUT_SECONDS = 20
 
 
 def _progress_float(job: dict[str, Any], key: str) -> float:
@@ -397,12 +399,11 @@ def ensure_encode_host_ready(
     if not host_key:
         return False
     status = fresh_host_status_for_key(config, host_key)
-    if status is not None and status.available:
-        return False
-    if status is not None:
+    if status is not None and not status.available:
         status = _recover_host_mounts(config, host, status)
-        if status is not None and status.available:
-            return False
+    if status is not None and status.available:
+        _confirm_full_wake(config, host, status)
+        return False
     start_command = host_lifecycle_start_command(host)
     if not start_command:
         raise RuntimeError(unavailable_host_error_message(status))
@@ -441,7 +442,21 @@ def ensure_sample_host_ready(config: MediaforceConfig, host_payload: dict[str, A
             status.detail or status.message or "Sample host is not available.",
             failure_kind="host_unavailable",
         )
-    return status
+    return _confirm_full_wake(config, host, status)
+
+
+def _confirm_full_wake(config: MediaforceConfig, host: dict[str, Any], status: HostStatus) -> HostStatus:
+    if not status.dark_wake:
+        return status
+    run_remote_command(
+        host, ["sh", "-c", REQUEST_FULL_WAKE_SHELL_LINE], _FULL_WAKE_REQUEST_TIMEOUT_SECONDS, wake_before_connect=False,
+    )
+    refreshed = fresh_host_status_for_key(config, status.key)
+    if refreshed is None or not refreshed.available or refreshed.dark_wake:
+        raise HostReadinessError(
+            f"{status.label} didn't wake up fully. Mediaforce will try again.", failure_kind="host_unavailable",
+        )
+    return refreshed
 
 
 def _recover_host_mounts(

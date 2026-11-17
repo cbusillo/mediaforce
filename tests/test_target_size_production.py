@@ -23,7 +23,7 @@ from mediaforce.core.process_control import (
     ScheduleWindowClosedError,
 )
 from mediaforce.encoding import manifest as manifest_module
-from mediaforce.encoding.staging import EncodeConnectionLostError
+from mediaforce.hosts.transport import EncodeConnectionLostError
 from mediaforce.encoding.quality import (
     QualitySearchError,
     QualitySearchResult,
@@ -1034,7 +1034,9 @@ class TargetSizeProductionTests(unittest.TestCase):
                 ), patch("mediaforce.execution._search_quality", return_value=quality), patch(
                     "mediaforce.execution._build_ffmpeg_command",
                     return_value=["ffmpeg", "-i", str(source_path), str(staging_path)],
-                ), patch("mediaforce.execution._run_encode_command", return_value=failed_process):
+                ), patch("mediaforce.execution._run_encode_command", return_value=failed_process), patch(
+                    "mediaforce.encoding.manifest.last_sleep_was_dark_wake", return_value=True,
+                ) as sleep_reason:
                     with self.assertRaises(RuntimeError) as raised:
                         execution.encode_one_item(
                             connection,
@@ -1047,8 +1049,12 @@ class TargetSizeProductionTests(unittest.TestCase):
                             host=host,
                         )
                 self.assertIs(type(raised.exception), expected_error)
-                if expected_error is EncodeConnectionLostError:
+                if isinstance(raised.exception, EncodeConnectionLostError):
                     self.assertIn("Encoder", str(raised.exception))
+                    self.assertTrue(raised.exception.dark_wake_sleep)
+                    sleep_reason.assert_called_once_with(host)
+                else:
+                    sleep_reason.assert_not_called()
 
     def test_warm_assigned_encode_failure_persists_acceptance_event_context(self) -> None:
         source_path = self._source_file("episode-warm-encode-failure.mkv")

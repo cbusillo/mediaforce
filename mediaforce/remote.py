@@ -33,8 +33,8 @@ from mediaforce.hosts.status_helpers import _classify_ssh_failure, _default_publ
     _local_tool_status_snapshot, _needs_initial_ssh_key_install, \
     _private_key_path_for_public_key, _should_retry_remote_status_exception, \
     _should_retry_remote_status_failure, _ssh_access_must_be_fixed_first
-from mediaforce.hosts.transport import _run_remote_ssh as _run_remote_ssh_impl, \
-    copy_remote_file_to_local as copy_remote_file_to_local_impl, \
+from mediaforce.hosts.transport import LAST_SLEEP_REASON_SHELL, _run_remote_ssh as _run_remote_ssh_impl, \
+    copy_remote_file_to_local as copy_remote_file_to_local_impl, is_dark_wake_sleep_reason, \
     run_remote_command as run_remote_command_impl, ssh_client_options as _ssh_client_options_impl
 from mediaforce.hosts.wake_runtime import _ensure_remote_awake_for_ssh as _ensure_remote_awake_for_ssh_impl, \
     _learn_remote_wake_mac as _learn_remote_wake_mac_impl, \
@@ -67,6 +67,7 @@ __all__ = [
     "execution_mode_for_host",
     "host_media_access_for_host",
     "host_status_targets_current_machine",
+    "last_sleep_was_dark_wake",
     "learn_controller_smb_mounts",
     "normalize_host_media_access",
     "prepare_remote_host_with_password",
@@ -455,6 +456,17 @@ def run_remote_command(
         remote_shell_path_export_line=remote_shell_path_export_line,
         run_remote_ssh=_run_remote_ssh,
     )
+
+
+_SLEEP_REASON_READ_TIMEOUT_SECONDS = 20
+
+
+def last_sleep_was_dark_wake(host: dict[str, object]) -> bool:
+    try:
+        result = run_remote_command(host, ["sh", "-c", LAST_SLEEP_REASON_SHELL], _SLEEP_REASON_READ_TIMEOUT_SECONDS)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and is_dark_wake_sleep_reason(result.stdout.strip())
 
 
 def copy_remote_file_to_local(

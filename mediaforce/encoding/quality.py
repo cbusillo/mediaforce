@@ -10,6 +10,7 @@ from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from mediaforce.encoding.ffmpeg import ab_av1_hwaccel_input_args
 from mediaforce.core.evidence import stable_json_hash
@@ -26,8 +27,8 @@ from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, manag
     process_result_reached_schedule_deadline
 from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.remote_cleanup import RemoteHostUnreachableError
-from mediaforce.hosts.transport import ssh_host_unreachable
-from mediaforce.remote import execution_mode_for_host, run_remote_command
+from mediaforce.hosts.transport import EncodeConnectionLostError, ssh_connection_dropped, ssh_host_unreachable
+from mediaforce.remote import execution_mode_for_host, last_sleep_was_dark_wake, run_remote_command
 
 RESULT_RE = re.compile(
     r"crf\s+(?P<crf>[0-9.]+)\s+(?P<metric>VMAF|XPSNR)\s+(?P<score>[0-9.]+)",
@@ -143,6 +144,7 @@ class RemoteQualityTimeoutError(RuntimeError):
             stalled: bool = False,
             scoped_temp_dir: str | None = None,
             containment_detail: str | None = None,
+            connection_lost: bool = False,
     ) -> None:
         outcome = (
             "that run was stopped."
@@ -150,7 +152,9 @@ class RemoteQualityTimeoutError(RuntimeError):
             else f"the run on that computer was not confirmed stopped. {CONTAINMENT_UNPROVEN_OWNER_STEP}"
         )
         what_happened = (
-            f"printed nothing for {_plain_duration(timeout_seconds)}"
+            "lost its connection"
+            if connection_lost
+            else f"printed nothing for {_plain_duration(timeout_seconds)}"
             if stalled
             else f"ran past {_plain_duration(timeout_seconds)} without a result"
         )
@@ -899,7 +903,7 @@ def _run_quality_command(
                 details = f"{details}\n{mkdir_result.stderr.strip()}".strip()
             raise QualityTempSetupError(details or f"Failed to prepare remote temp dir: {temp_dir}")
     try:
-        return run_remote_command(
+        result = run_remote_command(
             object_dict(host),
             cmd,
             REMOTE_QUALITY_TIMEOUT_SECONDS,
@@ -930,6 +934,31 @@ def _run_quality_command(
         if output_tail is not None:
             error.add_note(f"Last output from that computer:\n{output_tail}")
         raise error from None
+    if temp_dir is not None and result.returncode == 255 and ssh_connection_dropped(result.returncode, result.stderr):
+        raise _dropped_quality_run_error(object_dict(host), cmd, temp_dir)
+    return result
+
+
+def _dropped_quality_run_error(host: dict[str, Any], cmd: list[str], scoped_temp_dir: str) -> Exception:
+    host_key = str(host.get("key") or host.get("host") or "").strip()
+    host_label = str(host.get("label") or "").strip() or host_key or "another computer"
+    try:
+        stop_timed_out_remote_quality_run(host, scoped_temp_dir)
+    except Exception as containment_error:  # noqa: BLE001 - any failure leaves the run unproven; its detail is kept.
+        return RemoteQualityTimeoutError(
+            phase=_quality_phase(cmd),
+            timeout_seconds=REMOTE_QUALITY_TIMEOUT_SECONDS,
+            host_key=host_key,
+            host_label=host_label,
+            remote_process_contained=False,
+            scoped_temp_dir=scoped_temp_dir,
+            containment_detail=f"{type(containment_error).__name__}: {containment_error}"[-2000:],
+            connection_lost=True,
+        )
+    return EncodeConnectionLostError(
+        f"Lost the connection to {host_label} while measuring quality. It will be tried again.",
+        dark_wake_sleep=last_sleep_was_dark_wake(host),
+    )
 
 
 def stop_timed_out_remote_quality_run(

@@ -21,14 +21,46 @@ _SSH_CLIENT_FAILURE_PREFIXES = (
 )
 
 
+# A Mac in dark wake answers over the network with its display and most of its cooling off, and
+# sleeps again under load ("Dark Wake Thermal Emergency"); its capabilities then lack Graphics.
+MACOS_DARK_WAKE_SHELL_TEST = (
+    'case "$(pmset -g systemstate 2>/dev/null)" in '
+    '*"Capabilities are:"*Graphics*) false ;; *"Capabilities are:"*) true ;; *) false ;; esac'
+)
+
+# Declaring brief user activity brings a dark-woken Mac to full wake, which lights its display;
+# putting the display straight back to sleep keeps full wake. A Mac someone is using is already
+# in full wake, so its display is never touched. No power setting changes.
+REQUEST_FULL_WAKE_SHELL_LINE = (
+    f'if {MACOS_DARK_WAKE_SHELL_TEST}; then '
+    'caffeinate -u -t 2 </dev/null >/dev/null 2>&1; pmset displaysleepnow >/dev/null 2>&1; fi'
+)
+
 # On a Mac, caffeinate holds a "prevent idle sleep" assertion that ends when the shell running the
 # work exits, however it ends: success, failure, Stop, a schedule deadline or a dropped link. It
 # changes no power setting. Run from a subshell, it is not a job of the work's shell, so a bare
 # `wait` there cannot wait for it. Where caffeinate is missing, the line does nothing.
 _KEEP_AWAKE_SHELL_LINE = (
     'if command -v caffeinate >/dev/null 2>&1; then '
-    '(caffeinate -i -w "$$" </dev/null >/dev/null 2>&1 &); fi'
+    f'(caffeinate -i -w "$$" </dev/null >/dev/null 2>&1 &); {REQUEST_FULL_WAKE_SHELL_LINE}; fi'
 )
+
+# The reason the Mac gave for its most recent sleep, as its power log words it.
+LAST_SLEEP_REASON_SHELL = (
+    'ioreg -n IOPMrootDomain -r -d 1 2>/dev/null | sed -n \'s/^.*"Last Sleep Reason" = "\\(.*\\)"$/\\1/p\''
+)
+
+
+def is_dark_wake_sleep_reason(reason: str | None) -> bool:
+    return "dark wake" in (reason or "").lower()
+
+
+class EncodeConnectionLostError(RuntimeError):
+    """The SSH connection ended before the work on that computer finished."""
+
+    def __init__(self, message: str, *, dark_wake_sleep: bool = False) -> None:
+        super().__init__(message)
+        self.dark_wake_sleep = dark_wake_sleep
 
 
 SSH_ALIVE_CHECK_SECONDS = 15
@@ -36,7 +68,7 @@ SSH_ALIVE_CHECKS_BEFORE_DROP = 4
 
 
 def keep_awake_while_running(script: str) -> str:
-    """Keep the computer from idle-sleeping for as long as the shell running ``script`` lives."""
+    """Keep the computer fully awake for as long as the shell running ``script`` lives."""
     return f"{_KEEP_AWAKE_SHELL_LINE}\n{script}"
 
 

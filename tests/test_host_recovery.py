@@ -1,7 +1,9 @@
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
+import subprocess
 import threading
 from typing import Any
 from unittest.mock import patch
@@ -14,6 +16,9 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig, load_runtime_s
 from mediaforce.hosts.controller_mount import ControllerMountProbe
 from mediaforce.hosts.mount_runtime import ControllerSmbMount, NoUiMountResult, save_controller_smb_mounts, \
     controller_smb_mounts_path
+from mediaforce.hosts import status_helpers, status_runtime
+from mediaforce.hosts.transport import REQUEST_FULL_WAKE_SHELL_LINE
+from mediaforce import remote
 from mediaforce.remote import HostReadinessError, HostStatus
 from mediaforce.web import app as web_app
 from mediaforce.web.runtime import host_recovery as recovery, host_runtime, host_status, recovery_alerts as alerts
@@ -888,6 +893,90 @@ def test_a_laptop_that_returns_and_takes_work_is_no_longer_shown_away(
     assert card["recovery"]["status"] == "ready"
     assert card["recovery"]["absence_state"] is None
     mount.assert_not_called()
+
+
+_FAKE_UNAME = '#!/bin/sh\necho "$FAKE_KERNEL"\n'
+_FAKE_PMSET = """#!/bin/sh
+[ "$*" = "-g systemstate" ] && printf 'Current System Capabilities are: %s \\nCurrent Power State: 4\\n' "$FAKE_CAPABILITIES"
+"""
+
+
+def _checked_on(tmp_path: Path, config: MediaforceConfig, *, kernel: str, capabilities: str) -> HostStatus:
+    tools = tmp_path / "tools"
+    tools.mkdir(exist_ok=True)
+    for name, body in (("uname", _FAKE_UNAME), ("pmset", _FAKE_PMSET)):
+        (tools / name).write_text(body)
+        (tools / name).chmod(0o755)
+    environment = {**os.environ, "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}",
+                   "FAKE_KERNEL": kernel, "FAKE_CAPABILITIES": capabilities}
+
+    def run_here(_host: dict[str, object], script: str, *, timeout: int) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["/bin/sh", "-s"], input=script, env=environment, capture_output=True, text=True,
+                              timeout=timeout, check=False)
+
+    with patch_attr(status_helpers, "remote_shell_path_export_line", return_value=":"), \
+            patch_attr(status_runtime, "_cached_remote_tool_payload", return_value={"tools": {}}), \
+            patch_attr(remote, "_run_remote_status_probe", side_effect=run_here), \
+            patch_attr(remote, "_learn_remote_wake_mac"):
+        return remote.probe_host_status(config, config.raw["remote_hosts"][0])
+
+
+@pytest.mark.parametrize(("kernel", "capabilities", "dark_wake"), [
+    ("Darwin", "CPU Network", True),
+    ("Darwin", "CPU Graphics Audio Network", False),
+    ("Linux", "CPU Network", False),
+])
+def test_a_computer_check_reads_whether_a_mac_is_only_in_dark_wake(
+        tmp_path: Path, config: MediaforceConfig, kernel: str, capabilities: str, dark_wake: bool,
+) -> None:
+    checked = _checked_on(tmp_path, config, kernel=kernel, capabilities=capabilities)
+    assert checked.dark_wake is dark_wake, checked.detail
+
+
+def _dark_woken() -> HostStatus:
+    woken = status(available=True)
+    woken.dark_wake = True
+    return woken
+
+
+def _get_ready(work: str, config: MediaforceConfig) -> None:
+    host = config.raw["remote_hosts"][0]
+    if work == "encode":
+        host_runtime.ensure_encode_host_ready(config, host, lifecycle_command_timeout_seconds=1, lifecycle_poll_seconds=0)
+    else:
+        host_runtime.ensure_sample_host_ready(config, host)
+
+
+@pytest.mark.parametrize("work", ["encode", "sample"])
+def test_work_brings_a_mac_answering_from_dark_wake_fully_awake_first(
+        config: MediaforceConfig, empty_host_status_cache: None, work: str,
+) -> None:
+    with patch_attr(host_runtime, "collect_host_statuses", side_effect=[[_dark_woken()], [status(available=True)]]), \
+            patch_attr(host_runtime, "run_remote_command") as request:
+        _get_ready(work, config)
+    [call] = request.call_args_list
+    assert call.args[1] == ["sh", "-c", REQUEST_FULL_WAKE_SHELL_LINE]
+
+
+@pytest.mark.parametrize("work", ["encode", "sample"])
+def test_a_mac_that_stays_in_dark_wake_is_not_given_work(
+        config: MediaforceConfig, empty_host_status_cache: None, work: str,
+) -> None:
+    with patch_attr(host_runtime, "collect_host_statuses", return_value=[_dark_woken()]), \
+            patch_attr(host_runtime, "run_remote_command"):
+        with pytest.raises(HostReadinessError) as refused:
+            _get_ready(work, config)
+    assert refused.value.failure_kind == "host_unavailable"
+
+
+@pytest.mark.parametrize("work", ["encode", "sample"])
+def test_a_fully_awake_computer_is_given_work_without_a_wake_request(
+        config: MediaforceConfig, empty_host_status_cache: None, work: str,
+) -> None:
+    with patch_attr(host_runtime, "collect_host_statuses", return_value=[status(available=True)]), \
+            patch_attr(host_runtime, "run_remote_command") as request:
+        _get_ready(work, config)
+    request.assert_not_called()
 
 
 def test_unknown_result_retries_before_asking_and_keeps_the_warning_during_attempts(config: MediaforceConfig) -> None:

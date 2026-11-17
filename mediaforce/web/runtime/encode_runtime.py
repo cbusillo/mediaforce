@@ -32,7 +32,7 @@ from mediaforce.ops.runtime_install import update_hold_reason
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission, controller_storage_admission_issue
 from mediaforce.hosts.config import configured_remote_host_execution_mode, ssh_target_for_host
 from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
-from mediaforce.hosts.transport import SSH_ACCESS_REFUSED_MARKERS, ssh_host_unreachable
+from mediaforce.hosts.transport import SSH_ACCESS_REFUSED_MARKERS, EncodeConnectionLostError, ssh_host_unreachable
 from mediaforce.core.db import DBClient, DBRow, is_database_busy_failure, open_db
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import calibration_jobs
@@ -61,7 +61,7 @@ from mediaforce.encoding.staged_host import STAGED_JOB_KEY, StagedScratchError, 
 from mediaforce.hosts.types import is_stop_signal_exit, is_storage_io_failure, is_vmaf_model_load_failure
 from mediaforce.encoding.cadence import CadenceResolutionError
 from mediaforce.encoding.free_space import ReserveInputError
-from mediaforce.encoding.staging import EncodeConnectionLostError, FinishedOutputNotVisibleError, \
+from mediaforce.encoding.staging import FinishedOutputNotVisibleError, \
     StagedOutputHeldForReviewError, UnreadableEncodeOutputError, partial_output_path, safe_unlink
 from mediaforce.encoding.remote_cleanup import RemoteHostUnreachableError, confirm_computer_runs_no_quality_run, \
     end_remote_output_writers
@@ -2247,7 +2247,8 @@ def transition_encode_job_failure(
                  or _encode_failure_is_retryable(failure_kind, error_message, assigned_host))
     if auto_policy_retry:
         retryable = True
-    host_related = _encode_failure_is_host_related(failure_kind, error_message, assigned_host)
+    host_related = (_encode_failure_is_host_related(failure_kind, error_message, assigned_host)
+                    and not _slept_from_dark_wake(failure))
     retry_beyond_attempt_cap = storage_outage or _encode_failure_retries_after_attempt_cap(
         failure_kind,
         error_message,
@@ -5178,6 +5179,10 @@ def _finalize_encode_job_progress(
         return progress
     progress.update({"progress_state": terminal_state, "updated_at": deps.now_iso()})
     return progress
+
+
+def _slept_from_dark_wake(failure: Exception | None) -> bool:
+    return isinstance(failure, EncodeConnectionLostError) and failure.dark_wake_sleep
 
 
 def _encode_failure_is_host_related(failure_kind: str, error_message: str, host_payload: dict[str, Any]) -> bool:
