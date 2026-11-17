@@ -9,7 +9,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, cast
 
-from sqlalchemy import Select
+from sqlalchemy import Select, Table, TableClause, TextClause
+from sqlalchemy.sql import visitors
 
 from mediaforce.core.db import DBClient
 
@@ -18,8 +19,7 @@ class LibraryCalculations:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._saved: dict[str, tuple[object, Any]] = {}
-        self._read_revision: object = None
-        self._reads: dict[str, object] = {}
+        self._reads: dict[str, tuple[object, bytes]] = {}
 
     @contextmanager
     def request(self, connection: DBClient) -> Iterator[None]:
@@ -35,23 +35,24 @@ class LibraryCalculations:
 
     def saved_inputs(self, connection: DBClient, queries: Sequence[Select]) -> object:
         driver = cast(SQLiteConnection, connection.connection.driver_connection)
-        revision = _database_revision(connection)
         request = _request.get()
         clean_snapshot = request is not None and request.connection is connection and request.total_changes == driver.total_changes
         if driver.in_transaction and not clean_snapshot:
             return tuple(_saved_input_digest(connection, query) for query in queries)
+        revision = _database_revision(connection)
+        tokens = _table_change_tokens(connection) if driver.in_transaction else {}
         with self._lock:
-            if self._read_revision != revision:
-                self._reads.clear()
-                self._read_revision = revision
-            keys = []
+            digests = []
             for query in queries:
                 compiled = query.compile()
                 key = repr((str(compiled), compiled.params))
-                keys.append(key)
-                if key not in self._reads:
-                    self._reads[key] = _saved_input_digest(connection, query)
-            return tuple(self._reads[key] for key in keys)
+                state = _tables_state(query, tokens) or revision
+                saved = self._reads.get(key)
+                if saved is None or saved[0] != state:
+                    saved = state, _saved_input_digest(connection, query)
+                    self._reads[key] = saved
+                digests.append(saved[1])
+            return tuple(digests)
 
     def reuse[T](
         self, name: str, inputs: object, calculate: Callable[[], T], copy_result: Callable[[T], T], still_current: Callable[[], bool]
@@ -107,6 +108,31 @@ def _database_revision(connection: DBClient) -> tuple[object, int, int, int]:
         connection.exec_driver_sql("PRAGMA schema_version").scalar_one(),
         cast(SQLiteConnection, connection.connection.driver_connection).total_changes,
     )
+
+
+def _table_change_tokens(connection: DBClient) -> dict[str, tuple[int, bytes]]:
+    tracked = set(connection.exec_driver_sql(
+        "SELECT tbl_name FROM sqlite_master WHERE type = 'trigger' AND name IN "
+        "(tbl_name || '_change_token_insert', tbl_name || '_change_token_update', tbl_name || '_change_token_delete') "
+        "GROUP BY tbl_name HAVING count(*) = 3"
+    ).scalars())
+    if not tracked:
+        return {}
+    schema_version = connection.exec_driver_sql("PRAGMA schema_version").scalar_one()
+    rows = connection.exec_driver_sql("SELECT table_name, token FROM table_change_tokens")
+    return {name: (schema_version, token) for name, token in rows if name in tracked}
+
+
+def _tables_state(query: Select, tokens: dict[str, tuple[int, bytes]]) -> tuple[tuple[int, bytes], ...] | None:
+    names = set()
+    for element in visitors.iterate(query):
+        if isinstance(element, TextClause) or (isinstance(element, TableClause) and not isinstance(element, Table)):
+            return None
+        if isinstance(element, Table):
+            names.add(element.name)
+    if not names or not names <= tokens.keys():
+        return None
+    return tuple(tokens[name] for name in sorted(names))
 
 
 def _saved_input_digest(connection: DBClient, query: Select) -> bytes:

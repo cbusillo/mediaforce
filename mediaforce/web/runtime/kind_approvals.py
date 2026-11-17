@@ -455,12 +455,12 @@ class _ShowApproval:
 
 def _show_approvals(
         config: MediaforceConfig,
+        library_types: dict[str, str],
         show: str,
         episodes: list[tuple[str, int]],
         load_calibration_state: LoadCalibrationState,
 ) -> list[_ShowApproval]:
     """The current folder approvals on a show or its seasons, each with its sample's season and the seasons it governs."""
-    library_types = offered_library_types(config)
     seasons = {season for rel_path, _ in episodes if (season := look_group(library_types, rel_path)) is not None}
     found: dict[str, tuple[EffectiveApproval, str]] = {}
     governed: dict[str, list[str]] = {}
@@ -560,7 +560,7 @@ def _kind_contents(connection: DBClient, config: MediaforceConfig, load_calibrat
     library_types = offered_library_types(config)
     episodes = _tv_episodes(connection, config)
     approvals_by_show = {show: found for show, files in episodes.items()
-                         if (found := _show_approvals(config, show, files, folders_only))}
+                         if (found := _show_approvals(config, library_types, show, files, folders_only))}
     samples = _samples_in_hand(connection, {season for files in episodes.values() for path, _ in files
                                           if (season := look_group(library_types, path)) is not None})
     report = _kind_report(
