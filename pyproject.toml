@@ -45,7 +45,7 @@ exclude = [
 # The notarized app release: project.version is its version. Raise build for every release attempt;
 # Sparkle installs only a higher build. public-key is the Sparkle EdDSA key every release ships.
 [tool.mediaforce.release]
-build = 2
+build = 3
 feed = "https://cbusillo.github.io/mediaforce/appcast.xml"
 public-key = "rzpS2jLP0qsgpgYtvdu/lLrpv6ljcfy5zYhkkJAK5dg="
 
