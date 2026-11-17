@@ -35,6 +35,8 @@ from mediaforce.hosts.transport import keep_awake_while_running
 STAGED_JOB_KEY = "staged_job"
 SCRATCH_DIR_PREFIX = ".mediaforce-staged-"
 KEEPER_PID_FILE = "keeper.pid"
+# Whichever comes first, the source copy or a cleanup, makes this folder; the other then finds it made.
+SOURCE_COPY_CLAIM = "source-copy.claim"
 STAGED_SOURCE_STEM = "source"
 STAGED_OUTPUT_STEM = "output"
 # Source copy, the encoded output (bounded by the source size) and quality-search samples.
@@ -69,7 +71,8 @@ class ScratchStillInUseError(RemoteQualityTimeoutError):
 
 def remove_once_unused_shell(directory: str) -> str:
     return (
-        f"if sh -c {shlex.quote(REMOTE_QUALITY_CONTAINMENT_SCRIPT)} sh {directory} 2>/dev/null"
+        f"mkdir {directory}/{SOURCE_COPY_CLAIM} 2>/dev/null;"
+        f" if sh -c {shlex.quote(REMOTE_QUALITY_CONTAINMENT_SCRIPT)} sh {directory} 2>/dev/null"
         f" | grep -qx {shlex.quote(REMOTE_QUALITY_CONTAINED_MARKER)}; then rm -rf {directory}"
         f" && echo {shlex.quote(REMOTE_QUALITY_CONTAINED_MARKER)}; fi"
     )
@@ -208,6 +211,15 @@ def _digest_script(path: PurePosixPath) -> str:
     return f"(sha256sum {target} 2>/dev/null || shasum -a 256 {target}) | awk '{{print $1}}'"
 
 
+def copy_source_shell(job: StagedJob) -> str:
+    claim = shlex.quote(str(job.scratch_dir / SOURCE_COPY_CLAIM))
+    return f"exec 3>{shlex.quote(str(job.source_path))} && mkdir {claim} && exec cat >&3 3>&-"
+
+
+def new_scratch_dir(scratch_root: PurePosixPath) -> PurePosixPath:
+    return scratch_root / f"{SCRATCH_DIR_PREFIX}{uuid.uuid4().hex}"
+
+
 @contextmanager
 def staged_job(
         host: dict[str, Any],
@@ -220,6 +232,7 @@ def staged_job(
         process_controller: ManagedProcessController | None = None,
         reserved_bytes: int = 0,
         popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+        scratch_dir: PurePosixPath | None = None,
 ) -> Iterator[StagedJob]:
     """Stage ``source_path`` on the host for the duration of the block."""
     scratch_root = host_scratch_root(host)
@@ -242,7 +255,7 @@ def staged_job(
             f"this file and reserved work need about {required_bytes // (1024 ** 3) + 1} GiB."
         )
 
-    scratch_dir = scratch_root / f"{SCRATCH_DIR_PREFIX}{uuid.uuid4().hex}"
+    scratch_dir = scratch_dir or new_scratch_dir(scratch_root)
     job = StagedJob(
         scratch_dir=scratch_dir,
         source_path=scratch_dir / f"{STAGED_SOURCE_STEM}{source_path.suffix.lower()}",
@@ -296,7 +309,7 @@ def _copy_source(
         popen: Callable[..., subprocess.Popen[bytes]],
 ) -> None:
     writer = popen(
-        ["ssh", *ssh_options, ssh_target, f"cat > {shlex.quote(str(job.source_path))}"],
+        ["ssh", *ssh_options, ssh_target, copy_source_shell(job)],
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,

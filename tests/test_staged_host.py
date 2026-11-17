@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shlex
+import shutil
 import subprocess
 import time
 import unittest
@@ -20,12 +21,14 @@ from mediaforce.hosts.transport import EncodeConnectionLostError
 from mediaforce.encoding.staged_host import (
     KEEPER_PID_FILE,
     SCRATCH_DIR_PREFIX,
+    SOURCE_COPY_CLAIM,
     STAGED_JOB_KEY,
     StagedJob,
     ScratchStillInUseError,
     StagedScratchError,
     host_scratch_root,
     keeper_script,
+    copy_source_shell,
     measure_scratch_free_bytes,
     remote_ffmpeg_command,
     remove_once_unused_shell,
@@ -208,33 +211,63 @@ class ScratchScriptTests(unittest.TestCase):
 
         return {"controller": controller, "keeper exit": keeper_exit, "sweep": sweep}
 
+    @staticmethod
+    def _scratch_job(scratch_dir: Path) -> StagedJob:
+        folder = PurePosixPath(scratch_dir)
+        return StagedJob(scratch_dir=folder, source_path=folder / "source.mkv", output_path=folder / "output.mkv")
+
     def test_a_copy_writer_whose_command_never_names_the_folder_keeps_it_until_the_copy_ends(self) -> None:
+        for caller in ("controller", "keeper exit", "sweep"):
+            for file_state in ("in the folder", "already unlinked"):
+                with self.subTest(caller=caller, file=file_state), TemporaryDirectory() as raw_root:
+                    root = Path(raw_root)
+                    scratch_dir = root / f"{SCRATCH_DIR_PREFIX}job"
+                    scratch_dir.mkdir()
+                    staged_source = scratch_dir / "source.mkv"
+                    cleanup = self._folder_removals(root, scratch_dir)[caller]
+                    # The copy's shell ends by running cat in its place, so only the open file names the folder.
+                    copy = subprocess.Popen(["sh", "-c", copy_source_shell(self._scratch_job(scratch_dir))],
+                                            stdin=subprocess.PIPE, start_new_session=True)
+                    self.addCleanup(copy.kill)
+                    assert copy.stdin is not None
+                    copy.stdin.write(b"partial source")
+                    copy.stdin.flush()
+                    self.assertTrue(_wait_until(lambda: staged_source.exists() and staged_source.stat().st_size > 0))
+                    if file_state == "already unlinked":
+                        staged_source.unlink()
+
+                    cleanup(None)
+
+                    self.assertTrue(scratch_dir.exists())
+                    self.assertIsNone(copy.poll())
+
+                    copy.stdin.close()
+                    copy.wait(timeout=10)
+                    cleanup(None)
+
+                    self.assertFalse(scratch_dir.exists())
+
+    def test_a_copy_that_starts_after_a_cleanup_has_looked_writes_nothing(self) -> None:
+        real_lsof = shutil.which("lsof")
+        assert real_lsof is not None
         for caller in ("controller", "keeper exit", "sweep"):
             with self.subTest(caller), TemporaryDirectory() as raw_root:
                 root = Path(raw_root)
                 scratch_dir = root / f"{SCRATCH_DIR_PREFIX}job"
                 scratch_dir.mkdir()
-                staged_source = scratch_dir / "source.mkv"
-                cleanup = self._folder_removals(root, scratch_dir)[caller]
-                # The copy's shell runs `cat > <folder>/source` and execs cat, so only the open file names the folder.
-                copy = subprocess.Popen(["sh", "-c", 'exec cat > "$1"', "copy", str(staged_source)],
-                                        stdin=subprocess.PIPE, start_new_session=True)
-                self.addCleanup(copy.kill)
-                assert copy.stdin is not None
-                copy.stdin.write(b"partial source")
-                copy.stdin.flush()
-                self.assertTrue(_wait_until(lambda: staged_source.exists() and staged_source.stat().st_size > 0))
+                copy_exit = root / "copy-exit"
+                # The copy's connection opens the source only once the cleanup is already looking for open files.
+                exit_file, feed = shlex.quote(str(copy_exit)), shlex.quote(str(root / "copy-feed"))
+                env = _with_tool(root, "lsof", (
+                    f'exec 3>&-; if [ ! -e {feed} ]; then mkfifo {feed}; (sleep 30 > {feed} 2>/dev/null &); '
+                    f'(sh -c {shlex.quote(copy_source_shell(self._scratch_job(scratch_dir)))} < {feed}; echo $? > {exit_file}) '
+                    f'< /dev/null > /dev/null 2>&1 & sleep 1; fi; exec {real_lsof} "$@"'
+                ))
 
-                cleanup(None)
+                self._folder_removals(root, scratch_dir)[caller](env)
 
-                self.assertTrue(staged_source.exists())
-                self.assertIsNone(copy.poll())
-
-                copy.stdin.close()
-                copy.wait(timeout=10)
-                cleanup(None)
-
-                self.assertFalse(scratch_dir.exists())
+                self.assertTrue(_wait_until(copy_exit.exists, timeout=5), "the late copy is still writing")
+                self.assertNotEqual(copy_exit.read_text().strip(), "0")
 
     def test_a_folder_stays_while_open_files_cannot_be_listed(self) -> None:
         cases = {
@@ -401,7 +434,7 @@ class StagedHostTests(unittest.TestCase):
     def test_staged_job_copies_verifies_and_always_removes_the_scratch_directory(self) -> None:
         scripts, copies = self._run_staged_job(free_kib=10 * 1024 * 1024)
         self.assertTrue(scripts[0].startswith("root="), "the sweep must run before the job stages anything")
-        self.assertTrue(any(copy.startswith("cat > ") for copy in copies))
+        self.assertTrue(any(SOURCE_COPY_CLAIM in copy for copy in copies))
 
     def test_an_encode_that_stops_early_keeps_its_folder_and_holds_while_its_writer_is_unproven(self) -> None:
         lost = EncodeConnectionLostError("Lost the connection to Stage Host. It will be tried again.")

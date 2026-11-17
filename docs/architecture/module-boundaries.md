@@ -333,10 +333,15 @@ Guidance:
   - staged scratch folders (`encoding/staged_host.py`) follow the same rule
     in all three cleanups: the controller, the keeper's exit and the sweep
     remove a folder only once that scoped stop proves its writer ended and
-    `lsof` shows nothing open under it (the source copy's `cat` is named only
-    by its open file); an unproven scratch folder is saved as the hold's
-    scope, and the same recheck releases the file once its computer shows the
-    writer ended
+    `lsof` shows nothing open under it, not even a file already unlinked from
+    it (the source copy's `cat` is named only by its open file). The copy
+    opens its file and then claims the folder; every cleanup claims it first,
+    so a copy that starts once a cleanup is looking stops without writing. An
+    unproven scratch folder is saved as the hold's scope, and the same
+    recheck releases the file once its computer shows the writer ended. The
+    proof covers processes of the SSH account on that computer: a scratch
+    folder is local disk owned by that account, so other accounts and other
+    computers sharing a mount are out of its scope
   - a sample whose run was left unconfirmed keeps that scope in its result;
     while it does, neither a retry nor a new sample for that folder or file
     starts, and the same queue recheck clears the hold once the run is shown

@@ -221,11 +221,14 @@ REMOTE_QUALITY_TEMP_FILES_LEFT_NOTE = "Its temporary files could not be removed;
 #
 # It prints the marker only when a fresh listing shows nothing naming the folder, none of the
 # collected processes still running (an exited zombie is not running), and lsof shows no process
-# with a file open under the folder. That last check finds a writer whose command line never named
-# the folder, such as `cat > <folder>/source` once its shell has run cat in its place; such a
-# process is left running and the folder just stays. lsof exits 1 both when nothing is open and
-# on some errors, so only an exit of 0 or 1 with nothing on stderr counts; a missing lsof or any
-# warning is no proof.
+# with a file open under the folder, including a file already unlinked from it (`+L1`, matched by
+# the folder's path or its physical path, since macOS reports /var as /private/var). That last
+# check finds a writer whose command line never named the folder, such as `cat > <folder>/source`
+# once its shell has run cat in its place; such a process is left running and the folder just
+# stays. lsof exits 1 both when nothing is open and on some errors, so only an exit of 0 or 1 with
+# nothing on stderr counts; a missing lsof or any warning is no proof. Only processes of this
+# account on this computer are seen: the folder is this account's own work folder, and a writer on
+# another computer sharing the same storage is out of scope.
 # Every step fails closed: a failed ps, a listing that does not show this script itself, or a
 # failed awk is never proof.
 # Processes in this script's own group (its shells, whose arguments also name the folder) are
@@ -296,12 +299,17 @@ settled() {
   return 0
 }
 nothing_open_under_target() {
-  [ -e "$target" ] || return 0
-  report=$( { errors=$(lsof -n -P -Fp +D "$target" 2>&1 >&3); echo "lsof-exit $? ${errors:+stderr}"; } 3>&1 ) || return 1
-  printf '%s\\n' "$report" | awk '
-    /^p[0-9]+$/ { held = 1 }
-    $1 == "lsof-exit" { answered = NF == 2 && ($2 == 0 || $2 == 1) }
-    END { exit held || !answered }'
+  physical=$(cd "${target%/*}" 2>/dev/null && pwd -P) && physical="$physical/${target##*/}" || physical=$target
+  report=$( {
+    errors=$( { [ ! -e "$target" ] || lsof -n -P -Fp +D "$target"; } 2>&1 >&3); echo "lsof-exit $? ${errors:+stderr}"
+    errors=$(lsof -n -P -Fpn +L1 2>&1 >&3); echo "lsof-exit $? ${errors:+stderr}"
+  } 3>&1 ) || return 1
+  printf '%s\\n' "$report" | TARGET="$target" PHYSICAL="$physical" awk '
+    function under(name, folder) { return index(name, folder "/") == 1 }
+    $1 == "lsof-exit" { answers++; failed = failed || NF != 2 || ($2 != 0 && $2 != 1); next }
+    answers == 0 && /^p[0-9]+$/ { held = 1 }
+    answers == 1 && /^n/ && (under(substr($0, 2), ENVIRON["TARGET"]) || under(substr($0, 2), ENVIRON["PHYSICAL"])) { held = 1 }
+    END { exit held || failed || answers != 2 }'
 }
 listing=$(snapshot) || exit 3
 own_group=$(printf '%s\\n' "$listing" | awk -v self="$self" '$1 == self { print $3 }') || exit 3
