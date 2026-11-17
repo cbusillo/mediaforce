@@ -10,7 +10,8 @@ Catalog refresh and evidence analysis are separate operations.
   reused until the source, analyzer, schema, or policy makes it non-current.
 - Expensive updates run only inside a bounded item, folder, or root batch.
   A batch a user prepares starts paused and runs when it is started; a
-  batch created because production is waiting on a file starts unpaused.
+  batch created because a sample or production is waiting on a file starts
+  unpaused.
 
 The web app's evidence-autostart worker runs any unpaused batch that has
 claimable work (see the just-in-time path below). Catalog scans never start
@@ -182,10 +183,10 @@ Sample and production actions use a separate just-in-time path. Missing or stale
 cadence holds back only the affected media items, adds those exact rows to the
 active batch at decision priority, and lets the rest of a production selection
 queue; the user sees each held item in Activity. A new batch created for a
-production run starts unpaused, and the web app's evidence-autostart worker
-runs any unpaused batch with claimable work, so held files are checked without
-an explicit analysis request. The global background pause, a paused batch,
-and cancellation still stop it. Sample checks still create a paused batch. A retained
+sample or production run starts unpaused, and the web app's evidence-autostart
+worker runs any unpaused batch with claimable work, so held files are checked
+without an explicit analysis request. The global background pause, a paused
+batch, and cancellation still stop it. A retained
 terminal failure is reported as a failure and requires an explicit item retry;
 repeating the blocked action does not reset its attempt budget. Fingerprint
 evidence remains advisory and never blocks sample or production queueing.

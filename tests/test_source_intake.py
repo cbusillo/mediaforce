@@ -344,7 +344,7 @@ def test_window_waits_do_not_unpair_eligible_remote_measurements(tmp_path: Path)
         rebuild_library_item_evidence_states(database)
         for requested_kind in EVIDENCE_KINDS:
             queue_decision_evidence_work(database, config, "tv/ready.mkv", library_item_ids=[ready], evidence_kind=requested_kind,
-                work_reason="operator_scope", require_measurement=True, priority=50, start_new_batch=True)
+                work_reason="operator_scope", require_measurement=True, priority=50)
         database.execute(update(library_item_evidence_state).where(
             library_item_evidence_state.c.library_item_id == waiting).values(work_priority=0))
     config.raw["remote_hosts"] = [{"host": "localhost", "mode": "local"}]
@@ -413,7 +413,7 @@ def test_a_remote_decision_takes_over_an_original_window_wait(tmp_path: Path, ea
             database.execute(update(library_item_evidence_state).values(work_batch_id="earlier-batch"))
         queue_decision_evidence_work(database, config, "tv/source.mkv", library_item_ids=[item_id],
             evidence_kind="media_fingerprint", work_reason="decision_required", priority=0,
-            require_measurement=True, start_new_batch=True)
+            require_measurement=True)
         assert original_check_wait_reasons(database) == []
         assert runnable_evidence_work_count(database) == 1
         assert database.execute(select(library_item_evidence_state.c.attempt_count)).scalar_one() == (2 if claimed_wait else 0)
@@ -479,7 +479,7 @@ def test_remote_check_failure_keeps_its_backoff_when_a_request_changes_priority(
             database.execute(update(library_item_evidence_state).values(work_batch_id="earlier-batch"))
         queue_decision_evidence_work(database, config, "tv/source.mkv", library_item_ids=[item_id],
             evidence_kind="media_fingerprint", work_reason="decision_required", priority=0,
-            require_measurement=True, start_new_batch=True)
+            require_measurement=True)
         state = database.execute(select(library_item_evidence_state)).mappings().one()
         assert state["work_status"] == "retry_wait"
         assert state["retry_not_before"] == retry_at
@@ -677,7 +677,7 @@ def test_current_original_receipts_finish_without_a_computer(tmp_path: Path) -> 
             assert state["work_status"] == "completed"
             if qualification == 0:
                 queue_decision_evidence_work(db, config, "tv/source.mkv", library_item_ids=[item_id], evidence_kind="media_fingerprint",
-                    work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, require_measurement=True, restart_terminal=True, start_new_batch=True)
+                    work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, require_measurement=True, restart_terminal=True)
 
 
 def test_prefetch_skips_libraries_waiting_for_a_computer(tmp_path: Path) -> None:
@@ -1110,7 +1110,6 @@ def test_newer_measurement_after_stat_change_replaces_old_lineage(tmp_path: Path
             evidence_kind="media_fingerprint",
             work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
             require_measurement=True,
-            start_new_batch=True,
         )
         database.execute(
             update(library_item_evidence_state)
