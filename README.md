@@ -15,8 +15,8 @@ some shows need more, and your results will vary.
 ## What it does
 
 - **Looks.** You decide once how each kind of content should look, by
-  watching a short sample side by side with the original: one look for live
-  action and one for cartoons. Movies use the live action look. Each file is
+  watching a short sample side by side with the original. One look covers
+  live action, movies included; cartoons are approved one show at a time. Each file is
   then encoded to fit that look and measured before it is published.
 - **Checked, one file at a time.** Every episode or movie is encoded, checked
   and published on its own. A problem with one file stays with that file;
@@ -70,7 +70,7 @@ some shows need more, and your results will vary.
 A notarized Mac app, with the server built in and automatic updates, will be
 published on GitHub Releases.
 
-> **Download:** not available yet. RELEASE-LINK-PLACEHOLDER (replace this line with the GitHub Releases link)
+> **Download:** not available yet.
 
 ### From source
 
@@ -91,12 +91,13 @@ build has limits: macOS sends notifications only for an app signed with a
 Developer ID, and the server runs until you stop it
 (`scripts/mediaforce-dev.sh stop`) instead of starting at login. The
 maintainer's signed build and login service come from
-`scripts/deploy-controller.sh`, which signs with his Apple Developer team.
+`scripts/deploy-controller.sh`, which signs with the maintainer's Apple
+Developer team.
 
 ## Honest limits
 
 - **It is built for one library.** Mediaforce is the maintainer's own tool,
-  tuned to his taste: about 300 MB for a 45-minute 1080p episode, and 4K
+  tuned to the maintainer's taste: about 300 MB for a 45-minute 1080p episode, and 4K
   brought down to 1080p unless a look says to keep it. Change the size goal
   and tallest picture in Settings if you want bigger files.
 - **It is early.** There is no released build yet, and screens and settings
