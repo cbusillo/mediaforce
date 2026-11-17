@@ -90,11 +90,11 @@ def local_stage(run: dict[str, Any], *, fault: str | None = None, free_kib: int 
 
     def popen(argv: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
         script = argv[-1]
-        if script.startswith("cat >") and fault in {"full", "disconnect"}:
+        if script.startswith("exec 3>") and fault in {"full", "disconnect"}:
             detail = "No space left on device" if fault == "full" else "Connection reset by peer"
             script = f"cat >/dev/null; echo '{detail}' >&2; exit 1"
         process = subprocess.Popen(["sh", "-c", script], **kwargs)
-        if script.startswith("cat >") and fault == "cancelcopy":
+        if script.startswith("exec 3>") and fault == "cancelcopy":
             pipe = process.stdin
             assert pipe is not None
             cancelled_pipe = Mock(wraps=pipe)

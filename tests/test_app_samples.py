@@ -238,6 +238,17 @@ def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_di
         assert json.loads(refused.body) == {"ok": True, "compressing": False, "reason": reason}
 
 
+def test_making_a_sample_again_after_a_computer_check_is_the_owners_release_of_its_hold() -> None:
+    released: list[str] = []
+    for action, expected in (("check_computer", [PREFIX]), ("make_sample", []), ("retry_sample", [])):
+        released.clear()
+        make_sample(
+            _folder(), _status("needs_help", action), None,
+            ai_tune=lambda *_args: {"ok": True}, retry_saved=lambda *_args: {"ok": True}, release_hold=released.append,
+        )
+        assert released == expected, action
+
+
 def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() -> None:
     calls: list[tuple[Any, ...]] = []
 

@@ -35,7 +35,7 @@ from mediaforce.hosts.transport import keep_awake_while_running
 STAGED_JOB_KEY = "staged_job"
 SCRATCH_DIR_PREFIX = ".mediaforce-staged-"
 KEEPER_PID_FILE = "keeper.pid"
-# Whichever comes first, the source copy or a cleanup, makes this folder; the other then finds it made.
+# The source copy and every cleanup each try to make this folder. Only the copy that makes it first may write.
 SOURCE_COPY_CLAIM = "source-copy.claim"
 STAGED_SOURCE_STEM = "source"
 STAGED_OUTPUT_STEM = "output"

@@ -342,10 +342,14 @@ Guidance:
     proof covers processes of the SSH account on that computer: a scratch
     folder is local disk owned by that account, so other accounts and other
     computers sharing a mount are out of its scope
-  - a sample whose run was left unconfirmed keeps that scope in its result;
-    while it does, neither a retry nor a new sample for that folder or file
-    starts, and the same queue recheck clears the hold once the run is shown
-    ended
+  - a remote sample saves its run's own work folder before the run starts
+    (its scratch folder, or a `.mediaforce-ab-av1-` folder holding each
+    quality command's folder). A sample left unconfirmed, by a failure, a
+    Stop or a Mediaforce restart, keeps that folder as its hold. While held,
+    no retry, new sample or queued sample of that file starts; the same queue
+    recheck clears the hold once the run is shown ended. A hold that cannot be
+    checked, or is still unproven after a day, goes to the owner, and making
+    the sample again from there is the owner's release
 - `status_helpers.py` and `status_runtime.py`
   - host probe scripts, capability checks, and status parsing
   - successful status probes remain distinct from full encode readiness, so a

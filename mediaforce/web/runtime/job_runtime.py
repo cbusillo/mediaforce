@@ -20,7 +20,8 @@ from sqlalchemy import select
 from sqlalchemy import update
 
 from mediaforce.tuning.calibration_jobs import RUNNING_JOB_STATUSES, claim_next_queued_calibration_job, \
-    holds_an_unproven_run, queued_job_hosts, queued_jobs_waiting_to_retry, \
+    holds_an_unproven_run, queued_job_hosts, queued_jobs_held_by_unproven_runs, queued_jobs_waiting_to_retry, \
+    unproven_remote_run, \
     load_active_overlapping_job, \
     load_latest_failed_sample_job, \
     load_latest_failed_target_size_sample_job, load_latest_job, load_latest_overlapping_job, \
@@ -534,6 +535,8 @@ def expire_calibration_job(
         "finished_at": deps.now_iso(),
         "error": "Calibration was interrupted by a web process restart.",
     }
+    if (held := unproven_remote_run(job)) is not None:
+        expired["result"] = held
     save_job_state(connection, config, prefix, expired, deps)
     return expired
 
@@ -1011,6 +1014,7 @@ def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRu
             )
             not_startable = (
                 outside_window + queued_jobs_waiting_to_retry(connection, lane=lane, now=now) + still_ending
+                + queued_jobs_held_by_unproven_runs(connection, lane=lane)
             )
             while running_by_lane[lane] < capacity:
                 started_at = deps.now_iso()

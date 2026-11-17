@@ -1,9 +1,10 @@
 """A sample that loses its computer tries again by itself, and asks the owner only when it must."""
 
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from unittest.mock import patch
 
@@ -19,7 +20,7 @@ from mediaforce.hosts.types import HostReadinessError, HostStatus
 from mediaforce.tuning.calibration_jobs import holds_an_unproven_run, load_job, save_job, update_job_telemetry
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from mediaforce.web import app as web_app
-from mediaforce.web.runtime import job_runtime
+from mediaforce.web.runtime import calibration_runtime, job_runtime
 from mediaforce.web.runtime.calibration_runtime import SAMPLE_COMPUTER_RETRY_BASE_DELAY_SECONDS, \
     SAMPLE_COMPUTER_RETRY_LIMIT, CalibrationRunDeps, run_calibration_job
 
@@ -329,7 +330,65 @@ class SampleComputerRetryTests(unittest.TestCase):
         job = self._job()
         self.assertEqual(job["status"], "stopped")
         self.assertTrue(holds_an_unproven_run(job))
-        self.assertEqual(job["result"]["scoped_temp_dir"], unconfirmed.scoped_temp_dir)
+        self._assert_holds_its_own_run_folder(job)
+
+    def _assert_holds_its_own_run_folder(self, job: dict[str, Any]) -> None:
+        folder = Path(job["result"]["scoped_temp_dir"])
+        self.assertEqual(folder.parent, self.root / "staging")
+        self.assertRegex(folder.name, r"^\.mediaforce-ab-av1-[0-9a-f]{32}$")
+        self.assertEqual(job["result"]["host_key"], HOST["key"])
+
+    def test_a_remote_sample_cut_off_by_a_restart_is_held_with_the_folder_saved_before_it_ran(self) -> None:
+        self._save_job(status="running")
+        running: dict[str, Any] = {}
+
+        def _search_while_running(*_args: object, **_kwargs: object) -> None:
+            running.update(self._job())
+            raise QualitySearchError("ab-av1: no crf found")
+
+        self._run(self._deps(search=_search_while_running))
+        with open_db(self.config.paths.db_path) as connection:
+            job_runtime.expire_calibration_job(connection, self.config, PREFIX, running, web_app._job_runtime_deps())
+            connection.commit()
+
+        job = self._job()
+        self.assertEqual(job["status"], "failed")
+        self.assertTrue(holds_an_unproven_run(job))
+        self._assert_holds_its_own_run_folder(job)
+
+    def test_a_queued_sample_of_a_held_file_does_not_start_until_the_hold_clears(self) -> None:
+        held_result = {"failure_kind": "containment_unproven", "remote_process_contained": False,
+                       "scoped_temp_dir": f"/staging/.mediaforce-ab-av1-{'a' * 32}", "host_key": HOST["key"]}
+        with open_db(self.config.paths.db_path) as connection:
+            for job_id, prefix, status, result in (("held-elsewhere", "tv/Futurama", "stopped", held_result),
+                                                   (JOB_ID, PREFIX, "queued", None)):
+                save_job(connection, {"job_id": job_id, "prefix": prefix, "status": status, "lane": "sample",
+                                      "action": "baseline", "host": HOST, "policy": POLICY,
+                                      "sample_item": {"library_item_id": 7}, "result": result,
+                                      "created_at": NOW, "updated_at": NOW})
+            connection.commit()
+
+        self.assertEqual(self._queue_pass(now=NOW), [])
+
+        with open_db(self.config.paths.db_path) as connection:
+            held = load_job(connection, "held-elsewhere")
+            assert held is not None
+            save_job(connection, {**held, "result": {**held_result, "remote_process_contained": True}})
+            connection.commit()
+
+        self.assertEqual(self._queue_pass(now=NOW), [JOB_ID])
+
+    def test_a_finished_remote_sample_removes_its_run_folder_on_that_computer(self) -> None:
+        folder = self.root / "staging" / f".mediaforce-ab-av1-{'b' * 32}"
+        (folder / f".mediaforce-ab-av1-{'c' * 32}").mkdir(parents=True)
+
+        def _on_that_computer(_host: object, command: list[str], *_args: object, **_kwargs: object) -> Any:
+            return subprocess.run(command, capture_output=True, text=True, timeout=30)
+
+        with patch.object(calibration_runtime, "run_remote_command", side_effect=_on_that_computer):
+            calibration_runtime._remove_finished_run_folder(dict(HOST), PurePosixPath(folder))
+
+        self.assertFalse(folder.exists())
 
     def test_the_owners_stop_is_not_undone_by_a_retry(self) -> None:
         with self.subTest("stop ends the link"):

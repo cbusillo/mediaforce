@@ -137,6 +137,7 @@ def make_sample(
         ai_tune: AiTuneFn,
         retry_saved: RetrySampleFn,
         keep_full_height: bool | None = None,
+        release_hold: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Make the sample again: retry the saved request, or ask for a new one at the chosen or current size.
 
@@ -147,6 +148,8 @@ def make_sample(
     action = object_dict(status.get("page_state")).get("primary_action")
     if size is None and action == "choose_size":
         return {"ok": False, "code": "choose_size"}
+    if action == "check_computer" and release_hold is not None:
+        release_hold(prefix)
     result: Mapping[str, Any] = {}
     retry = object_dict(status.get("retryable_sample_job"))
     picture = _picture(folder)

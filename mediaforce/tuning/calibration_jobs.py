@@ -28,6 +28,11 @@ SUCCESSFUL_SAMPLE_JOB_STATUSES = ("completed", "pending_review", "superseded")
 # times it has tried again, when it may next start, and which computer it waits for.
 COMPUTER_RETRY_RESULT_KEY = "computer_retry"
 ENDED_JOB_STATUSES = ("failed", "stopped")
+# A running sample's result holds the work folder its run uses on another computer, saved before that run starts.
+REMOTE_RUN_RESULT_KEY = "remote_run"
+# A held sample's result says when its hold went to the owner, and when the owner released it.
+HOLD_ASKED_KEY = "asked_at"
+HOLD_RELEASED_KEY = "released_by_owner_at"
 
 
 def load_latest_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
@@ -164,7 +169,12 @@ def holds_an_unproven_run(job: Mapping[str, Any]) -> bool:
     result = object_dict(job.get("result"))
     return (str(job.get("status") or "") in ENDED_JOB_STATUSES
             and result.get("failure_kind") == CONTAINMENT_UNPROVEN_FAILURE_KIND
-            and result.get("remote_process_contained") is not True)
+            and result.get("remote_process_contained") is not True
+            and not result.get(HOLD_RELEASED_KEY))
+
+
+def hold_asks_the_owner(job: Mapping[str, Any]) -> bool:
+    return holds_an_unproven_run(job) and bool(object_dict(job.get("result")).get(HOLD_ASKED_KEY))
 
 
 def load_jobs_holding_unproven_runs(connection: DBClient) -> list[dict[str, Any]]:
@@ -176,12 +186,42 @@ def load_jobs_holding_unproven_runs(connection: DBClient) -> list[dict[str, Any]
     return [job for job in map(_hydrate_job, rows) if holds_an_unproven_run(job)]
 
 
+def _holds_sample_of(held: Mapping[str, Any], prefix: str, library_item_id: int) -> bool:
+    held_item_id = int_value(object_dict(held.get("sample_item")).get("library_item_id"))
+    if held_item_id > 0 and library_item_id > 0:
+        return held_item_id == library_item_id
+    return held.get("prefix") == prefix
+
+
 def load_job_holding_sample(connection: DBClient, prefix: str, library_item_id: int) -> dict[str, Any] | None:
+    return next((job for job in load_jobs_holding_unproven_runs(connection)
+                 if _holds_sample_of(job, prefix, library_item_id)), None)
+
+
+def queued_jobs_held_by_unproven_runs(connection: DBClient, *, lane: str) -> tuple[str, ...]:
+    held = load_jobs_holding_unproven_runs(connection)
+    if not held:
+        return ()
+    queued = connection.execute(
+        select(calibration_jobs.c.job_id, calibration_jobs.c.prefix, calibration_jobs.c.sample_item_json)
+        .where(calibration_jobs.c.status == "queued")
+        .where(calibration_jobs.c.lane == lane)
+    ).mappings().fetchall()
+    return tuple(
+        str(row["job_id"]) for row in queued
+        if any(_holds_sample_of(job, str(row["prefix"]), int_value(object_dict(
+            _loads_optional(row["sample_item_json"], default={})).get("library_item_id"))) for job in held)
+    )
+
+
+def release_holds_the_owner_was_asked_about(connection: DBClient, prefix: str, *, released_at: str) -> None:
     for job in load_jobs_holding_unproven_runs(connection):
-        held_item_id = int_value(object_dict(job.get("sample_item")).get("library_item_id"))
-        if job["prefix"] == prefix or 0 < library_item_id == held_item_id:
-            return job
-    return None
+        if job["prefix"] == prefix and hold_asks_the_owner(job):
+            result = {**object_dict(job.get("result")), HOLD_RELEASED_KEY: released_at}
+            connection.execute(
+                update(calibration_jobs).where(calibration_jobs.c.job_id == job["job_id"])
+                .values(result_json=json.dumps(result, sort_keys=True), updated_at=released_at)
+            )
 
 
 def load_job(connection: DBClient, job_id: str) -> dict[str, Any] | None:
@@ -360,6 +400,29 @@ def finish_running_job(
         select(calibration_jobs.c.status).where(calibration_jobs.c.job_id == job_id)
     ).scalar_one_or_none()
     return str(current) if current is not None else None
+
+
+def record_remote_run(connection: DBClient, job_id: str, *, scoped_temp_dir: str, host_key: str) -> None:
+    current = connection.execute(
+        select(calibration_jobs.c.result_json)
+        .where(calibration_jobs.c.job_id == job_id)
+        .where(calibration_jobs.c.status.in_(tuple(RUNNING_JOB_STATUSES)))
+    ).scalar_one_or_none()
+    result = object_dict(_loads_optional(current, default={}))
+    result[REMOTE_RUN_RESULT_KEY] = {"scoped_temp_dir": scoped_temp_dir, "host_key": host_key}
+    connection.execute(
+        update(calibration_jobs)
+        .where(calibration_jobs.c.job_id == job_id)
+        .where(calibration_jobs.c.status.in_(tuple(RUNNING_JOB_STATUSES)))
+        .values(result_json=json.dumps(result, sort_keys=True))
+    )
+
+
+def unproven_remote_run(job: Mapping[str, Any]) -> dict[str, Any] | None:
+    remote_run = object_dict(object_dict(job.get("result")).get(REMOTE_RUN_RESULT_KEY))
+    if not remote_run.get("scoped_temp_dir"):
+        return None
+    return {"failure_kind": CONTAINMENT_UNPROVEN_FAILURE_KIND, "remote_process_contained": False, **remote_run}
 
 
 def keep_unproven_run_on_ended_job(connection: DBClient, job_id: str, *, error: str, result: dict[str, Any]) -> None:

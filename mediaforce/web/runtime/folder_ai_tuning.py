@@ -674,18 +674,8 @@ def folder_ai_tune_preview_action(
         sample_item = deps.sample_item(connection, config, normalized_prefix)
         if sample_item is None:
             raise HTTPException(status_code=404, detail=f"No sample item found for {normalized_prefix}")
-        if (held_refusal := _held_sample_refusal(connection, normalized_prefix, sample_item)) is not None:
-            return held_refusal
-        cadence_blocker = cadence_evidence_blocker(
-            connection,
-            config,
-            normalized_prefix,
-            library_item_ids=[int(sample_item.get("library_item_id") or 0)],
-            decision_label="queueing this sample",
-            work_reason="sample_safety",
-        )
-        if cadence_blocker is not None:
-            return cadence_blocker
+        if (blocker := _sample_start_blocker(connection, config, normalized_prefix, sample_item)) is not None:
+            return blocker
         calibration = deps.load_calibration_state(config, normalized_prefix)
         resolved_policy = object_dict(sample_item.get("resolved_policy"))
         current_policy = _tuning_base_policy(resolved_policy, calibration)
@@ -799,18 +789,8 @@ def folder_ai_tune_confirm_action(
         sample_item = deps.sample_item(connection, config, normalized_prefix)
         if sample_item is None:
             raise HTTPException(status_code=404, detail=f"No sample item found for {normalized_prefix}")
-        if (held_refusal := _held_sample_refusal(connection, normalized_prefix, sample_item)) is not None:
-            return held_refusal
-        cadence_blocker = cadence_evidence_blocker(
-            connection,
-            config,
-            normalized_prefix,
-            library_item_ids=[int(sample_item.get("library_item_id") or 0)],
-            decision_label="queueing this sample",
-            work_reason="sample_safety",
-        )
-        if cadence_blocker is not None:
-            return cadence_blocker
+        if (blocker := _sample_start_blocker(connection, config, normalized_prefix, sample_item)) is not None:
+            return blocker
         calibration = deps.load_calibration_state(config, normalized_prefix)
         if action == "baseline" and calibration is not None:
             return {
@@ -946,6 +926,19 @@ def folder_ai_tune_confirm_action(
     }
 
 
+def _sample_start_blocker(
+        connection: DBClient, config: MediaforceConfig, normalized_prefix: str, sample_item: dict[str, Any],
+) -> dict[str, Any] | None:
+    return _held_sample_refusal(connection, normalized_prefix, sample_item) or cadence_evidence_blocker(
+        connection,
+        config,
+        normalized_prefix,
+        library_item_ids=[int(sample_item.get("library_item_id") or 0)],
+        decision_label="queueing this sample",
+        work_reason="sample_safety",
+    )
+
+
 def _held_sample_refusal(
         connection: DBClient, normalized_prefix: str, sample_item: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -1003,16 +996,8 @@ def _retry_latest_sample_job(
             stored_sample_item = object_dict(current_sample_item)
         elif not stored_sample_item or not int(stored_sample_item.get("library_item_id") or 0):
             raise HTTPException(status_code=404, detail=f"No current sample item found for {normalized_prefix}")
-        cadence_blocker = cadence_evidence_blocker(
-            connection,
-            config,
-            normalized_prefix,
-            library_item_ids=[int(stored_sample_item.get("library_item_id") or 0)],
-            decision_label="queueing this sample",
-            work_reason="sample_safety",
-        )
-        if cadence_blocker is not None:
-            return cadence_blocker
+        if (blocker := _sample_start_blocker(connection, config, normalized_prefix, stored_sample_item)) is not None:
+            return blocker
         prepared_sample_item, target_size_blocker = _prepare_sample_item(
             config,
             stored_sample_item,

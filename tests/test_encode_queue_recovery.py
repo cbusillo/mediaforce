@@ -91,7 +91,7 @@ from mediaforce.encoding.staged_host import SCRATCH_DIR_PREFIX, ScratchStillInUs
 from mediaforce.hosts.types import SOURCE_ROOT_READ_MISSING_ISSUE, STAGING_ROOT_WRITE_MISSING_ISSUE, \
     VMAF_MODEL_MISSING_ISSUE, is_vmaf_model_load_failure
 from mediaforce.remote import HostReadinessError, HostStatus
-from mediaforce.tuning.calibration_jobs import holds_an_unproven_run, list_queue_summary, \
+from mediaforce.tuning.calibration_jobs import hold_asks_the_owner, holds_an_unproven_run, list_queue_summary, \
     load_job as load_calibration_job, \
     load_active_overlapping_job as load_active_overlapping_calibration_job, \
     load_latest_job as load_latest_calibration_job, \
@@ -4175,6 +4175,41 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 self.assertEqual(computer.quality_runs_stopped, [scope] if releasable else [])
                 if releasable:
                     self.assertNotIn(encoding_quality.CONTAINMENT_UNPROVEN_OWNER_STEP, checked["error"])
+
+    def test_a_held_sample_goes_to_the_owner_when_it_cannot_be_checked_or_a_day_has_passed(self) -> None:
+        scope = self._scoped_quality_run()
+        configured = [{"host": self._QUALITY_TIMEOUT_SSH_HOST, "label": "Remote A", "media_access": "mounted"}]
+        a_day_ago = (datetime.now(tz=UTC) - encode_runtime.UNCONFIRMED_RUN_ASK_AFTER - timedelta(minutes=1)).isoformat()
+        just_now = datetime.now(tz=UTC).isoformat()
+        for label, remote_hosts, finished_at, asks in (
+                ("its computer was removed", [], just_now, True),
+                ("its computer has not answered for a day", configured, a_day_ago, True),
+                ("its computer has not answered yet", configured, just_now, False),
+        ):
+            with self.subTest(label):
+                self.config.raw["remote_hosts"] = remote_hosts
+                held: dict[str, Any] = {
+                    "job_id": f"sample-{len(label)}", "prefix": f"tv/asked-{len(label)}", "status": "stopped",
+                    "lane": "sample", "action": "ai_tune", "sample_item": {"library_item_id": 7},
+                    "host": {"key": self._QUALITY_TIMEOUT_SSH_HOST, "label": "Remote A", "mode": "ssh"},
+                    "result": {"failure_kind": encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND,
+                               "remote_process_contained": False, "scoped_temp_dir": scope,
+                               "host_key": self._QUALITY_TIMEOUT_SSH_HOST},
+                    "error": str(self._unconfirmed_quality_run(scope)),
+                    "created_at": finished_at, "finished_at": finished_at,
+                }
+                computer = _SleepingComputer(self._QUALITY_TIMEOUT_SSH_HOST)
+                with self._quality_timeout_computer(computer.run_remote_command), \
+                        open_db(self.config.paths.db_path) as connection:
+                    save_calibration_job(connection, held)
+                    connection.commit()
+                    encode_runtime.reconcile_encode_jobs(
+                        connection, self.config, replace(web_app._encode_queue_runtime_deps(), scratch_ready_hosts={}))
+                    checked = load_calibration_job(connection, held["job_id"])
+                    assert checked is not None
+
+                self.assertTrue(holds_an_unproven_run(checked))
+                self.assertEqual(hold_asks_the_owner(checked), asks)
 
     def test_any_other_interruption_that_leaves_a_run_unconfirmed_waits_for_it_before_retrying(self) -> None:
         scope = self._scoped_quality_run()

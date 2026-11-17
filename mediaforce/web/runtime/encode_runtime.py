@@ -53,7 +53,8 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict, objec
 from mediaforce.encoding.duration_estimate import EncodeDurationEstimate, EncodeDurationSample, \
     estimate_encode_job_duration, estimate_fits_before_schedule_close, load_encode_duration_samples
 from mediaforce.encoding.free_space import CapacityCache, large_job_requires_serialization
-from mediaforce.tuning.calibration_jobs import load_job as load_calibration_job, load_jobs_holding_unproven_runs, \
+from mediaforce.tuning.calibration_jobs import HOLD_ASKED_KEY, load_job as load_calibration_job, \
+    load_jobs_holding_unproven_runs, \
     save_job as save_calibration_job
 from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND, CONTAINMENT_UNPROVEN_OWNER_STEP, \
     REMOTE_QUALITY_TIMEOUT_FAILURE_KIND, QualityTempSetupError, RemoteQualityTimeoutError, \
@@ -2455,11 +2456,16 @@ def _release_sample_holds_whose_run_ended(
             continue
         connection.commit()
         try:
-            _show_sample_run_ended(config, job)
+            computer, scope = _sample_run_to_check(config, job)
+            stop_timed_out_remote_quality_run(computer, scope, wake_before_connect=False)
+        except _SampleRunUncheckable:
+            checked = {**job, "result": _held_sample_checked(result, now, ask_the_owner=True)}
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
-            checked = {**job, "result": {**result, "checked_at": now.isoformat(timespec="seconds")}}
+            held_since = deps.parse_iso(job.get("finished_at")) or now
+            checked = {**job, "result": _held_sample_checked(
+                result, now, ask_the_owner=now - held_since >= UNCONFIRMED_RUN_ASK_AFTER)}
         else:
-            shown_ended = {key: value for key, value in result.items() if key != "checked_at"}
+            shown_ended = {key: value for key, value in result.items() if key not in {"checked_at", HOLD_ASKED_KEY}}
             checked = {
                 **job,
                 "result": {**shown_ended, "failure_kind": REMOTE_QUALITY_TIMEOUT_FAILURE_KIND, "remote_process_contained": True},
@@ -2468,18 +2474,29 @@ def _release_sample_holds_whose_run_ended(
         _save_unchanged_sample_job(connection, job, checked, deps)
 
 
-def _show_sample_run_ended(config: MediaforceConfig, job: Mapping[str, Any]) -> None:
+class _SampleRunUncheckable(RuntimeError):
+    pass
+
+
+def _held_sample_checked(result: dict[str, Any], now: datetime, *, ask_the_owner: bool) -> dict[str, Any]:
+    checked = {**result, "checked_at": now.isoformat(timespec="seconds")}
+    if ask_the_owner:
+        checked.setdefault(HOLD_ASKED_KEY, checked["checked_at"])
+    return checked
+
+
+def _sample_run_to_check(config: MediaforceConfig, job: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
     host = object_dict(job.get("host"))
     result = object_dict(job.get("result"))
     host_key = _recorded_host_key(host)
     configured = [object_dict(entry) for entry in config.remote_hosts if ssh_target_for_host(object_dict(entry)) == host_key]
     scope = str(result.get("scoped_temp_dir") or "")
     if not host_key or len(configured) != 1 or result.get("host_key") != host_key:
-        raise RuntimeError("Mediaforce's record of which computer made that sample is missing or does not match.")
+        raise _SampleRunUncheckable("Mediaforce's record of which computer made that sample is missing or does not match.")
     computer = {**configured[0], **host}
     if execution_mode_for_host(computer) != "ssh" or not scope or not _is_its_own_work_folder(config, computer, scope):
-        raise RuntimeError("The saved sample run does not match its computer and work folder.")
-    stop_timed_out_remote_quality_run(computer, scope, wake_before_connect=False)
+        raise _SampleRunUncheckable("The saved sample run does not match its computer and work folder.")
+    return computer, scope
 
 
 def _save_unchanged_sample_job(

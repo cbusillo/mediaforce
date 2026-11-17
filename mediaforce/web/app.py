@@ -26,7 +26,7 @@ from sqlalchemy import select
 from mediaforce.core.audio_presets import AUDIO_PRESETS
 from mediaforce.advisor import TuningPolicyResponse
 from mediaforce.advising.routing import advisor_routing_from_config
-from mediaforce.tuning.calibration_jobs import load_job, \
+from mediaforce.tuning.calibration_jobs import load_job, release_holds_the_owner_was_asked_about, \
     list_queue_summary, sample_failures_in_a_row, update_job_telemetry
 from mediaforce.tuning.quality_observations import (
     backfill_quality_search_observations,
@@ -2343,8 +2343,13 @@ def create_app(
             return {"ok": False, "code": "refused"}
         return make_sample(
             *payloads, size, balance, ai_tune=_folder_ai_tune_action, retry_saved=_folder_ai_tune_confirm_action,
-            keep_full_height=keep_full_height,
+            keep_full_height=keep_full_height, release_hold=_release_sample_hold_for_the_owner,
         )
+
+    def _release_sample_hold_for_the_owner(normalized_prefix: str) -> None:
+        with open_db(config.paths.db_path) as connection:
+            release_holds_the_owner_was_asked_about(connection, normalized_prefix, released_at=_now_iso())
+            connection.commit()
 
     register_app_window_routes(
         app,

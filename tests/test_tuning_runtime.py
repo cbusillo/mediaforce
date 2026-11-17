@@ -59,7 +59,7 @@ from mediaforce.tuning.tuning_memory import (
 )
 from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_risk_public_view, \
     with_quality_risk_intent
-from mediaforce.tuning.calibration_jobs import list_queue_summary, load_job, \
+from mediaforce.tuning.calibration_jobs import list_queue_summary, load_job, load_job_holding_sample, \
     load_latest_failed_target_size_sample_job, sample_failures_in_a_row, save_job, update_job_telemetry
 from mediaforce.tuning.compression_intent import CompressionIntentV1
 from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND, REMOTE_QUALITY_TIMEOUT_FAILURE_KIND
@@ -707,6 +707,38 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertNotIn("heartbeat_at", saved_jobs[0])
         self.assertNotIn("progress", saved_jobs[0])
         self.assertNotEqual(saved_jobs[0]["job_id"], retryable_job["job_id"])
+
+    def test_a_held_file_is_not_retried_from_another_folders_saved_draft(self) -> None:
+        saved_jobs: list[dict[str, object]] = []
+        host = self._sample_host()
+        held = {**self._stopped_sample(host), "job_id": "job-held", "prefix": "tv/show",
+                "result": {"failure_kind": CONTAINMENT_UNPROVEN_FAILURE_KIND, "remote_process_contained": False,
+                           "scoped_temp_dir": f"/staging/.mediaforce-ab-av1-{'a' * 32}", "host_key": host.key}}
+        season_draft = {**self._stopped_sample(host), "prefix": "tv/show/Season 1"}
+        with open_db(self.config.paths.db_path) as connection:
+            save_job(connection, held)
+            connection.commit()
+        deps = replace(self._sample_retry_deps(season_draft, host, saved_jobs),
+                       load_job_state=lambda *_args, **_kwargs: None,
+                       load_retryable_sample_job_state=lambda *_args, **_kwargs: dict(season_draft))
+
+        refusal = folder_ai_tune_confirm_action(self.config, deps, "tv/show/Season 1", "")
+
+        self.assertFalse(refusal["ok"])
+        self.assertEqual(saved_jobs, [])
+
+    def test_a_hold_keeps_only_its_own_file_from_new_samples(self) -> None:
+        host = self._sample_host()
+        held = {**self._stopped_sample(host), "result": {
+            "failure_kind": CONTAINMENT_UNPROVEN_FAILURE_KIND, "remote_process_contained": False,
+            "scoped_temp_dir": f"/staging/.mediaforce-ab-av1-{'a' * 32}", "host_key": host.key}}
+        with open_db(self.config.paths.db_path) as connection:
+            save_job(connection, held)
+            connection.commit()
+            held_file = int(object_dict(held["sample_item"])["library_item_id"])
+
+            self.assertIsNotNone(load_job_holding_sample(connection, "tv/show/Season 1", held_file))
+            self.assertIsNone(load_job_holding_sample(connection, "tv/show", held_file + 1))
 
     def test_a_held_sample_is_not_retried_or_replaced_until_its_run_is_shown_ended(self) -> None:
         saved_jobs: list[dict[str, object]] = []

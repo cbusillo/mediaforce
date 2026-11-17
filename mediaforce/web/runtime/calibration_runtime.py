@@ -3,12 +3,14 @@ import logging
 import shutil
 import threading
 import time
+import shlex
+import subprocess
 import uuid
 from contextlib import nullcontext
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from sqlalchemy import delete
@@ -24,7 +26,8 @@ from mediaforce.encoding.helpers import resolve_item_source_path
 from mediaforce.encoding.quality import RemoteQualityTimeoutError, SampleEncodeResult, default_local_quality_temp_root, \
     quality_error_message, resolve_local_quality_temp_root
 from mediaforce.encoding.video_filters import build_video_filter, planned_output_dimensions
-from mediaforce.encoding.staged_host import STAGED_JOB_KEY, host_scratch_root, staged_job, staged_job_for_host
+from mediaforce.encoding.staged_host import REMOTE_CONTROL_TIMEOUT_SECONDS, STAGED_JOB_KEY, host_scratch_root, new_scratch_dir, \
+    remove_once_unused_shell, staged_job, staged_job_for_host
 from mediaforce.hosts.config import host_media_access_for_host, host_targets_current_machine, ssh_target_for_host
 from mediaforce.hosts.transport import EncodeConnectionLostError, ssh_host_unreachable
 from mediaforce.remote import execution_mode_for_host, run_remote_command, ssh_client_options
@@ -37,7 +40,7 @@ from mediaforce.tuning.content_intent_observations import (
 )
 from mediaforce.tuning.av1_cold_start import unavailable_av1_cold_start_prediction
 from mediaforce.tuning.calibration_jobs import COMPUTER_RETRY_RESULT_KEY, finish_running_job, holds_an_unproven_run, \
-    keep_unproven_run_on_ended_job, \
+    keep_unproven_run_on_ended_job, record_remote_run, \
     requeue_running_job_for_retry
 from mediaforce.tuning.target_size_search import MAX_TARGET_SIZE_CANDIDATES, TargetSizeSearchError
 from mediaforce.web.runtime.encode_runtime import running_staged_scratch_reservations
@@ -518,6 +521,7 @@ def run_calibration_job(
     library_item_id: int | None = None
     staged_artifact_snapshot: dict[str, Any] | None = None
     terminal_status: str | None = None
+    remote_run_folder: PurePosixPath | None = None
 
     try:
         telemetry.update("preparing_host")
@@ -578,6 +582,11 @@ def run_calibration_job(
                     deps=deps,
                 )
             else:
+                remote_run_folder = sample_remote_run_folder(config, host_data)
+                if remote_run_folder is not None:
+                    record_remote_run(connection, job_id, scoped_temp_dir=str(remote_run_folder),
+                                      host_key=str(host_data.get("key") or host_data.get("host") or ""))
+                    connection.commit()
                 calibration_payload, calibration_dir = run_sampled_calibration(
                     config=config,
                     prefix=prefix,
@@ -592,6 +601,7 @@ def run_calibration_job(
                     deps=deps,
                     progress_callback=telemetry.update,
                     calibration_job_id=job_id,
+                    remote_run_folder=remote_run_folder,
                 )
 
         telemetry.update("saving_results")
@@ -634,7 +644,7 @@ def run_calibration_job(
                         "failure_kind": unproven.failure_kind,
                         "host_key": unproven.host_key,
                         "remote_process_contained": False,
-                        "scoped_temp_dir": unproven.scoped_temp_dir,
+                        "scoped_temp_dir": _held_scope(remote_run_folder, unproven),
                     }}),
                 },
             )
@@ -664,7 +674,7 @@ def run_calibration_job(
                 "failure_message": str(exc),
                 "host_key": exc.host_key,
                 "remote_process_contained": exc.remote_process_contained,
-                "scoped_temp_dir": exc.scoped_temp_dir,
+                "scoped_temp_dir": _held_scope(remote_run_folder, exc),
             },
         )
     except Exception as exc:
@@ -697,6 +707,23 @@ def run_calibration_job(
         remove_path(manifest_path)
         remove_path(calibration_dir)
         purge_transient_artifacts(config, force=True)
+
+
+def sample_remote_run_folder(config: MediaforceConfig, host_data: dict[str, Any]) -> PurePosixPath | None:
+    sample_host = {**(_configured_host_record(config, host_data) or {}), **host_data}
+    if execution_mode_for_host(sample_host) != "ssh":
+        return None
+    if host_media_access_for_host(sample_host) == "stream":
+        scratch_root = host_scratch_root(sample_host)
+        return new_scratch_dir(scratch_root) if scratch_root is not None else None
+    quality_host = _quality_host_data(config, sample_host)
+    if execution_mode_for_host(quality_host) != "ssh":
+        return None
+    return PurePosixPath(_quality_temp_dir_for_host(config, quality_host)) / f".mediaforce-ab-av1-{uuid.uuid4().hex}"
+
+
+def _held_scope(remote_run_folder: PurePosixPath | None, unproven: RemoteQualityTimeoutError) -> str | None:
+    return str(remote_run_folder) if remote_run_folder is not None else unproven.scoped_temp_dir
 
 
 def _sample_computer_label(host: Mapping[str, Any]) -> str:
@@ -879,6 +906,7 @@ def run_sampled_calibration(
         source_path_override: Path | None = None,
         progress_callback: Callable[..., None] | None = None,
         calibration_job_id: str | None = None,
+        remote_run_folder: PurePosixPath | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
     sample_host = {**(_configured_host_record(config, host_data) or {}), **host_data}
     stage_source = (
@@ -910,16 +938,29 @@ def run_sampled_calibration(
         run_remote_command=run_remote_command,
         process_controller=process_controller,
         reserved_bytes=reserved_bytes,
+        scratch_dir=remote_run_folder,
     ) if stage_source else nullcontext(None)
     with stage as job:
         quality_host = {**sample_host, STAGED_JOB_KEY: job.to_payload()} if job is not None else sample_host
-        return _run_sampled_calibration_on_host(
+        sampled = _run_sampled_calibration_on_host(
             config=config, prefix=prefix, action=action, host_data=host_data,
             quality_host=quality_host, notes=notes, policy=policy, seed_metadata=seed_metadata,
             sample_item=sample_item, calibration_run_id=calibration_run_id,
             process_controller=process_controller, deps=deps,
             source_path_override=source_path_override, progress_callback=progress_callback,
+            quality_temp_dir=None if stage_source or remote_run_folder is None else Path(str(remote_run_folder)),
         )
+    if not stage_source and remote_run_folder is not None:
+        _remove_finished_run_folder(sample_host, remote_run_folder)
+    return sampled
+
+
+def _remove_finished_run_folder(host: dict[str, Any], folder: PurePosixPath) -> None:
+    try:
+        run_remote_command(host, ["sh", "-c", remove_once_unused_shell(shlex.quote(str(folder)))],
+                           REMOTE_CONTROL_TIMEOUT_SECONDS, wake_before_connect=False)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        LOGGER.warning("Could not remove the finished sample's work folder %s; the sweeps remove it later.", folder)
 
 
 def _run_sampled_calibration_on_host(
@@ -938,6 +979,7 @@ def _run_sampled_calibration_on_host(
         deps: CalibrationRunDeps,
         source_path_override: Path | None,
         progress_callback: Callable[..., None] | None,
+        quality_temp_dir: Path | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
     _ = prefix
     quality_host = _quality_host_data(config, quality_host)
@@ -956,7 +998,7 @@ def _run_sampled_calibration_on_host(
     staged = staged_job_for_host(quality_host)
     if staged is not None:
         quality_source_path = Path(str(staged.source_path))
-    quality_temp_dir = _quality_temp_dir_for_host(config, quality_host)
+    quality_temp_dir = quality_temp_dir or _quality_temp_dir_for_host(config, quality_host)
     video_policy = object_dict(policy.get("video"))
     stream_budget = deps.resolve_stream_budget_ledger(
         sample_item,
