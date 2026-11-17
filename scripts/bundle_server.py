@@ -19,12 +19,14 @@ from mediaforce.ops.login_item import MACOS_SIGNING_TEAM
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RPATH = re.compile(r"cmd LC_RPATH\s+cmdsize \d+\s+path (.*?) \(offset")
 MACHO_MAGICS = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
 
 
-def run(*arguments: str | Path) -> str:
+def run(*arguments: str | Path, env: dict[str, str] | None = None) -> str:
     try:
-        return subprocess.run([str(arg) for arg in arguments], check=True, text=True, capture_output=True, cwd=ROOT).stdout
+        return subprocess.run([str(arg) for arg in arguments], check=True, text=True, capture_output=True, cwd=ROOT,
+                              env=env).stdout
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f"{arguments[0]} failed: {exc.stderr or exc.stdout}") from exc
 
@@ -55,7 +57,7 @@ def verify_native_target(path: Path, architectures: set[str], minimum_os: str) -
     libraries = re.findall(r"cmd LC_(?:LOAD_DYLIB|LOAD_WEAK_DYLIB|REEXPORT_DYLIB|LOAD_UPWARD_DYLIB)\s+cmdsize \d+\s+name (.*?) \(offset", commands)
     if any(not relocatable_reference(library, path) for library in libraries):
         raise ValueError(f"Native dependency is not relocatable: {path}: {libraries}")
-    rpaths = re.findall(r"cmd LC_RPATH\s+cmdsize \d+\s+path (.*?) \(offset", commands)
+    rpaths = RPATH.findall(commands)
     if any(not relocatable_reference(value, path) for value in rpaths):
         raise ValueError(f"Native search path is not relocatable: {path}: {rpaths}")
 
@@ -137,11 +139,13 @@ def stage_server(app: Path, cache: Path, identity: str) -> None:
         requirements = build / "requirements.txt"
         run("uv", "export", "--locked", "--no-default-groups", "--no-emit-project", "--no-header",
             "--no-annotate", "--output-file", requirements)
+        # uv picks wheels for the macOS version this names, so it accepts any wheel the app's minimum can run.
+        target_os = {**os.environ, "MACOSX_DEPLOYMENT_TARGET": minimum_os}
         for architecture in sorted(architectures):
             platform = "aarch64-apple-darwin" if architecture == "arm64" else "x86_64-apple-darwin"
             run("uv", "pip", "install", "--target", server / architecture, "--requirements", requirements,
                 "--require-hashes", "--only-binary", ":all:", "--python-version", abi, "--python-platform", platform,
-                "--no-compile-bytecode", "--link-mode", "copy")
+                "--no-compile-bytecode", "--link-mode", "copy", env=target_os)
     for directory in (target / "bin" for target in server.iterdir()):
         if directory.is_dir():
             shutil.rmtree(directory)
@@ -158,6 +162,10 @@ def stage_server(app: Path, cache: Path, identity: str) -> None:
         path.unlink()
     images = native_files(contents)
     for path in images:
+        # Some wheels keep their build machine's library folder as a search path; nothing loads from there.
+        for value in RPATH.findall(run("otool", "-l", path)):
+            if value.startswith("/") and not relocatable_reference(value, path):
+                run("install_name_tool", "-delete_rpath", value, path)
         required = {path.relative_to(server).parts[0]} if path.is_relative_to(server) and path.relative_to(server).parts[0] in architectures else architectures
         verify_native_target(path, required, minimum_os)
         run("xcrun", "strip", "-S", path)
