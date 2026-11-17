@@ -422,7 +422,7 @@ def _run_evidence_claim(
                         sync_library_item_evidence_state(connection, cast(dict[str, Any], dict(item)), kind)
                         queue_decision_evidence_work(connection, config, item["rel_path"], library_item_ids=[claim.library_item_id],
                             evidence_kind=kind, work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, require_measurement=True,
-                            priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE, start_new_batch=True, manage_transaction=False)
+                            priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE, manage_transaction=False)
             if evidence.waiting_reason:
                 _defer_claim(config, claim, deps, work_status="retry_wait", reason=evidence.waiting_reason, restore_attempt=True)
                 return 1

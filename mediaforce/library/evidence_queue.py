@@ -264,15 +264,13 @@ def queue_decision_evidence_work(
         work_reason: str,
         updated_at: str | None = None,
         manage_transaction: bool = True,
-        start_new_batch: bool = False,
         require_measurement: bool = False,
         priority: int = EVIDENCE_WORK_PRIORITY_DECISION,
         restart_terminal: bool = False,
 ) -> dict[str, Any]:
     """Queue decision-priority evidence for the selected items.
 
-    A new batch starts paused for the operator unless start_new_batch is set, as it is for checks that
-    an approved production run is waiting on.
+    A new batch runs without anyone pressing Start, since a sample or production run is waiting on it.
     """
     scope_prefix = str(prefix or "").strip().strip("/")
     if not scope_prefix:
@@ -514,10 +512,10 @@ def queue_decision_evidence_work(
                 {
                     "queue_name": DEFAULT_EVIDENCE_QUEUE_NAME,
                     "batch_id": batch_id,
-                    "status": "queued" if start_new_batch else "paused",
+                    "status": "queued",
                     "scope": scope_payload,
                     "evidence_kinds": [selected_kind],
-                    "is_paused": not start_new_batch,
+                    "is_paused": False,
                     "cancel_requested": False,
                     "item_count": prepared_count,
                     "completed_count": 0,
