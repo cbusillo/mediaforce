@@ -328,6 +328,7 @@ def folder_page_state(
         sample_job=load_latest_job(connection, prefix),
         load_calibration=cached_calibration_loader(sources.load_calibration_state),
         review_blocked=_review_blocked_checker(config, sources.load_advice_state),
+        library_types=offered_library_types(config),
         staged_integrity=staged_integrity,
         lifecycle=lifecycle,
     )
@@ -348,6 +349,7 @@ def card_page_states(
     latest_jobs = load_latest_jobs_for_prefixes(connection, [prefix for prefix, _workflow, _lifecycle in card_list])
     load_calibration = cached_calibration_loader(sources.load_calibration_state)
     review_blocked = _review_blocked_checker(config, sources.load_advice_state)
+    library_types = offered_library_types(config)
     return {
         prefix: decide_page_state(_facts(
             connection,
@@ -358,6 +360,7 @@ def card_page_states(
             sample_job=latest_jobs.get(prefix),
             load_calibration=load_calibration,
             review_blocked=review_blocked,
+            library_types=library_types,
             lifecycle=lifecycle,
         )).to_payload()
         for prefix, workflow, lifecycle in card_list
@@ -374,6 +377,7 @@ def _facts(
         sample_job: Mapping[str, Any] | None,
         load_calibration: LoadCalibrationState,
         review_blocked: Callable[[EffectiveApproval], bool],
+        library_types: dict[str, str],
         staged_integrity: Mapping[str, Any] | None = None,
         lifecycle: Mapping[str, Any] | None = None,
 ) -> PageStateFacts:
@@ -386,7 +390,7 @@ def _facts(
             and str(object_dict(sample_job).get("status") or "") not in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES):
         if approval is None:
             # A season in a library not set to compress follows no look; it says so instead of offering a sample.
-            wait = (sample_wait(config, prefix, load_calibration) if look_group(offered_library_types(config), prefix) == prefix
+            wait = (sample_wait(config, prefix, load_calibration) if look_group(library_types, prefix) == prefix
                     else SampleWait(measurement_reasons=("measurement_library_disabled",)))
         elif (approval.kind is not None and approval.current and calibration is not None
               and not holds_approval(calibration)):

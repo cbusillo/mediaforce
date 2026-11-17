@@ -1,9 +1,15 @@
+import shutil
+import sqlite3
+from contextlib import closing
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, select
 
+from mediaforce.core.db_migrations import run_migrations
+from mediaforce.core.db_tables import series_metadata
+from mediaforce.library import calculation_reuse
 from mediaforce.library.calculation_reuse import LibraryCalculations, reuse_library_calculation
 
 
@@ -190,4 +196,65 @@ def test_rollback_after_a_write_inside_the_read_snapshot_does_not_reuse_the_writ
                 assert read() == "changed"
                 transaction.rollback()
             assert read() == "first"
+    engine.dispose()
+
+
+def test_reads_are_reused_across_requests_until_a_tracked_table_changes(tmp_path: Path) -> None:
+    db_path = tmp_path / "library.sqlite3"
+    run_migrations(db_path)
+    engine = create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as setup:
+        setup.exec_driver_sql("PRAGMA journal_mode=WAL")
+        setup.exec_driver_sql("CREATE TABLE work (progress INTEGER)")
+        setup.execute(series_metadata.insert().values(series_prefix="tv/Show", updated_at="first"))
+    calculations = LibraryCalculations()
+    query = select(series_metadata.c.series_prefix, series_metadata.c.updated_at).order_by(series_metadata.c.series_prefix)
+
+    def read() -> list[tuple[str, str]]:
+        with engine.connect() as connection, calculations.request(connection):
+            return reuse_library_calculation(connection, "series", (query,), (), lambda: [tuple(row) for row in connection.execute(query)])
+
+    def write(*statements: str) -> None:
+        with engine.begin() as writer:
+            for statement in statements:
+                writer.exec_driver_sql(statement)
+
+    with patch("mediaforce.library.calculation_reuse._saved_input_digest", wraps=calculation_reuse._saved_input_digest) as reads:
+        assert read() == [("tv/Show", "first")]
+        write("INSERT INTO work VALUES (1)")
+        assert read() == [("tv/Show", "first")]
+        assert reads.call_count == 1
+
+        write("INSERT INTO series_metadata (series_prefix, updated_at) VALUES ('tv/Other', 'added')")
+        assert read() == [("tv/Other", "added"), ("tv/Show", "first")]
+        write("UPDATE series_metadata SET updated_at = 'edited' WHERE series_prefix = 'tv/Show'")
+        assert read() == [("tv/Other", "added"), ("tv/Show", "edited")]
+        write("DELETE FROM series_metadata WHERE series_prefix = 'tv/Other'")
+        assert read() == [("tv/Show", "edited")]
+
+        with engine.connect() as reader:
+            triggers = reader.exec_driver_sql(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'series_metadata' AND name LIKE '%change_token%'"
+            ).scalars().all()
+        drop_triggers = [f"DROP TRIGGER series_metadata_change_token_{change}" for change in ("insert", "update", "delete")]
+        write(*drop_triggers)
+        assert read() == [("tv/Show", "edited")]
+        write("UPDATE series_metadata SET updated_at = 'untracked edit'")
+        assert read() == [("tv/Show", "untracked edit")]
+        write(*triggers)
+        assert read() == [("tv/Show", "untracked edit")]
+        write(*drop_triggers, "UPDATE series_metadata SET updated_at = 'edit while untracked'", *triggers)
+        assert read() == [("tv/Show", "edit while untracked")]
+
+        backup = tmp_path / "backup.sqlite3"
+        write("PRAGMA wal_checkpoint(TRUNCATE)")
+        shutil.copyfile(db_path, backup)
+        write("UPDATE series_metadata SET updated_at = 'live edit'")
+        assert read() == [("tv/Show", "live edit")]
+        with closing(sqlite3.connect(backup)) as restored:
+            restored.execute("UPDATE series_metadata SET updated_at = 'restored edit'")
+            restored.commit()
+        engine.dispose()
+        backup.replace(db_path)
+        assert read() == [("tv/Show", "restored edit")]
     engine.dispose()
