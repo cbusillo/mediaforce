@@ -47,7 +47,7 @@ exclude = [
 [tool.mediaforce.release]
 build = 2
 feed = "https://cbusillo.github.io/mediaforce/appcast.xml"
-public-key = ""
+public-key = "rzpS2jLP0qsgpgYtvdu/lLrpv6ljcfy5zYhkkJAK5dg="
 
 [tool.ruff]
 target-version = "py313"
