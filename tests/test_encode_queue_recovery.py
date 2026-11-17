@@ -22,7 +22,7 @@ from concurrent.futures import Future
 from contextlib import ExitStack, closing, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any, Callable, NoReturn, cast
 from unittest.mock import ANY, Mock, patch
@@ -86,6 +86,8 @@ from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.media_scopes import media_scope_from_prefix
 from mediaforce.library.run_manifests import select_encode_candidates
 from mediaforce.hosts import status_runtime as host_status_runtime
+from mediaforce.hosts.transport import EncodeConnectionLostError
+from mediaforce.encoding.staged_host import SCRATCH_DIR_PREFIX, ScratchStillInUseError
 from mediaforce.hosts.types import SOURCE_ROOT_READ_MISSING_ISSUE, STAGING_ROOT_WRITE_MISSING_ISSUE, \
     VMAF_MODEL_MISSING_ISSUE, is_vmaf_model_load_failure
 from mediaforce.remote import HostReadinessError, HostStatus
@@ -3315,13 +3317,34 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "ssh_transport")
 
     def test_lost_connection_to_encode_computer_retries_with_a_plain_reason(self) -> None:
-        lost = staging_runtime.EncodeConnectionLostError("Lost the connection to Remote A. It will be tried again.")
+        lost = EncodeConnectionLostError("Lost the connection to Remote A. It will be tried again.")
 
         updated = self._remote_job_failing_at_attempt_cap("job-lost-link", lost)
 
         self.assertEqual(updated["last_failure_kind"], "ssh_transport")
         self.assertEqual(updated["status"], "retry_backoff")
         self.assertEqual(updated["error"], str(lost))
+
+    def test_a_mac_that_slept_from_dark_wake_mid_file_is_retried_without_cooling_down(self) -> None:
+        for dark_wake_sleep in (True, False):
+            with self.subTest(dark_wake_sleep=dark_wake_sleep):
+                lost = EncodeConnectionLostError(
+                    "Lost the connection to Remote A. It will be tried again.", dark_wake_sleep=dark_wake_sleep,
+                )
+
+                updated = self._remote_job_failing(
+                    f"job-lost-link-{dark_wake_sleep}", lost, attempt_count=web_app.ENCODE_JOB_MAX_ATTEMPTS - 1,
+                )
+
+                self.assertEqual(updated["status"], "retry_backoff")
+                self.assertEqual(updated["host_cooldown_until"] is None, dark_wake_sleep)
+
+    def test_dark_wake_sleeps_still_stop_at_the_attempt_cap(self) -> None:
+        lost = EncodeConnectionLostError("Lost the connection to Remote A. It will be tried again.", dark_wake_sleep=True)
+
+        updated = self._remote_job_failing_at_attempt_cap("job-lost-link-at-cap", lost)
+
+        self.assertNotEqual(updated["status"], "retry_backoff")
 
     def test_refused_ssh_access_stops_at_the_attempt_cap_with_its_own_reason(self) -> None:
         for job_id, diagnostic in (
@@ -3336,6 +3359,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 self.assertEqual(updated["error"], diagnostic)
 
     def _remote_job_failing_at_attempt_cap(self, job_id: str, exc: Exception) -> dict[str, Any]:
+        return self._remote_job_failing(job_id, exc, attempt_count=web_app.ENCODE_JOB_MAX_ATTEMPTS)
+
+    def _remote_job_failing(self, job_id: str, exc: Exception, *, attempt_count: int) -> dict[str, Any]:
         source_path = self._create_source_file(f"{job_id}.mkv")
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_library_item(connection, source_path, status="encoding")
@@ -3349,17 +3375,21 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 manifest_name=f"{job_id}.json",
                 host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
                 status="running",
-                attempt_count=web_app.ENCODE_JOB_MAX_ATTEMPTS,
+                attempt_count=attempt_count,
             )
             job = load_encode_job(connection, job_id)
             assert job is not None
-            web_app._transition_encode_job_failure(
-                connection,
-                self.config,
-                job,
-                failure_kind=encode_runtime._classify_encode_failure(exc, job),
-                error_message=str(exc),
-            )
+            asleep = subprocess.CompletedProcess(["ssh"], 255, "", "ssh: connect to host remote-a port 22: Host is down")
+            with patch.object(encode_runtime, "run_remote_command", return_value=asleep):
+                encode_runtime.transition_encode_job_failure(
+                    connection,
+                    self.config,
+                    job,
+                    web_app._encode_queue_runtime_deps(),
+                    failure_kind=encode_runtime._classify_encode_failure(exc, job),
+                    error_message=str(exc),
+                    failure=exc,
+                )
             updated = load_encode_job(connection, job_id)
         assert updated is not None
         return updated
@@ -4026,6 +4056,128 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(unrelated.read_text(), "another encode")
         self.assertEqual((self.root / "source" / "tv" / "show" / "last-episode.mkv").read_text(), "source")
         self.assertIn("Measuring quality on Remote A", plain_message)
+
+    _SCRATCH_ROOT = "/Users/encoder/mediaforce-scratch"
+    _SCRATCH_HOST: dict[str, object] = {
+        "key": "remote-a", "host": _QUALITY_TIMEOUT_SSH_HOST, "label": "Remote A", "mode": "ssh",
+        "media_access": "stream", "scratch_root": _SCRATCH_ROOT,
+    }
+
+    def _run_job_ending_with(
+            self, connection: DBClient, name: str, ending: Exception, *, host: dict[str, object],
+    ) -> dict[str, Any]:
+        source_path = self._create_source_file(f"{name}.mkv")
+        item_id = self._insert_library_item(connection, source_path, status="encoding")
+        self._write_manifest(
+            f"manifest-{name}.json",
+            [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{name}.mkv"))}],
+        )
+        self._save_job(connection, job_id=f"job-{name}", manifest_name=f"manifest-{name}.json", host=dict(host),
+                       status="running", attempt_count=1)
+        connection.commit()
+        deps = replace(web_app._encode_queue_runtime_deps(), load_config=Mock(return_value=self.config),
+                       ensure_encode_host_ready=Mock(return_value=False), encode_manifest_items=Mock(side_effect=ending))
+        encode_runtime.run_encode_job(
+            config_path=self.config.paths.config_path, job_id=f"job-{name}",
+            process_controller=ManagedProcessController(), deps=deps,
+        )
+        updated = load_encode_job(connection, f"job-{name}")
+        assert updated is not None
+        return updated
+
+    @staticmethod
+    def _unconfirmed_quality_run(scope: str) -> encoding_quality.RemoteQualityTimeoutError:
+        return encoding_quality.RemoteQualityTimeoutError(
+            phase="crf_search", timeout_seconds=encoding_quality.REMOTE_QUALITY_TIMEOUT_SECONDS, host_key="remote-a",
+            host_label="Remote A", remote_process_contained=False, scoped_temp_dir=scope,
+            containment_detail="fixture stop could not reach the computer", ended_early=True,
+        )
+
+    def test_a_stop_that_leaves_a_run_unconfirmed_holds_its_file_until_the_computer_shows_it_ended(self) -> None:
+        quality_dir = self._scoped_quality_run()
+        scratch_dir = str(PurePosixPath(self._SCRATCH_ROOT) / f"{SCRATCH_DIR_PREFIX}{'c' * 32}")
+        for label, host, scope, unproven in (
+                ("quality run", self._QUALITY_TIMEOUT_HOST, quality_dir, self._unconfirmed_quality_run(quality_dir)),
+                ("scratch encode", self._SCRATCH_HOST, scratch_dir,
+                 ScratchStillInUseError(dict(self._SCRATCH_HOST), PurePosixPath(scratch_dir))),
+        ):
+            with self.subTest(label):
+                stop = ProcessCancelledError("Stopped by the owner")
+                stop.unproven_remote_run = unproven
+                computer = _SleepingComputer(self._QUALITY_TIMEOUT_SSH_HOST)
+                deps = replace(web_app._encode_queue_runtime_deps(), scratch_ready_hosts={})
+                with self._quality_timeout_computer(computer.run_remote_command), \
+                        patch.object(encode_runtime, "STOPPED_HOLD_CHECK_INTERVAL", timedelta(0)), \
+                        open_db(self.config.paths.db_path) as connection:
+                    job = self._run_job_ending_with(connection, f"stopped-{label.split()[0]}", stop, host=host)
+                    self.assertEqual(job["status"], "stopped")
+                    self.assertEqual(job["last_failure_kind"], encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND)
+                    self.assertEqual(job["progress"]["quality_containment"]["scoped_temp_dir"], scope)
+
+                    encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
+                    away = load_encode_job(connection, job["job_id"])
+                    assert away is not None
+                    self.assertEqual(away["last_failure_kind"], encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND)
+
+                    computer.awake = True
+                    encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
+                    released = load_encode_job(connection, job["job_id"])
+                    assert released is not None
+
+                self.assertEqual(computer.quality_runs_stopped, [scope])
+                self.assertEqual(released["status"], "stopped")
+                self.assertIsNone(released["last_failure_kind"])
+                self.assertNotIn("quality_containment", released["progress"] or {})
+
+    def test_any_other_interruption_that_leaves_a_run_unconfirmed_waits_for_it_before_retrying(self) -> None:
+        scope = self._scoped_quality_run()
+        for label, interruption in (
+                ("schedule closed", ScheduleWindowClosedError("Encode host schedule window closed.")),
+                ("Mediaforce restarting", encode_runtime.ControllerShutdownCancelledError("Mediaforce is shutting down.")),
+        ):
+            with self.subTest(label):
+                interruption.unproven_remote_run = self._unconfirmed_quality_run(scope)
+                computer = _SleepingComputer(self._QUALITY_TIMEOUT_SSH_HOST)
+                with self._quality_timeout_computer(computer.run_remote_command), \
+                        open_db(self.config.paths.db_path) as connection:
+                    job = self._run_job_ending_with(
+                        connection, f"interrupted-{label.split()[0].lower()}", interruption, host=self._QUALITY_TIMEOUT_HOST,
+                    )
+
+                self.assertEqual(job["status"], "retry_backoff")
+                self.assertEqual(job["last_failure_kind"], encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND)
+                self.assertEqual(job["progress"]["quality_containment"]["scoped_temp_dir"], scope)
+
+    def test_an_unconfirmed_scratch_encode_waits_for_its_computer_then_retries_once_its_writer_is_shown_ended(self) -> None:
+        scratch_dir = PurePosixPath(self._SCRATCH_ROOT) / f"{SCRATCH_DIR_PREFIX}{'b' * 32}"
+        computer = _SleepingComputer(self._QUALITY_TIMEOUT_SSH_HOST)
+        window_open = replace(web_app._encode_queue_runtime_deps(), scheduler_allows_encode_run=Mock(return_value=True),
+                              scratch_ready_hosts={})
+        with self._quality_timeout_computer(computer.run_remote_command), open_db(self.config.paths.db_path) as connection:
+            job = self._run_job_ending_with(
+                connection, "scratch-episode", ScratchStillInUseError(dict(self._SCRATCH_HOST), scratch_dir),
+                host=self._SCRATCH_HOST,
+            )
+            self.assertEqual(job["status"], "retry_backoff")
+            self.assertEqual(job["last_failure_kind"], encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND)
+            self.assertEqual(job["progress"]["quality_containment"]["scoped_temp_dir"], str(scratch_dir))
+
+            self._due_now(connection, job)
+            encode_runtime.reconcile_encode_jobs(connection, self.config, window_open)
+            still_asleep = load_encode_job(connection, job["job_id"])
+            assert still_asleep is not None
+            self.assertEqual(still_asleep["status"], "retry_backoff")
+            self.assertEqual(computer.quality_runs_stopped, [])
+
+            computer.awake = True
+            self._due_now(connection, job)
+            encode_runtime.reconcile_encode_jobs(connection, self.config, window_open)
+            retried = load_encode_job(connection, job["job_id"])
+            assert retried is not None
+
+        self.assertEqual(computer.quality_runs_stopped, [str(scratch_dir)])
+        self.assertEqual(retried["status"], "queued")
+        self.assertNotIn("quality_containment", retried["progress"] or {})
 
     def test_quality_run_a_computer_does_not_confirm_stopped_for_a_day_goes_to_the_owner_with_its_explanation(self) -> None:
         scope = self._scoped_quality_run()

@@ -82,6 +82,7 @@ class HostStatus:
     probe_available: bool | None = None
     check_failure: str | None = None
     computer_model: str | None = None
+    dark_wake: bool = False
 
 
 @dataclass(slots=True)

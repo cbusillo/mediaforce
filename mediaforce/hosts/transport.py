@@ -1,5 +1,7 @@
+import re
 import shlex
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -21,14 +23,65 @@ _SSH_CLIENT_FAILURE_PREFIXES = (
 )
 
 
+# A Mac in dark wake answers over the network with its display and most of its cooling off, and
+# sleeps again under load ("Dark Wake Thermal Emergency"); its capabilities then lack Graphics.
+MACOS_DARK_WAKE_SHELL_TEST = (
+    'case "$(pmset -g systemstate 2>/dev/null)" in '
+    '*"Capabilities are:"*Graphics*) false ;; *"Capabilities are:"*) true ;; *) false ;; esac'
+)
+
+# Nanoseconds since the last keyboard, mouse or trackpad input; empty when the Mac cannot say.
+_INPUT_IDLE_NANOSECONDS_SHELL = "ioreg -c IOHIDSystem -d 4 2>/dev/null | awk '/\"HIDIdleTime\" =/ { print $NF; exit }'"
+
+# Declaring brief user activity brings a dark-woken Mac to full wake, which lights its display;
+# putting the display straight back to sleep keeps full wake. The display is put to sleep only on
+# proof that nobody touched the Mac during the request: input idle time read before and after it,
+# where the first reading already outlasts the whole request (whole seconds, with a second's margin
+# for the last reading) and the second is longer still. Input during the request would make the
+# second reading shorter than the request itself. Without that proof the display is left alone. The
+# last reading sits right before display sleep; input in the moment between them is not seen. No
+# power setting changes.
+REQUEST_FULL_WAKE_SHELL_LINE = (
+    f'if {MACOS_DARK_WAKE_SHELL_TEST}; then '
+    f'mediaforce_from=$(date +%s); mediaforce_idle_before=$({_INPUT_IDLE_NANOSECONDS_SHELL}); '
+    'caffeinate -u -t 2 </dev/null >/dev/null 2>&1; '
+    f'mediaforce_to=$(date +%s); mediaforce_idle_after=$({_INPUT_IDLE_NANOSECONDS_SHELL}); '
+    'if [ -n "$mediaforce_idle_before" ] && [ -n "$mediaforce_idle_after" ] '
+    '&& [ "$mediaforce_idle_after" -gt "$mediaforce_idle_before" ] '
+    '&& [ "$mediaforce_idle_before" -ge $(((mediaforce_to - mediaforce_from + 2) * 1000000000)) ]; then '
+    'pmset displaysleepnow >/dev/null 2>&1; fi; fi'
+)
+
 # On a Mac, caffeinate holds a "prevent idle sleep" assertion that ends when the shell running the
 # work exits, however it ends: success, failure, Stop, a schedule deadline or a dropped link. It
 # changes no power setting. Run from a subshell, it is not a job of the work's shell, so a bare
 # `wait` there cannot wait for it. Where caffeinate is missing, the line does nothing.
 _KEEP_AWAKE_SHELL_LINE = (
     'if command -v caffeinate >/dev/null 2>&1; then '
-    '(caffeinate -i -w "$$" </dev/null >/dev/null 2>&1 &); fi'
+    f'(caffeinate -i -w "$$" </dev/null >/dev/null 2>&1 &); {REQUEST_FULL_WAKE_SHELL_LINE}; fi'
 )
+
+# The Mac's power log line for its most recent sleep: when it slept and why, in its own words.
+LAST_SLEEP_ENTRY_SHELL = "pmset -g log 2>/dev/null | grep 'Entering Sleep state due to' | tail -n 1"
+_SLEEP_ENTRY = re.compile(
+    r"^(?P<at>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4}) .*Entering Sleep state due to '(?P<reason>[^']*)'"
+)
+
+
+def slept_from_dark_wake_after(sleep_entry: str, since: datetime) -> bool:
+    match = _SLEEP_ENTRY.match(sleep_entry.strip())
+    if match is None:
+        return False
+    slept_at = datetime.strptime(match["at"], "%Y-%m-%d %H:%M:%S %z")
+    return slept_at >= since and "dark wake" in match["reason"].lower()
+
+
+class EncodeConnectionLostError(RuntimeError):
+    """The SSH connection ended before the work on that computer finished."""
+
+    def __init__(self, message: str, *, dark_wake_sleep: bool = False) -> None:
+        super().__init__(message)
+        self.dark_wake_sleep = dark_wake_sleep
 
 
 SSH_ALIVE_CHECK_SECONDS = 15
@@ -36,7 +89,7 @@ SSH_ALIVE_CHECKS_BEFORE_DROP = 4
 
 
 def keep_awake_while_running(script: str) -> str:
-    """Keep the computer from idle-sleeping for as long as the shell running ``script`` lives."""
+    """Keep the computer fully awake for as long as the shell running ``script`` lives."""
     return f"{_KEEP_AWAKE_SHELL_LINE}\n{script}"
 
 

@@ -25,9 +25,8 @@ from mediaforce.encoding.quality import RemoteQualityTimeoutError, SampleEncodeR
     quality_error_message, resolve_local_quality_temp_root
 from mediaforce.encoding.video_filters import build_video_filter, planned_output_dimensions
 from mediaforce.encoding.staged_host import STAGED_JOB_KEY, host_scratch_root, staged_job, staged_job_for_host
-from mediaforce.encoding.staging import EncodeConnectionLostError
 from mediaforce.hosts.config import host_media_access_for_host, host_targets_current_machine, ssh_target_for_host
-from mediaforce.hosts.transport import ssh_host_unreachable
+from mediaforce.hosts.transport import EncodeConnectionLostError, ssh_host_unreachable
 from mediaforce.remote import execution_mode_for_host, run_remote_command, ssh_client_options
 from mediaforce.reviewing.artifact_identity import reviewed_artifact_fingerprint
 from mediaforce.state_cleanup import purge_transient_artifacts
@@ -615,8 +614,9 @@ def run_calibration_job(
                 },
             )
         terminal_status = completed_status
-    except ProcessCancelledError:
+    except ProcessCancelledError as cancel_error:
         terminal_status = "stopped"
+        unproven = cancel_error.unproven_remote_run
         with open_db(config.paths.db_path) as connection:
             deps.save_job_state(
                 connection,
@@ -627,7 +627,14 @@ def run_calibration_job(
                     "job_id": job_id,
                     "status": "stopped",
                     "finished_at": deps.now_iso(),
-                    "error": "Calibration queue job was stopped and cleaned up.",
+                    "error": "Calibration queue job was stopped and cleaned up." if unproven is None
+                    else quality_error_message(unproven),
+                    **({} if not isinstance(unproven, RemoteQualityTimeoutError) else {"result": {
+                        "failure_kind": unproven.failure_kind,
+                        "host_key": unproven.host_key,
+                        "remote_process_contained": False,
+                        "scoped_temp_dir": unproven.scoped_temp_dir,
+                    }}),
                 },
             )
     except TargetSizeSearchError as exc:
@@ -656,6 +663,7 @@ def run_calibration_job(
                 "failure_message": str(exc),
                 "host_key": exc.host_key,
                 "remote_process_contained": exc.remote_process_contained,
+                "scoped_temp_dir": exc.scoped_temp_dir,
             },
         )
     except Exception as exc:

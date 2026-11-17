@@ -2,6 +2,7 @@ import json
 import logging
 import time
 import uuid
+from datetime import UTC, datetime
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -11,7 +12,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.hosts.config import execution_mode_for_host, host_media_access_for_host
-from mediaforce.hosts.transport import ssh_connection_dropped
+from mediaforce.hosts.transport import EncodeConnectionLostError, ssh_connection_dropped
+from mediaforce.remote import slept_from_dark_wake_since
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
@@ -32,7 +34,6 @@ from mediaforce.encoding.staged_host import staged_job_for_host
 from mediaforce.encoding.staging import (
     ENCODER_LOG_TAIL_MAX_CHARS,
     HEADER_ONLY_OUTPUT_MAX_BYTES,
-    EncodeConnectionLostError,
     FinishedOutputNotVisibleError,
     StagedOutputHeldForReviewError,
     UnreadableEncodeOutputError,
@@ -767,6 +768,7 @@ def encode_one_item(
     kept_final_size_miss: str | None = None
     try:
         while True:
+            encode_started_at = datetime.now(UTC)
             result = run_encode_command(
                 ffmpeg_cmd=ffmpeg_cmd,
                 temp_output=temp_output,
@@ -782,7 +784,10 @@ def encode_one_item(
                     details = f"{details}\n{(result.stderr or '').strip()}".strip()
                 if execution_mode_for_host(host) == "ssh" and ssh_connection_dropped(result.returncode, result.stderr):
                     computer = _host_text(host, "label", fallback_key="key") or "the encode computer"
-                    lost = EncodeConnectionLostError(f"Lost the connection to {computer}. It will be tried again.")
+                    lost = EncodeConnectionLostError(
+                        f"Lost the connection to {computer}. It will be tried again.",
+                        dark_wake_sleep=slept_from_dark_wake_since(object_dict(host), encode_started_at),
+                    )
                     if details:
                         lost.add_note(details[-ENCODER_LOG_TAIL_MAX_CHARS:])
                     raise lost
