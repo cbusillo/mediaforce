@@ -70,6 +70,9 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 
 ## Developer workflows
 
+- [Developer guide](development/developer-guide.md): layout, running from
+  source, configuration, the command line, page screenshots and how the
+  background work behaves.
 - [Releases](development/release-flow.md): how agents deploy `main` to the controller, and read-only work evidence.
 - [Bundled delivery proposal](development/bundled-server-plan.md): server bundle,
   Sparkle, rollback and publishing design.

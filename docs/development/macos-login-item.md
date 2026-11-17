@@ -157,7 +157,7 @@ The service manager rotates either log to a single `.1` file when it exceeds
 
 ## Development Handoff
 
-The [local web development helper](../../README.md#local-web-development) owns development
+The [local development helper](developer-guide.md#running-from-source) owns development
 process reuse, checkout isolation and bounded login-item shutdown/startup.
 Its bootout is temporary; the persistent enable/disable state remains owned
 by `mediaforce service`. The source lifecycle tests use fake launchctl output
