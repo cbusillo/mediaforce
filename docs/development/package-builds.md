@@ -114,3 +114,12 @@ the stage's saved copy.
 update proofs with its own app ID, service label, port, support folder and
 logs. Run its service from a folder on the internal drive: a launchd agent
 stalled reading an app on an external volume.
+
+`release OUTPUT CACHE` builds the copy a [notarized release](release-flow.md#notarized-releases)
+ships, `notarize APP ARCHIVE` has Apple notarize and staple it and writes the
+zip, and `smoke APP` starts its server with a throwaway config on its own port.
+`notarize` reads an App Store Connect API key from `NOTARY_KEY` (the `.p8`
+file), `NOTARY_KEY_ID` and `NOTARY_ISSUER`; it also works on a proof copy.
+
+Wheels are chosen for the app's minimum macOS. A build-machine library folder
+left as a search path in a wheel's native code is removed before signing.

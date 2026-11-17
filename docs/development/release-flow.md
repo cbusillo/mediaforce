@@ -169,13 +169,83 @@ Preparing the candidate also builds the Mac app from that release, so the
 deploy host needs Xcode and `xcodegen`. A failed build is a preparation
 failure and leaves the existing service alone. The app is signed with the
 team's Developer ID certificate, which must be in this Mac's keychain; macOS
-gives an ad-hoc signed app no notification permission. There is no App Store
-or notarization step. After the
+gives an ad-hoc signed app no notification permission. This deploy does not
+notarize; [notarized releases](#notarized-releases) do. After the
 candidate passes its health check, the deploy replaces
 `/Applications/Mediaforce.app` with the release's copy and then resumes the
 encode queue. If installing the app fails, the queue still resumes and the
 deploy reports the failure; the release's own copy stays in its
 `.build/release-app/` folder.
+
+## Notarized releases
+
+`.github/workflows/release.yml` publishes a notarized app with the server
+inside it and points the Sparkle feed at it. It does not install anything on
+the controller. The staged deploy above stays the controller's install path
+until the cutover (step 4 of
+[#1314](https://github.com/cbusillo/mediaforce/issues/1314)): the app
+installed today has no Sparkle, so the cutover installs the first downloaded
+release through that deploy, and later releases update themselves between
+files.
+
+`[tool.mediaforce.release]` in `pyproject.toml` is the one source of the
+release identity. `project.version` is the version, `build` is the number
+Sparkle compares, `feed` is the
+[feed](https://cbusillo.github.io/mediaforce/appcast.xml) and `public-key` is
+the Sparkle key every release ships. The tag is `v<version>-<build>`. Source
+builds keep their own version and never read the feed.
+
+### Cutting a release
+
+1. Start only from a release request the Director made. A merge never
+   releases anything.
+2. Land a pull request through the merge train that raises `build`, and
+   `project.version` when the version changes. Every attempt needs a new
+   build; the workflow refuses a used tag.
+3. Wait until that commit is the head of `main` and its CI `acceptance` check
+   passed. The workflow refuses a commit without it.
+4. Dispatch the workflow on `main` with the automation identity:
+
+   ```bash
+   gh-with-env-token workflow run release.yml --repo cbusillo/mediaforce --ref main
+   ```
+
+5. Watch the run. The `release` job checks the tag is unused, the live feed
+   offers an older build and the Sparkle private key matches `public-key`. It
+   builds the app with `scripts/build-mac-app.sh release`, which runs the
+   package verifier on the app. Apple notarizes it, the ticket is stapled and
+   Gatekeeper must accept it. The notarized app's server must start and answer
+   as its build. Then it signs the zip for Sparkle, uploads a draft release,
+   downloads it again to check the bytes and signature, publishes it and
+   checks anyone can download it. The `feed` job publishes the feed to Pages
+   last and checks it is served.
+6. Report the release page, the build and the served feed to the Director.
+
+If the `release` job fails before publishing, fix the cause, raise `build` and
+dispatch again; delete a leftover draft after reading what failed. Once the
+release is published, never run that job again. If only the `feed` job failed,
+re-run that job alone: it republishes the same feed without rebuilding.
+Removing a feed item does not downgrade an installed app; a bad release is
+replaced by a newer build.
+
+### One-time setup
+
+The workflow runs in the `release` environment, limited to `main`, which
+holds these secrets:
+
+- `MACOS_CERTIFICATE_P12` and `MACOS_CERTIFICATE_PASSWORD`: the team's
+  Developer ID Application certificate, base64-encoded, and its password.
+- `APP_STORE_CONNECT_API_KEY_P8_BASE64`, `APP_STORE_CONNECT_KEY_ID` and
+  `APP_STORE_CONNECT_ISSUER_ID`: an App Store Connect API key for notarization.
+- `SPARKLE_EDDSA_PRIVATE_KEY`: Mediaforce's own Sparkle key. Create it once
+  with Sparkle's `generate_keys --account mediaforce` (in
+  `.build/mac-app/SourcePackages/artifacts/sparkle/Sparkle/bin/` after a
+  build) and export it with `-x FILE`. Its public half, from `-p`, goes in
+  `public-key`. Never reuse another app's key.
+
+GitHub Pages must publish from GitHub Actions. Proving the notarized artifact
+and an update on this Mac uses the proof identity in
+[package builds](package-builds.md#updates-with-sparkle), never the real app.
 
 ## Work evidence
 
