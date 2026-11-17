@@ -817,6 +817,23 @@ def refresh_controller_digest_waits(connection: DBClient, window: ControllerDige
              last_error=window.waiting_reason, updated_at=now_iso))
 
 
+def paused_check_folders(connection: DBClient) -> list[str]:
+    """The folders whose files wait on the current batch while it is paused; failed or cancelled checks never wait."""
+    state = load_evidence_queue_state(connection)
+    if state["status"] != "paused" or not state["is_paused"] or state["cancel_requested"]:
+        return []
+    return list(connection.execute(
+        select(library_items.c.parent_dir)
+        .join(library_item_evidence_state, library_item_evidence_state.c.library_item_id == library_items.c.id)
+        .where(
+            library_item_evidence_state.c.work_batch_id == state["batch_id"],
+            library_item_evidence_state.c.work_status.in_(EVIDENCE_WORK_CLAIMABLE_STATUSES),
+        )
+        .distinct()
+        .order_by(library_items.c.parent_dir)
+    ).scalars())
+
+
 def original_check_wait_reasons(connection: DBClient) -> list[str]:
     batch = str(load_evidence_queue_state(connection).get("batch_id") or "")
     reasons = connection.execute(select(library_item_evidence_state.c.last_error).where(

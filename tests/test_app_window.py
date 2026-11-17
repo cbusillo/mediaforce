@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import select, update
 
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import evidence_queue_state, encode_jobs, item_events, library_item_evidence_state, library_items, \
@@ -383,28 +384,49 @@ def test_saved_background_pause_is_visible_and_preserved_by_native_reads(connect
         assert background_work_is_paused(connection)
 
 
-def test_paused_fingerprint_batch_is_visible_without_changing_encode_state(connection: DBClient) -> None:
-    item_id = _item(connection, "tv/A/Season 1/e1.mkv")
-    baseline = _payload(connection)["work"]
-    connection.execute(
-        library_item_evidence_state.insert().values(
-            library_item_id=item_id, evidence_kind=MEDIA_FINGERPRINT_EVIDENCE_KIND, state="analysis_required",
-            policy_hash="policy", work_batch_id="batch-1", work_status="queued", updated_at=NOW,
+def test_paused_checks_name_the_waiting_season_without_changing_encode_state(connection: DBClient) -> None:
+    _encode_job(connection, "tv/C/Season 1", status="running", host_key="mbp")
+    rows = {
+        "tv/A/Season 1/e1.mkv": ("queued", 0),
+        "tv/B/Season 1/e1.mkv": ("failed", 3),
+        "tv/B/Season 1/e2.mkv": ("cancelled", 2),
+    }
+    for rel_path, (status, attempts) in rows.items():
+        connection.execute(
+            library_item_evidence_state.insert().values(
+                library_item_id=_item(connection, rel_path), evidence_kind=MEDIA_FINGERPRINT_EVIDENCE_KIND,
+                state="analysis_required", policy_hash="policy", work_batch_id="batch-1", work_status=status,
+                attempt_count=attempts, updated_at=NOW,
+            )
         )
-    )
+    baseline = _payload(connection, computers=[_computer("mbp")])["work"]
     connection.execute(
         evidence_queue_state.insert().values(
             queue_name="evidence", batch_id="batch-1", status="paused", evidence_kinds_json='["media_fingerprint"]',
-            is_paused=1, cancel_requested=0, item_count=1, updated_at=NOW,
+            is_paused=1, cancel_requested=0, item_count=len(rows), updated_at=NOW,
         )
     )
     connection.commit()
 
+    def saved_rows() -> list[tuple[Any, ...]]:
+        return [tuple(row) for row in connection.execute(
+            select(library_item_evidence_state.c.work_status, library_item_evidence_state.c.attempt_count)
+            .order_by(library_item_evidence_state.c.library_item_id)
+        )]
+
     for _ in range(2):
-        work = _payload(connection)["work"]
-        assert work["checks_paused"] is True
-        assert (work["state"], work["stop_reasons"]) == (baseline["state"], baseline["stop_reasons"])
+        work = _payload(connection, computers=[_computer("mbp")])["work"]
+        assert [season["prefix"] for season in work["paused_check_seasons"]] == ["tv/A/Season 1"]
+        assert (work["state"], work["paused_by_owner"], work["stop_reasons"], work["running_count"]) == (
+            baseline["state"], False, baseline["stop_reasons"], baseline["running_count"],
+        )
         assert evidence_queue_summary(connection)["is_paused"] is True
+        assert saved_rows() == list(rows.values())
+
+    connection.execute(update(library_item_evidence_state).where(
+        library_item_evidence_state.c.work_status == "queued").values(work_status="failed"))
+    connection.commit()
+    assert _payload(connection)["work"]["paused_check_seasons"] == []
 
 
 def test_work_names_each_season_being_compressed_once(connection: DBClient) -> None:

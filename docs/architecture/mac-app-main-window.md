@@ -23,9 +23,10 @@ without waiting for a cache to expire.
   `no_computer_ready` (work is waiting and no computer can take it).
   `running_count` and `waiting_count` count encode jobs. `storage` lists each
   required mount with its recovery `status` and last `failure` code.
-  `checks_paused` is true when the active evidence batch is paused, has not
-  been asked to cancel, and still has work that can be claimed. It is separate
-  from encode `state`, `paused_by_owner`, and `stop_reasons`.
+  `paused_check_seasons` names each season or title with files waiting in the
+  active evidence batch while it is paused and not asked to cancel; failed and
+  cancelled checks are never listed. It is separate from encode `state`,
+  `paused_by_owner`, and `stop_reasons`.
   `seasons_needing_you` carries non-sample season decisions for the badge and
   notifications, using the TV season facts below; sample decisions remain under
   `samples.waiting_on_you` so they count once.

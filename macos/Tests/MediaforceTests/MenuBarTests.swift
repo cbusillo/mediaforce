@@ -25,7 +25,7 @@ final class MenuBarTests: XCTestCase {
             """
         }
         return """
-        {"state": "idle", "paused_by_owner": \(paused), "checks_paused": \(checksPaused), "stop_reasons": [\(reasons.map { "\"\($0)\"" }.joined(separator: ","))],
+        {"state": "idle", "paused_by_owner": \(paused), "paused_check_seasons": [\(checksPaused ? PausedBarTests.waitingSeason : "")], "stop_reasons": [\(reasons.map { "\"\($0)\"" }.joined(separator: ","))],
          "running_count": \(running), "running_seasons": [\(named.joined(separator: ","))], "waiting_count": \(waiting), "storage": []}
         """
     }
