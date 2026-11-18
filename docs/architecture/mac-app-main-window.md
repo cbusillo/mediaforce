@@ -215,7 +215,10 @@ gives its facts, or `404` when the prefix names no present file: `prefix`,
 (the keep decision's reason, such as `mixed` or `put_back`), `held_reason`
 (`motion_pattern`), `percent_complete`, `size_question`, `bytes` (the file in
 the library now), `original_bytes` (its size before replacement, or null) and
-`original_backup` (whether its backup is still there to compare). A TV item
+`original_backup` (whether its backup is still there to compare), and
+`held_copy`: for a file whose unpublished copy waits on the Director because it
+came out far smaller than expected, `bytes` (that copy's size) and `present`
+(whether it is still there to watch), otherwise null. A TV item
 also has `sound` (`show_prefix`, `current`, `options`) and `still_airing`
 (`series_prefix`, `mode` `auto`, `on` or `off`, and `airing`, TMDB's answer or
 null). The page saves those through the folder routes `audio-preset` and
@@ -227,7 +230,9 @@ this page with that file in the player and its answers beside it.
 `GET /api/app/player/{library_item_id}/{side}/index.m3u8` streams one file to
 the page's player as HLS, `side` `compressed` or `original` (the backup of a
 replaced file, or the file itself when it was never replaced), or `404` when
-that side is gone. The Mac player cannot open MKV, and reading a whole file off
+that side is gone. For a file with a held copy, `compressed` is that copy, read
+only from inside a configured staging root, and `original` is the library
+file. The Mac player cannot open MKV, and reading a whole file off
 the library takes too long, so the playlist comes from the file's keyframe
 index and each segment of about six seconds is made when the player asks for
 it (`mediaforce/web/runtime/player_stream.py`). Picture and sound are separate
