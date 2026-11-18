@@ -88,6 +88,9 @@ class SupportsCancellation(Protocol):
     def throw_if_cancelled(self) -> None:
         ...
 
+    def throw_if_stopped_to_start_over(self) -> None:
+        ...
+
 
 def encode_manifest_items(
         connection: DBClient,
@@ -1161,6 +1164,8 @@ def encode_one_item(
         .where(library_items.c.id == item["library_item_id"])
         .values(status="encoded", updated_at=now)
     )
+    if process_controller is not None:
+        process_controller.throw_if_stopped_to_start_over()
     connection.commit()
     completion_event_errors = _persist_event_best_effort(
         connection,

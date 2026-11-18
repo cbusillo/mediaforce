@@ -61,7 +61,7 @@ from mediaforce.web.runtime.folder_tuning_advice import review_gate
 from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_contract, \
     production_approval_identity, production_approval_matches
 from mediaforce.core.models import ProbeSummary
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, \
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, StartOverCancelledError, \
     ProcessDeadlineEnforcementError, ScheduleWindowClosedError
 from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, SCHEDULE_DEADLINE_MARKER
 from mediaforce.core.schedule_deadline import ScheduleDeadlineConfigurationError
@@ -124,6 +124,7 @@ from mediaforce.library.motion_holds import queue_motion_holds
 from mediaforce.library.evidence_state import library_item_source_fingerprint, sync_library_item_evidence_state
 from mediaforce.library.evidence_queue import claim_next_evidence_work, resume_evidence_queue, start_evidence_work
 from mediaforce.web.runtime.page_state import PageStateSources, folder_page_state
+from mediaforce.web.runtime.queue_actions import stop_running_file_action
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 
 
@@ -4128,6 +4129,45 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 self.assertEqual(released["status"], "stopped")
                 self.assertIsNone(released["last_failure_kind"])
                 self.assertNotIn("quality_containment", released["progress"] or {})
+
+    def test_a_stopped_file_whose_run_is_unconfirmed_is_held_then_waits_again_once_its_computer_shows_it_ended(self) -> None:
+        quality_dir = self._scoped_quality_run()
+        scratch_dir = str(PurePosixPath(self._SCRATCH_ROOT) / f"{SCRATCH_DIR_PREFIX}{'d' * 32}")
+        for label, host, scope, unproven in (
+                ("quality run", self._QUALITY_TIMEOUT_HOST, quality_dir, self._unconfirmed_quality_run(quality_dir)),
+                ("scratch encode", self._SCRATCH_HOST, scratch_dir,
+                 ScratchStillInUseError(dict(self._SCRATCH_HOST), PurePosixPath(scratch_dir))),
+        ):
+            with self.subTest(label):
+                stop = StartOverCancelledError("You stopped this file.")
+                stop.unproven_remote_run = unproven
+                computer = _SleepingComputer(self._QUALITY_TIMEOUT_SSH_HOST)
+                deps = replace(web_app._encode_queue_runtime_deps(), scratch_ready_hosts={},
+                               ensure_encode_host_ready=Mock(return_value=False),
+                               scheduler_allows_encode_run=Mock(return_value=True))
+                with self._quality_timeout_computer(computer.run_remote_command), \
+                        patch.object(encode_runtime, "STOPPED_HOLD_CHECK_INTERVAL", timedelta(0)), \
+                        open_db(self.config.paths.db_path) as connection:
+                    held = self._run_job_ending_with(connection, f"start-over-{label.split()[0]}", stop, host=host)
+                    self.assertEqual(held["status"], "stopped")
+                    self.assertEqual(held["last_failure_kind"], encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND)
+                    self.assertFalse(encode_runtime.unfinished_child_reason(held)[2])
+
+                    encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
+                    asleep = load_encode_job(connection, held["job_id"])
+                    assert asleep is not None
+                    self.assertEqual(asleep["status"], "stopped")
+
+                    computer.awake = True
+                    encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
+                    self._due_now(connection, held)
+                    encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
+                    waiting = load_encode_job(connection, held["job_id"])
+                    assert waiting is not None
+
+                self.assertEqual(computer.quality_runs_stopped, [scope])
+                self.assertEqual((waiting["status"], waiting["attempt_count"]), ("queued", 0))
+                self.assertNotIn("quality_containment", waiting["progress"] or {})
 
     def test_any_other_interruption_that_leaves_a_run_unconfirmed_waits_for_it_before_retrying(self) -> None:
         scope = self._scoped_quality_run()
@@ -15419,6 +15459,78 @@ raise SystemExit(0)
         self.assertIn("Conversion failed!", str(raised.exception))
         self.assertEqual(encode_runtime._classify_encode_failure(raised.exception, {"host": mounted_host}), "unknown")
 
+    def test_a_stop_before_the_finished_file_is_saved_wins_and_any_other_cancel_there_keeps_the_file(self) -> None:
+        for name, cancel_with, saved in (
+                ("owner-stop", StartOverCancelledError("You stopped this file."), False),
+                ("shutdown", encode_runtime.ControllerShutdownCancelledError("Mediaforce is shutting down."), True),
+        ):
+            with self.subTest(name):
+                item_id, raised = self._encode_with_cancel_while_saving(name, cancel_with)
+
+                self.assertEqual(raised is not None, not saved)
+                with open_db(self.config.paths.db_path) as connection:
+                    staged = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
+                self.assertEqual(staged is not None, saved)
+
+    def _encode_with_cancel_while_saving(
+            self, name: str, cancel_with: ProcessCancelledError,
+    ) -> tuple[int, ProcessCancelledError | None]:
+        source_path = self._create_source_file(f"{name}.mkv")
+        staging_path = self._staging_path(f"{name}.mkv")
+        staged_probe = ProbeSummary(
+            duration_seconds=60.0, video_codec="av1", video_bitrate=900000, width=1920, height=1080,
+            pix_fmt="yuv420p10le", audio_track_count=1, subtitle_track_count=0, english_audio_count=1,
+            english_subtitle_count=0, default_audio_language="eng", default_subtitle_language=None,
+            audio_summary_json="[]", subtitle_summary_json="[]",
+        )
+        controller = ManagedProcessController()
+        save_output_record = manifest_runtime.record_generated_output
+
+        def stop_arrives_while_saving(*args: Any, **kwargs: Any) -> None:
+            save_output_record(*args, **kwargs)
+            controller.cancel(cancel_with)
+
+        def run_encode_side_effect(*, temp_output: Path, **_: object) -> subprocess.CompletedProcess[str]:
+            temp_output.parent.mkdir(parents=True, exist_ok=True)
+            temp_output.write_text("encoded")
+            return subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr="")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path)
+            connection.commit()
+        item: dict[str, Any] = {
+            "library_item_id": item_id,
+            "resolved_policy": {"video": {"preset": 4, "encoder": "libsvtav1"}, "audio": {}, "subtitle": {}},
+            "rel_path": f"tv/show/{name}.mkv", "duration_seconds": 1500.0, "video_codec": "h264",
+            "width": 1920, "height": 1080, "source_path": str(source_path),
+            "source_fingerprint": "source-fingerprint", "source_size_bytes": 1024, "output_container": "mkv",
+        }
+        item["stream_budget_ledger"] = execution.resolve_stream_budget_ledger(
+            item, default_video_policy=item["resolved_policy"]["video"], output_container="mkv", prefer_persisted=False,
+        ).to_payload()
+        raised: ProcessCancelledError | None = None
+        try:
+            with open_db(self.config.paths.db_path) as connection, \
+                    patch("mediaforce.execution.resolve_item_source_path", return_value=source_path), \
+                    patch("mediaforce.execution.resolve_item_staging_path", return_value=staging_path), \
+                    patch("mediaforce.execution._search_quality", return_value=QualitySearchResult(
+                        crf=28.0, metric="XPSNR", target=41.0, score=41.5, stdout="ok")), \
+                    patch("mediaforce.execution._build_ffmpeg_command",
+                          return_value=["ffmpeg", "-i", str(source_path), str(staging_path)]), \
+                    patch("mediaforce.execution._run_encode_command", side_effect=run_encode_side_effect), \
+                    patch("mediaforce.execution.probe_media", return_value=staged_probe), \
+                    patch("mediaforce.execution.file_fingerprint", return_value="staged-fingerprint"), \
+                    patch.object(manifest_runtime, "record_generated_output", new=stop_arrives_while_saving):
+                execution.encode_one_item(
+                    connection, self.config, self.root / "runs" / f"manifest-{name}.json", {"run_id": f"run-{name}", "items": []},
+                    0, item, overwrite=False, process_controller=controller,
+                    host={"key": "remote-a", "label": "Remote A", "mode": "ssh", "media_access": "mounted"},
+                    encode_context={"origin": "queue", "encode_job_id": f"job-{name}", "encode_worker_id": "worker-1"},
+                )
+        except ProcessCancelledError as cancelled:
+            raised = cancelled
+        return item_id, raised
+
     def test_encode_one_item_records_operator_cancellation_as_stopped(self) -> None:
         source_path = self._create_source_file("episode-encode-stopped.mkv")
         staging_path = self._staging_path("episode-encode-stopped.mkv")
@@ -21350,6 +21462,122 @@ raise SystemExit(0)
         self.assertEqual(job["status"], "stopped")
         self.assertIsNone(job["retry_not_before"])
         self.assertEqual(job["error"], encode_runtime.STOPPED_CLEANUP_PENDING_MESSAGE)
+
+    def _stop_from_the_app(
+            self, job_id: str, controllers: dict[str, ManagedProcessController], *, run: str | None = None,
+    ) -> dict[str, Any]:
+        with open_db(self.config.paths.db_path) as connection:
+            seen = load_encode_job(connection, job_id)
+        return stop_running_file_action(
+            job_id, run if run is not None else str((seen or {}).get("started_at") or ""),
+            connection_factory=lambda: open_db(self.config.paths.db_path),
+            live_encode_job_controller=lambda running_job: controllers.get(running_job),
+        )
+
+    def _running_file(self, job_id: str) -> int:
+        source_path = self._create_source_file(f"{job_id}.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                f"manifest-{job_id}.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{job_id}.mkv"))}],
+            )
+            self._save_job(connection, job_id=job_id, manifest_name=f"manifest-{job_id}.json",
+                           host={"key": "local", "label": "Local", "mode": "local"}, status="running", attempt_count=1)
+            connection.commit()
+        return item_id
+
+    def test_stop_from_the_app_sends_only_that_file_back_to_waiting_and_leaves_pause_alone(self) -> None:
+        self._running_file("job-stopped-by-owner")
+        self._running_file("job-still-running")
+        controllers = {"job-stopped-by-owner": ManagedProcessController(), "job-still-running": ManagedProcessController()}
+        with open_db(self.config.paths.db_path) as connection:
+            queue_before = load_queue_state(connection)
+        answers: list[dict[str, Any]] = []
+
+        def compress_until_the_owner_stops(*_args: Any, **kwargs: Any) -> list[Any]:
+            answers.append(self._stop_from_the_app("job-stopped-by-owner", controllers))
+            kwargs["process_controller"].throw_if_cancelled()
+            return []
+
+        deps = replace(web_app._encode_queue_runtime_deps(), load_config=Mock(return_value=self.config),
+                       ensure_encode_host_ready=Mock(return_value=False),
+                       encode_manifest_items=Mock(side_effect=compress_until_the_owner_stops))
+
+        encode_runtime.run_encode_job(
+            config_path=self.config.paths.config_path, job_id="job-stopped-by-owner",
+            process_controller=controllers["job-stopped-by-owner"], deps=deps,
+        )
+
+        self.assertEqual(answers, [{"ok": True}])
+        self.assertFalse(controllers["job-still-running"].cancelled)
+        with open_db(self.config.paths.db_path) as connection:
+            stopped = load_encode_job(connection, "job-stopped-by-owner")
+            untouched = load_encode_job(connection, "job-still-running")
+            queue_after = load_queue_state(connection)
+            assert stopped is not None and untouched is not None
+            self.assertEqual(
+                (stopped["status"], stopped["waiting_reason"], stopped["attempt_count"]),
+                ("retry_backoff", encode_runtime.STARTS_OVER_WAITING_REASON, 0),
+            )
+            self.assertEqual(untouched["status"], "running")
+            self.assertEqual((queue_after["is_paused"], queue_after["stop_requested"]),
+                             (queue_before["is_paused"], queue_before["stop_requested"]))
+
+            self._due_now(connection, stopped)
+            encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
+            waiting = load_encode_job(connection, "job-stopped-by-owner")
+        assert waiting is not None
+        self.assertEqual(waiting["status"], "queued")
+
+    def test_stop_from_the_app_refuses_a_file_that_is_not_running(self) -> None:
+        self._running_file("job-finished-meanwhile")
+        self._running_file("job-waiting")
+        with open_db(self.config.paths.db_path) as connection:
+            waiting = load_encode_job(connection, "job-waiting")
+            assert waiting is not None
+            save_encode_job(connection, {**waiting, "status": "queued"})
+            connection.commit()
+        controller = ManagedProcessController()
+
+        for job_id, controllers in (
+                ("job-waiting", {"job-waiting": controller}),
+                ("job-finished-meanwhile", {}),
+                ("job-never-queued", {}),
+        ):
+            with self.subTest(job_id):
+                self.assertEqual(self._stop_from_the_app(job_id, controllers), {"ok": False, "code": "not_running"})
+        self.assertFalse(controller.cancelled)
+
+    def test_a_stop_the_app_saw_before_the_file_started_again_does_not_stop_the_new_run(self) -> None:
+        self._running_file("job-started-again")
+        controller = ManagedProcessController()
+
+        answer = self._stop_from_the_app("job-started-again", {"job-started-again": controller},
+                                         run="2000-01-01T00:00:00+00:00")
+
+        self.assertEqual(answer, {"ok": False, "code": "started_again"})
+        self.assertFalse(controller.cancelled)
+
+    def test_a_stop_after_the_finished_file_is_saved_is_refused_and_the_file_finishes(self) -> None:
+        item_id = self._running_file("job-finishing")
+        staging_path = self._staging_path("job-finishing.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("encoded")
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(update(library_items).where(library_items.c.id == item_id).values(status="encoded"))
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            connection.execute(
+                update(staged_artifacts).where(staged_artifacts.c.library_item_id == item_id)
+                .values(encode_job_id="job-finishing", item_index=0, staging_fingerprint="fingerprint")
+            )
+            connection.commit()
+        controller = ManagedProcessController()
+
+        answer = self._stop_from_the_app("job-finishing", {"job-finishing": controller})
+
+        self.assertEqual(answer, {"ok": False, "code": "finishing"})
+        self.assertFalse(controller.cancelled)
 
     def _run_job_ended_by_reclaim(self, job_id: str, *, reclaim_first: bool) -> tuple[dict[str, Any], int]:
         source_path = self._create_source_file(f"{job_id}.mkv")

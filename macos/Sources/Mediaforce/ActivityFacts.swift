@@ -32,6 +32,8 @@ struct ActivityFacts: Decodable, Sendable {
         let computerName: String?
         let waiting: String?
         let progress: Double?
+        /// When this run of a running file started, so a Stop never reaches a later run of it.
+        let run: String?
         var mediaKind: MediaKind { MediaKind(rawValue: String(prefix.split(separator: "/").first ?? "")) ?? .other }
 
     }

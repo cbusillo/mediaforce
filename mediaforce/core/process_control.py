@@ -21,6 +21,10 @@ class ScheduleWindowClosedError(ProcessCancelledError):
     pass
 
 
+class StartOverCancelledError(ProcessCancelledError):
+    pass
+
+
 class ProcessDeadlineExpiredError(ScheduleWindowClosedError):
     pass
 
@@ -356,6 +360,14 @@ class ManagedProcessController:
             with self._lock:
                 if self._activity_guard is active_guard:
                     self._activity_guard = previous_guard
+
+    def throw_if_stopped_to_start_over(self) -> None:
+        with self._lock:
+            stopped = self._cancel_requested and issubclass(self._cancel_error_type, StartOverCancelledError)
+            error_type = self._cancel_error_type
+            message = self._cancel_message
+        if stopped:
+            raise error_type(message)
 
     def throw_if_cancelled(self) -> None:
         with self._lock:

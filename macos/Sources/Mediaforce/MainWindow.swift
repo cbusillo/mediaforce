@@ -7,6 +7,8 @@ final class MainWindowModel {
     // Working out the kinds reads the whole TV library, so the sidebar's sizes refresh less often; a kind's page reads
     // them again when it opens.
     static let kindsInterval: TimeInterval = 120
+    // How many times Activity is read again after a Stop until the file no longer shows running.
+    static let stopChecks = 60
 
     private(set) var facts: MainWindowFacts?
     // Each kind of content and how it is decided; nil until Mediaforce first answers.
@@ -25,6 +27,9 @@ final class MainWindowModel {
     var onFacts: ((MainWindowFacts) -> Void)?
     // Whether work was asked to run or pause and the server hasn't confirmed it yet; nil when nothing is pending.
     private(set) var switching: Bool?
+    // Running files the Director stopped that Activity still shows running.
+    private(set) var stopping: Set<String> = []
+    var stopCheckInterval: Duration = .seconds(2)
     // Settings › Computers was asked for from the Computers page; Settings takes it and clears it.
     var settingsRequest: SettingsRequest?
     // The computer Settings › Computers should show; its list takes it and clears it.
@@ -92,6 +97,31 @@ final class MainWindowModel {
         switching = on
         await perform { on ? try await $0.resume() : try await $0.pause() }
         switching = nil
+    }
+
+    /// Stops one run of a file, then keeps it shown as stopping until Activity no longer shows it running.
+    func stop(_ file: String, run: String) async {
+        guard !stopping.contains(file) else { return }
+        stopping.insert(file)
+        defer { stopping.remove(file) }
+        do {
+            let result = try await client.stopFile(file, run: run)
+            guard result.ok else {
+                notice = .notStopped(result.code)
+                return
+            }
+        } catch {
+            notice = .unanswered
+            return
+        }
+        for _ in 0..<Self.stopChecks {
+            if let activity = try? await client.activity() {
+                self.activity.facts = activity
+                if !activity.computers.contains(where: { $0.running.contains { $0.id == file } }) { break }
+            }
+            try? await Task.sleep(for: stopCheckInterval)
+        }
+        await refresh()
     }
 
     func deleteCleanupFolder() async {

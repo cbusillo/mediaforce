@@ -70,6 +70,10 @@ struct ActivityPage: View {
                     } else {
                         ProgressView().progressViewStyle(.linear).controlSize(.small).accessibilityLabel("Measuring progress")
                     }
+                    if let run = file.run {
+                        StopFileButton(id: file.id, run: run, title: file.title, progress: file.progress, model: model)
+                            .font(.callout)
+                    }
                 }
             }
             .frame(width: nameWidth, alignment: .leading)

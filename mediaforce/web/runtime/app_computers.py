@@ -142,7 +142,7 @@ def _running(job: Mapping[str, Any]) -> dict[str, Any]:
     eta = float_value(progress.get("eta_seconds"))
     updated = _timestamp(progress.get("updated_at"))
     return {
-        "id": job["job_id"], **identity, "stage": stage,
+        "id": job["job_id"], "run": job.get("started_at"), **identity, "stage": stage,
         "progress": min(1.0, max(0.0, float_value(percent) / 100)) if percent is not None and stage == "compressing" else None,
         "finishes_at": (updated + timedelta(seconds=eta)).isoformat() if eta > 0 and updated else None,
         "file_count": int(job.get("item_count") or 1),

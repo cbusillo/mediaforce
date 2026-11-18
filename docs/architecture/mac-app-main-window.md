@@ -260,6 +260,13 @@ every 30 seconds while it is open. Both pages link to Settings › Computers for
 setup. A notification, the menu bar and Needs you open these pages, not
 Settings.
 
+Each running file on the Activity page and on a computer's row has a Stop. It
+asks first only when the file is at least half done, then reads "Stopping"
+until Activity no longer shows the file running; the file then waits in the
+line-up and starts over later. A refusal is shown as a notice that says why:
+the file isn't running anymore, already started again, or is already
+finishing.
+
 ## Settings
 
 Mediaforce > Settings… (⌘,) opens the Settings window, one tab per section of

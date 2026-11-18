@@ -47,6 +47,7 @@ from mediaforce.core.process_control import (
     ProcessCancelledError,
     ProcessDeadlineEnforcementError,
     ScheduleWindowClosedError,
+    StartOverCancelledError,
 )
 from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, parse_schedule_close_deadline
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
@@ -956,6 +957,8 @@ STOPPED_CLEANUP_PENDING_MESSAGE = (
     "and its unfinished file removed."
 )
 CONTROLLER_RESTART_REQUEUE_REASON = "Queued again after Mediaforce restarted; removing its unfinished file first."
+STARTS_OVER_TERMINAL_REASON = "stopped_to_start_over"
+STARTS_OVER_WAITING_REASON = "You stopped this file. It starts over when a computer is free."
 
 
 def _restart_stop_names(job: Mapping[str, Any], items: list[Any] | None = None) -> tuple[str, str]:
@@ -1003,6 +1006,23 @@ def _requeue_restart_stopped_job(job: dict[str, Any], deps: EncodeQueueRuntimeDe
             "last_failure_kind": "worker_restart",
             "last_failure_at": now_iso,
             "error": None,
+        }
+    )
+
+
+def _start_over(job: dict[str, Any], deps: EncodeQueueRuntimeDeps) -> None:
+    now_iso = deps.now_iso()
+    job.update(
+        {
+            "status": "retry_backoff",
+            "finished_at": None,
+            "retry_not_before": now_iso,
+            "waiting_reason": STARTS_OVER_WAITING_REASON,
+            "terminal_reason": None,
+            "last_failure_kind": None,
+            "attempt_count": max(int_value(job.get("attempt_count")) - 1, 0),
+            "error": None,
+            "progress": _finalize_encode_job_progress(job, deps=deps, terminal_state="retry_backoff"),
         }
     )
 
@@ -1848,6 +1868,8 @@ def unfinished_child_reason(child: Mapping[str, Any]) -> tuple[str, str, bool]:
         return "retrying", _UNFINISHED_REASON_LABELS["retrying"], False
     if status == "stopped" and child.get("terminal_reason") == KEPT_ORIGINAL_TERMINAL_REASON:
         return KEPT_ORIGINAL_TERMINAL_REASON, _UNFINISHED_REASON_LABELS["size_exception_declined"], False
+    if status == "stopped" and child.get("terminal_reason") == STARTS_OVER_TERMINAL_REASON and _stopped_hold_is_rechecked(child):
+        return CONTAINMENT_UNPROVEN_FAILURE_KIND, _UNFINISHED_REASON_LABELS[CONTAINMENT_UNPROVEN_FAILURE_KIND], False
     if status == "stopped" and child.get("terminal_reason") == CONTROLLER_RESTART_STOP_REASON:
         # Still stopped after a restart: its earlier encode is not confirmed ended, or it was on its
         # last attempt. Each computer gets its own line so the owner knows where to look.
@@ -2054,7 +2076,7 @@ def _transition_encode_job_schedule_close(
         return False
     snapshot = stable_json_hash(current_job)
     job = current_job
-    completed = _encode_job_outputs_completed(connection, job)
+    completed = encode_job_outputs_completed(connection, job)
     connection.commit()
     assigned_host = object_dict(job.get("host"))
     cleanup = _EncodeRetryArtifactCleanupResult(
@@ -2080,7 +2102,7 @@ def _transition_encode_job_schedule_close(
         connection.rollback()
         return False
     job = current_job
-    if _encode_job_outputs_completed(connection, job):
+    if encode_job_outputs_completed(connection, job):
         job.update(
             {
                 "status": "completed",
@@ -2146,7 +2168,7 @@ def _transition_encode_job_schedule_close(
     return True
 
 
-def _encode_job_outputs_completed(connection: DBClient, job: dict[str, Any]) -> bool:
+def encode_job_outputs_completed(connection: DBClient, job: dict[str, Any]) -> bool:
     manifest_path = Path(str(job.get("manifest_path") or "").strip())
     try:
         manifest = json.loads(manifest_path.read_text())
@@ -2204,7 +2226,7 @@ def _encode_job_outputs_completed(connection: DBClient, job: dict[str, Any]) -> 
 def _encode_job_outputs_completed_by_id(config: MediaforceConfig, job_id: str) -> bool:
     with open_db(config.paths.db_path) as connection:
         current_job = load_encode_job(connection, job_id)
-        return current_job is not None and _encode_job_outputs_completed(connection, current_job)
+        return current_job is not None and encode_job_outputs_completed(connection, current_job)
 
 
 def _worker_may_write_terminal_state(
@@ -2425,7 +2447,7 @@ def _release_stopped_holds_whose_run_ended(
         progress = object_dict(job.get("progress"))
         context = object_dict(progress.get(QUALITY_CONTAINMENT_PROGRESS_KEY))
         checked_at = deps.parse_iso(context.get("checked_at"))
-        if not context.get("scoped_temp_dir") or (checked_at is not None and now - checked_at < STOPPED_HOLD_CHECK_INTERVAL):
+        if not _stopped_hold_is_rechecked(job) or (checked_at is not None and now - checked_at < STOPPED_HOLD_CHECK_INTERVAL):
             continue
         snapshot = stable_json_hash(job)
         connection.commit()
@@ -2438,7 +2460,13 @@ def _release_stopped_holds_whose_run_ended(
             progress.pop(QUALITY_CONTAINMENT_PROGRESS_KEY, None)
             job.update({"progress": progress, "last_failure_kind": None,
                         "error": "Encode queue job was stopped; its remote processes have ended."})
+            if job.get("terminal_reason") == STARTS_OVER_TERMINAL_REASON:
+                _start_over(job, deps)
         _save_swept_job(connection, job, snapshot, deps)
+
+
+def _stopped_hold_is_rechecked(job: Mapping[str, Any]) -> bool:
+    return bool(object_dict(object_dict(job.get("progress")).get(QUALITY_CONTAINMENT_PROGRESS_KEY)).get("scoped_temp_dir"))
 
 
 def _check_held_quality_runs_again(connection: DBClient, config: MediaforceConfig, deps: EncodeQueueRuntimeDeps) -> None:
@@ -4962,6 +4990,7 @@ def run_encode_job(
     failure: Exception | None = None
     # An owner's Stop whose run on the computer was not confirmed ended stays a Stop and holds the file.
     stop_left_unproven_run: Exception | None = None
+    starts_over = False
     started_host_for_job = bool(object_dict(job.get("host")).get("scratch_admission_started"))
     try:
         process_controller.throw_if_cancelled()
@@ -5015,6 +5044,7 @@ def run_encode_job(
             stop_left_unproven_run = cancel_error.unproven_remote_run
             final_status = "stopped"
             restart_stop = isinstance(cancel_error, ControllerShutdownCancelledError)
+            starts_over = isinstance(cancel_error, StartOverCancelledError)
             with open_db(config.paths.db_path) as connection:
                 cleanup = _cleanup_encode_retry_artifacts(
                     connection, manifest_path=manifest_path, indexes=indexes,
@@ -5101,6 +5131,10 @@ def run_encode_job(
                         })
                     if stop_left_unproven_run is not None:
                         _hold_stopped_file_for_unproven_run(config, job, stop_left_unproven_run)
+                        if starts_over:
+                            job["terminal_reason"] = STARTS_OVER_TERMINAL_REASON
+                    elif starts_over:
+                        _start_over(job, deps)
                     save_encode_job(connection, job)
                     sync_encode_job_parent(connection, job, deps)
                 elif error is not None:

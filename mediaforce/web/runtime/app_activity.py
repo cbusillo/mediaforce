@@ -122,7 +122,7 @@ def _running(job: Mapping[str, Any], now: datetime) -> dict[str, Any]:
     prefix = str(job["prefix"])
     rel_path = str(progress.get("current_item_rel_path") or progress.get("rel_path") or "")
     percent = progress.get("percent_complete")
-    return {"id": job["job_id"], **season_identity(prefix), "title": _title(rel_path) if rel_path else _season_title(prefix),
+    return {"id": job["job_id"], "run": job.get("started_at"), **season_identity(prefix), "title": _title(rel_path) if rel_path else _season_title(prefix),
             "starts_at": now.isoformat(), "finishes_at": (now + timedelta(seconds=seconds)).isoformat() if seconds > 0 else None,
             "progress": min(1.0, max(0.0, float_value(percent) / 100)) if percent is not None else None}
 

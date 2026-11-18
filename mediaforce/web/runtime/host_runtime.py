@@ -257,6 +257,7 @@ def _running_encode_jobs_for_hosts(connection: DBClient, *, format_eta_seconds: 
     rows = connection.execute(
         select(
             encode_jobs.c.job_id,
+            encode_jobs.c.started_at,
             encode_jobs.c.prefix,
             encode_jobs.c.item_count,
             encode_jobs.c.bypass_schedule,
@@ -276,6 +277,7 @@ def _running_encode_jobs_for_hosts(connection: DBClient, *, format_eta_seconds: 
         jobs.append(
             {
                 "job_id": str(row["job_id"]),
+                "started_at": row["started_at"],
                 "prefix": str(row["prefix"]),
                 "item_count": int(row["item_count"] or 0),
                 "bypass_schedule": bool(row["bypass_schedule"]),
