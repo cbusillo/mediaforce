@@ -14,7 +14,7 @@ in an `AGENTS.md` too.
 
 Mediaforce reclaims media-library space by converting videos to AV1 and audio to Opus, while checking quality before publishing each file.
 Its native Mac app direction calls for automatic handling of measured problems, with the Director deciding judgment calls and rollback-copy cleanup.
-Evidence: [DIRECTION.md](DIRECTION.md); [README.md](README.md) describes implementation details.
+Evidence: [DIRECTION.md](DIRECTION.md); [the developer guide](docs/development/developer-guide.md) describes implementation details.
 
 ## Naming
 
@@ -56,7 +56,9 @@ Here that also means tests pin or stub the host platform, the developer's
 
 ## See also
 
-- `README.md`: durable user and developer overview
+- `README.md`: what Mediaforce is, what it needs and how to install it
+- `docs/development/developer-guide.md`: layout, running from source, CLI and
+  background behavior
 - `docs/README.md`: docs table of contents
 - `docs/style/workstation-ui.md`: primary user-surface design doctrine
 - `docs/architecture/module-boundaries.md`: durable backend module

@@ -1,1023 +1,143 @@
 # Mediaforce
 
-Mediaforce reclaims space on a media library by re-encoding it to AV1 video
-and Opus audio with minimal, acceptable quality loss.
+Mediaforce is a Mac app that shrinks a media library. In the background it
+re-encodes TV shows and movies to AV1 video and Opus audio, checks every new
+file's picture and sound against its original, and only then puts it in the
+original's place. The original is kept as a rollback copy until you say it
+can go.
 
-The Director's [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md)
-comes first, followed by this repository's [DIRECTION.md](DIRECTION.md).
-Those files set purpose, work order, and stop boundaries and take precedence
-over this README. [AGENTS.md](AGENTS.md) is the repository's agent-instruction
-entry point; this README describes the current implementation and how to use it.
+How much space comes back depends on the source. H.264 episodes have averaged
+about 9% of their original size at quality the maintainer was happy with;
+some shows need more, and your results will vary.
 
-## Scope
+![Needs you, listing two questions: a sample ready to watch and an episode that came out smaller than its sample](docs/images/needs-you.png)
 
-- Source roots: taken from checked-in defaults plus runtime settings
-- Staging root: taken from checked-in defaults plus runtime settings
-- Only configured library roots are scanned; a library path may not contain or
-  sit inside the working (transcode) folder
+## What it does
 
-The current checked-in defaults point at `/Volumes/media/movies`,
-`/Volumes/media/tv`, and `/Volumes/media/transcode`, but those are config
-defaults rather than product-level invariants.
+- **Looks.** You decide once how each kind of content should look, by
+  watching a short sample side by side with the original. One look covers
+  live action, movies included; cartoons are approved one show at a time. Each file is
+  then encoded to fit that look and measured before it is published.
+- **Checked, one file at a time.** Every episode or movie is encoded, checked
+  and published on its own. A problem with one file stays with that file;
+  the rest keep going.
+- **Rollback copies.** Each replaced original moves to a Cleanup folder.
+  Nothing is deleted until you approve it on the Space saved page.
+- **Needs you.** Only real judgment calls reach you: a sample to watch, a
+  file that came out much smaller than its sample, a computer that needs
+  fixing. They appear in one list, with a notification and a Dock
+  badge.
+- **Other computers.** Extra Macs and Linux computers can share the work
+  over SSH. Mediaforce sets up a Mac for you, can wake a sleeping one when
+  work is waiting, and sends files to a computer that cannot see your
+  library share.
+- **Work windows.** Each computer works only in the hours you give it, for
+  example overnight or during off-peak power hours, including seasonal
+  time-of-use hours that change through the year. A file that cannot finish
+  before its window closes waits for the next one.
+- **Plain screens.** Library, Activity, Computers and Space saved show what
+  is running, what comes next and what has been saved, without encoder
+  jargon.
 
-## Status
+![Computers page showing four computers, what each is doing and its work window](docs/images/computers.png)
 
-The current implementation covers:
+## What you need
 
-- discovery and inventory into SQLite, refreshed in the background
-- the Mac app: TV, Movies, and Other libraries, Activity, Finished, and
-  Settings, talking to the local server's API
-- Library shows saved-so-far beside estimated total savings, adding the server's
-  remaining TV, movie, and Other estimates. Missing estimates, an incomplete
-  listing, or a failed library refresh make it read "At least" instead of
-  "About"; no available estimate says it is not known yet.
-- “Needs you” lists every item counted by the Dock badge as one row each: what stops work first, then the
-  most space. Each row asks its question in a few words and takes the answer in place where Mediaforce can
-  (a group's settings, a sample size, keeping or remaking a file), or opens the page the answer needs. Opening the app from the Dock, its waiting
-  menu-bar notice, or a notification shows the list while anything waits
-- the Mac Media table fills the available window below its filters, with one
-  scrollbar for its rows and a visible column header while browsing
-- per-file sample, encode, and machine validation across configured encode
-  hosts, with work-window schedules
-- measured evidence (motion pattern, media fingerprint) checked automatically
-  for files production is waiting on
-- side-by-side compare clips for sample review
-- automatic per-file checking and publishing under a current approval, with
-  original-file archival under the transcode root,
-  and user-approved cleanup of those rollback copies
+- **A Mac running macOS 15 or later.** The app is built for Apple silicon
+  and Intel; the maintainer runs it on Apple silicon.
+- **Your library** in folders on that Mac's disk or on a network share it
+  mounts. Mediaforce reconnects a share in the background using the password
+  saved in your Keychain. It also needs a separate working folder, outside the
+  library, for new files and the Cleanup folder.
+- **ffmpeg** from Homebrew (`brew install ffmpeg-full`) on the Mac that runs
+  Mediaforce.
+- **At least one computer to do the work**, reached over SSH. That can be
+  the same Mac: turn on Remote Login and add it under Settings › Computers.
+  - **Another Mac** needs Remote Login turned on. Set up computer installs
+    this Mac's SSH key (asking for that account's password once), and
+    installs Homebrew's `ffmpeg-full` and `ab-av1` when they are missing.
+  - **A Linux computer** needs SSH, ffmpeg with the SVT-AV1 encoder, and
+    `ab-av1` already installed. Linux computers compress files but do not make
+    samples.
+- **Optional:** a Plex server for posters and when each show was added, a
+  TMDB read-access token so Mediaforce can tell cartoons from live action and
+  which seasons are still airing, and Docker for the sound score on samples.
 
-Approving a live-action kind’s representative sample approves the kind across
-its shows. The kind keeps the watched sample as its evidence. Choose
-“Approve only this season” for a season-only decision.
-Live-action seasons and movies can follow one approval for their kind of content
-("How it should look": live action and cartoons). Older unapproved
-season samples stop asking separately when they finished before the kind was
-approved or before its newest sample was requested. Newer samples, uncertain timing,
-and existing folder approvals keep their own decision. While the kind waits for a
-choice, its newest sample stays available, even after that season finishes.
-Mediaforce automatically requests a first sample for each unapproved kind with
-waiting shows, using the existing sample queue and size settings. While that
-sample is not started or being made, the kind shows its progress under How it
-should look and stays off Needs you. It reaches Needs you, and notifies, once
-there is a sample to watch, approved settings to choose, a size or detail to
-choose, or a sample to make again. A size or balance
-choice reaches Needs you only when the season offers one; otherwise the start is
-retried like any other refusal. An existing
-approved setting comes first. An unsuitable sample stays reachable and stops
-automatic sampling of further shows until that kind's choice is settled.
-Cartoons continue to need
-a choice for each show. 4K is not a look: a look's approval says once whether 4K
-stays 4K or comes down to the library's tallest picture (Settings), and it comes
-down unless the Director chooses to keep it. A season whose sample episode is
-taller than that limit offers the same choice on its sample page, and choosing a
-size never changes it. Movies use the live action look; movie genres are not
-stored, so an animated movie is live action too. VR & 3D has no look until
-Mediaforce can compress it. Seasons missing original measurements wait for measuring without a sample decision, even
-when an older sample is saved. After measuring, they follow their kind; measured
-seasons without a reusable kind keep their own sample decisions. A blocked
-measurement names its reason and next action on the season and sample page:
-library processing needs enabling when disabled, or files need support to identify
-their format safely. Files already excluded from conversion do not block measuring
-the remaining originals. It does not ask for approval of the old sample.
-Saved sample files are retained. Finished production files are checked and
-published automatically one at a time under their current approval. Manual
-checking and publishing remain explicit overrides. Rollback copies stay until
-the user approves cleanup.
+## Install
 
-Remote computers reconnect missing shared storage in the background. After an uncertain
-connection, the same mount helper checks that computer again before retrying.
-It waits for a running connection request, clears an old unused lock, and
-refuses to mount beside a leftover folder. If it cannot prove that, it shows what
-it found and keeps checking. A laptop identified from its last-seen Mac model
-stays quiet while away; a desktop missing from the network for a long while
-notifies once. Other computers keep working, and returning computers rejoin
-automatically. Models are learned when a computer answers a check.
+### Download
 
-## Runtime state
+**[Download the latest release](https://github.com/cbusillo/mediaforce/releases/latest)**
+(`Mediaforce-<version>.zip`). It is a notarized Mac app with the server built
+in, and it updates itself between files from then on.
 
-Runtime artifacts now live outside the repo by default:
+1. Unzip it and move `Mediaforce.app` to Applications.
+2. Make a config file. Start from the app's own defaults and set your library
+   folders and working folder in it:
 
-- durable state: `~/Library/Application Support/mediaforce/`
-- disposable review clips: `~/Library/Caches/mediaforce/review/`
-- runtime settings: `~/Library/Application Support/mediaforce/runtime-settings.json`
-- learned memory artifacts: `~/Library/Application Support/mediaforce/learned-memory/`
+   ```bash
+   mkdir -p ~/Library/Application\ Support/mediaforce
+   cp /Applications/Mediaforce.app/Contents/Resources/server/app/mediaforce/package_defaults/defaults.toml \
+      ~/Library/Application\ Support/mediaforce/config.toml
+   open -e ~/Library/Application\ Support/mediaforce/config.toml
+   ```
 
-That keeps the repository focused on code and policy while allowing the local
-catalog, manifests, scan jobs, and calibration artifacts to survive repo moves
-or fresh clones.
+3. Start the background server once. It then starts at login:
 
-Database schema changes are now managed through SQLAlchemy 2.x plus Alembic.
-Opening the app against a database will auto-apply Alembic migrations, and
-legacy pre-Alembic databases are normalized to the initial revision before
-later revisions run. Encode artifacts also persist richer telemetry now: source
-size and path at encode time, host and worker metadata, wall-clock encode
-duration, and append-only item events for encode start, completion, and
-failure.
+   ```bash
+   /Applications/Mediaforce.app/Contents/MacOS/mediaforce-server \
+     --config ~/Library/Application\ Support/mediaforce/config.toml service install
+   ```
 
-For migration authoring and review workflow, see
-`docs/development/database-tooling.md`.
+4. Open Mediaforce and finish setup in Settings.
 
-Transient calibration artifacts are also cleaned up automatically. By default,
-Mediaforce purges cached review clips that no kind approval still references, temporary calibration manifests, and
-`/Volumes/media/transcode/_calibration/` scratch outputs after `14` days.
-While the server or CLI is in active use, it also retries that cleanup sweep at
-most once per hour so stale files get another chance to disappear if an earlier
-pass raced or only cleaned up partially. Run plans containing original source
-trait measurements are retained regardless of age or job status; unreadable or
-malformed run plans are also retained. The same sweep keeps only the newest
-two folders under the support directory's `deployments/` (each holds a full
-database copy for rollback) and removes `operations/` evidence folders whose
-files are older than 30 days. Age comes from the files inside a folder, not
-the folder's own modified time, which Finder changes just by opening it. Set
-`kept_deploy_backups` and `operation_evidence_retention_days` under
-`[state.cleanup]` to change these.
+Setup from the app itself, without Terminal, is not built yet.
 
-Completed calibration jobs also clean up their own temporary manifest and
-scratch encode directory right away after compare clips are generated, so only
-the review clips and saved calibration summary remain.
+### From source
 
-The Mac sample page shows the coverage saved with the sample beside its size
-facts and approval controls: how many files were tested and which seasons or
-picture formats were not. It uses that sample's record, even when today's
-remaining files differ. Older samples without recorded coverage say so.
-Every production file still passes its own quality and final-output checks.
-The same page offers the season's existing plain-language balance choices. A
-chosen balance is applied together with a chosen size whenever a fresh sample
-is made; requests without an explicit choice keep the current choice or the
-automatic balanced default.
-
-## Confirming independently acquired originals
-
-To prepare an exact list for the Mac app, name each library item explicitly:
+This is how to try Mediaforce today. It needs Xcode, [xcodegen](https://github.com/yonaskolb/XcodeGen)
+and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv run mediaforce evidence register-original 123 124 --assertion "Independently acquired before Mediaforce compressed them"
+git clone https://github.com/cbusillo/mediaforce.git
+cd mediaforce
+uv sync --locked
+scripts/mediaforce-dev.sh start backend   # the server, on http://127.0.0.1:8777
+scripts/build-mac-app.sh test             # builds the Mac app and runs its tests
+open .build/mac-app/Build/Products/Debug/Mediaforce.app
 ```
 
-This prepares a saved preview, including each file's full content check. It
-never confirms an original. Open **Needs you** in the Mac app, review every
-file and any separate format exception, then confirm with macOS
-LocalAuthentication. The app saves that exact approval in its own store and
-the existing background evidence worker rechecks files and source revisions
-before recording each file independently. One changed file needs an updated list
-while the others continue. The confirmation sheet closes after saving the approval;
-the existing background discovery queues it even when the controller was idle.
-Activity shows why file checks are waiting. Cancelled
-or unsuccessful authentication records no approval. Retrying a saved approval
-returns each file's existing result. Changed bytes or approval checks appear in
-**Needs you** and require an updated list for that file. Temporary missing files
-wait without discarding the approval. Once a library scan confirms a file is
-gone, its check finishes and resumes if the file returns. An unknown error retries before asking;
-after diagnosing exhausted checks, an agent can retry through the existing
-`mediaforce evidence start tv/source.mkv --kind media_fingerprint` and
-`mediaforce evidence resume` commands, naming the affected file and check kind.
-This reuses the saved approval without another authentication. Dismissing a request
-changes no file or approval.
-Dismissing a problem acknowledges only the member problems shown. Different
-problems still appear. Dismissing a missing-approval problem also stops
-that file's waiting checks. If the
-approval is restored later, an agent can start those exact file checks again
-with the same commands.
-
-A format exception must name its item, for example `--codec-override '123=Independently acquired AV1 download'`.
-It never permits a Mediaforce stamp, a known compressed output or unavailable
-checks. Approving an original does not upgrade old measurements: SMB and
-remote measurements still have only observed strength.
-
-The Mac app's approval files live under its Application Support directory at
-`mediaforce/mac-app/original-approvals`. This is the in-app boundary chosen by
-the Director: agents do not write confirmations or invoke original deletion.
-It is not an isolated service or protection against direct writes by the same
-macOS account. Keep these approval files with the database when backing up;
-a missing approval leaves its original unconfirmed. Original registration neither deletes nor restores media.
-When a replacement is identified by the background checks, only a full content
-match to one retained version for that library item reconnects its history.
-Missing files, ambiguous matches and unreadable content checks do not transfer
-an original's approval to another file or a reused catalog ID.
-
-## Layout
-
-- CLI entry points: `mediaforce`, `mediaforce-web`
-- `bin/mediaforce.py`: Python entry point
-- `config/defaults.toml`: checked-in encode defaults and policy defaults
-- `mediaforce/`: internal Python package
-- `macos/`: the Mac app (SwiftUI). `scripts/build-mac-app.sh test` builds and
-  tests it; it needs Xcode and `xcodegen`.
-- runtime state: stored under `~/Library/Application Support/mediaforce/`
-  and `~/Library/Caches/mediaforce/review/`
-
-### Mac page screenshots
-
-Run the app executable directly to render live server data into PNGs in light
-and dark. Rendering draws its own page hierarchy into a window that is never
-shown, with no Computer Use or Screen Recording permission. Run it in a
-logged-in macOS session:
-
-```bash
-/Applications/Mediaforce.app/Contents/MacOS/Mediaforce render /path/to/captures
-```
-
-Use a task build's executable before its source is installed. The default set
-includes Library and each library, Needs you, Activity, Space saved, Media,
-every Settings section and kind, and available examples of a show, season,
-sample, movie and other folder. Missing live states are not manufactured.
-Select specific pages with repeated `--page` options:
-
-```bash
-Mediaforce render /path/to/captures --page needs-you --page 'sample:tv/Show/Season 1'
-```
-
-Other page names are `library`, `tv`, `movies`, `other` (VR & 3D), `activity`,
-`computers`, `computer:ADDRESS`, `space-saved`, `media`, `kind:CODE`, `item:PREFIX`, `settings:libraries`,
-`settings:compression`, `settings:computers`, `settings:metadata` and `menu`
-(the menu bar panel, drawn at its own size and only when asked for).
-`--server URL` selects another server; the default is the app's local server.
-`--width POINTS` and `--height POINTS` adjust the viewport. Settings retain
-their normal form width. Use a new empty output directory for each run so old
-PNGs cannot be mistaken for current evidence. A page whose required data fails to load makes the command
-fail instead of producing a successful loading-state capture.
-
-Agents post these PNGs on the owning issue or PR for appearance evidence.
-They show the actual shared page content and title bar, without the sidebar
-or Settings tab selector: those native vibrant selections cannot be captured
-faithfully in an unshown window. Screenshots prove appearance, not click
-routing; video frames in the compare player may be blank. The macOS CI render
-job exercises the same renderer in the native test gate, reusing existing fixtures, and
-keeps its PNGs in the `mac-pages` artifact. It fails for unreadable or blank
-pages; it does not compare pixel hashes against a saved design.
-
-For source validation while local media work is running, use the pull request's
-`mac-app` CI job on its isolated `macos-latest` runner and download `mac-pages`
-from that exact run. It runs `scripts/build-mac-app.sh test` and the offscreen
-renderer without installing or restarting the workstation's app or server.
-
-## Commands
-
-On macOS, Mediaforce now prefers Homebrew's `ffmpeg-full` and `ffprobe` from
-`/opt/homebrew/opt/ffmpeg-full/bin` when present so VMAF support survives PATH
-changes and normal formula upgrades. You can override either binary with
-`MEDIAFORCE_FFMPEG` or `MEDIAFORCE_FFPROBE`.
-
-The Mac sidebar lists Needs you, Activity, Computers and Space saved, then
-Library. Library combines TV shows, Movies and VR & 3D: its storage summary,
-finished seasons, approved samples, biggest unstarted shows and state shelves.
-Browse all opens Media, the complete list, and a shelf heading opens that
-state. Under Library, TV shows, Movies and VR & 3D (once it holds something)
-each open their own list with its size, how much remains original and what it
-can save, plus a Can save column. State, search and table/poster controls stay
-in the lists, without a second library picker. Mediaforce can't compress VR and
-3D video yet, so those files say so and are never counted as waiting work.
-Computers lists each computer's state and opens its page with its fixes;
-Settings › Computers holds only their setup. Storage totals remain visible when
-a list cannot load.
-
-The sidebar keeps the last kinds received while retrying an unanswered refresh.
-
-The compression list counts current file questions. Published files and files settled by a
-later run stop asking for attention; their saved compression-job history stays intact.
-
-API reads only report persisted catalog and job state; opening or
-polling a page does not start scans, host probes, or media analysis. Catalog
-inventory refreshes in the background every `media.catalog_refresh_hours`
-(default 6; 0 turns it off). Save a library-path change in Settings or run
-`mediaforce scan` to reconcile sooner. A full scan also refreshes configured Plex and TMDB metadata;
-provider failures leave the last successful metadata in place and surface a
-warning instead of blocking the catalog scan.
-
-Scans update inventory with `ffprobe` metadata only. Cadence and media
-fingerprint analysis is remembered as canonical evidence and refreshed through
-bounded evidence batches. A background worker runs unpaused batches, such as
-the checks a sample or production is waiting on; a batch prepared by hand starts paused,
-and a catalog scan never starts analysis. For a small folder pilot:
-
-```bash
-uv run mediaforce evidence start "tv/Futurama/Season 1" --limit 10
-uv run mediaforce evidence status
-uv run mediaforce evidence resume
-uv run mediaforce evidence run --max-items 1
-```
-
-`uv run mediaforce evidence restore-source` reports historical original-trait
-recovery from retained run plans without reading original media. Add `--apply`
-to append eligible historical-probable records. Those advisory traits stay
-separate from current-file evidence and cannot grant approval or cleanup authority.
-
-Repeat the final command to resume durable progress. `evidence pause` prevents
-the next claim, while `evidence cancel` terminates the active managed process
-and cancels the remainder. See `docs/architecture/evidence-worker.md`.
-
-The TV library (`/` or `/folders`) lists shows. Open a show for show-wide
-actions, or a season for season actions.
-
-The Mac app's back button shows a chevron and the name of the page you came
-from, then returns to it, including Media, Space saved, a kind, or another
-show, season or sample.
-Changing the selection in the sidebar starts a new browsing path.
-Opening a page from a notification or the menu bar keeps a way back to the
-page already open in the window.
-
-In the Mac app, a show's seasons follow the player and show choices, so loading
-the season list leaves the player in place. The file list highlights the file
-shown in the player, including the first file chosen when the page opens.
-
-Folder calibration now uses a size-first review flow by default. The checked-in
-defaults aim for roughly 300 MB per 45-minute episode at up to 1080p, then use
-sampled metrics as guardrails and representative picture-and-sound clips as the
-user decision point. The comparison can open in a focused full-screen
-workspace with side-by-side and instant Original/New views, shared playback,
-and actual-size inspection. Technical encoding evidence remains under Details,
-and approval stays on the calm folder page. The first size note is measured
-before it becomes a ceiling; once a
-follow-up target lands above the band, the next sample draft carries the learned
-size ceiling forward instead of repeating the oversized run. The current fast
-sample engine is still `ab-av1`; scene-aware engine work is tracked separately so
-host orchestration and review workflow can stay stable while that bakeoff happens.
-When a sample re-encodes the audio, Mediaforce also checks the sound: a ViSQOL
-score against the original, plus loudness, dialogue, peak and clipping guards.
-ViSQOL runs from a local Docker image; build it once with
-`docker build -t mediaforce-visqol:38d0b01 docker/visqol`. See
-`docs/architecture/sample-sound-check.md`.
-Once a sample is approved, the show or season page offers the compress action
-(for example `Compress the season`), which queues the real encode from that
-approval rather than from an unsaved preview.
-
-For this personal workflow, source-resolution 1080p AV1 around 200–300 MB per
-45 minutes is an established user-approved baseline, including conventional
-and dark or stylized TV material. Direct user instructions and accepted
-visual samples outrank generic bitrate guidance; real sample evidence decides
-whether a particular folder needs adjustment.
-
-`video.max_crf` is the initial quality-search range, not a hidden veto on an
-approved size goal. Size-directed tests may expand in measured steps up to
-`video.target_search_max_crf` (63 by default) while still enforcing the metric
-floor and requiring user review. Saved jobs created before that ceiling was
-recorded replay their original CRF range exactly; make a fresh test to use the
-new search contract.
-
-For scene-aware engine research, generate a repeatable bakeoff plan from an
-existing manifest instead of replacing the production engine path directly:
-
-```bash
-uv run mediaforce bakeoff path/to/run-manifest.json --all \
-  --output ~/Desktop/mediaforce-bakeoff.json
-```
-
-The bakeoff plan carries the same size-first defaults and per-item resolved
-policy used by the TV season page, then lays out candidate commands and tool
-requirements for the current `ab-av1` path plus Av1an, Xav, and Auto-Boost. Use
-the plan to collect output size, runtime, selected CRF or quantizer, metric
-score, and review artifacts before choosing a production engine migration.
-
-Run Mediaforce through the project entrypoint with `uv`:
-
-```bash
-uv run mediaforce report --limit 10
-```
-
-Inspect read-only quality-memory readiness, active observations, concurrent
-holdouts, and safety evidence without starting media work:
-
-```bash
-uv run mediaforce quality-memory
-uv run mediaforce quality-memory --prefix "tv/Show/Season 1" --json
-```
-
-See which kind of content each season still waiting on a sample belongs to:
-
-```bash
-uv run mediaforce content-kinds
-```
-
-This read-only JSON report groups each waiting season and movie title: cartoon
-by the series' TMDB genres, else live action once any of its originals is
-measured, else unmeasured. It reads only proven or probable original
-measurements, so published episodes count with the original they were made
-from, and output measurements never count. Seasons with a folder approval are
-only counted. A movie title holds only its feature files, never its extras.
-
-Inspect a target-size default proposal using a current visual boundary observation
-ID from the configured database:
-
-```bash
-uv run mediaforce target-defaults cibo1_example
-```
-
-This read-only JSON report explains item, folder, and measured-content scope,
-evidence counts, confidence, and fallback. It does not apply a target or start
-media work. Exact-item Studio pages also expose this evidence when the saved
-review still matches the current source, calibration, intent and budget.
-Suggestions remain review-only; sample approvals do not establish promoted
-production evidence. See [target-default rules](docs/architecture/content-intent-boundary-evidence.md#target-default-proposals)
-for the evidence thresholds and required user confirmation.
-
-Inspect the separately captured production lineage for an approved boundary:
-
-```bash
-uv run mediaforce target-production-evidence cibo1_example
-```
-
-This read-only report links the exact reviewed item to its validated, promoted
-output and explains current evidence eligibility. It never adopts a default or
-backfills historical promotions. Output identity uses sampled content bytes,
-size, and metadata, not a full-file digest. See the
-[production lineage contract](docs/architecture/content-intent-boundary-evidence.md#production-outcome-lineage).
-
-Record approvals that never reached the learning tables, rebuilt from the
-saved approval files:
-
-```bash
-uv run mediaforce backfill-approval-boundaries
-uv run mediaforce backfill-approval-boundaries --apply
-```
-
-Without `--apply` it only reports what it would record and why each other
-approval is skipped. See [backfill](docs/architecture/content-intent-boundary-evidence.md#backfill-from-saved-approvals).
-
-Run a sample scan:
-
-```bash
-uv run mediaforce scan --limit 25
-```
-
-Scan a specific show or folder:
-
-```bash
-uv run mediaforce scan \
-  --prefix "tv/Futurama"
-```
-
-Inspect a folder and print a suggested override block:
-
-```bash
-uv run mediaforce inspect-folder "tv/Suits"
-```
-
-Start a folder campaign in one command:
-
-```bash
-uv run mediaforce campaign \
-  "tv/Suits/Season 5"
-```
-
-The Mac app is the normal way to run Mediaforce. For a manual one-off or
-debugging run from the CLI, start a run instead:
-
-```bash
-uv run mediaforce run \
-  "tv/Suits/Season 5" \
-  --play
-```
-
-`campaign` will:
-
-- rescan that folder prefix
-- print the folder summary and suggested override block
-- write a run manifest for the matching items in that folder
-- print the first item plan in plain English
-
-`run` will do the same setup work and then immediately:
-
-- encode item 0
-- validate item 0
-- render compare clips for harder/high-complexity parts of the source
-- optionally play the first compare clip
-- print the next approval step
-
-After a campaign, the rest of the commands default to the latest manifest, so
-you do not need to paste the run path each time.
-
-Review the first item from the latest run:
-
-```bash
-uv run mediaforce review --play
-```
-
-Approve the reviewed item from the latest run:
-
-```bash
-uv run mediaforce approve
-```
-
-Report the best current candidates:
-
-```bash
-uv run mediaforce report --limit 15
-```
-
-Generate a reviewable run manifest:
-
-```bash
-uv run mediaforce plan \
-  --prefix "movies" \
-  --limit 10
-```
-
-Run manifests are written under
-`~/Library/Application Support/mediaforce/runs/` by default and contain:
-
-- source file path
-- resolved policy for that file
-- recommendation bucket and score
-- staging output path under `/Volumes/media/transcode`
-- audio/subtitle summaries for review
-
-Encode one or more items from a run manifest:
-
-```bash
-uv run mediaforce encode \
-  --index 0
-```
-
-Encode every item from the latest manifest:
-
-```bash
-uv run mediaforce encode --all
-```
-
-Run machine validation against staged outputs:
-
-```bash
-uv run mediaforce validate \
-  --index 0
-```
-
-Validate every staged item from the latest manifest:
-
-```bash
-uv run mediaforce validate --all
-```
-
-Inspect staged-output integrity for one explicit scope without changing media,
-runtime state, or database rows. Add `--details` to perform bounded discovery
-of untracked and temporary files under configured staging roots:
-
-```bash
-uv run mediaforce staged-integrity "tv/Show/Season 1" --details
-```
-
-Mediaforce checks finished production files and publishes each passing file
-automatically, retaining the original in the Cleanup folder. Temporary holds,
-including a storage read that times out, retry without limit; unknown failures retry with a delay before
-pausing for the manual check or publish override.
-Changed approvals, failed checks, and file conflicts stay with that file.
-Reasons appear in its staged-integrity details. Sample outputs never
-publish automatically. Older outputs without an unambiguous recorded production origin use
-the manual override, so sample files cannot be mistaken for full replacements.
-
-Manually publish a checked file as an explicit override:
-
-```bash
-uv run mediaforce promote \
-  --index 0
-```
-
-Manually try every checked file from the latest manifest:
-
-```bash
-uv run mediaforce promote --all
-```
-
-Promotion is decided file by file, for TV seasons and shows as for movies and
-exact files. An episode publishes when its staged output is locally available,
-unchanged, validated, made under an approved policy (the current approval or
-the approval its run recorded), not being written by an active encode, and not
-in conflict with an existing library file. Every other episode waits and is
-reported with its reason; it never holds back the rest. Promotion stops for the
-whole scope only when Mediaforce cannot judge files safely: an incomplete
-integrity report, an unavailable policy check, or an active encode whose files
-cannot be read.
-
-Generate side-by-side approval clips from the source and staged outputs:
-
-```bash
-uv run mediaforce compare \
-  --index 0
-```
-
-Generate review clips for all items from the latest manifest:
-
-```bash
-uv run mediaforce compare --all --play
-```
-
-Without explicit timestamps, `compare` now tries to pick scene-change moments
-from the source automatically and falls back to evenly spaced review points if
-scene analysis does not yield useful candidates.
-
-For episodes short enough to scan, it tries high-complexity moments before
-scene changes. You can override the choice with explicit timestamps, for
-example:
-
-```bash
-uv run mediaforce compare \
-  ~/Library/Application\ Support/mediaforce/runs/run-abc123.json \
-  --index 0 \
-  --timestamp 120 \
-  --timestamp 640 \
-  --timestamp 1100 \
-  --play
-```
-
-## Policy model
-
-Source checkouts use `config/defaults.toml` for runtime encode defaults.
-Installed packages use the separate install-safe resource
-`mediaforce/package_defaults/defaults.toml`; see [Package Builds](docs/development/package-builds.md).
-Machine-specific libraries, transcode roots, and remote hosts should live in
-runtime settings instead of repo-tracked config. Mediaforce resolves settings
-in this order:
-
-1. Global defaults
-2. Matching per-folder overrides from `config/folder-defaults.toml` in
-   declaration order
-3. Matching local folder overrides saved into
-   `~/Library/Application Support/mediaforce/runtime-settings.json`
-4. Runtime environment overrides from
-   `~/Library/Application Support/mediaforce/runtime-settings.json`
-
-Codec and quality recommendations still rank and label rather than silently
-excluding media. TV lifecycle policy is a separate eligibility gate: protected
-seasons remain visible with their hold reason, do not enter automatic manifests,
-and can only be bypassed through an explicit season-level confirmation. The
-underlying lifecycle status and the existing runnable queue order do not change.
-
-The checked-in video defaults are intentionally tuned to the user's taste, not a
-near-transparent archival preset. The baseline AV1 policy uses a size-first
-review model: 300 MB per 45-minute episode, VMAF 85 with an 80 floor as a
-guardrail, and max 1080p output unless the user explicitly asks for another
-resolution. Raise the metric floors or add a folder override when a class needs
-a more conservative pass; use an explicit scale request when downsampling is
-desired.
-
-`report`, `encode`, and `validate` all surface source-vs-staged size deltas so
-you can see the storage win before promotion.
-
-## Folder defaults
-
-[config/folder-defaults.toml](config/folder-defaults.toml) holds shared
-per-folder starting points and ships with one sample block (`tv/Suits`). Shows
-normally follow the global defaults and the Director's approval; do not pin
-per-show or per-season tuning there.
-
-Bench-approved drafts are saved locally in runtime settings so future runs on
-that machine can reuse them without changing the tracked repo defaults.
-
-Plex posters are requested at display-sized dimensions to avoid downloading
-full-size artwork.
-
-Use the Mac app's Settings for ordered typed library roots, the transcode folder,
-remote host definitions, the Plex server URL, and Plex-to-Mediaforce path
-mappings so those environment details stay off the checked-in repo. Library
-labels are editable while root IDs remain stable. TV, Movies, and Other can
-run in Production; 3D/VR stays Browse only until its workflow and safety plans
-land. Changing an existing type requires an explicit
-compatibility preview and never moves media files. See
-`docs/architecture/typed-library-settings.md` for the durable config contract.
-
-## Library lifecycle policy
-
-TV series use a per-series current-season mode:
-
-- `Auto` protects the highest positive numbered season while cached TMDB status
-  says the series is active. Missing or stale status is treated conservatively.
-- `On` protects the highest numbered season regardless of provider status.
-- `Off` disables current-season protection for that series.
-
-Specials and Season 0 never identify the current season. A protected current
-season releases when a higher numbered season appears or after 365 days without
-a newly added or replaced episode. Independently, every season waits 30 days
-after its newest addition or replacement before automatic encoding. A manual
-override applies only to the exact season the user confirms. An explicitly
-selected episode may use that same parent-season override while its manifest
-remains bounded to that one file. The resulting manifest records both the hold
-reasons and the override.
-
-Eligible media is ranked by Plex `addedAt`, oldest first. When Plex age is not
-available, Mediaforce records and uses its own discovery timestamp, then the
-filesystem modification time as the final fallback. Selection provenance is
-written into the run manifest so retries and recovery do not silently recompute
-membership under newer policy or metadata.
-
-Enter the Plex token and the TMDB API read-access token once in Settings ›
-Plex and TMDB. The server keeps each in the login Keychain (service
-`Mediaforce`, accounts `plex` and `tmdb`; a server on any other state folder,
-such as a development or proof server, uses its own `Mediaforce <hash>`
-entries) through Apple's `security` tool, so
-it reads them back on every start without a permission dialog; Settings only
-ever learns whether a key is set and whether the service accepts it. A key
-already set in the launch environment or the `.env` file
-(`MEDIAFORCE_PLEX_TOKEN`, `MEDIAFORCE_TMDB_TOKEN`) keeps working; a key
-entered in Settings takes its place.
-
-The configured SSH account and media paths are unrelated to these credentials.
-Plex path mappings translate the paths reported by Plex to the corresponding
-Mediaforce source roots using exact root boundaries. See
-`docs/architecture/library-lifecycle-policy.md` for the durable data and
-selection contract.
-
-`mediaforce-web` reads optional startup defaults from the repo-local `.env`.
-Use that file for machine-specific server launcher settings like bind address,
-port, and reload mode. A checked-in template lives at `.env.example`. Startup
-precedence is explicit CLI arguments, then shell environment variables, then
-`.env`, then built-in defaults. Prefer the `MEDIAFORCE_WEB_*` variable names
-for local defaults.
-
-The macOS launch item is a long-running user service, not a development
-reloader. Give it an explicit `--no-reload` argument even when `.env` enables
-reload for an active development session; otherwise Uvicorn `StatReload`
-continuously walks the checkout and consumes CPU while the app appears idle.
-
-Manage the local macOS login item through the Mediaforce CLI:
-
-```bash
-uv run mediaforce service install
-uv run mediaforce service enable
-uv run mediaforce service status
-uv run mediaforce service logs --stderr
-uv run mediaforce service disable
-```
-
-The generated `~/Library/LaunchAgents/com.mediaforce.web.plist` invokes the
-repo-local `.venv/bin/mediaforce-web` entrypoint directly, not `uv`, and always
-passes `--no-reload`. It has no `/Volumes` dependency and does not mount storage;
-the running app remains the only owner of SMB recovery. Durable stdout and
-stderr logs live under `~/Library/Logs/mediaforce/`. Use `restart` to regenerate
-and reload the item after moving the checkout or recreating `.venv`, and use
-`uninstall` to disable it and remove the plist. See
-`docs/development/macos-login-item.md` for verification and raw launchctl
-fallbacks.
-
-## Local server development
-
-FastAPI serves the API the Mac app uses, plus review media.
-
-For local server work on macOS and Linux, prepare this checkout with
-`uv sync --locked`. Cleanup also needs `ps` (included on macOS; install
-`procps` on minimal Linux systems). Then use `scripts/mediaforce-dev.sh` with
-`start|stop|restart|status|smoke`, for example
-`scripts/mediaforce-dev.sh restart backend`. Commands read the repo-local `.env`.
-Start reuses an existing owner; use Restart to apply changes to its host, port
-or configuration.
-
-Concurrent Start commands wait for their competing launchers to exit before
-reporting the shared owner. Once every Start reports that owner, Stop cannot
-leave a competing launcher that starts another server.
-
-If Start reaches its listening deadline, it reports failure while the server
-continues starting under the same watchdog. Use Status to check for readiness
-or Stop to cancel startup; a crash still triggers cleanup. Startup work is not
-terminated by the command's deadline. Bind checks use the configured host's
-usable resolved addresses, including IPv6 loopback and wildcard addresses.
-
-The server has a launcher and a watchdog that owns the server from its
-first instruction, in a private session and process group. Stop asks that owner
-to send TERM to the group, then KILL if necessary. The watchdog keeps the leader
-unreaped until it has exited and consecutive observations find no other group
-member, then reaps
-the leader and releases the component lock. It never queries or signals the
-released group number again, even if completion logging fails. A server crash
-also triggers cleanup of its orphaned workers. If the command-facing launcher
-is killed, a private connection closes and the watchdog performs the same cleanup.
-Start cannot replace a component while its watchdog still holds the lock.
-Cleanup errors retain that owner. Even if process inventory is unavailable,
-the watchdog still escalates TERM to KILL for its reserved group; it reports
-each changed cleanup error once instead of repeating it on every retry.
-Missing inventory does not prevent Start. Restore `ps` or resolve the reported
-inventory error so the watchdog can verify completion and release the lock,
-then retry Stop. Until verification succeeds, Status stays stopping even when
-the server and workers have exited. Status distinguishes starting, running, stopping, a failed watchdog and an
-unknown control-channel response. An unknown response cannot authorize a new
-server or prove that cleanup finished. A failed watchdog blocks new starts and reports its failure rather
-than signalling processes discovered from saved PIDs. If the watchdog itself
-is killed, use the OS process manager to force-quit that component's remaining
-server, workers and launcher before starting it again. Deleting a lock file or
-using old PID records does not recover custody. A failed control connection
-leaves both running and failed owners intact.
-
-Control sockets, locks and component logs live outside the repository at
-`~/Library/Application Support/mediaforce/development/<checkout hash>/`.
-`MEDIAFORCE_DEV_STATE_DIR` can select another state directory, including isolated
-fixtures. The hash uses the physical checkout path, so invoking the helper
-through a checkout symlink reaches the same owner. Stop uses the prepared
-Python interpreter and this standalone helper; it does not import the app or
-run `uv sync` while cleaning up.
-
-The helper manages only servers it launched. It does not adopt foreground
-servers, inspect another checkout's processes, unload login items, or change
-the shared backend runtime lock. An occupied port refuses startup. To move from
-an older development launch, end it in its original terminal first; if that
-backend belongs to the login item, use the existing `uv run mediaforce service
-stop` command from its service checkout when intentionally switching to dev
-work. Then start the new launcher. Old PID records and cleanup markers remain
-untouched and are not authority for signalling or starting a replacement.
-
-The group contract is specific to these dev commands: the backend (including
-reload children) was checked on both macOS and Linux
-and stayed in their group's session. A component that deliberately detaches
-with `setsid` or `setpgid` needs OS service-manager containment instead. Production worker
-supervision keeps its separate native identity and containment rules.
-
-The backend also holds a Python-level singleton lock while running, so a second
-`mediaforce-web` process exits instead of binding another port and confusing the
-local session. Busy startup reports the active owner PID and bind address when
-that metadata is available. `scripts/mediaforce-web-dev.sh` remains as a
-compatibility alias for backend-only actions.
-
-To enforce the local acceptance gate before each commit, point Git at the
-checked-in hooks once per clone:
-
-```bash
-git config core.hooksPath .githooks
-```
-
-That pre-commit hook runs `scripts/pre-commit-check.sh` for CLI smoke. Select
-focused local tests through [the testing guide](docs/style/testing.md); the
-complete backend suite, Mac app tests and macOS custody tests run in CI before
-ready or merge.
-
-See [Local server development](#local-server-development) for server startup.
-
-Host configuration is now unified too: Mediaforce no longer injects a special
-synthetic local host. If you want the current machine to participate in sample
-or encode-host decisions, add it as a normal SSH host entry such as
-`cbusillo@localhost`, then set its priority and capabilities in Settings like
-any other host.
-
-Each host can now declare its own `max_parallel_encodes` limit and pick a
-structured schedule instead of typing profile keys by hand. `Always` is the
-built-in default, and you can add named windows when a machine should only run
-during certain hours, on specific days of the week, or all day on explicit
-exception days such as Sunday. `Never` is also built in for temporarily
-disabling queued encodes on a host without removing its capabilities or setup
-state. Those windows are evaluated in the local time of the host that is
-actually running the work. Host probes retain an IANA timezone when the
-operating system exposes one, use fixed UTC offsets only as a compatibility
-fallback, and publish exact UTC close and next-open transitions for runtime
-enforcement and user surfaces.
-
-Work windows can instead allow the current file to finish. Enable that close
-behavior in Settings → Computers → Work windows.
-A file admitted before closing finishes its encode, checks and normal publication;
-no next file starts until the window opens again. This avoids throwing away a
-partial encode on a computer used for other work during the day. Duration
-estimates still hold back files unlikely to fit before closing; the option
-protects a running file when that estimate was too short. Legacy multi-file
-jobs retain their hard stop; new queue work is one file per job. Manual
-`Bypass scheduler` requests still explicitly override the work window.
-
-Bounded host schedules are hard execution windows. A non-bypassed quality
-search or episode encode receives the selected host's absolute UTC close
-deadline; controller-side cancellation and a host-side watchdog stop encode
-CPU at that boundary even if SSH or the server process disappears. Mediaforce
-discards that episode's partial output and returns it directly to the queue
-without consuming a failure attempt or applying host cooldown. Completed
-episodes stay complete, and the interrupted episode restarts from the beginning
-when a compatible window opens. Mediaforce does not create resumable media or
-phase checkpoints. `Bypass scheduler` intentionally omits the deadline.
-
-Before starting non-bypassed work on a bounded host, Mediaforce now estimates
-the episode's quality-search and full-encode time from its source duration and
-recent successful runs on that host. Sparse history receives a larger safety
-margin. If the oldest queued episode cannot safely finish before any compatible
-host closes, the queue may choose the fitting episode that leaves the least
-unused window time; normal FIFO order resumes whenever the oldest episode fits.
-When no episode fits, the host drains without consuming attempts, and an episode
-that exceeds every compatible configured window receives an actionable waiting
-reason. The hard close deadline remains the correctness backstop when an
-estimate is wrong, and `Bypass scheduler` skips duration admission entirely.
-
-Activity and the show and season pages present those schedule outcomes
-directly. Worker rows
-show exact host-local open/close transitions, active episodes show their hard
-stop time, and draining is distinct from off-schedule or unavailable. An episode
-stopped at close is labeled `Paused until the next work window` with its
-automatic whole-episode restart expectation, while an explicit bypass is
-labeled `Not limited by the work window` and a job that cannot fit any configured window links to the work-window
-settings that need attention. A waiting reason that quotes a runtime estimate
-names the computer whose estimate it used.
-
-A computer the queue holds out after repeated failures shows `Cooling down`
-with when Mediaforce tries it again; Prepare clears the hold at once. Time
-estimates stay blank until one exists: quality search and an unmeasured job
-never show `0s`. Queue and season estimates cover only work that will run on
-its own and say how many items they leave out because they wait for you or did
-not finish.
-
-The Mac app's Review Files action opens the item page with a waiting file
-selected. On the item page it brings the waiting files into view. Files kept original after repeated failed checks or an
-oversized copy say why beside the file and no longer ask for a decision,
-even while a failed copy waits for automatic cleanup.
-
-Transient SSH transport failures, including a remote host reboot or an OpenSSH
-`closed by remote host` disconnect, enter bounded retry backoff instead of
-requiring a new encode request. Mediaforce preserves unverified remote artifacts
-while the host is unreachable, removes the interrupted partial output once the
-host is available again, and then requeues the same episode from the beginning.
-It does not resume a partial media stream or promote interrupted output.
-A copy whose automatic checking or publishing stops after its retries, or whose
-files could not be restored after a publishing failure, appears as waiting for
-you on the Mac item page. It names the publishing problem while other files
-continue independently.
-A measured quality-floor conflict within the automatic allowance retries that
-one file with an item-local size exception; other deterministic encode and
-policy failures stop and ask about that file.
-
-Starting a folder again while some of its episodes are still queued, retrying,
-or encoding never removes that work. Only the episodes that ended are retried,
-inside the same folder encode. An episode that missed its approved final size,
-or any ended episode when the approved settings changed after the folder was
-queued, waits and is planned again with the current settings once the rest of
-the folder has finished. A folder is never planned twice while any overlapping
-encode, such as a show-wide one, still has parts of it queued or running.
-
-For a blank remote Mac, first turn on Remote Login so SSH answers. Once that is
-reachable, Settings can finish setup: if
-the host only needs first-time trust, enter the remote account password once so
-Mediaforce can install this Mac's SSH public key, then let the prep step
-create remote paths and install `ffmpeg-full` plus `ab-av1` for
-`sample_calibration` hosts when possible. Those sample hosts now verify
-`libvmaf`/`xpsnr` metric support and `libsvtav1` before they show as ready.
-The controller's automatic background recovery reconnects required SMB storage
-with a saved share mapping through the macOS NetFS API with `UIOption=NoUI`,
-using existing Keychain credentials without reading,
-storing, or transporting passwords. Its background recovery runs even when
-processing is paused or the work window is closed; reconnecting storage does
-not unpause work. Clean connection failures retry with bounded backoff;
-missing mappings and failures that cannot be retried safely, including ambiguous
-timeouts, wait for user attention.
-Completed attempts whose share has not appeared yet retry too; a service restart
-retains backoff and incident state rather than discarding them. Remote Macs also
-receive background status checks and no-dialog storage recovery without waiting
-for queued work; that recovery runs in the remote desktop session so it can use
-the password saved in the login Keychain, and a missing password or login is
-named in plain words for that computer. The warning below the navigation names unavailable controller
-storage immediately and computers still unavailable after five minutes (or
-requiring attention). It stays visible until fresh checks succeed. This feature
-does not configure external notification delivery.
-Fresh checks must verify the expected mount path, share identity, and directory
-access before work starts. See [controller storage recovery](docs/development/macos-login-item.md#controller-storage-recovery)
-for the runtime contract and installed acceptance procedure.
-
-While a required controller share is healthy,
-Mediaforce learns a password-free mount mapping into
-`~/Library/Application Support/mediaforce/controller-smb-mounts.json`. Status
-reads use that machine-local mapping instead of probing or mutating mount state.
-For first bootstrap, a private `controller_smb_mounts` list in runtime settings
-may supply the same `source` and `/Volumes/...` `mount_point` fields until a
-healthy mount can be observed and learned.
-
-Remote mounted-media macOS hosts reconnect through Finder only for explicit
-Prepare (Set up computer), on the controller or a remote Mac. Sampling and
-encode dispatch use the background no-dialog connection instead,
-because a dialog nobody answers keeps that computer out of work. These paths
-require a signed-in console user with the share password saved in the login
-Keychain. After a missing desktop session, sign in on that computer and use
-Prepare to retry; on the controller, attempts remain suppressed until its
-console login session changes. Each computer keeps at most one Finder request
-per share: a request Finder has not
-answered within the attempt, usually because a dialog is open, is left running
-rather than ended, since ending it would not close the dialog. Later attempts,
-explicit or automatic, report that request instead of opening another dialog
-until someone answers or cancels it on that Mac. A failed connection says what
-Finder or the helper reported: a sign-in failure, an unreachable server, a
-cancelled dialog, a missing desktop session, a share connected under a
-suffixed name such as `/Volumes/media-1`, a helper that could not start, or a
-timeout with no reason given. Only a sign-in failure asks for one manual Finder
-connection with the password saved to Keychain.
-
-Sampled calibration and AI note tuning can now run on any configured host with
-the `sample_calibration` capability. The folder page uses one AI-guided sample
-note box instead of separate baseline/tuning actions, lets the user choose
-the sample host, and still keeps the compress action hostless so the encode
-queue can dispatch it automatically. For mounted-media remote sample hosts,
-source and encoded review excerpts are rendered where the selected host can
-read the media, then copied back as small browser-ready clips; the controller
-does not need the full source mount for that review path. Runtime settings now
-carry remote host
-priority, per-host queue capabilities, explicit schedule selections, and a
-per-job `Bypass scheduler` escape hatch for urgent runs.
-
-Each note-driven tuning attempt is now recorded in SQLite, and successful
-cross-folder learnings are promoted to markdown artifacts under the learned
-memory directory so future tuning requests can retrieve concise prior guidance.
-
-The current starter profile includes `tv/Suits`, because it is a high-value AV1
-target: large 1080p H.264 episodes with DTS 5.1 audio and low grain.
-
-Promotion moves the original source into `/Volumes/media/transcode/_replaced`
-before replacing it with the staged `.mkv`, which keeps rollback straightforward
-without leaving the active library in an ambiguous state.
-
-The Mac app's Activity page puts every computer on the same next-24-hours
-clock. Shaded stretches show work windows; current and estimated files sit on
-those stretches. Each working computer shows progress and a finish estimate
-when one is known. The numbered line-up names the file, estimated start and
-computer; unknown starts remain listed. These forecasts use the existing
-computer history and window rules, and may change as computers become free.
-Activity reads its forecast only while the page is open. The next approved season is named below them.
-Activity shows only what is running and what comes next. Held work that needs the Director is in Needs you,
-and original-backup cleanup is in Needs you and Space saved.
-
-The main window reuses unchanged library calculations without timed expiry or a
-new background process. Each refresh still reads current work status and sample
-approvals.
+Then add your libraries, working folder and computers in Settings. A source
+build has limits: macOS sends notifications only for an app signed with a
+Developer ID, and the server runs until you stop it
+(`scripts/mediaforce-dev.sh stop`) instead of starting at login. For the
+signed app that starts at login and updates itself, use the download above.
+
+## Honest limits
+
+- **It is built for one library.** Mediaforce is the maintainer's own tool,
+  tuned to the maintainer's taste: about 300 MB for a 45-minute 1080p episode, and 4K
+  brought down to 1080p unless a look says to keep it. Change the size goal
+  and tallest picture in Settings if you want bigger files.
+- **It is early.** Setup needs Terminal, and screens and settings still
+  change often.
+- **It replaces your files.** Originals are kept until you approve cleanup,
+  but keep your own backup too.
+- **It does not** compress VR and 3D video yet (those files are listed and
+  left alone), give cartoons one shared look (each cartoon show is approved on
+  its own), tell animated movies from live action, run on Windows, or
+  download, rename or organize media.
+
+## For developers
+
+- [Developer guide](docs/development/developer-guide.md): layout, running
+  from source, the command line, configuration, page screenshots and how the
+  background work behaves.
+- [Docs index](docs/README.md): architecture, design vocabulary, style and
+  release flow.
+- [DIRECTION.md](DIRECTION.md) and [AGENTS.md](AGENTS.md): what the project
+  is for and how agents work in it. The maintainer's
+  [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md)
+  comes first.
+
+Mediaforce is released under the [MIT License](LICENSE).
