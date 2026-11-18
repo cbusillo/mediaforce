@@ -492,8 +492,8 @@ private struct RunningFile: View {
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             link
-            if let job = file.job {
-                StopFileButton(id: job, title: Words.fileTitle(file), progress: file.progress, model: model)
+            if let job = file.job, let run = file.run {
+                StopFileButton(id: job, run: run, title: Words.fileTitle(file), progress: file.progress, model: model)
             }
         }
     }

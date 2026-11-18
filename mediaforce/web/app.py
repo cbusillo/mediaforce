@@ -2376,8 +2376,8 @@ def create_app(
         app,
         pause_encode_queue_action=_pause_encode_queue_action,
         resume_encode_queue_action=_resume_encode_queue_action,
-        stop_running_file_action=lambda job_id: stop_running_file_action(
-            job_id, connection_factory=lambda: open_db(config.paths.db_path),
+        stop_running_file_action=lambda job_id, run: stop_running_file_action(
+            job_id, run, connection_factory=lambda: open_db(config.paths.db_path),
             live_encode_job_controller=_live_encode_job_controller,
         ),
     )

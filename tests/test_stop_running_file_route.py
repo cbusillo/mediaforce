@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import Callable
 from typing import Any
@@ -21,9 +22,9 @@ def _stop_route(action: Mock) -> Callable[..., Any]:
 def test_the_mac_app_stops_the_file_it_names(answer: dict[str, object], status: int) -> None:
     action = Mock(return_value=answer)
 
-    response = _stop_route(action)("job-7", _json_request({}))
+    response = asyncio.run(_stop_route(action)("job-7", _json_request({"run": "2026-11-18T19:00:00+00:00"})))
 
-    action.assert_called_once_with("job-7")
+    action.assert_called_once_with("job-7", "2026-11-18T19:00:00+00:00")
     assert (response.status_code, json.loads(response.body)) == (status, answer)
 
 
@@ -34,7 +35,16 @@ def test_the_mac_app_stops_the_file_it_names(answer: dict[str, object], status: 
 def test_a_web_page_cannot_stop_a_file(headers: dict[str, str]) -> None:
     action = Mock(return_value={"ok": True})
 
-    response = _stop_route(action)("job-7", _json_request({}, headers))
+    response = asyncio.run(_stop_route(action)("job-7", _json_request({"run": "x"}, headers)))
 
     action.assert_not_called()
     assert response.status_code == 403
+
+
+def test_a_stop_that_does_not_say_which_run_it_saw_is_refused() -> None:
+    action = Mock(return_value={"ok": True})
+
+    response = asyncio.run(_stop_route(action)("job-7", _json_request({})))
+
+    action.assert_not_called()
+    assert response.status_code == 400

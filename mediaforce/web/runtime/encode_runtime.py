@@ -47,6 +47,7 @@ from mediaforce.core.process_control import (
     ProcessCancelledError,
     ProcessDeadlineEnforcementError,
     ScheduleWindowClosedError,
+    StartOverCancelledError,
 )
 from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, parse_schedule_close_deadline
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
@@ -942,10 +943,6 @@ class ReclaimCancelledError(ProcessCancelledError):
 
 class ControllerShutdownCancelledError(ProcessCancelledError):
     """Mediaforce itself is shutting down; the owner did not ask for this stop."""
-
-
-class StartOverCancelledError(ProcessCancelledError):
-    pass
 
 
 # A child stopped only because Mediaforce shut down keeps this terminal reason until the next
@@ -2079,7 +2076,7 @@ def _transition_encode_job_schedule_close(
         return False
     snapshot = stable_json_hash(current_job)
     job = current_job
-    completed = _encode_job_outputs_completed(connection, job)
+    completed = encode_job_outputs_completed(connection, job)
     connection.commit()
     assigned_host = object_dict(job.get("host"))
     cleanup = _EncodeRetryArtifactCleanupResult(
@@ -2105,7 +2102,7 @@ def _transition_encode_job_schedule_close(
         connection.rollback()
         return False
     job = current_job
-    if _encode_job_outputs_completed(connection, job):
+    if encode_job_outputs_completed(connection, job):
         job.update(
             {
                 "status": "completed",
@@ -2171,7 +2168,7 @@ def _transition_encode_job_schedule_close(
     return True
 
 
-def _encode_job_outputs_completed(connection: DBClient, job: dict[str, Any]) -> bool:
+def encode_job_outputs_completed(connection: DBClient, job: dict[str, Any]) -> bool:
     manifest_path = Path(str(job.get("manifest_path") or "").strip())
     try:
         manifest = json.loads(manifest_path.read_text())
@@ -2229,7 +2226,7 @@ def _encode_job_outputs_completed(connection: DBClient, job: dict[str, Any]) -> 
 def _encode_job_outputs_completed_by_id(config: MediaforceConfig, job_id: str) -> bool:
     with open_db(config.paths.db_path) as connection:
         current_job = load_encode_job(connection, job_id)
-        return current_job is not None and _encode_job_outputs_completed(connection, current_job)
+        return current_job is not None and encode_job_outputs_completed(connection, current_job)
 
 
 def _worker_may_write_terminal_state(

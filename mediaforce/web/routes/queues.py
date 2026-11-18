@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+from mediaforce.web.routes.folders import request_body
 from mediaforce.web.routes.local_requests import refusal_unless_this_mac
 
 CHILD_RECOVERY_PREVIEW_PATH = "/api/encode-queue/recover-children/preview"
@@ -19,7 +20,7 @@ def register_queue_routes(
     *,
     pause_encode_queue_action: Callable[[], dict[str, Any]],
     resume_encode_queue_action: Callable[[], dict[str, Any]],
-    stop_running_file_action: Callable[[str], dict[str, Any]],
+    stop_running_file_action: Callable[[str, str], dict[str, Any]],
 ) -> None:
 
     @app.post("/api/encode-queue/pause")
@@ -31,10 +32,13 @@ def register_queue_routes(
         return JSONResponse(resume_encode_queue_action())
 
     @app.post(STOP_RUNNING_FILE_PATH)
-    def api_stop_running_file(job_id: str, request: Request) -> JSONResponse:
+    async def api_stop_running_file(job_id: str, request: Request) -> JSONResponse:
         if refusal := refusal_unless_this_mac(request):
             return refusal
-        result = stop_running_file_action(job_id)
+        run = (await request_body(request)).get("run")
+        if not isinstance(run, str) or not run:
+            return JSONResponse({"ok": False, "code": "refused"}, status_code=400)
+        result = await run_in_threadpool(stop_running_file_action, job_id, run)
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
 

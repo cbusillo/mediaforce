@@ -31,10 +31,25 @@ final class StopFileTests: XCTestCase {
         super.tearDown()
     }
 
+    nonisolated private static func body(_ request: URLRequest) -> [String: String]? {
+        if let body = request.httpBody { return try? JSONDecoder().decode([String: String].self, from: body) }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 1024)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return try? JSONDecoder().decode([String: String].self, from: data)
+    }
+
     private var stopRequests: [URLRequest] { Self.requests.filter { $0.httpMethod == "POST" } }
     private var activityReads: Int { Self.requests.filter { $0.url?.path == "/api/app/activity" }.count }
 
-    func testStopNamesTheOneFileAndStaysStoppingUntilActivityNoLongerShowsItRunning() async {
+    func testStopNamesTheOneRunAndStaysStoppingUntilActivityNoLongerShowsItRunning() async throws {
         let model = model { request in
             switch request.url?.path {
             case "/api/encode-queue/running/job-4/stop": (200, #"{"ok": true}"#)
@@ -44,31 +59,37 @@ final class StopFileTests: XCTestCase {
             }
         }
 
-        await model.stop("job-4")
+        await model.stop("job-4", run: "2026-10-31T14:00:00+00:00")
 
         XCTAssertEqual(stopRequests.map(\.url?.path), ["/api/encode-queue/running/job-4/stop"])
+        let body = try XCTUnwrap(stopRequests.first.flatMap(StopFileTests.body))
+        XCTAssertEqual(body["run"], "2026-10-31T14:00:00+00:00")
         XCTAssertEqual(activityReads, 2)
         XCTAssertEqual(model.stopping, [])
         XCTAssertNil(model.notice)
         XCTAssertEqual(model.activity.facts?.computers.first?.running.map(\.id), ["job-5"])
     }
 
-    func testAFileThatAlreadyFinishedSaysNothingWasStopped() async {
-        let model = model { request in
-            request.httpMethod == "POST" ? (409, #"{"ok": false, "code": "not_running"}"#) : (200, MainWindowTests.facts)
+    func testEachRefusalSaysWhyNothingWasStopped() async {
+        for (code, message) in [("not_running", "That file isn't running anymore."),
+                                ("started_again", "That file already started again."),
+                                ("finishing", "That file is already finishing.")] {
+            let model = model { request in
+                request.httpMethod == "POST" ? (409, #"{"ok": false, "code": "\#(code)"}"#) : (200, MainWindowTests.facts)
+            }
+
+            await model.stop("job-4", run: "2026-10-31T14:00:00+00:00")
+
+            XCTAssertEqual(model.notice?.message, message, code)
+            XCTAssertEqual(model.stopping, [])
+            XCTAssertEqual(activityReads, 0)
         }
-
-        await model.stop("job-4")
-
-        XCTAssertEqual(model.notice?.title, ActionNotice.notRunning.title)
-        XCTAssertEqual(model.stopping, [])
-        XCTAssertEqual(activityReads, 0)
     }
 
     func testAStopWithNoAnswerSaysSo() async {
         let model = model { _ in (500, "") }
 
-        await model.stop("job-4")
+        await model.stop("job-4", run: "2026-10-31T14:00:00+00:00")
 
         XCTAssertEqual(model.notice?.title, ActionNotice.unanswered.title)
         XCTAssertEqual(model.stopping, [])
@@ -81,9 +102,10 @@ final class StopFileTests: XCTestCase {
     }
 
     func testARunningFileOnAComputerCarriesTheJobItsStopNames() throws {
-        let running = #"{"id": "job-9", "prefix": "tv/Show/Season 1", "show_prefix": "tv/Show", "show": "Show", "season": 1, "episode": 4}"#
+        let running = #"{"id": "job-9", "run": "2026-11-13T17:00:00+00:00", "prefix": "tv/Show/Season 1", "show_prefix": "tv/Show", "show": "Show", "season": 1, "episode": 4}"#
         let finished = #"{"prefix": "tv/Show/Season 1", "show_prefix": "tv/Show", "show": "Show", "season": 1, "episode": 3}"#
-        XCTAssertEqual(try JSONDecoder.mediaforce.decode(ComputersFacts.File.self, from: Data(running.utf8)).job, "job-9")
+        let file = try JSONDecoder.mediaforce.decode(ComputersFacts.File.self, from: Data(running.utf8))
+        XCTAssertEqual([file.job, file.run], ["job-9", "2026-11-13T17:00:00+00:00"])
         XCTAssertNil(try JSONDecoder.mediaforce.decode(ComputersFacts.File.self, from: Data(finished.utf8)).job)
     }
 }

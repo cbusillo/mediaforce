@@ -100,10 +100,11 @@ struct ComputersFacts: Decodable, Sendable {
         var replaced: Bool?
         /// The running file's job, which its Stop names; finished files have none.
         var job: String?
+        var run: String?
         var id: String { "\(prefix)/\(episode ?? 0)/\(finishedAt ?? "")" }
 
         private enum CodingKeys: String, CodingKey {
-            case prefix, showPrefix, show, season, episode, stage, progress, finishesAt, fileCount, finishedAt, bytesSaved, replaced
+            case prefix, showPrefix, show, season, episode, stage, progress, finishesAt, fileCount, finishedAt, bytesSaved, replaced, run
             case job = "id"
         }
         var mediaKind: MediaKind { MediaKind(rawValue: String(prefix.split(separator: "/").first ?? "")) ?? .other }

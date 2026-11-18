@@ -263,8 +263,9 @@ Settings.
 Each running file on the Activity page and on a computer's row has a Stop. It
 asks first only when the file is at least half done, then reads "Stopping"
 until Activity no longer shows the file running; the file then waits in the
-line-up and starts over later. A refusal (the file already finished) is shown
-as a notice.
+line-up and starts over later. A refusal is shown as a notice that says why:
+the file isn't running anymore, already started again, or is already
+finishing.
 
 ## Settings
 

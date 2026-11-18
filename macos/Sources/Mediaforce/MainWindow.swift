@@ -99,14 +99,15 @@ final class MainWindowModel {
         switching = nil
     }
 
-    /// Stops one running file, then keeps it shown as stopping until Activity no longer shows it running.
-    func stop(_ file: String) async {
+    /// Stops one run of a file, then keeps it shown as stopping until Activity no longer shows it running.
+    func stop(_ file: String, run: String) async {
         guard !stopping.contains(file) else { return }
         stopping.insert(file)
         defer { stopping.remove(file) }
         do {
-            guard try await client.stopFile(file).ok else {
-                notice = .notRunning
+            let result = try await client.stopFile(file, run: run)
+            guard result.ok else {
+                notice = .notStopped(result.code)
                 return
             }
         } catch {

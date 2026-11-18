@@ -7,10 +7,13 @@ struct StopFileResult: Decodable, Sendable {
 }
 
 extension MediaforceClient {
-    /// Stops one running file; it waits again and starts over later. A file no longer running answers 409 with a code.
-    func stopFile(_ id: String) async throws -> StopFileResult {
+    /// Stops the run of one file that started at `run`; it waits again and starts over later. A refusal answers 409 with a
+    /// code: the file isn't running, started again, or is already finishing.
+    func stopFile(_ id: String, run: String) async throws -> StopFileResult {
         var request = URLRequest(url: baseURL.appending(path: "api/encode-queue/running").appending(path: id).appending(path: "stop"))
         request.httpMethod = "POST"
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["run": run])
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let (data, response) = try await session.data(for: request)
         guard [200, 409].contains((response as? HTTPURLResponse)?.statusCode) else {
             throw URLError(.badServerResponse)
@@ -22,6 +25,7 @@ extension MediaforceClient {
 /// Stop for one running file, beside it wherever it is shown running. Losing half a file or more asks first.
 struct StopFileButton: View {
     let id: String
+    let run: String
     let title: String
     let progress: Double?
     let model: MainWindowModel
@@ -34,11 +38,11 @@ struct StopFileButton: View {
             Text(Words.stoppingFile).foregroundStyle(.secondary)
         } else {
             Button(Words.stopFile, systemImage: "stop.circle") {
-                if Self.asksFirst(progress) { confirming = true } else { Task { await model.stop(id) } }
+                if Self.asksFirst(progress) { confirming = true } else { Task { await model.stop(id, run: run) } }
             }
             .help(Words.stopFileHelp)
             .confirmationDialog(Words.stopFileQuestion(title), isPresented: $confirming) {
-                Button(Words.stopFile, role: .destructive) { Task { await model.stop(id) } }
+                Button(Words.stopFile, role: .destructive) { Task { await model.stop(id, run: run) } }
             } message: {
                 Text(Words.stopFileConsequence(progress))
             }
@@ -47,10 +51,14 @@ struct StopFileButton: View {
 }
 
 extension ActionNotice {
-    static let notRunning = ActionNotice(
-        title: "Nothing was stopped",
-        message: "That file isn't running anymore."
-    )
+    static func notStopped(_ code: String?) -> ActionNotice {
+        let message = switch code {
+        case "started_again": "That file already started again."
+        case "finishing": "That file is already finishing."
+        default: "That file isn't running anymore."
+        }
+        return ActionNotice(title: "Nothing was stopped", message: message)
+    }
 }
 
 extension Words {

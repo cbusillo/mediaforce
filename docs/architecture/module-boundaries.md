@@ -331,9 +331,14 @@ Guidance:
     An owner's Stop stays a Stop and holds the file; any other interruption
     waits for the queue's recheck to prove the run ended before retrying.
     The Mac app's Stop on one running file
-    (`POST /api/encode-queue/running/{job_id}/stop`, this Mac only) cancels
-    that job's own process controller with `StartOverCancelledError`; nothing
-    else stops and the pause state is untouched. The worker takes the owner's
+    (`POST /api/encode-queue/running/{job_id}/stop`, this Mac only) names the
+    run it saw by its start time and, holding the database write lock, cancels
+    that run's own process controller with `StartOverCancelledError`; nothing
+    else stops and the pause state is untouched. A later run of the file is
+    refused as `started_again`, and a file whose finished output is already
+    saved as `finishing`. Saving the finished output checks for that Stop under
+    the same lock before it commits, so a Stop either wins before the save or
+    is refused after it. The worker takes the owner's
     Stop path, then gives the attempt back and puts the file in retry backoff,
     whose cleanup removes its unfinished file before it is queued again. When
     the run is not shown ended, the file is held like any owner's Stop and the
