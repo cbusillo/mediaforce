@@ -8,11 +8,12 @@ struct ItemPage: View {
     let openSample: (String) -> Void
     let openItem: (String) -> Void
     var namePage: (String) -> Void = { _ in }
+    // The file in the player; one named when the page opens plays first.
+    @State var selected: ItemFacts.File.ID?
     @State private var facts: ItemFacts?
     @State private var work: SampleFacts?
     @State private var show: TVShowsFacts.Show?
     @State private var refreshFailed = false
-    @State private var selected: ItemFacts.File.ID?
     @State private var notice: ActionNotice?
     @State private var confirming: WorkAction?
     @State private var working = false

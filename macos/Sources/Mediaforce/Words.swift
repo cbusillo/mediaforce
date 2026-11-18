@@ -44,7 +44,7 @@ enum Words {
         case .media: media
         case .kind(let code): kindName(code)
         case .seasonsWithoutKind: seasonsWithoutKindTitle
-        case .item(let prefix): folderName(prefix)
+        case .item(let prefix, _): folderName(prefix)
         case .sample(let prefix): sampleTitle(folderName(prefix))
         case .computer: computers
         }
@@ -1450,6 +1450,11 @@ extension Words {
     }
 
     static func playerCaption(_ file: ItemFacts.File, comparing: Bool) -> String {
+        if let held = file.heldCopy {
+            guard held.present else { return "\(fileName(file)): \(size(file.bytes)), as it is now. Its new copy is gone, so make it again." }
+            let newCopy = held.bytes.map { "new copy \(size($0))" } ?? "new copy"
+            return "\(fileName(file)): original \(size(file.bytes)), \(newCopy). The new copy isn't in the library yet."
+        }
         if comparing, let before = file.originalBytes {
             return "\(fileName(file)): \(beforeAfter(before, file.bytes))."
         }

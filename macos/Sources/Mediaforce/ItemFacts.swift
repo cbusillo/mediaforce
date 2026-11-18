@@ -31,13 +31,22 @@ struct ItemFacts: Decodable, Sendable {
         let bytes: Int64
         let originalBytes: Int64?
         let originalBackup: Bool
+        let heldCopy: HeldCopy?
         var id: Int { libraryItemId }
         // A whole show's page names the season too, since episode numbers repeat across seasons.
         var inShowPage = false
 
         private enum CodingKeys: String, CodingKey {
             case libraryItemId, relPath, name, season, episode, stage, validation, waitReason, additionalWaitReasons, keptReason, heldReason
-            case percentComplete, sizeQuestion, bytes, originalBytes, originalBackup
+            case percentComplete, sizeQuestion, bytes, originalBytes, originalBackup, heldCopy
+        }
+
+        /// What the player shows: a held copy against the file as it is, a compressed file against its backup, or the
+        /// one file there is.
+        var playerSides: (shown: PlayerSide, comparedWith: PlayerSide?) {
+            if heldCopy?.present == true { return (.compressed, .original) }
+            if compressed { return (.compressed, originalBackup ? .original : nil) }
+            return (.original, nil)
         }
 
         var compressed: Bool { stage == "published" }
@@ -56,6 +65,13 @@ struct ItemFacts: Decodable, Sendable {
         let computer: String?
         /// Why a failed copy could not be made again.
         let blockers: [String]?
+    }
+
+    /// A copy held for the Director because it came out far smaller than expected: its size, and whether it is still
+    /// there to watch.
+    struct HeldCopy: Decodable, Sendable, Equatable {
+        let bytes: Int64?
+        let present: Bool
     }
 
     /// The file needs more than its size goal to keep the picture right.

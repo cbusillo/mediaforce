@@ -293,16 +293,18 @@ extension NeedsYouItem {
                             picture: .posters([MediaPoster.titlePrefix(season.prefix)]), asks: asks, opens: .item(season.prefix))
     }
 
-    /// One file's question, answered on the page where Mediaforce takes the answer for that file.
+    /// One file's question, answered on the page where Mediaforce takes the answer for that file. A file the Director
+    /// judges can be watched first, in the season's player beside the same answers.
     static func fileAsk(_ file: ItemFacts.File, season: String) -> NeedsYouAsk {
+        let watch = NeedsYouAnswer(title: Words.watchIt, action: .open(.item(season, file: file.id)))
         if let question = file.sizeQuestion {
-            return NeedsYouAsk(line: Words.sizeQuestionAsk(file, question), answers: [
+            return NeedsYouAsk(line: Words.sizeQuestionAsk(file, question), look: watch, answers: [
                 NeedsYouAnswer(title: Words.keepTheOriginal, action: .file(.keepOriginal, prefix: season, file: file)),
                 NeedsYouAnswer(title: Words.allowLarger(question), action: .file(.allowLarger, prefix: season, file: file)),
             ])
         }
         if file.validation == "size_held" {
-            return NeedsYouAsk(line: Words.sizeHeldAsk(file), answers: [
+            return NeedsYouAsk(line: Words.sizeHeldAsk(file), look: watch, answers: [
                 NeedsYouAnswer(title: Words.keepThisCopy, action: .file(.keepThisCopy, prefix: season, file: file)),
                 NeedsYouAnswer(title: Words.makeItAgain, action: .file(.makeAgain, prefix: season, file: file)),
             ])

@@ -15,14 +15,15 @@ final class ItemTests: XCTestCase {
 
     private func file(_ id: Int, stage: String, bytes: Int64, original: Int64? = nil, backup: Bool = false,
                       validation: String? = nil, kept: String? = nil, question: String = "null",
-                      waitReason: String = "null", additionalWaitReasons: String = "[]") -> String {
+                      waitReason: String = "null", additionalWaitReasons: String = "[]", held: String = "null") -> String {
         let quoted = { (value: String?) in value.map { #""\#($0)""# } ?? "null" }
         return #"""
         {"library_item_id": \#(id), "rel_path": "tv/Futurama/Season 2/Futurama.S02E0\#(id).mkv",
          "name": "Futurama.S02E0\#(id).mkv", "episode": \#(id), "stage": "\#(stage)", "validation": \#(quoted(validation)),
          "wait_reason": \#(waitReason), "additional_wait_reasons": \#(additionalWaitReasons),
          "kept_reason": \#(quoted(kept)), "held_reason": null, "percent_complete": null, "size_question": \#(question),
-         "bytes": \#(bytes), "original_bytes": \#(original.map(String.init) ?? "null"), "original_backup": \#(backup)}
+         "bytes": \#(bytes), "original_bytes": \#(original.map(String.init) ?? "null"), "original_backup": \#(backup),
+         "held_copy": \#(held)}
         """#
     }
 
@@ -76,6 +77,20 @@ final class ItemTests: XCTestCase {
         XCTAssertEqual(season.selectedFile(999)?.id, season.waiting.first?.id)
         let finished = try facts([file(1, stage: "published", bytes: 100, original: 700, backup: true)])
         XCTAssertEqual(finished.selectedFile(nil)?.id, finished.files.first?.id)
+    }
+
+    func testAHeldCopyPlaysAgainstTheFileAsItIsUntilItIsGone() throws {
+        let season = try facts([
+            file(1, stage: "needs_you", bytes: 3_500_000_000, validation: "size_held", held: #"{"bytes": 162000000, "present": true}"#),
+            file(2, stage: "needs_you", bytes: 3_500_000_000, validation: "size_held", held: #"{"bytes": 162000000, "present": false}"#),
+            file(3, stage: "published", bytes: 100, original: 700, backup: true),
+            file(4, stage: "waiting", bytes: 900),
+        ])
+        let sides = season.files.map(\.playerSides)
+
+        XCTAssertEqual(sides.map(\.shown), [.compressed, .original, .compressed, .original])
+        XCTAssertEqual(sides.map(\.comparedWith), [.original, nil, .original, nil])
+        XCTAssertTrue(Words.playerCaption(season.files[0], comparing: true).contains(Words.size(162_000_000)))
     }
 
     func testAnAutomaticRetryDoesNotOfferAnEmptyFileReview() throws {

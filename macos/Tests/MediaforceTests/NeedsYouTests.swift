@@ -105,6 +105,43 @@ final class NeedsYouTests: XCTestCase {
         XCTAssertEqual(answers(NeedsYouItem.fileAsk(held, season: season)), [.releaseHold])
     }
 
+    func testAFileTheDirectorJudgesIsWatchedFirstInItsSeasonPlayer() throws {
+        let season = "tv/Suits/Season 6"
+        let question = #"{"job_id": "j1", "goal_bytes": 800000000, "smallest_quality_safe_bytes": 1200000000}"#
+        for file in [try file("size_held"), try file(nil, question: question)] {
+            let watch = try XCTUnwrap(NeedsYouItem.fileAsk(file, season: season).look, "\(file.validation ?? "size question") has no Watch")
+            XCTAssertEqual(watch.title, Words.watchIt)
+            guard case .open(let place) = watch.action else { return XCTFail("Watch does not open a page") }
+            var navigation = PageNavigation()
+            navigation.select(.needsYou)
+            navigation.open(place)
+            XCTAssertEqual(navigation.place, .item(season, file: file.id))
+            XCTAssertEqual(navigation.back, .needsYou)
+        }
+        // Releasing a hold is not a judgment of the file, so it has nothing to watch.
+        XCTAssertNil(NeedsYouItem.fileAsk(try file(nil, additional: #"[{"code": "containment_unproven"}]"#), season: season).look)
+    }
+
+    func testTheSeasonPageOpensWithTheFileItWasAskedToShowInThePlayer() throws {
+        let waiting = { (id: Int) in
+            #"""
+            {"library_item_id": \#(id), "rel_path": "tv/Suits/Season 6/Suits.S06E\#(id).mkv", "name": "Suits.S06E\#(id).mkv",
+             "episode": \#(id), "stage": "needs_you", "validation": "size_held", "wait_reason": {"code": "size_held"},
+             "additional_wait_reasons": [], "kept_reason": null, "held_reason": null, "percent_complete": null,
+             "size_question": null, "bytes": 1, "original_bytes": null, "original_backup": false}
+            """#
+        }
+        let season = try JSONDecoder.mediaforce.decode(ItemFacts.self, from: Data(#"""
+        {"prefix": "tv/Suits/Season 6", "domain": "tv", "kind": "tv_season", "title": "Suits · Season 6", "show": "Suits",
+         "show_prefix": "tv/Suits", "season": 6, "parent_prefix": "tv/Suits", "sound": null, "still_airing": null,
+         "files": [\#(waiting(14)), \#(waiting(15))]}
+        """#.utf8))
+        let model = MainWindowModel(client: MediaforceClient(baseURL: ServerConnection.localServer))
+        let page = ItemPage(prefix: season.prefix, model: model, openSample: { _ in }, openItem: { _ in }, selected: 15)
+        // Without it the page would open on the first file waiting.
+        XCTAssertEqual(season.selectedFile(page.selected)?.id, 15)
+    }
+
     func testASeasonRowAsksEachWaitingFileOnceItsFilesAreRead() throws {
         let facts = try facts()
         let prefix = "tv/Suits/Season 6"
