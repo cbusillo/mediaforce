@@ -220,7 +220,9 @@ also has `sound` (`show_prefix`, `current`, `options`) and `still_airing`
 (`series_prefix`, `mode` `auto`, `on` or `off`, and `airing`, TMDB's answer or
 null). The page saves those through the folder routes `audio-preset` and
 `series-lifecycle`, and acts on a file through `size-held-decision` (keep this
-copy, or make it again) and `put-original-back`.
+copy, or make it again) and `put-original-back`. A Needs you question about a
+file held for its size, or a size question, offers Watch it first, which opens
+this page with that file in the player and its answers beside it.
 
 `GET /api/app/player/{library_item_id}/{side}/index.m3u8` streams one file to
 the page's player as HLS, `side` `compressed` or `original` (the backup of a

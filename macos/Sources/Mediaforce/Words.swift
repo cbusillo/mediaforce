@@ -44,7 +44,7 @@ enum Words {
         case .media: media
         case .kind(let code): kindName(code)
         case .seasonsWithoutKind: seasonsWithoutKindTitle
-        case .item(let prefix): folderName(prefix)
+        case .item(let prefix, _): folderName(prefix)
         case .sample(let prefix): sampleTitle(folderName(prefix))
         case .computer: computers
         }
