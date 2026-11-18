@@ -37,6 +37,8 @@ targets:
         SUFeedURL: $(MEDIAFORCE_UPDATE_FEED)
         SUPublicEDKey: $(MEDIAFORCE_UPDATE_KEY)
         SUEnableAutomaticChecks: true
+        # Hourly, Sparkle's shortest; Check for Updates… in the app menu checks at once.
+        SUScheduledCheckInterval: 3600
         # Mediaforce installs on its own, between files; Sparkle may download only a build the server prepared.
         SUAllowsAutomaticUpdates: true
         SUAutomaticallyUpdate: true

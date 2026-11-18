@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import notify
 import ServiceManagement
 import UserNotifications
 
@@ -60,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         Task { await Updates.shared.start() }
         // A proof copy never asks for notifications or posts them; they belong to the live app.
         guard !BackgroundService.isProof else {
+            Self.chooseCheckForUpdatesOnProofSignal()
             model.startWatching()
             return
         }
@@ -85,6 +87,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         model.placeRequest = PlaceRequest(place: Attention.openingPlace(model.facts))
         return true
+    }
+
+    /// A proof copy chooses Check for Updates… from its own app menu when its driver posts
+    /// `notifyutil -p <label>.check-for-updates`, so an update proof needs no click. The live app never listens.
+    private static func chooseCheckForUpdatesOnProofSignal() {
+        var token: Int32 = 0
+        notify_register_dispatch("\(BackgroundService.label).check-for-updates", &token, .main) { _ in
+            MainActor.assumeIsolated {
+                guard let menu = NSApp.mainMenu?.items.first?.submenu,
+                      let index = menu.items.firstIndex(where: { $0.title == Words.checkForUpdates }) else {
+                    return Updates.logger.notice("Proof: no Check for Updates… in the app menu")
+                }
+                // As opening the menu would: SwiftUI brings its items up to date, then AppKit validates them.
+                menu.delegate?.menuNeedsUpdate?(menu)
+                menu.update()
+                let item = menu.items[index]
+                let before = menu.items[..<index].last(where: { !$0.isSeparatorItem })?.title ?? ""
+                let updater = Updates.shared.canCheckForUpdates
+                Updates.logger.notice("Proof: choosing \(item.title, privacy: .public) after \(before, privacy: .public), enabled \(item.isEnabled, privacy: .public), updater can check \(updater, privacy: .public)")
+                menu.performActionForItem(at: index)
+            }
+        }
     }
 
     private static var isRunningTests: Bool {
