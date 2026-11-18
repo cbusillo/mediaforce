@@ -67,10 +67,31 @@ some shows need more, and your results will vary.
 
 ### Download
 
-A notarized Mac app, with the server built in and automatic updates, will be
-published on GitHub Releases.
+**[Download the latest release](https://github.com/cbusillo/mediaforce/releases/latest)**
+(`Mediaforce-<version>.zip`). It is a notarized Mac app with the server built
+in, and it updates itself between files from then on.
 
-> **Download:** not available yet.
+1. Unzip it and move `Mediaforce.app` to Applications.
+2. Make a config file. Start from the app's own defaults and set your library
+   folders and working folder in it:
+
+   ```bash
+   mkdir -p ~/Library/Application\ Support/mediaforce
+   cp /Applications/Mediaforce.app/Contents/Resources/server/app/mediaforce/package_defaults/defaults.toml \
+      ~/Library/Application\ Support/mediaforce/config.toml
+   open -e ~/Library/Application\ Support/mediaforce/config.toml
+   ```
+
+3. Start the background server once. It then starts at login:
+
+   ```bash
+   /Applications/Mediaforce.app/Contents/MacOS/mediaforce-server \
+     --config ~/Library/Application\ Support/mediaforce/config.toml service install
+   ```
+
+4. Open Mediaforce and finish setup in Settings.
+
+Setup from the app itself, without Terminal, is not built yet.
 
 ### From source
 
@@ -100,8 +121,8 @@ Developer team.
   tuned to the maintainer's taste: about 300 MB for a 45-minute 1080p episode, and 4K
   brought down to 1080p unless a look says to keep it. Change the size goal
   and tallest picture in Settings if you want bigger files.
-- **It is early.** There is no released build yet, and screens and settings
-  still change often.
+- **It is early.** Setup needs Terminal, and screens and settings still
+  change often.
 - **It replaces your files.** Originals are kept until you approve cleanup,
   but keep your own backup too.
 - **It does not** compress VR and 3D video yet (those files are listed and
