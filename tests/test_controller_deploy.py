@@ -21,6 +21,7 @@ from sqlalchemy import Column, MetaData, Table, Text
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db
+from mediaforce.encoding.delivery_lock import archive_activity, delivery_lock
 from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
 from mediaforce.ops import controller_deploy, login_item, runtime_install
 
@@ -662,3 +663,23 @@ def test_a_failed_stop_before_any_backup_brings_the_old_service_back(controller:
         _install(mac)
     assert mac.started[0] == "previous" and mac.running == "previous"
     assert mac.plist.read_bytes() == mac.previous_payload and runtime_install.read_update_intent(mac.support) is None
+
+
+def test_publishing_check_reads_the_shared_archive_lock_beside_file_locks(tmp_path: Path) -> None:
+    database = tmp_path / "library.sqlite3"
+    with archive_activity(database):
+        with delivery_lock(database, 7):
+            pass
+        assert controller_deploy._publishing(database) == 1
+    assert (database.parent / "delivery-locks" / "archive-activity.lock").exists()
+    assert controller_deploy._publishing(database) == 0
+    with delivery_lock(database, 7):
+        assert _publishing_in_another_thread(database) == 1
+
+
+def _publishing_in_another_thread(database: Path) -> int:
+    result: list[int] = []
+    worker = threading.Thread(target=lambda: result.append(controller_deploy._publishing(database)))
+    worker.start()
+    worker.join()
+    return result[0]

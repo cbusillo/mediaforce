@@ -17,7 +17,7 @@ from urllib.request import Request, urlopen
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import open_db, open_readonly_db
 from mediaforce.core.utils import timestamp
-from mediaforce.encoding.delivery_lock import delivery_lock
+from mediaforce.encoding.delivery_lock import archive_activity, delivery_lock
 from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, load_queue_state, save_queue_state
 from mediaforce.ops.login_item import (
     CommandRunner, LoginItemError, LoginItemPaths, _atomic_write, _bootstrap, _bundle_code_hash, _launch_domain, _launch_target,
@@ -766,10 +766,14 @@ def _finishing_soon(update: AppUpdate) -> bool:
 
 
 def _publishing(database: Path) -> int:
+    """How many file deliveries, or publishing and cleanup as a whole, are holding their locks right now."""
     held = 0
     for path in (database.resolve().parent / "delivery-locks").glob("*.lock"):
-        with delivery_lock(database, int(path.stem), blocking=False) as acquired:
-            held += not acquired
+        if path.stem.isdigit():
+            with delivery_lock(database, int(path.stem), blocking=False) as acquired:
+                held += not acquired
+    with archive_activity(database, cleanup=True) as acquired:
+        held += not acquired
     return held
 
 
