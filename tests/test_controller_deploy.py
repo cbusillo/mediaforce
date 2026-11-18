@@ -53,12 +53,14 @@ class Controller:
         if previous == "legacy":
             self.config = _config(self.legacy_root / "config/defaults.toml", self.support)
             (self.legacy_root / ".env").write_text("MEDIAFORCE_FIXTURE=1\n")
+            (self.legacy_root / ".env").chmod(0o600)
             _app(self.install, build="legacy", code=b"legacy app")
             item = login_item.LoginItemPaths(self.legacy_root, self.home, saved_label=LABEL)
         else:
             self.config = _config(tmp_path / "persistent/config.toml", self.support)
             item = login_item.LoginItemPaths(_app(self.install, build="1", code=b"old app"), self.home, self.config)
         self.plist = item.plist
+        self.previous_paths = item
         self.plist.parent.mkdir(parents=True)
         self.previous_payload = login_item.render_login_item_plist(item)
         self.plist.write_bytes(self.previous_payload)
@@ -77,12 +79,20 @@ class Controller:
         if Path(item["ProgramArguments"][0]).is_relative_to(self.legacy_root):
             started = "previous"
         elif item.get("MediaforceAppCodeHash") != plistlib.loads(login_item.render_login_item_plist(
-                login_item.LoginItemPaths(self.install, self.home, self.config)))["MediaforceAppCodeHash"]:
+                login_item.LoginItemPaths(self.install, self.home, self.config)))["MediaforceAppCodeHash"] \
+                or not self._update_admits(self.install):
             started = "refused"
         else:
             started = "previous" if plist.read_bytes() == self.previous_payload else "release"
         self.running = None if started == "refused" else started
         self.started.append(started)
+
+    def _update_admits(self, app: Path) -> bool:
+        try:
+            controller_deploy.require_update_startup_allowed(self.support, app)
+        except controller_deploy.UpdateRefused:
+            return False
+        return True
 
     def api(self, _base: str, route: str, *, post: bool = False) -> dict[str, Any]:
         if self.running is None:
@@ -100,7 +110,7 @@ class Controller:
             if self.outcome == "resume-lost":
                 raise RemoteDisconnected("response lost")
         database = str((self.support / "library.sqlite3").resolve())
-        build = {"previous": None, "release": "2"}[self.running]
+        build = {"previous": "3" if self.outcome == "running-build-3" else None, "release": "2"}[self.running]
         if self.outcome == "other-database" and self.running == "previous":
             database = "/elsewhere/library.sqlite3"
         if self.outcome == "wrong-build" and self.running == "release":
@@ -120,13 +130,15 @@ def controller(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Contr
     actual_install = controller_deploy.install_app
 
     def install(app: Path, destination: Path) -> None:
-        if mac.outcome == "app-install-failed" and app == mac.release or mac.outcome == "app-folder-locked":
+        if mac.outcome == "app-install-failed" and app == mac.release or mac.outcome == "app-folder-locked" \
+                or mac.outcome == "restore-app-failed" and app != mac.release:
             raise OSError("Applications folder not writable")
         actual_install(app, destination)
 
     backup = patch.object(controller_deploy, "backup_database", side_effect=OSError("backup volume unavailable")) \
         if outcome == "backup-failed" else patch.object(controller_deploy, "backup_database", controller_deploy.backup_database)
-    refuse_installed = OSError("the installed copy fails its signature check") if outcome == "installed-signature-refused" else None
+    refuse_installed = OSError("the installed copy fails its signature check") \
+        if outcome in {"installed-signature-refused", "restore-app-failed"} else None
     with patch.object(controller_deploy, "_api", mac.api), patch.object(controller_deploy, "disable_login_item", mac.disable), \
             patch.object(controller_deploy, "start_saved_launch_item", mac.start), \
             patch.object(controller_deploy, "_verify_signed_bundle", side_effect=refuse_installed), patch.object(controller_deploy, "install_app", install), \
@@ -142,7 +154,8 @@ def _install(mac: Controller, **options: bool) -> None:
                                       stopped=mac.stopped, **options)
 
 
-OUTCOMES = ["healthy", "backup-failed", "app-install-failed", "app-folder-locked", "installed-signature-refused", "listener-stuck", "unhealthy", "wrong-build", "resume-lost"]
+OUTCOMES = ["healthy", "backup-failed", "app-install-failed", "app-folder-locked", "installed-signature-refused", "restore-app-failed",
+            "listener-stuck", "unhealthy", "wrong-build", "resume-lost"]
 
 
 @pytest.mark.parametrize("controller", [
@@ -163,7 +176,7 @@ def test_install_keeps_old_code_off_a_database_the_release_may_have_migrated(con
     assert mac.started == (["release"] if release_started else ["previous"] if restored else [])
     assert mac.running == ("release" if mac.outcome in {"healthy", "resume-lost"} else "previous" if restored else None)
     installed = (mac.install / "Contents/MacOS/Mediaforce").read_bytes()
-    replaced = release_started or (mac.stopped and mac.outcome == "installed-signature-refused")
+    replaced = release_started or mac.outcome == "restore-app-failed" or (mac.stopped and mac.outcome == "installed-signature-refused")
     assert installed == b"release app" if replaced else installed in {b"legacy app", b"old app"}
     assert (mac.plist.read_bytes() == mac.previous_payload) is not release_started
     assert (stage / "launch-item.before.plist").read_bytes() == mac.previous_payload
@@ -173,7 +186,8 @@ def test_install_keeps_old_code_off_a_database_the_release_may_have_migrated(con
     # New work and publication stay held while the release is checked, and until a failed one is reconciled.
     assert mac.release_held and all(mac.release_held) if release_started else not mac.release_held
     held = runtime_install.read_update_intent(mac.support)
-    assert (held is not None) is (mac.outcome not in {"healthy", "resume-lost"} and not restored)
+    # The record exists from the backup on, and stays until the old service is back or the release passed.
+    assert (held is not None) is (mac.outcome not in {"healthy", "resume-lost", "backup-failed", "listener-stuck"} and not restored)
     if mac.outcome in {"listener-stuck", "backup-failed"}:
         assert not (stage / "before.sqlite").exists()
         return
@@ -524,3 +538,68 @@ def test_paused_rollback_backup_preserves_work_and_leaves_source_queue_unchanged
     with sqlite3.connect(backup) as connection:
         assert connection.execute("SELECT is_paused, stop_requested, active_job_id FROM encode_queue_state").fetchone() == (1, 1, retained_job)
         assert connection.execute("SELECT job FROM retained_work").fetchall() == [(work_id,)]
+
+
+@pytest.mark.parametrize("controller", [("bundled", False, "unhealthy"), ("legacy", False, "unhealthy")], indirect=True)
+def test_a_failed_release_rolls_back_through_the_app_update_rollback(controller: Controller) -> None:
+    mac = controller
+    with pytest.raises(RuntimeError):
+        _install(mac)
+    with open_db(mac.support / "library.sqlite3") as connection:
+        connection.exec_driver_sql("create table release_migration (id integer)")
+    controller_deploy.rollback_update(controller_deploy.AppUpdate(mac.config, mac.install, mac.home))
+    assert mac.running == "previous" and mac.started == ["release", "previous"]
+    assert mac.plist.read_bytes() == mac.previous_payload and runtime_install.read_update_intent(mac.support) is None
+    assert (mac.install / "Contents/MacOS/Mediaforce").read_bytes() in {b"legacy app", b"old app"}
+    with sqlite3.connect(mac.support / "library.sqlite3") as restored:
+        assert not restored.execute("select name from sqlite_master where name = 'release_migration'").fetchall()
+
+
+@pytest.mark.parametrize("controller", [("bundled", False, "healthy")], indirect=True)
+def test_an_interrupted_install_continues_as_a_stopped_install(controller: Controller) -> None:
+    mac = controller
+    with patch.object(controller_deploy, "retain_deploy_stage", side_effect=KeyboardInterrupt), pytest.raises(KeyboardInterrupt):
+        _install(mac)
+    assert (runtime_install.read_update_intent(mac.support) or {}).get("phase") == controller_deploy.INSTALLING
+    mac.disable(mac.previous_paths)
+    controller_deploy.install_release(mac.release, mac.support / "deployments/continued", mac.home, evidence={},
+                                      install=mac.install, startup_timeout=0, stopped=True)
+    assert mac.running == "release" and runtime_install.read_update_intent(mac.support) is None
+
+
+@pytest.mark.parametrize("controller", [("bundled", False, "healthy")], indirect=True)
+def test_a_service_that_will_not_stop_leaves_nothing_held(controller: Controller) -> None:
+    mac = controller
+    with patch.object(controller_deploy, "disable_login_item", side_effect=OSError("launchctl refused")), pytest.raises(OSError):
+        _install(mac)
+    assert mac.started == [] and runtime_install.read_update_intent(mac.support) is None
+
+
+@pytest.mark.parametrize("controller", [("bundled", False, "running-build-3")], indirect=True)
+def test_an_unrecorded_build_uses_the_running_servers_build(controller: Controller) -> None:
+    mac = controller
+    unrecorded = plistlib.loads(mac.previous_payload)
+    del unrecorded["MediaforceAppBuild"]
+    mac.plist.write_bytes(plistlib.dumps(unrecorded))
+    with pytest.raises(RuntimeError, match="older release"):
+        _install(mac, allow_unknown_build=True)
+    assert mac.started == []
+
+
+@pytest.mark.parametrize("controller", [("legacy", False, "healthy")], indirect=True)
+def test_install_refuses_credentials_others_can_read(controller: Controller) -> None:
+    mac = controller
+    (mac.legacy_root / ".env").chmod(0o644)
+    with pytest.raises(runtime_install.RuntimeProtectionError, match="chmod 600"):
+        _install(mac)
+    assert mac.running == "previous" and mac.started == []
+
+
+def test_proof_destination_is_compared_after_resolving_links(tmp_path: Path) -> None:
+    applications = tmp_path / "Applications"
+    applications.mkdir()
+    (tmp_path / "alias").symlink_to(applications, target_is_directory=True)
+    app = _app(tmp_path / "Mediaforce.app", build="2", code=b"proof")
+    with patch.object(controller_deploy, "APPLICATIONS_APP", applications / "Mediaforce.app"), \
+            pytest.raises(RuntimeError, match="only the live app"):
+        controller_deploy.install_release(app, tmp_path / "stage", tmp_path, evidence={}, install=tmp_path / "alias/Mediaforce.app")

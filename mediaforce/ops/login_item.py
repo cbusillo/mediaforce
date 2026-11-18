@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from mediaforce.ops.runtime_install import SERVICE_LABEL, bundle_build, bundle_service
+from mediaforce.ops.runtime_install import SERVICE_LABEL, RuntimeProtectionError, bundle_build, bundle_service, require_private_credentials
 
 
 LOGIN_ITEM_LABEL = SERVICE_LABEL
@@ -324,8 +324,9 @@ def _require_bundled_install(paths: LoginItemPaths) -> None:
         try:
             with paths.credentials_path.open("rb"):
                 pass
-        except OSError as exc:
-            raise LoginItemError("the saved credential source is unreadable") from exc
+            require_private_credentials(paths.credentials_path)
+        except (OSError, RuntimeProtectionError) as exc:
+            raise LoginItemError(f"the saved credential source is unusable: {exc}") from exc
     if paths.plist.exists():
         installed = plistlib.loads(paths.plist.read_bytes())
         _require_same_bundle_install(paths, installed)

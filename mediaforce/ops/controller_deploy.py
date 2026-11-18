@@ -1,7 +1,7 @@
 """Staged installation of a release on the controller, and the app's own update. Invoke only in an authorized release window."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import json
 from http.client import HTTPException
@@ -25,7 +25,7 @@ from mediaforce.ops.login_item import (
 )
 from mediaforce.ops.runtime_install import (
     SERVICE_LABEL, UPDATE_INTENT_NAME, bundle_build, bundle_service, read_update_intent, register_runtime_roots,
-    require_own_support, retain_deploy_stage, runtime_activity, saved_service_config,
+    require_own_support, require_private_credentials, retain_deploy_stage, runtime_activity, saved_service_config,
 )
 from mediaforce.web.runtime.controller_storage_recovery import READY_FRESHNESS_SECONDS
 from mediaforce.web.runtime.release_work import release_work_payload
@@ -243,12 +243,21 @@ class ReleaseInstall:
         return LoginItemPaths(self.install, self.home, self.saved.config_path, self.saved.credentials_path,
                               saved_label=self.previous.label)
 
+    @property
+    def support(self) -> Path:
+        return self.config.paths.db_path.parent
+
+    @property
+    def credentials(self) -> Path | None:
+        implicit = self.support / ".env"
+        return self.saved.credentials_path or (implicit if self.saved.bundled and implicit.exists() else None)
+
 
 def install_release(
     app: Path, stage: Path, home: Path, *, evidence: dict[str, str], install: Path = APPLICATIONS_APP,
     startup_timeout: int = DEFAULT_STARTUP_TIMEOUT, stopped: bool = False, allow_unknown_build: bool = False,
 ) -> None:
-    if (bundle_service(app)[0] == SERVICE_LABEL) != (install == APPLICATIONS_APP):
+    if (bundle_service(app)[0] == SERVICE_LABEL) != (install.resolve() == APPLICATIONS_APP.resolve()):
         raise RuntimeError(f"only the live app installs at {APPLICATIONS_APP}, and it installs nowhere else")
     plist = LoginItemPaths(app, home).plist
     support = load_config(SavedService.read(plist).config_path).paths.db_path.parent
@@ -261,15 +270,27 @@ def install_release(
         config = load_config(saved.config_path)
         if config.paths.db_path.parent != support:
             raise RuntimeError("the saved service changed to another database while this install waited; run it again")
-        _require_installable(app, saved, config, home, allow_unknown_build=allow_unknown_build)
+        if saved.build is None and not stopped:
+            saved = replace(saved, build=_running_build(app))
+        _require_installable(app, saved, config, home, stopped=stopped, allow_unknown_build=allow_unknown_build)
         _switch(ReleaseInstall(app, install, stage, home, saved, config, stopped, startup_timeout), {
             **evidence, "previous_build": saved.build or ("unknown" if saved.bundled else "clone runtime")})
 
 
-def _require_installable(app: Path, saved: SavedService, config: MediaforceConfig, home: Path, *, allow_unknown_build: bool) -> None:
+def _running_build(app: Path) -> str | None:
+    return (_api(f"http://127.0.0.1:{bundle_service(app)[1]}", "/api/release/work").get("server") or {}).get("build")
+
+
+def _require_installable(app: Path, saved: SavedService, config: MediaforceConfig, home: Path, *, stopped: bool,
+                         allow_unknown_build: bool) -> None:
     require_own_support(app, config.paths.db_path, home)
-    if read_update_intent(config.paths.db_path.parent) is not None:
-        raise RuntimeError("an app update or install is unfinished; reconcile or roll it back first")
+    unfinished = read_update_intent(config.paths.db_path.parent) or {}
+    # A stranded installation continues as a stopped one of the same or a newer release; anything else is reconciled
+    # through the app's update steps first.
+    continuing = stopped and unfinished.get("phase") == INSTALLING and int(bundle_build(app) or 0) >= int(unfinished.get("to") or 0)
+    if unfinished and not continuing:
+        raise RuntimeError("an app update or install is unfinished; continue it with --stopped and the same or a newer "
+                           "release, or roll it back with the installed app's `service update rollback`")
     if saved.bundled and saved.build is None and not allow_unknown_build:
         raise RuntimeError("the saved service does not record which build last ran on this database; "
                            "pass --allow-unknown-build only after confirming the release is not older")
@@ -278,9 +299,9 @@ def _require_installable(app: Path, saved: SavedService, config: MediaforceConfi
 
 
 def _switch(job: ReleaseInstall, evidence: dict[str, str]) -> None:
-    support = job.config.paths.db_path.parent
-    _require_fresh_stage(job.stage, support)
-    _require_readable(job.saved.credentials_path)
+    _require_fresh_stage(job.stage, job.support)
+    if (credentials := job.credentials) is not None:
+        require_private_credentials(credentials)
     if not job.stopped:
         _require_running_server(job)
     job.stage.mkdir(parents=True)
@@ -288,22 +309,17 @@ def _switch(job: ReleaseInstall, evidence: dict[str, str]) -> None:
     _atomic_write(job.stage / "release.json", json.dumps(evidence, indent=2).encode())
     if _is_present(job.install):
         _copy_app(job.install, job.stage / MAC_APP_NAME)
-    register_runtime_roots(support, *job.saved.protected_roots)
-    _write_intent(support, {"phase": INSTALLING, "from": job.saved.build, "to": bundle_build(job.app),
-                            "stage": str(job.stage), "app": str(job.install)})
+    register_runtime_roots(job.support, *job.saved.protected_roots, *([job.credentials] if job.credentials else []))
+    if not job.stopped:
+        _require_running_server(job)
+    candidate_started = port_closed = app_replaced = False
     try:
-        if not job.stopped:
-            _require_running_server(job)
-    except Exception:
-        _end_intent(support)
-        raise
-    disable_login_item(job.previous)
-    candidate_started = port_closed = False
-    try:
+        disable_login_item(job.previous)
         wait_for_closed_listener(job.port)
         port_closed = True
         resume_queue, pending_encode = _back_up_stopped_database(job)
         install_app(job.app, job.install)
+        app_replaced = True
         _verify_signed_bundle(job.install)
         _atomic_write(job.service.plist, render_login_item_plist(job.service))
         candidate_started = True
@@ -316,17 +332,24 @@ def _switch(job: ReleaseInstall, evidence: dict[str, str]) -> None:
         if candidate_started or not port_closed or job.stopped:
             # Migrations, uncertain listener custody or a database the stopped install already touched require
             # reconciliation; old code never starts on them, and the record keeps work held until then.
-            disable_login_item(job.previous)
-            _write_intent(support, {**(read_update_intent(support) or {}), "failure": str(failure)})
+            _hold_for_reconciliation(job, failure)
         else:
-            _end_intent(support)
-            _restore_previous(job, failure)
+            _restore_previous(job, failure, app_replaced=app_replaced)
         raise
-    retain_deploy_stage(support, job.stage)
-    _end_intent(support)
+    retain_deploy_stage(job.support, job.stage)
+    _end_intent(job.support)
     if resume_queue:
         # A lost resume response is uncertain; leave the healthy release running.
         _api(job.base_url, "/api/encode-queue/resume", post=True)
+
+
+def _hold_for_reconciliation(job: ReleaseInstall, failure: Exception) -> None:
+    try:
+        disable_login_item(job.previous)
+    except Exception as cleanup:
+        failure.add_note(f"stopping the service also failed; stop it with launchctl bootout: {cleanup}")
+    if (intent := read_update_intent(job.support)) is not None:
+        _write_intent(job.support, {**intent, "failure": str(failure)})
 
 
 def _require_fresh_stage(stage: Path, support: Path) -> None:
@@ -334,13 +357,6 @@ def _require_fresh_stage(stage: Path, support: Path) -> None:
         raise RuntimeError(f"deploy stage must be a real directory directly under {support / 'deployments'}")
     if stage.exists():
         raise RuntimeError("deploy stage already exists; use a fresh stage")
-
-
-def _require_readable(credentials: Path | None) -> None:
-    if credentials is None:
-        return
-    with credentials.open("rb"):
-        pass
 
 
 def _require_running_server(job: ReleaseInstall) -> None:
@@ -361,6 +377,8 @@ def _back_up_stopped_database(job: ReleaseInstall) -> tuple[bool, int]:
         if _publishing(config.paths.db_path):
             raise RuntimeError("a file is still being published; reconcile it before installing")
         backup_database(config.paths.db_path, job.stage / "before.sqlite", pause_queue=job.stopped)
+        _write_intent(job.support, {"phase": INSTALLING, "from": job.saved.build, "to": bundle_build(job.app),
+                                    "stage": str(job.stage), "app": str(job.install)})
         if job.stopped:
             pause_stopped_queue(config)
         pending_encode = release_work_payload(config.paths.db_path)["counts"]["pending_encode"]
@@ -374,19 +392,28 @@ def _require_server(base_url: str, build: str | None, config: MediaforceConfig, 
         raise UpdateRefused(f"the started server is not build {build} with the same queued work: {work}")
 
 
-def _restore_previous(job: ReleaseInstall, failure: Exception) -> None:
-    # The saved launch item may start the app it names, so that app is back in place first.
-    for step, words in ((_restore_previous_app, "restoring the previous app"), (_restart_previous_service, "restarting the previous service")):
-        try:
-            step(job)
-        except Exception as cleanup:
-            failure.add_note(f"{words} also failed: {cleanup}")
-
-
-def _restart_previous_service(job: ReleaseInstall) -> None:
-    _atomic_write(job.previous.plist, job.saved.payload)
-    start_saved_launch_item(job.previous.plist)
-    wait_until_healthy(job.base_url, job.startup_timeout)
+def _restore_previous(job: ReleaseInstall, failure: Exception, *, app_replaced: bool) -> None:
+    # The release never started, so the database is untouched. The record's restoring phase admits the previous build.
+    try:
+        if app_replaced:
+            _restore_previous_app(job)
+    except Exception as cleanup:
+        failure.add_note(f"restoring the previous app failed, so its service stays disabled with work held: {cleanup}")
+        _hold_for_reconciliation(job, failure)
+        return
+    intent = read_update_intent(job.support)
+    try:
+        if intent is not None:
+            _write_intent(job.support, {**intent, "phase": "restoring"})
+        _atomic_write(job.previous.plist, job.saved.payload)
+        start_saved_launch_item(job.previous.plist)
+        wait_until_healthy(job.base_url, job.startup_timeout)
+    except Exception as cleanup:
+        failure.add_note(f"restarting the previous service also failed; work stays held: {cleanup}")
+        _hold_for_reconciliation(job, failure)
+        return
+    if intent is not None:
+        _end_intent(job.support)
 
 
 def _restore_previous_app(job: ReleaseInstall) -> None:
@@ -615,7 +642,7 @@ def rollback_update(update: AppUpdate) -> None:
     """Restore the saved database, app and exact launch item of a failed candidate, keeping each attempt's failed
     copies. The candidate never released work, so nothing it did is lost."""
     intent = _require_intent(update)
-    if intent["phase"] not in {"starting", "failed", "rolling-back"}:
+    if intent["phase"] not in {"starting", "failed", "rolling-back", INSTALLING}:
         raise UpdateRefused("nothing ran on the new build; cancel the update instead")
     # Every step below is repeatable from the saved pair; an interrupted rollback is run again, from either app copy.
     intent["phase"] = "rolling-back"

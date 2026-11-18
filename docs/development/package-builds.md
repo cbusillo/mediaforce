@@ -121,7 +121,9 @@ zip, and `smoke APP` starts its server with a throwaway config on its own port.
 file), `NOTARY_KEY_ID` and `NOTARY_ISSUER`; it also works on a proof copy.
 `scripts/deploy-controller.sh` installs a notarized proof copy over a proof
 service when given its `--feed`, `--public-key` and `--install` folder; the
-live app takes none of them.
+live app takes none of them. A proof server refuses to start unless it can read
+the live service's launch item and the config it names, since it must prove
+its database is not the controller's or beside it.
 
 Wheels are chosen for the app's minimum macOS. A build-machine library folder
 left as a search path in a wheel's native code is removed before signing.

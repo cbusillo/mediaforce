@@ -302,3 +302,14 @@ def test_proof_build_refuses_the_controller_database_wherever_its_config_puts_it
         return
     with pytest.raises(RuntimeProtectionError):
         require_own_support(proof, proof_database, tmp_path)
+
+
+def test_proof_build_names_the_live_launch_item_it_cannot_read(tmp_path: Path) -> None:
+    from mediaforce.ops.runtime_install import RuntimeProtectionError, require_own_support
+
+    proof = _app(tmp_path / "Proof.app", build="1", code=b"", MediaforceServiceLabel="com.mediaforce.web.proof")
+    live = tmp_path / "Library/LaunchAgents/com.mediaforce.web.plist"
+    live.parent.mkdir(parents=True)
+    live.write_bytes(plistlib.dumps({"ProgramArguments": ["/old/clone/.venv/bin/mediaforce-web"], "WorkingDirectory": "/old/clone"}))
+    with pytest.raises(RuntimeProtectionError, match="com.mediaforce.web.plist or the config it names cannot be read"):
+        require_own_support(proof, tmp_path / "proof/library.sqlite3", tmp_path)

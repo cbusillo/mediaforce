@@ -40,25 +40,26 @@ which the pause request itself can start), it reads the saved launch item. Its
 `--config` and `--credentials`, or the clone runtime's own
 `config/defaults.toml` and `.env`, go into the new launch item and are read
 where they are; nothing is copied. The running server must report the database
-that config names. It refuses an unfinished app update, and a release older
-than the build the launch item records (`MediaforceAppBuild`, kept there so a
-damaged or missing app cannot hide it). When a bundled launch item records no
-build, it refuses unless `--allow-unknown-build` is given after confirming the
-release is not older than what last ran on the database.
+that config names, and the credential file must be private (`chmod 600`). It
+refuses an unfinished app update, and a release older than the build that last
+ran: the one the launch item records (`MediaforceAppBuild`, kept there so a
+damaged or missing app cannot hide it), or else the one the running server
+reports. Only when neither is known does it accept `--allow-unknown-build`,
+given after confirming the release is not older.
 
 1. The dashboard must show the queue paused, with nothing compressing,
    sampling, checking the library, measuring or publishing.
 2. The stage saves the exact launch item (`launch-item.before.plist`), the
    installed app (`Mediaforce.app`) and `release.json`, which also records the
    previous build. The clone runtime and the exact config and credential files
-   are registered as protected.
-3. `runtime/update-intent.json` is written with phase `installing`. As during
-   an app update, it holds new work, automatic publication and cleanup on
-   whichever server reads it, and lets only the release's own server start.
-   The dashboard check runs again under it.
-4. The service stops and the port must close. Under the runtime lock, no work
+   are registered as protected. The dashboard check runs again.
+3. The service stops and the port must close. Under the runtime lock, no work
    record may be running, no publication may hold its delivery lock, and
    `before.sqlite` is an online backup that passed `quick_check`.
+4. `runtime/update-intent.json` is written with phase `installing`. As during
+   an app update, it holds new work, publication, putting originals back,
+   original-backup cleanup and hourly cleanup on whichever server reads it, and
+   lets only the release's own server start.
 5. The app replaces `/Applications/Mediaforce.app` and its signature is
    checked. The launch item keeps its label and logs and now starts the app's
    server.
@@ -74,14 +75,28 @@ It prints the installed identity and the saved rollback. Runtime settings, the
 work window, queued jobs, originals and rollback copies stay where they are.
 
 A failure before the new server starts, such as a failed backup or app copy,
-removes the record, puts back the saved app and then the exact saved launch
-item, and starts the old service: its database is untouched. Once the new
-server has started, or when the port does not close, a failure leaves the
-service disabled and the record in place, with the failure in it, so nothing
-publishes until the install is reconciled. Old code never
-starts against a database the release may have migrated; use the rollback
-below. A lost resume response leaves the healthy release running; check the
-dashboard before retrying.
+puts back the saved app, then starts the exact saved launch item under the
+record's `restoring` phase, which admits the previous build, and removes the
+record once the old service is healthy: its database is untouched. If the app
+cannot be put back or the old service does not come back, the service stays
+disabled and the record stays. Once the new server has started, when the port
+does not close, or after any failure in a stopped install, the service stays
+disabled and the record stays, with the failure in it. Old code never starts
+against a database the release may have migrated. A lost resume response
+leaves the healthy release running; check the dashboard before retrying.
+
+A record left in place, by a failure or an interrupted run, has two ways
+forward:
+
+- Forward: stop the service if it runs (`launchctl bootout
+  gui/$(id -u)/com.mediaforce.web`) and run the script again with `--stopped`,
+  a fresh stage and the same or a newer release. It checks the port and work
+  records, backs up again and finishes the install.
+- Back: run `/Applications/Mediaforce.app/Contents/MacOS/mediaforce-server
+  service update rollback`. It is the app update's own rollback: it keeps the
+  current database and app aside, restores the stage's `before.sqlite`, app and
+  exact launch item, starts the previous build under the `restoring` phase and
+  removes the record once it answers.
 
 ### First install from the clone runtime
 
@@ -115,20 +130,17 @@ item and backup ready for the rollback below.
 
 ### Rollback and cleanup ownership
 
-The install's record held all new work and publication, so a release that
-failed its checks changed nothing in the library and its `before.sqlite` loses
-nothing. Once a release has passed and resumed work, roll back only before it
-has encoded or published anything; after that a newer release is the safer
-fix. Stop the service with `launchctl bootout gui/$(id -u)/com.mediaforce.web`
-and verify port 8777 is closed. If the new server started, set aside the
-database and its `-wal`/`-shm` files and restore the stage's verified
-`before.sqlite`. Put the stage's `Mediaforce.app` back in `/Applications`.
-Restore `launch-item.before.plist` atomically to the launch-item path, then use
-`launchctl enable` and `launchctl bootstrap` for that exact saved plist. Do not
-regenerate it: new service commands refuse to install a clone runtime. Verify
-the API and queue, then remove `runtime/update-intent.json` and resume work.
-No runtime directory is deleted.
-After the app has updated itself, use the update's own recovery instead
+The install's record held every change to the library, so a release that
+failed its checks changed nothing there and its `before.sqlite` loses nothing;
+use the rollback above. Once a release has passed and resumed work, roll back
+only before it has encoded or published anything; after that a newer release
+is the safer fix. Then stop the service and verify port 8777 is closed, set
+aside the database and its `-wal`/`-shm` files, restore the stage's
+`before.sqlite` and `Mediaforce.app`, restore `launch-item.before.plist`
+atomically and start that exact plist with `launchctl enable` and `launchctl
+bootstrap`. Do not regenerate it: new service commands refuse to install a
+clone runtime. No runtime directory is deleted. After the app has updated
+itself, use the update's own recovery instead
 ([package builds](package-builds.md#updates-with-sparkle)).
 
 `runtime/protected-roots.json` beside the configured database lists every
@@ -149,12 +161,10 @@ under `runtime/releases/` stay until a verified retirement shows nothing uses
 them: no cleanup removes anything under `runtime/`, and the clone whose config
 and `.env` the service reads is registered as protected.
 
-To move that config and `.env` beside the database later, stop the service,
-copy both files there (the `.env` with mode `0600`), point the launch item's
-`--config` and `--credentials` at the copies with `plutil -replace
-ProgramArguments`, and start it with `launchctl enable` and `launchctl
-bootstrap`. The server and its updates read both paths from the launch item.
-The clone stays protected until its retirement.
+Moving that config and `.env` beside the database is a later step with its own
+procedure: the config's relative paths and `include_files` resolve from its own
+folder, so a moved copy can select other state unless each is made absolute
+first.
 
 ## Notarized releases
 

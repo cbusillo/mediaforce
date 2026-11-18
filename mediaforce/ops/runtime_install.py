@@ -67,11 +67,22 @@ def require_own_support(app: Path, database: Path, home: Path) -> None:
     """A proof build never opens or records anything beside the live service's database, wherever its config puts it."""
     if bundle_service(app)[0] == SERVICE_LABEL:
         return
-    live = home.resolve() / "Library" / "Application Support" / "mediaforce"
-    live_database = saved_service_database(home / "Library" / "LaunchAgents" / f"{SERVICE_LABEL}.plist")
+    live = (home / "Library" / "Application Support" / "mediaforce").resolve()
+    plist = home / "Library" / "LaunchAgents" / f"{SERVICE_LABEL}.plist"
+    try:
+        live_database = saved_service_database(plist)
+    except (OSError, ValueError, KeyError, IndexError, RuntimeProtectionError) as exc:
+        raise RuntimeProtectionError(
+            f"a proof build starts only once the live service's database is known, and {plist} or the config it names "
+            f"cannot be read: {exc}") from exc
     database = database.resolve()
     if database.is_relative_to(live) or (live_database is not None and database.parent == live_database.resolve().parent):
         raise RuntimeProtectionError(f"a proof build must use its own config and database, not {database}")
+
+
+def require_private_credentials(path: Path) -> None:
+    if path.stat().st_mode & 0o077:
+        raise RuntimeProtectionError(f"{path} can be read by other users; run chmod 600 '{path}' first")
 
 
 def saved_service_config(item: dict) -> Path | None:

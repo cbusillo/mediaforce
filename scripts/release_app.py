@@ -166,7 +166,7 @@ def install(args: argparse.Namespace) -> dict[str, object]:
     proof = args.feed is not None or args.public_key is not None or args.install is not None
     feed, public_key = args.feed or identity["feed"], args.public_key or identity["public_key"]
     stage = args.stage.expanduser().absolute()
-    destination = args.install.expanduser().absolute() if args.install else APPLICATIONS_APP
+    destination = args.install.expanduser().resolve() if args.install else APPLICATIONS_APP
     with tempfile.TemporaryDirectory(prefix="mediaforce-release-") as scratch:
         release = verify_release(args.release, Path(scratch), feed=feed, public_key=public_key, proof=proof)
         install_release(release.app, stage, Path.home(), evidence=release.evidence, install=destination,
