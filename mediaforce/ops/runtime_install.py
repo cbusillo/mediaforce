@@ -64,28 +64,45 @@ def support_root(home: Path) -> Path:
 
 
 def require_own_support(app: Path, database: Path, home: Path) -> None:
-    """A proof build never opens or records anything beside the live service's database."""
-    live = home.resolve() / "Library" / "Application Support" / "mediaforce"
-    if bundle_service(app)[0] != SERVICE_LABEL and database.resolve().is_relative_to(live):
+    """A proof build never opens or records anything beside the live service's database, wherever its config puts it."""
+    if bundle_service(app)[0] == SERVICE_LABEL:
+        return
+    live = (home / "Library" / "Application Support" / "mediaforce").resolve()
+    plist = home / "Library" / "LaunchAgents" / f"{SERVICE_LABEL}.plist"
+    try:
+        live_database = saved_service_database(plist)
+    except (OSError, ValueError, KeyError, IndexError, RuntimeProtectionError) as exc:
+        raise RuntimeProtectionError(
+            f"a proof build starts only once the live service's database is known, and {plist} or the config it names "
+            f"cannot be read: {exc}") from exc
+    database = database.resolve()
+    if database.is_relative_to(live) or (live_database is not None and database.parent == live_database.resolve().parent):
         raise RuntimeProtectionError(f"a proof build must use its own config and database, not {database}")
 
 
-def runtime_directory(home: Path) -> Path:
-    return support_root(home) / "runtime"
+def require_private_credentials(path: Path) -> None:
+    if path.stat().st_mode & 0o077:
+        raise RuntimeProtectionError(f"{path} can be read by other users; run chmod 600 '{path}' first")
 
 
-def require_release_directory(project_root: Path, home: Path) -> None:
-    releases = runtime_directory(home) / "releases"
-    root = project_root.absolute()
-    if root.parent != releases.absolute() or root.resolve() != root:
-        raise RuntimeProtectionError(f"controller runtime {root} must be a real directory directly under {releases}")
-    if (
-        (root / ".git").is_symlink()
-        or not (root / ".git").is_dir()
-        or (root / ".git/commondir").exists()
-        or (root / ".git/objects/info/alternates").exists()
-    ):
-        raise RuntimeProtectionError(f"controller runtime {root} must be an independent clone, not a development worktree")
+def saved_service_config(item: dict) -> Path | None:
+    arguments = item["ProgramArguments"]
+    if "--config" in arguments:
+        return Path(arguments[arguments.index("--config") + 1])
+    if Path(arguments[0]).name == "mediaforce-server":
+        return None
+    return Path(item["WorkingDirectory"]) / "config/defaults.toml"
+
+
+def saved_service_database(plist: Path) -> Path | None:
+    from mediaforce.core.config import load_config
+
+    if not plist.exists():
+        return None
+    config = saved_service_config(plistlib.loads(plist.read_bytes()))
+    if config is None:
+        raise RuntimeProtectionError(f"the saved service at {plist} names no config")
+    return load_config(config).paths.db_path
 
 
 def protected_runtime_roots(support_dir: Path) -> tuple[Path, ...]:
@@ -102,11 +119,11 @@ def protected_runtime_roots(support_dir: Path) -> tuple[Path, ...]:
     return (runtime.resolve(), *(Path(value).resolve() for value in values))
 
 
-def register_runtime_roots(home: Path, *roots: Path, support_dir: Path | None = None) -> None:
+def register_runtime_roots(support_dir: Path, *roots: Path) -> None:
     from mediaforce.ops.login_item import _atomic_write
 
-    runtime = (support_dir or runtime_directory(home).parent) / "runtime"
-    existing = (*protected_runtime_roots(runtime.parent), runtime_directory(home))
+    runtime = support_dir / "runtime"
+    existing = protected_runtime_roots(support_dir)
     runtime.mkdir(parents=True, exist_ok=True)
     values = sorted({str(root.resolve()) for root in (*existing, *roots)})
     _atomic_write(runtime / "protected-roots.json", json.dumps(values, indent=2).encode())

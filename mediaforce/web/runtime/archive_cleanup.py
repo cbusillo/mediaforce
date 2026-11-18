@@ -9,6 +9,7 @@ from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import library_items, staged_artifacts
 from mediaforce.encoding.delivery_lock import archive_activity
 from mediaforce.encoding.staging import safe_unlink
+from mediaforce.ops.runtime_install import update_hold_reason
 from mediaforce.encoding.source_publication import commit_archive_removal, pending_archive_paths, prepare_archive_removal, reconcile_archive_removals
 from mediaforce.web.settings_runtime import settings_archive_root
 
@@ -53,6 +54,9 @@ def clear_archive_cleanup_action(
         if not available:
             return {"ok": False, "message": "Files are being published. Retry cleanup when they finish.",
                     "removed_count": 0, "removed_size_bytes": 0,
+                    "archive_cleanup": archive_cleanup_summary(config, transcode_root=transcode_root)}
+        if hold := update_hold_reason(config.paths.db_path.parent):
+            return {"ok": False, "message": hold, "removed_count": 0, "removed_size_bytes": 0,
                     "archive_cleanup": archive_cleanup_summary(config, transcode_root=transcode_root)}
         return _clear_archive_cleanup_action(config, transcode_root=transcode_root, on_removed=on_removed)
 

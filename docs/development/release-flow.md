@@ -1,192 +1,186 @@
 # Releases
 
-Agents deploy Mediaforce `main` to the controller themselves with a staged,
-gated deploy script. The Director decided this on 2026-10-13
-([direction#82](https://github.com/cbusillo/direction/issues/82)). Launchplane
-does not manage Mediaforce. A system-owned release flow
-([#730](https://github.com/cbusillo/mediaforce/issues/730),
-[Launchplane#3184](https://github.com/cbusillo/launchplane/issues/3184)) is a
-possible future replacement, not a gate on deploys today.
+Mediaforce ships as a notarized Mac app with its server inside. Agents publish
+a release when the Director asks ([Notarized releases](#notarized-releases)),
+and the installed app updates itself between files. The Director decided that
+agents release Mediaforce themselves on 2026-10-13
+([direction#82](https://github.com/cbusillo/direction/issues/82)) and that it
+updates itself automatically on 2026-11-12
+([#1314](https://github.com/cbusillo/mediaforce/issues/1314#issuecomment-6841277256)).
+Launchplane does not manage Mediaforce.
 
-## Staged deploy
+## Installing a release on the controller
 
-Use the maintained `scripts/deploy-controller.sh`, from a clean checkout of
-reviewed `main`. Do not copy an old machine-local deploy script: those scripts
-update a development worktree in place.
+`scripts/deploy-controller.sh` installs one published release through a
+staged transaction. It moves the controller from the clone-based runtime to
+the app once, and repairs an installed app that cannot update itself.
+Ordinary updates need nothing from it.
 
-The controller installs into
-`~/Library/Application Support/mediaforce/runtime/releases/<full-sha>-<attempt>/`.
-Each release is an independent Git clone with its own environment and freshly
-built Mac app. A fresh attempt folder lets the same commit be retried without
-overwriting a retained candidate; it has no Git alternates or worktree registration pointing back
-to a development checkout. Launchd's program and working directory name that
-release directly. Service commands run from a development checkout address the
-installed controller rather than changing it to the caller's checkout.
+Run it from a clean checkout of the release's commit: the script refuses a
+release whose version and build differ from `pyproject.toml`'s, whose feed and
+Sparkle public key it also uses:
 
-The deploy script excludes retention cleanup while preparing and switching
-runtime ownership, serializes deploys, waits up to ten minutes for a running
-cleanup or deploy to finish (the pause request itself can start the hourly
-cleanup), checks the existing paused/idle dashboard
-gate, refuses a dirty previous runtime, and prepares the candidate before
-stopping the service. It rechecks the gate, stops the login item, verifies port
-8777 closes, takes an online SQLite backup and runs `pragma quick_check`, then
-switches the plist atomically and starts the candidate. Startup runs migrations.
-After the API health check succeeds it reads `controller_storage` and
-`controller_storage_admission` from `/api/hosts` until the candidate's own
-storage check has run again a full 90-second freshness window after its first
-pass, and that check either admits work or reports a real reason such as an
-unmounted share. A check that stops after one pass, or never replaces the
-previous service's record, fails the deploy as a candidate startup failure
-(#1340). It then protects that stage's rollback and resumes the encode queue. Preparation failure leaves the existing service alone
-and creates no stage. If the backup fails after the port is verified closed,
-it restores the unchanged previous login item. Uncertain listener custody or
-a candidate startup failure leaves the service disabled for reconciliation;
-it never starts older code against a possibly migrated database. A lost resume
-response leaves the healthy candidate running; inspect the dashboard before
-retrying a request with an uncertain outcome. Startup permits three minutes by
-default; use `--startup-timeout` for a migration expected to take longer. Existing dashboard gates retain their
-current scope; the work-count endpoint below is not an idle gate.
+```bash
+scripts/deploy-controller.sh --release v<version>-<build> \
+  --stage "$HOME/Library/Application Support/mediaforce/deployments/release-<build>-<date>"
+```
 
-### Next deploy: switch from the legacy worktree
+`--release` also takes the archive's URL or a local copy with `SHA256SUMS`
+beside it. The stage is a fresh folder in `deployments/` beside the configured
+database. Before anything on the Mac changes, the script checks, in order:
 
-These steps belong to the next authorized deploy, after this change is merged.
-They are not part of source implementation or PR review.
+1. the archive matches its `SHA256SUMS`;
+2. the feed offers this build, and the archive carries the feed's Sparkle
+   signature for `public-key`;
+3. the app is signed by the team, its notarization ticket is stapled and
+   Gatekeeper accepts it as notarized;
+4. the app is that version and build, with the committed feed and key.
 
-1. Use a clean `main` checkout containing this script. Fetch `origin/main` and
-   resolve the exact reviewed commit with `git rev-parse origin/main`. Record
-   that full SHA as the target; do not select a task branch. The candidate
-   explicitly fetches that SHA, including when the local checkout is behind the
-   fetched remote. Use the same config as the installed controller: for an
-   alternate config, pass `--config /persistent/path/config.toml`; deployment
-   derives its database, lock and registry from that config and preserves the
-   option in the new launch item. Keep custom config outside development trees.
-2. Pause the queue with `POST /api/encode-queue/pause`. Wait for dashboard
-   encode, sample and full-run counts to reach zero. Preserve queued jobs,
-   runtime settings and all retained outputs. Check the existing runtime is
-   clean; do not move, delete or unlock it.
-3. Choose a fresh stage under
-   `~/Library/Application Support/mediaforce/deployments/main-<sha>-<date>/`
-   (or `deployments/` beside the configured database for a custom config).
-   Run from the clean checkout, substituting the full reviewed SHA and a fresh
-   stage name:
+Then, under the deploy lock (it waits up to ten minutes for a running cleanup,
+which the pause request itself can start), it reads the saved launch item. Its
+`--config` and `--credentials`, or the clone runtime's own
+`config/defaults.toml` and `.env`, go into the new launch item and are read
+where they are; nothing is copied. The running server must report the database
+that config names, and the credential file must be private (`chmod 600`). It
+refuses an unfinished app update, and a release older than the build that last
+ran: the one the launch item records (`MediaforceAppBuild`, kept there so a
+damaged or missing app cannot hide it), or else the one the running server
+reports. Only when neither is known does it accept `--allow-unknown-build`,
+given after confirming the release is not older.
 
-   ```bash
-   scripts/deploy-controller.sh --target <full-sha> --stage "$HOME/Library/Application Support/mediaforce/deployments/main-<sha>-<date>"
-   ```
+1. The dashboard must show the queue paused, with nothing compressing,
+   sampling, checking the library, measuring or publishing.
+2. The stage saves the exact launch item (`launch-item.before.plist`), the
+   installed app (`Mediaforce.app`) and `release.json`, which also records the
+   previous build. The clone runtime and the exact config and credential files
+   are registered as protected. The dashboard check runs again.
+3. The service stops and the port must close. Under the runtime lock, no work
+   record may be running, no publication may hold its delivery lock, and
+   `before.sqlite` is an online backup that passed `quick_check`.
+4. `runtime/update-intent.json` is written with phase `installing`. As during
+   an app update, it holds new work, publication, putting originals back,
+   original-backup cleanup and hourly cleanup on whichever server reads it, and
+   lets only the release's own server start.
+5. The app replaces `/Applications/Mediaforce.app` and its signature is
+   checked. The launch item keeps its label and logs and now starts the app's
+   server.
+6. The server must answer within three minutes (`--startup-timeout` for a
+   longer migration) as the release's build, on the same database, with the
+   same queued work. Its storage check must then run again a full 90-second
+   freshness window after its first pass, and either admit work or name a real
+   reason such as an unmounted share (#1340).
+7. The stage becomes the protected rollback, the record is removed and the
+   queue resumes.
 
-4. The stage retains `launch-item.before.plist`, `previous-commit.txt`,
-   `candidate.txt` and `before.sqlite`. The new runtime retains the existing
-   credential file with mode `0600` through the service install path; never
-   print its contents. Database/settings remain at their existing support paths.
-5. Verify `uv run mediaforce service status`, the installed plist's program and
-   working directory, the dashboard and durable logs. Both launch paths must
-   point into the candidate named in `candidate.txt`, and queued work must
-   remain present. Keep the legacy runtime and its worktree lock as rollback;
-   this deploy never removes or changes its source/environment.
+It prints the installed identity and the saved rollback. Runtime settings, the
+work window, queued jobs, originals and rollback copies stay where they are.
+
+A failure before the new server starts, such as a failed backup or app copy,
+puts back the saved app, then starts the exact saved launch item under the
+record's `restoring` phase, which admits the previous build, and removes the
+record once the old service is healthy: its database is untouched. If the app
+cannot be put back or the old service does not come back, the service stays
+disabled and the record stays. Once the new server has started, when the port
+does not close, or after any failure in a stopped install, the service stays
+disabled and the record stays, with the failure in it. Old code never starts
+against a database the release may have migrated. A lost resume response
+leaves the healthy release running; check the dashboard before retrying.
+
+A record left in place, by a failure or an interrupted run, has two ways
+forward:
+
+- Forward: stop the service if it runs (`launchctl bootout
+  gui/$(id -u)/com.mediaforce.web`) and run the script again with `--stopped`,
+  a fresh stage and the same or a newer release. It checks the port and work
+  records, backs up again and finishes the install.
+- Back: run `/Applications/Mediaforce.app/Contents/MacOS/mediaforce-server
+  service update rollback`. It is the app update's own rollback: it keeps the
+  current database and app aside, restores the stage's `before.sqlite`, app and
+  exact launch item, starts the previous build under the `restoring` phase and
+  removes the record once it answers. When the saved launch item runs the clone
+  runtime, it rolls back without the app and says so. When it runs a bundled app
+  whose saved copy is missing or damaged, it refuses before changing anything;
+  repair forward instead.
+
+A release that failed its checks after starting is added to
+`runtime/failed-update-builds.json`, so the app never installs it again
+through Sparkle.
+
+### First install from the clone runtime
+
+The app installed before the first release has no Sparkle, so that release
+goes through this script:
+
+- The release is published and the feed offers it.
+- Pause the queue with `POST /api/encode-queue/pause` and wait until the
+  dashboard's encode, sample and full-run counts reach zero.
+- Be at the Mac. The server is a new program to macOS, which may ask once to
+  let Mediaforce use network volumes or the local network.
+
+Afterwards, quit and reopen Mediaforce so the new app checks for updates. The
+clone runtime stays: the service reads its config and `.env`, and its saved
+launch item is the rollback. Moving them beside the database is a later step.
 
 ### A controller intentionally stopped for repair
 
-Use the same script with `--stopped` when the controller must stay stopped until
-its replacement is installed. Keep the same `--config` as its saved launch item.
-The script takes the normal deploy lock and the controller's exclusive runtime
-lease, verifies that port 8777 is closed and that no encode, sample, scan or
-evidence record is running, and prepares the candidate without starting old
-code. Missing or running work records require reconciliation; this mode never
-clears them.
+Use `--stopped` when the controller must stay stopped until its replacement is
+installed. The script skips the dashboard and verifies that the port is closed
+and that no encode, sample, scan or evidence record is running. Missing or
+running work records require reconciliation; this mode never clears them.
 
-The rollback copy retains the work records with its encode queue paused, as in
-the online flow. The source database is unchanged until the backup passes its
-integrity check.
-After that verified backup, the script pauses the encode queue through
-the database's custody guards, then releases its runtime lease before starting
-the candidate. The ordinary health check and app installation follow. The queue resumes only
-if it was running before the stopped deployment; an existing pause is preserved.
-A failure leaves the service stopped. The saved plist and backup remain
-available for the rollback procedure below.
+The backup keeps the work records with its encode queue paused, as in the
+online flow, and the source database is unchanged until that backup passes its
+integrity check. Then the script pauses the encode queue through the
+database's custody guards before the new server starts. The queue resumes only
+if it was running before; an existing pause is preserved. Because the database
+was touched, any failure leaves the service stopped, with the saved launch
+item and backup ready for the rollback below.
 
 ### Rollback and cleanup ownership
 
-Before changing the plist, deploy records both old and new runtime paths in
-`runtime/protected-roots.json` beside the configured database. Registration is cumulative: active and rollback
-roots remain protected from hourly cleanup across later deploys. The hourly cleanup refuses an
-entire sweep when any configured cleanup tree overlaps the runtime install
-root, a registered runtime/rollback path, or the executing source tree. An
-unreadable registry also refuses cleanup. It never prunes `runtime/` releases.
-Routine development cleanup owns development worktrees only; it must leave
-installed runtimes, the registry, locked legacy runtimes and retained rollback
-material alone. These guards cover Mediaforce's supported retention cleanup,
-not arbitrary filesystem deletion or another repository's cleanup program.
-The September disappearance's actor remains unknown.
+The install's record held every change to the library, so a release that
+failed its checks changed nothing there and its `before.sqlite` loses nothing;
+use the rollback above. Once a release has passed and resumed work, roll back
+only before it has encoded or published anything; after that a newer release
+is the safer fix. Then stop the service and verify port 8777 is closed, set
+aside the database and its `-wal`/`-shm` files, restore the stage's
+`before.sqlite` and `Mediaforce.app`, restore `launch-item.before.plist`
+atomically and start that exact plist with `launchctl enable` and `launchctl
+bootstrap`. Do not regenerate it: new service commands refuse to install a
+clone runtime. No runtime directory is deleted. After the app has updated
+itself, use the update's own recovery instead
+([package builds](package-builds.md#updates-with-sparkle)).
 
-Before the first switch-over, new-code `service enable` and `restart` refuse
-the legacy worktree. An approved legacy restart uses `launchctl kickstart -k`
-on the existing `gui/<uid>/com.mediaforce.web` item; when unloaded, enable and
-bootstrap its saved plist instead. This preserves the legacy target without
-regenerating an install in a development tree.
-
-For rollback, first stop the service with `mediaforce service disable` (or the
-raw `launchctl` recovery in the login-item doc). Verify port 8777 is closed.
-If startup reached migrations, restore this stage's verified `before.sqlite`
-with the service stopped and remove the database's stale `-wal`/`-shm` files.
-Restore `launch-item.before.plist` atomically to the launch-item path, then use
-`launchctl enable` and `launchctl bootstrap` for that exact saved plist. Do not
-regenerate it with new code: the old rollback may be a legacy worktree that new
-service installation correctly refuses. Verify its exact saved commit, API and
-queue before resuming work. No runtime directory is deleted during rollback.
+`runtime/protected-roots.json` beside the configured database lists every
+runtime, config and credential folder a service has used. Registration is
+cumulative. The hourly cleanup refuses an entire sweep when any configured
+cleanup tree overlaps the support folder's `runtime/`, a registered path or the
+executing source tree, and an unreadable registry refuses cleanup too. It never
+prunes `runtime/`. Routine development cleanup owns development worktrees
+only; it must leave clone runtimes, the registry and rollback material alone.
+These guards cover Mediaforce's supported retention cleanup, not arbitrary
+filesystem deletion or another repository's cleanup program.
 
 The hourly cleanup keeps the newest `state.cleanup.kept_deploy_backups` stage
-folders (two by default), plus the running release's rollback stage named in
-`runtime/rollback-stage.txt`. Failed preparation does not consume a retention
-slot. Retain a stage outside that cleanup tree when its backup is needed after
-a later successful release replaces that pointer.
+folders (two by default), plus the rollback stage named in
+`runtime/rollback-stage.txt`. Retain a stage outside that cleanup tree when its
+backup is needed after a later release replaces that pointer. Clone runtimes
+under `runtime/releases/` stay until a verified retirement shows nothing uses
+them: no cleanup removes anything under `runtime/`, and the clone whose config
+and `.env` the service reads is registered as protected.
 
-After app installation and queue resume succeed, the deploy trims independent
-clones under `runtime/releases/` to three. It keeps the installed running
-release and the rollback named by the retained stage's saved launch item,
-then fills the remaining slots with the newest directories by modification
-time. The recorded rollback takes precedence over age. A legacy rollback
-outside `runtime/releases/` stays untouched and does not consume a slot.
-Missing or inconsistent running/rollback evidence, symlinks or non-clone
-directories refuse the trim before deletion. Plain files such as Finder's
-`.DS_Store` are left alone. A trim failure leaves the healthy release running
-and reports that deployment succeeded but trimming failed. Failed deploys do
-not trim. A spare slot can contain an unsuccessful preparation attempt; only
-the currently recorded rollback is guaranteed to retain its release code.
-The deployment stage, database backup, protection registry, legacy worktrees
-and media originals are outside this trim. Releasing legacy protection still
-requires a separate, verified retirement.
-
-If trimming refuses, leave the healthy controller running. Compare the named
-entry with the installed launch item and retained stage's saved launch item.
-Move only material confirmed unrelated to the running release or rollback out
-of `runtime/releases/` before the next authorized deploy; preserve ambiguous
-material and reconcile its ownership first. Do not replay the deploy just to
-retry cleanup.
-
-### Mac app
-
-Preparing the candidate also builds the Mac app from that release, so the
-deploy host needs Xcode and `xcodegen`. A failed build is a preparation
-failure and leaves the existing service alone. The app is signed with the
-team's Developer ID certificate, which must be in this Mac's keychain; macOS
-gives an ad-hoc signed app no notification permission. This deploy does not
-notarize; [notarized releases](#notarized-releases) do. After the
-candidate passes its health check, the deploy replaces
-`/Applications/Mediaforce.app` with the release's copy and then resumes the
-encode queue. If installing the app fails, the queue still resumes and the
-deploy reports the failure; the release's own copy stays in its
-`.build/release-app/` folder.
+Moving that config and `.env` beside the database is a later step with its own
+procedure: the config's relative paths and `include_files` resolve from its own
+folder, so a moved copy can select other state unless each is made absolute
+first.
 
 ## Notarized releases
 
 `.github/workflows/release.yml` publishes a notarized app with the server
 inside it and points the Sparkle feed at it. It does not install anything on
-the controller. The staged deploy above stays the controller's install path
-until the cutover (step 4 of
-[#1314](https://github.com/cbusillo/mediaforce/issues/1314)): the app
-installed today has no Sparkle, so the cutover installs the first downloaded
-release through that deploy, and later releases update themselves between
-files.
+the controller: the app there updates itself, and
+[the install script](#installing-a-release-on-the-controller) covers the first
+install and repairs.
 
 `[tool.mediaforce.release]` in `pyproject.toml` is the one source of the
 release identity. `project.version` is the version, `build` is the number
@@ -304,8 +298,8 @@ uncertain effects require reconciliation rather than replay.
 ## M4 night window (Q1015)
 
 The Director chose 12:00 AM–5:00 AM local time for this Mac's encoding
-starts. Deliver the reviewed scheduling change through the staged deploy
-above before applying its new setting. Then use the existing Computers
+starts. Deliver the reviewed scheduling change in a release before applying its
+new setting. Then use the existing Computers
 settings API (`GET` and `POST /api/app/settings/computers`, preserving the
 returned revision and all other computers and schedules), or the Mac app's
 Settings → Computers:
