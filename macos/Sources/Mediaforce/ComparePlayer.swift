@@ -563,7 +563,9 @@ final class ComparePlayers {
     }
 
     func load(_ file: ItemFacts.File, client: MediaforceClient) {
-        load(file.libraryItemId, compressed: file.compressed, originalBackup: file.originalBackup, client: client)
+        let sides = file.playerSides
+        load(compressed: client.player(file.libraryItemId, sides.shown),
+             original: sides.comparedWith.map { client.player(file.libraryItemId, $0) })
     }
 
     func load(_ libraryItemId: Int, compressed: Bool, originalBackup: Bool, client: MediaforceClient) {

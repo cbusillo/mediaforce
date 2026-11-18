@@ -15,11 +15,13 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_readonly_db
 from mediaforce.core.db_tables import library_items, motion_keep_decisions, staged_artifacts
+from mediaforce.core.type_defs import int_value
 from mediaforce.library.candidate_selection import encode_candidate_decisions, scope_lifecycle_payload_from_decisions, \
     workflow_eligibility
 from mediaforce.library.media_scopes import MediaScope, resolve_media_scope
 from mediaforce.library.motion_holds import queue_motion_holds
 from mediaforce.library.motion_keep_state import library_item_source_sql
+from mediaforce.library.staged_validation import staged_validation_outcome
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.web.runtime.app_window import season_identity
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
@@ -67,6 +69,9 @@ def item_payload(
                 staged_artifacts.c.promoted_at,
                 staged_artifacts.c.source_size_bytes,
                 staged_artifacts.c.archived_source_path,
+                staged_artifacts.c.staging_path,
+                staged_artifacts.c.staging_size_bytes,
+                staged_artifacts.c.validation_json,
             ).where(staged_artifacts.c.library_item_id.in_(ids))).mappings()
         }
         kept = {
@@ -104,6 +109,7 @@ def item_payload(
             "bytes": sizes.get(item.item_id, 0),
             "original_bytes": int(stage.get("source_size_bytes") or 0) if replaced else None,
             "original_backup": replaced and bool(stage.get("archived_source_path")) and item.item_id not in removed,
+            "held_copy": _held_copy_facts(config, stage),
         })
     files.sort(key=lambda row: (row["episode"] is None, row["season"] or 0, row["episode"] or 0, row["name"]))
     return {
@@ -156,23 +162,57 @@ def player_source(config: MediaforceConfig, library_item_id: int, side: str) -> 
             select(library_items.c.source_path).where(library_items.c.id == library_item_id)
         ).scalar_one_or_none()
         stage = connection.execute(
-            select(staged_artifacts.c.promoted_at, staged_artifacts.c.archived_source_path)
-            .where(staged_artifacts.c.library_item_id == library_item_id)
-        ).one_or_none()
+            select(
+                staged_artifacts.c.promoted_at,
+                staged_artifacts.c.archived_source_path,
+                staged_artifacts.c.staging_path,
+                staged_artifacts.c.validation_json,
+            ).where(staged_artifacts.c.library_item_id == library_item_id)
+        ).mappings().one_or_none() or {}
     if item is None:
         return None
-    promoted_at, backup = stage if stage is not None else (None, None)
-    return _player_sources(Path(str(item)), Path(str(backup)) if backup else None, replaced=promoted_at is not None).get(side)
+    return _player_sources(config, Path(str(item)), stage).get(side)
 
 
-def _player_sources(library_file: Path, backup: Path | None, *, replaced: bool) -> dict[str, Path]:
-    """Each side that can play now: a replaced file has its compressed copy and maybe its backup."""
-    sides: list[tuple[str, Path | None]] = [("compressed", library_file), ("original", backup)] if replaced \
-        else [("original", library_file)]
+def _player_sources(config: MediaforceConfig, library_file: Path, stage: Mapping[Any, Any]) -> dict[str, Path]:
+    """Each side that can play now: a held copy against the file as it is, or a replaced file's copy and backup."""
+    if _waits_on_held_copy(stage):
+        sides: dict[str, Path | None] = {"compressed": _held_copy(config, stage), "original": library_file}
+    elif stage.get("promoted_at") is not None:
+        backup = stage.get("archived_source_path")
+        sides = {"compressed": library_file, "original": Path(str(backup)) if backup else None}
+    else:
+        sides = {"original": library_file}
     playable: dict[str, Path] = {}
-    for side, path in sides:
+    for side, path in sides.items():
         if path is not None and path.is_file():
             playable[side] = path
     return playable
 
 
+def _waits_on_held_copy(stage: Mapping[Any, Any]) -> bool:
+    """An unpublished copy held only because it came out far smaller than predicted."""
+    return stage.get("promoted_at") is None and staged_validation_outcome(stage.get("validation_json")) == "size_held"
+
+
+def _held_copy(config: MediaforceConfig, stage: Mapping[Any, Any]) -> Path | None:
+    """The held copy itself, only while it is still there inside a configured staging root."""
+    staging_path = str(stage.get("staging_path") or "")
+    if not staging_path:
+        return None
+    path = Path(staging_path)
+    return path if path.is_file() and _inside_staging_root(config, path) else None
+
+
+def _inside_staging_root(config: MediaforceConfig, path: Path) -> bool:
+    resolved = path.resolve()
+    roots = {config.staging_root_for_host(host).expanduser().resolve() for host in [None, *config.remote_hosts]}
+    return any(resolved.is_relative_to(root) for root in roots)
+
+
+def _held_copy_facts(config: MediaforceConfig, stage: Mapping[Any, Any]) -> dict[str, Any] | None:
+    """For a held file, its unpublished copy's size and whether the player can still show it."""
+    if not _waits_on_held_copy(stage):
+        return None
+    size = stage.get("staging_size_bytes")
+    return {"bytes": None if size is None else int_value(size), "present": _held_copy(config, stage) is not None}

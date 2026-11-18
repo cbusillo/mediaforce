@@ -186,7 +186,8 @@ enum Place: Hashable {
     // The Computers page, or one computer's page when it names one.
     case computer(String?)
     case sample(String)
-    case item(String)
+    // A season, movie or folder; naming a file opens it in the player.
+    case item(String, file: ItemFacts.File.ID? = nil)
     // A kind of content under "How it should look", and the seasons that fit no kind.
     case kind(String)
     case seasonsWithoutKind
@@ -197,7 +198,7 @@ enum Place: Hashable {
         switch self {
         case .kind(let kind): "kind:\(kind)"
         case .sample(let prefix): "sample:\(prefix)"
-        case .item(let prefix): "item:\(prefix)"
+        case .item(let prefix, _): "item:\(prefix)"
         case .computer(let key?): "computer:\(key)"
         case .computer(nil): "computer"
         case .library: "library"
@@ -456,10 +457,10 @@ struct MainPage: View {
             case .sample(let prefix):
                 SamplePage(prefix: prefix, model: model, openItem: { open(.item($0)) },
                            namePage: { namePage(.sample(prefix), $0) }).id(prefix)
-            case .item(let prefix):
+            case .item(let prefix, let file):
                 ItemPage(prefix: prefix, model: model, openSample: { open(.sample($0)) }, openItem: { open(.item($0)) },
-                         namePage: { namePage(.item(prefix), $0) })
-                    .id(prefix)
+                         namePage: { namePage(.item(prefix, file: file), $0) }, selected: file)
+                    .id(place)
             case .media: MediaPage(model: model) { open(.item($0)) }
             case .mediaKind(let kind, let state):
                 MediaPage(model: model, kind: kind, stateGroup: state) { open(.item($0)) }.id(place)
