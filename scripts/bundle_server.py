@@ -84,12 +84,17 @@ SPARKLE_PARTS = (
 )
 
 
-def signing_identity() -> str:
+def signing_identity(app: Path) -> str:
+    """The Developer ID identity Xcode signed the app with, so the server and app share one certificate."""
     identities = re.findall(r'\b([0-9A-F]{40}) "Developer ID Application: [^"\n]+ \(' + MACOS_SIGNING_TEAM + r'\)"',
                             run("security", "find-identity", "-v", "-p", "codesigning"))
-    if len(identities) != 1:
-        raise ValueError("Choose one Developer ID Application identity for Mediaforce's team with --identity")
-    return identities[0]
+    with tempfile.TemporaryDirectory() as scratch:
+        prefix = Path(scratch) / "certificate"
+        run("codesign", "-d", f"--extract-certificates={prefix}", str(app))
+        signed_with = hashlib.sha1(prefix.with_name("certificate0").read_bytes()).hexdigest().upper()
+    if signed_with not in identities:
+        raise ValueError("Mediaforce.app is not signed by a Developer ID Application identity for Mediaforce's team")
+    return signed_with
 
 
 def prepare_framework(destination: Path, cache: Path) -> None:
@@ -195,7 +200,7 @@ def main() -> int:
     parser.add_argument("--cache", required=True, type=Path)
     parser.add_argument("--identity")
     args = parser.parse_args()
-    stage_server(args.app.resolve(strict=True), args.cache, args.identity or signing_identity())
+    stage_server(args.app.resolve(strict=True), args.cache, args.identity or signing_identity(args.app.resolve(strict=True)))
     return 0
 
 

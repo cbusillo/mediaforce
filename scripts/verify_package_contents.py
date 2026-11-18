@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import tarfile
@@ -194,6 +195,8 @@ def _without_sdist_root(member: PurePosixPath) -> PurePosixPath:
 
 def _scan_archive_text(archive: Path, members: Iterable[_ArchiveMember]) -> None:
     private_path = str(Path.home()).encode("utf-8")
+    # A CI runner's home is disposable, and third-party wheels built on such runners carry its path.
+    disposable_home = os.environ.get("GITHUB_ACTIONS") == "true"
     for member in members:
         scannable = _scannable_member(member.path)
         if scannable and member.size > MAX_SCANNABLE_MEMBER_BYTES:
@@ -201,13 +204,13 @@ def _scan_archive_text(archive: Path, members: Iterable[_ArchiveMember]) -> None
                 f"{archive.name} contains oversized scannable member {member.path}"
             )
         payload = member.read()
-        if private_path and private_path not in EXAMPLE_HOME_PATHS and private_path in payload:
-            raise PackageContentsError(f"{archive.name} contains the current machine's home path")
-        if not scannable:
-            continue
         vendor_runtime = member.path.parts[:3] == ("Contents", "Frameworks", "Python.framework")
         vendor_dependency = member.path.parts[:3] == ("Contents", "Resources", "server") and member.path.parts[3] in {"arm64", "x86_64"}
-        if vendor_runtime or vendor_dependency:
+        vendored = vendor_runtime or vendor_dependency
+        if (private_path and private_path not in EXAMPLE_HOME_PATHS and private_path in payload
+                and not (disposable_home and vendored)):
+            raise PackageContentsError(f"{archive.name} contains the current machine's home path in {member.path}")
+        if not scannable or vendored:
             continue
         if PRIVATE_MACHINE_PATH_RE.search(payload):
             raise PackageContentsError(
