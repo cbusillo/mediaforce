@@ -70,6 +70,9 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 
 ## Developer workflows
 
+- [Developer guide](development/developer-guide.md): layout, running from
+  source, configuration, the command line, page screenshots and how the
+  background work behaves.
 - [Releases](development/release-flow.md): how agents publish notarized releases, install one on the controller, and read work evidence.
 - `docs/development/targeted-child-recovery.md`: exact child recovery for host-setup failures in an active encode batch.
 - `docs/development/database-tooling.md`: SQLAlchemy/Alembic schema workflow,
