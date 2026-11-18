@@ -16,8 +16,9 @@ staged transaction. It moves the controller from the clone-based runtime to
 the app once, and repairs an installed app that cannot update itself.
 Ordinary updates need nothing from it.
 
-Run it from a clean checkout of `main` that contains the release, so
-`pyproject.toml` names the release's feed and Sparkle public key:
+Run it from a clean checkout of the release's commit: the script refuses a
+release whose version and build differ from `pyproject.toml`'s, whose feed and
+Sparkle public key it also uses:
 
 ```bash
 scripts/deploy-controller.sh --release v<version>-<build> \
@@ -96,7 +97,14 @@ forward:
   service update rollback`. It is the app update's own rollback: it keeps the
   current database and app aside, restores the stage's `before.sqlite`, app and
   exact launch item, starts the previous build under the `restoring` phase and
-  removes the record once it answers.
+  removes the record once it answers. When the saved launch item runs the clone
+  runtime, it rolls back without the app and says so. When it runs a bundled app
+  whose saved copy is missing or damaged, it refuses before changing anything;
+  repair forward instead.
+
+A release that failed its checks after starting is added to
+`runtime/failed-update-builds.json`, so the app never installs it again
+through Sparkle.
 
 ### First install from the clone runtime
 

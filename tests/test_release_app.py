@@ -151,3 +151,20 @@ def test_release_refuses_an_app_that_is_not_the_named_release(published: Path, t
     with pytest.raises(ValueError):
         _verify(published, tmp_path, proof=problem != "live identity",
                 archive="Mediaforce-0.2.0-8.zip" if problem == "named build" else "Mediaforce-0.2.0-7.zip")
+
+
+def test_live_install_refuses_a_release_other_than_the_one_the_checkout_names(published: Path, tmp_path: Path) -> None:
+    with patch.object(release_app, "fetch") as fetch, pytest.raises(ValueError, match="not the release this checkout names"):
+        verify_release(str(published / "Mediaforce-0.2.0-7.zip"), tmp_path, feed=str(published / "appcast.xml"),
+                       public_key=PROOF_KEY, proof=False, committed=("0.2.0", "8"))
+    fetch.assert_not_called()
+
+
+@pytest.mark.parametrize("saved", ["clone runtime", "bundled app"])
+def test_retained_rollback_has_a_usable_app_when_the_old_launch_item_needs_one(tmp_path: Path, saved: str) -> None:
+    stage = tmp_path / "support/deployments/stage"
+    stage.mkdir(parents=True)
+    program = "/clone/.venv/bin/mediaforce-web" if saved == "clone runtime" else "/Applications/Mediaforce.app/Contents/MacOS/mediaforce-server"
+    (stage / "launch-item.before.plist").write_bytes(plistlib.dumps({"ProgramArguments": [program]}))
+    with patch.object(release_app, "usable_app", return_value=False):
+        assert release_app.retained_rollback(stage)["app"] is (saved == "clone runtime")

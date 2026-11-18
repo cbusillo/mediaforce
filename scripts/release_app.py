@@ -18,7 +18,9 @@ import tomllib
 from urllib.request import urlopen
 from xml.etree import ElementTree
 
-from mediaforce.ops.controller_deploy import APPLICATIONS_APP, DEFAULT_STARTUP_TIMEOUT, install_release
+from mediaforce.ops.controller_deploy import (
+    APPLICATIONS_APP, DEFAULT_STARTUP_TIMEOUT, usable_app, install_release, saved_app_is_needed,
+)
 from mediaforce.ops.login_item import _verify_signed_bundle
 from mediaforce.ops.runtime_install import SERVICE_LABEL, bundle_service, retained_deploy_stage
 
@@ -140,11 +142,15 @@ def require_identity(app: Path, expected: dict[str, str]) -> None:
         raise ValueError(f"{app} is {found}, not the release {expected}")
 
 
-def verify_release(release: str, folder: Path, *, feed: str, public_key: str, proof: bool) -> VerifiedRelease:
+def verify_release(release: str, folder: Path, *, feed: str, public_key: str, proof: bool,
+                   committed: tuple[str, str] | None = None) -> VerifiedRelease:
     location = archive_location(release)
     named = ARCHIVE.fullmatch(location.rsplit("/", 1)[-1])
     if named is None or not public_key:
         raise ValueError(f"{location} is not a release archive, or no Sparkle public key is configured")
+    if committed is not None and (named["version"], named["build"]) != committed:
+        raise ValueError(f"{location} is not the release this checkout names (version {committed[0]}, build "
+                         f"{committed[1]} in pyproject.toml); check out that release's commit")
     downloads, extracted = folder / "download", folder / "app"
     downloads.mkdir()
     extracted.mkdir()
@@ -161,6 +167,13 @@ def verify_release(release: str, folder: Path, *, feed: str, public_key: str, pr
     return VerifiedRelease(app, identity, {"release": release, "archive": location, "sha256": digest, **identity})
 
 
+def retained_rollback(stage: Path) -> dict[str, object]:
+    saved_app = stage / "Mediaforce.app"
+    return {"stage": str(stage), "retained": retained_deploy_stage(stage.parent.parent) == stage,
+            **{name: (stage / name).is_file() for name in ("before.sqlite", "launch-item.before.plist")},
+            "app": not saved_app_is_needed(stage) or usable_app(saved_app)}
+
+
 def install(args: argparse.Namespace) -> dict[str, object]:
     identity = release_identity()
     proof = args.feed is not None or args.public_key is not None or args.install is not None
@@ -168,13 +181,13 @@ def install(args: argparse.Namespace) -> dict[str, object]:
     stage = args.stage.expanduser().absolute()
     destination = args.install.expanduser().resolve() if args.install else APPLICATIONS_APP
     with tempfile.TemporaryDirectory(prefix="mediaforce-release-") as scratch:
-        release = verify_release(args.release, Path(scratch), feed=feed, public_key=public_key, proof=proof)
+        release = verify_release(args.release, Path(scratch), feed=feed, public_key=public_key, proof=proof,
+                                 committed=None if proof else (identity["version"], identity["build"]))
         install_release(release.app, stage, Path.home(), evidence=release.evidence, install=destination,
                         startup_timeout=args.startup_timeout, stopped=args.stopped,
                         allow_unknown_build=args.allow_unknown_build)
     require_identity(destination, release.identity)
-    rollback = {"stage": str(stage), "retained": retained_deploy_stage(stage.parent.parent) == stage,
-                **{name: (stage / name).is_file() for name in ("before.sqlite", "launch-item.before.plist")}}
+    rollback = retained_rollback(stage)
     if not all(rollback.values()):
         raise RuntimeError(f"the release runs, but its saved rollback is incomplete: {rollback}")
     return {"installed": str(destination), **release.identity, "rollback": rollback}

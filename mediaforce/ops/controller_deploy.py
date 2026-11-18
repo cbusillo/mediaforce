@@ -20,7 +20,7 @@ from mediaforce.core.utils import timestamp
 from mediaforce.encoding.delivery_lock import delivery_lock
 from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, load_queue_state, save_queue_state
 from mediaforce.ops.login_item import (
-    CommandRunner, LoginItemPaths, _atomic_write, _bootstrap, _bundle_code_hash, _launch_domain, _launch_target,
+    CommandRunner, LoginItemError, LoginItemPaths, _atomic_write, _bootstrap, _bundle_code_hash, _launch_domain, _launch_target,
     _require_success, _run_command, _verify_signed_bundle, disable_login_item, render_login_item_plist,
 )
 from mediaforce.ops.runtime_install import (
@@ -133,12 +133,16 @@ def require_closed_listener(port: int = 8777) -> None:
         raise RuntimeError(f"port {port} is still listening")
 
 
+class ListenerStillOpen(RuntimeError):
+    pass
+
+
 def wait_for_closed_listener(port: int) -> None:
     for _ in range(15):
         if _listener_is_closed(port):
             return
         time.sleep(1)
-    raise RuntimeError(f"port {port} still listening")
+    raise ListenerStillOpen(f"port {port} still listening")
 
 
 def wait_until_healthy(base_url: str, timeout: float) -> None:
@@ -287,7 +291,7 @@ def _require_installable(app: Path, saved: SavedService, config: MediaforceConfi
     unfinished = read_update_intent(config.paths.db_path.parent) or {}
     # A stranded installation continues as a stopped one of the same or a newer release; anything else is reconciled
     # through the app's update steps first.
-    continuing = stopped and unfinished.get("phase") == INSTALLING and int(bundle_build(app) or 0) >= int(unfinished.get("to") or 0)
+    continuing = stopped and unfinished.get("phase") in {INSTALLING, "rolling-back"} and int(bundle_build(app) or 0) >= int(unfinished.get("to") or 0)
     if unfinished and not continuing:
         raise RuntimeError("an app update or install is unfinished; continue it with --stopped and the same or a newer "
                            "release, or roll it back with the installed app's `service update rollback`")
@@ -312,11 +316,10 @@ def _switch(job: ReleaseInstall, evidence: dict[str, str]) -> None:
     register_runtime_roots(job.support, *job.saved.protected_roots, *([job.credentials] if job.credentials else []))
     if not job.stopped:
         _require_running_server(job)
-    candidate_started = port_closed = app_replaced = False
+    candidate_started = app_replaced = False
     try:
         disable_login_item(job.previous)
         wait_for_closed_listener(job.port)
-        port_closed = True
         resume_queue, pending_encode = _back_up_stopped_database(job)
         install_app(job.app, job.install)
         app_replaced = True
@@ -329,8 +332,10 @@ def _switch(job: ReleaseInstall, evidence: dict[str, str]) -> None:
         _require_server(job.base_url, bundle_build(job.install), job.config, pending_encode)
         require_storage_admission(job.base_url, started_at)
     except Exception as failure:
-        if candidate_started or not port_closed or job.stopped:
-            # Migrations, uncertain listener custody or a database the stopped install already touched require
+        if candidate_started:
+            _record_failed_build(job.support, bundle_build(job.app))
+        if candidate_started or job.stopped or isinstance(failure, ListenerStillOpen):
+            # Migrations, an unknown process on the port or a database the stopped install already touched require
             # reconciliation; old code never starts on them, and the record keeps work held until then.
             _hold_for_reconciliation(job, failure)
         else:
@@ -402,6 +407,8 @@ def _restore_previous(job: ReleaseInstall, failure: Exception, *, app_replaced: 
         _hold_for_reconciliation(job, failure)
         return
     intent = read_update_intent(job.support)
+    if intent is None and _previous_still_serving(job):
+        return
     try:
         if intent is not None:
             _write_intent(job.support, {**intent, "phase": "restoring"})
@@ -414,6 +421,23 @@ def _restore_previous(job: ReleaseInstall, failure: Exception, *, app_replaced: 
         return
     if intent is not None:
         _end_intent(job.support)
+
+
+def _previous_still_serving(job: ReleaseInstall) -> bool:
+    try:
+        server = _api(job.base_url, "/api/release/work").get("server") or {}
+    except (OSError, HTTPException, ValueError):
+        return False
+    return server.get("database") == str(job.config.paths.db_path.resolve())
+
+
+def _record_failed_build(support: Path, build: str | None) -> None:
+    failed = support / "runtime" / UPDATE_FAILED_NAME
+    try:
+        builds = json.loads(failed.read_text())
+    except FileNotFoundError:
+        builds = []
+    _atomic_write(failed, json.dumps([*builds, build]).encode())
 
 
 def _restore_previous_app(job: ReleaseInstall) -> None:
@@ -507,7 +531,7 @@ def run_update_step(step: str, app: Path, build: str | None) -> int:
             elif step == "cancel":
                 back_out_update(update)
             elif step == "rollback":
-                rollback_update(update)
+                outcome = rollback_update(update)
             else:
                 outcome = reconcile_update(update)
     except Exception as exc:
@@ -633,22 +657,27 @@ def _finish(update: AppUpdate, intent: dict) -> None:
         disable_login_item(update.paths)
         intent.update(phase="failed", failure=str(exc))
         _save_intent(update, intent)
-        _atomic_write(update.file(UPDATE_FAILED_NAME), json.dumps([*_failed(update), intent["to"]]).encode())
+        _record_failed_build(update.support, intent["to"])
         raise
     _end(update)
 
 
-def rollback_update(update: AppUpdate) -> None:
+def rollback_update(update: AppUpdate) -> str | None:
     """Restore the saved database, app and exact launch item of a failed candidate, keeping each attempt's failed
     copies. The candidate never released work, so nothing it did is lost."""
     intent = _require_intent(update)
     if intent["phase"] not in {"starting", "failed", "rolling-back", INSTALLING}:
         raise UpdateRefused("nothing ran on the new build; cancel the update instead")
+    stage = Path(intent["stage"])
+    installed = Path(intent["app"])
+    saved_app = stage / MAC_APP_NAME
+    restore_app = saved_app_is_needed(stage)
+    if restore_app and not usable_app(saved_app):
+        raise UpdateRefused(f"the saved launch item runs {saved_app}, which is missing or damaged; repair forward by "
+                            "installing the same or a newer release with --stopped")
     # Every step below is repeatable from the saved pair; an interrupted rollback is run again, from either app copy.
     intent["phase"] = "rolling-back"
     _save_intent(update, intent)
-    stage = Path(intent["stage"])
-    installed = Path(intent["app"])
     disable_login_item(update.paths)
     wait_for_closed_listener(update.port)
     failed = stage / f"failed-{_utc_now():%Y%m%dT%H%M%S%fZ}"
@@ -664,19 +693,33 @@ def rollback_update(update: AppUpdate) -> None:
             if (current := database.with_name(database.name + suffix)).exists():
                 current.rename(failed / current.name)
         incoming.rename(database)
-    incoming_app = installed.with_name(f".{installed.name}.restoring")
-    shutil.rmtree(incoming_app, ignore_errors=True)
-    _copy_app(stage / MAC_APP_NAME, incoming_app)
-    _verify_signed_bundle(incoming_app)
-    if installed.exists():
-        shutil.move(installed, failed / installed.name)
-    incoming_app.rename(installed)
+    if restore_app:
+        incoming_app = installed.with_name(f".{installed.name}.restoring")
+        shutil.rmtree(incoming_app, ignore_errors=True)
+        _copy_app(saved_app, incoming_app)
+        _verify_signed_bundle(incoming_app)
+        if installed.exists():
+            shutil.move(installed, failed / installed.name)
+        incoming_app.rename(installed)
     intent["phase"] = "restoring"
     _save_intent(update, intent)
     _atomic_write(update.paths.plist, (stage / "launch-item.before.plist").read_bytes())
     start_saved_launch_item(update.paths.plist)
     wait_until_healthy(update.base_url, DEFAULT_STARTUP_TIMEOUT)
     _end(update)
+    return None if restore_app else "rolled back without the app: the saved launch item runs the clone runtime"
+
+
+def saved_app_is_needed(stage: Path) -> bool:
+    return Path(plistlib.loads((stage / "launch-item.before.plist").read_bytes())["ProgramArguments"][0]).name == "mediaforce-server"
+
+
+def usable_app(app: Path) -> bool:
+    try:
+        _verify_signed_bundle(app)
+    except (OSError, LoginItemError):
+        return False
+    return True
 
 
 def require_update_startup_allowed(support_dir: Path, app: Path) -> None:

@@ -550,7 +550,10 @@ def test_a_failed_release_rolls_back_through_the_app_update_rollback(controller:
     controller_deploy.rollback_update(controller_deploy.AppUpdate(mac.config, mac.install, mac.home))
     assert mac.running == "previous" and mac.started == ["release", "previous"]
     assert mac.plist.read_bytes() == mac.previous_payload and runtime_install.read_update_intent(mac.support) is None
-    assert (mac.install / "Contents/MacOS/Mediaforce").read_bytes() in {b"legacy app", b"old app"}
+    # The clone runtime's launch item does not run the app, so only a bundled rollback puts the old app back.
+    assert (mac.install / "Contents/MacOS/Mediaforce").read_bytes() == (b"release app" if mac.legacy_root.exists() and
+                                                                       Path(plistlib.loads(mac.previous_payload)["ProgramArguments"][0]).is_relative_to(mac.legacy_root)
+                                                                       else b"old app")
     with sqlite3.connect(mac.support / "library.sqlite3") as restored:
         assert not restored.execute("select name from sqlite_master where name = 'release_migration'").fetchall()
 
@@ -603,3 +606,59 @@ def test_proof_destination_is_compared_after_resolving_links(tmp_path: Path) -> 
     with patch.object(controller_deploy, "APPLICATIONS_APP", applications / "Mediaforce.app"), \
             pytest.raises(RuntimeError, match="only the live app"):
         controller_deploy.install_release(app, tmp_path / "stage", tmp_path, evidence={}, install=tmp_path / "alias/Mediaforce.app")
+
+
+@pytest.mark.parametrize("controller", [("legacy", False, "unhealthy")], indirect=True)
+def test_rollback_to_the_clone_runtime_needs_no_saved_app(controller: Controller) -> None:
+    mac = controller
+    with pytest.raises(RuntimeError):
+        _install(mac)
+    shutil.rmtree(mac.support / "deployments/fixture-stage/Mediaforce.app")
+    outcome = controller_deploy.rollback_update(controller_deploy.AppUpdate(mac.config, mac.install, mac.home))
+    assert outcome and "without the app" in outcome
+    assert mac.running == "previous" and runtime_install.read_update_intent(mac.support) is None
+
+
+@pytest.mark.parametrize("controller", [("bundled", False, "unhealthy")], indirect=True)
+def test_rollback_refuses_a_missing_saved_app_before_touching_anything(controller: Controller) -> None:
+    mac = controller
+    with pytest.raises(RuntimeError):
+        _install(mac)
+    shutil.rmtree(mac.support / "deployments/fixture-stage/Mediaforce.app")
+    with sqlite3.connect(mac.support / "library.sqlite3") as migrated:
+        migrated.execute("create table release_migration (id integer)")
+    with patch.object(controller_deploy, "_verify_signed_bundle", side_effect=login_item.LoginItemError("no app")), \
+            pytest.raises(controller_deploy.UpdateRefused, match="--stopped"):
+        controller_deploy.rollback_update(controller_deploy.AppUpdate(mac.config, mac.install, mac.home))
+    assert (runtime_install.read_update_intent(mac.support) or {}).get("phase") == controller_deploy.INSTALLING
+    with sqlite3.connect(mac.support / "library.sqlite3") as kept:
+        assert kept.execute("select name from sqlite_master where name = 'release_migration'").fetchall()
+    mac.outcome = "healthy"
+    controller_deploy.install_release(mac.release, mac.support / "deployments/forward", mac.home, evidence={},
+                                      install=mac.install, startup_timeout=0, stopped=True)
+    assert mac.running == "release" and runtime_install.read_update_intent(mac.support) is None
+
+
+@pytest.mark.parametrize("controller", [("bundled", False, "unhealthy")], indirect=True)
+def test_a_release_that_fails_its_checks_is_never_offered_again(controller: Controller) -> None:
+    mac = controller
+    with pytest.raises(RuntimeError):
+        _install(mac)
+    assert json.loads((mac.support / "runtime" / controller_deploy.UPDATE_FAILED_NAME).read_text()) == ["2"]
+
+
+@pytest.mark.parametrize("failure", ["disable", "listener-probe"])
+@pytest.mark.parametrize("controller", [("bundled", False, "healthy"), ("legacy", False, "healthy")], indirect=True)
+def test_a_failed_stop_before_any_backup_brings_the_old_service_back(controller: Controller, failure: str) -> None:
+    mac = controller
+
+    def stopped_then_refused(paths: login_item.LoginItemPaths) -> None:
+        mac.disable(paths)
+        raise login_item.LoginItemError("could not disable the login item")
+
+    stop = patch.object(controller_deploy, "disable_login_item", side_effect=stopped_then_refused) if failure == "disable" \
+        else patch.object(controller_deploy, "_listener_is_closed", side_effect=RuntimeError("cannot verify listener state"))
+    with stop, pytest.raises(RuntimeError):
+        _install(mac)
+    assert mac.started[0] == "previous" and mac.running == "previous"
+    assert mac.plist.read_bytes() == mac.previous_payload and runtime_install.read_update_intent(mac.support) is None
