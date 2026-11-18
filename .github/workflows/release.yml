@@ -50,7 +50,7 @@ jobs:
         id: identity
         run: uv run python -m scripts.release_app identity | tee -a "$GITHUB_OUTPUT"
 
-      - name: Refuse an unchecked commit, a used tag or a feed that is already newer
+      - name: Refuse an unchecked commit or a used tag, and read the live feed
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.identity.outputs.tag }}
@@ -62,7 +62,7 @@ jobs:
           [ "$acceptance" = success ] || { echo "CI acceptance has not passed on $GITHUB_SHA" >&2; exit 1; }
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
             [ -n "$(git ls-remote --tags "https://github.com/$GITHUB_REPOSITORY" "refs/tags/$TAG")" ]; then
-            echo "$TAG already exists; raise the build in pyproject.toml for a new attempt" >&2
+            echo "$TAG already exists; raise the version in pyproject.toml" >&2
             exit 1
           fi
           mkdir -p "$RUNNER_TEMP/feed"
@@ -72,6 +72,12 @@ jobs:
             404) echo "No feed is published yet." ;;
             *) echo "The live feed answered $status; refusing to replace what cannot be read" >&2; exit 1 ;;
           esac
+
+      - name: Number the build one above the live feed's newest, refusing a version that is not higher
+        id: build
+        run: |
+          set -euo pipefail
+          uv run python -m scripts.release_app next-build ${PREVIOUS_FEED:+--previous "$PREVIOUS_FEED"} | tee -a "$GITHUB_OUTPUT"
 
       - name: Check the Sparkle key matches the key the app ships
         env:
@@ -109,14 +115,16 @@ jobs:
           echo "RELEASE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
 
       - name: Build the app with its server
-        run: bash scripts/build-mac-app.sh release "$RUNNER_TEMP/build" "$RUNNER_TEMP/runtime-cache"
+        env:
+          BUILD: ${{ steps.build.outputs.build }}
+        run: bash scripts/build-mac-app.sh release "$RUNNER_TEMP/build" "$RUNNER_TEMP/runtime-cache" "$BUILD"
 
       - name: Notarize, staple and archive
         env:
           APP_STORE_CONNECT_API_KEY_P8_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8_BASE64 }}
           NOTARY_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           NOTARY_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-          ARCHIVE: Mediaforce-${{ steps.identity.outputs.version }}-${{ steps.identity.outputs.build }}.zip
+          ARCHIVE: ${{ steps.identity.outputs.archive }}
         run: |
           set -euo pipefail
           export NOTARY_KEY="$RUNNER_TEMP/notary.p8"
@@ -153,7 +161,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
           TAG: ${{ steps.identity.outputs.tag }}
-          TITLE: Mediaforce ${{ steps.identity.outputs.version }} (${{ steps.identity.outputs.build }})
+          TITLE: Mediaforce ${{ steps.identity.outputs.version }}
         run: |
           set -euo pipefail
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \

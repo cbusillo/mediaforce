@@ -7,7 +7,7 @@ Usage: scripts/build-mac-app.sh test
        scripts/build-mac-app.sh build OUTPUT_DIR
        scripts/build-mac-app.sh bundle OUTPUT_DIR CACHE_DIR
        scripts/build-mac-app.sh proof OUTPUT_DIR CACHE_DIR BUILD FEED_URL PUBLIC_KEY
-       scripts/build-mac-app.sh release OUTPUT_DIR CACHE_DIR
+       scripts/build-mac-app.sh release OUTPUT_DIR CACHE_DIR BUILD
        scripts/build-mac-app.sh notarize APP ARCHIVE
        scripts/build-mac-app.sh smoke APP
 
@@ -16,7 +16,9 @@ build  builds a Release copy into OUTPUT_DIR/Mediaforce.app, signed with the tea
        so macOS lets it send notifications.
 proof  builds a bundled copy for update proofs with its own app ID, service label and port, so it
        never addresses the live service, plus the given build number, feed and Sparkle key.
-release  builds the bundled copy a release ships: version, build, feed and Sparkle key from pyproject.toml.
+release  builds the bundled copy a release ships: the given build number, and the feed and Sparkle key from
+       pyproject.toml.
+Every build shows pyproject.toml's [project] version.
 notarize  has Apple notarize APP, staples it, checks Gatekeeper accepts it and writes the stapled ARCHIVE (zip).
        It reads an App Store Connect API key: NOTARY_KEY (the .p8 file), NOTARY_KEY_ID and NOTARY_ISSUER.
 smoke  starts APP's server on its own port with a throwaway config and checks it answers as APP's build.
@@ -32,10 +34,29 @@ team_id() {
 	uv run --directory "$repo_root" python -c 'from mediaforce.ops.login_item import MACOS_SIGNING_TEAM; print(MACOS_SIGNING_TEAM)'
 }
 
+project_version() {
+	local line section="" pattern='^version = "([0-9]+\.[0-9]+\.[0-9]+)"$'
+	while IFS= read -r line; do
+		[[ "$line" == "["*"]" ]] && section="$line"
+		if [[ "$section" == "[project]" && "$line" =~ $pattern ]]; then
+			echo "${BASH_REMATCH[1]}"
+			return
+		fi
+	done <"$repo_root/pyproject.toml"
+	echo "pyproject.toml's [project] version is not MAJOR.MINOR.PATCH" >&2
+	return 1
+}
+
 generate_project() {
 	command -v xcodegen >/dev/null || { echo "xcodegen is required (brew install xcodegen)" >&2; exit 1; }
 	xcodegen generate --quiet --spec "$repo_root/macos/project.yml"
 }
+
+case "${1:-}" in
+test | build | bundle | proof | release)
+	version="MARKETING_VERSION=$(project_version)"
+	;;
+esac
 
 case "${1:-}" in
 test)
@@ -51,7 +72,7 @@ test)
 		fi
 	fi
 	xcodebuild -project "$project" -scheme Mediaforce -destination 'platform=macOS' \
-		-derivedDataPath "$derived_data" test ${identity[@]+"${identity[@]}"}
+		-derivedDataPath "$derived_data" test "$version" ${identity[@]+"${identity[@]}"}
 	;;
 build|bundle|proof|release)
 	output="${2:?build needs an output directory}"
@@ -60,8 +81,11 @@ build|bundle|proof|release)
 		release="$(uv run --directory "$repo_root" python -m scripts.release_app identity)"
 		value() { sed -n "s/^$1=//p" <<<"$release"; }
 		[[ -n "$(value public_key)" ]] || { echo "pyproject.toml names no Sparkle public key for releases" >&2; exit 1; }
-		identity=("MARKETING_VERSION=$(value version)" "CURRENT_PROJECT_VERSION=$(value build)"
-			"MEDIAFORCE_UPDATE_FEED=$(value feed)" "MEDIAFORCE_UPDATE_KEY=$(value public_key)")
+		build="${4:?release needs a build number}"
+		[[ "$build" =~ ^[1-9][0-9]*$ ]] || { echo "the build number must be a positive integer, not $build" >&2; exit 1; }
+		[[ "$version" == "MARKETING_VERSION=$(value version)" ]] ||
+			{ echo "$version disagrees with the release identity's version $(value version)" >&2; exit 1; }
+		identity=("CURRENT_PROJECT_VERSION=$build" "MEDIAFORCE_UPDATE_FEED=$(value feed)" "MEDIAFORCE_UPDATE_KEY=$(value public_key)")
 	elif [[ "$1" == proof ]]; then
 		identity=(PRODUCT_BUNDLE_IDENTIFIER=com.shinycomputers.mediaforce.proof MEDIAFORCE_SERVICE_LABEL=com.mediaforce.web.proof
 			MEDIAFORCE_SERVER_PORT=8787 "CURRENT_PROJECT_VERSION=${4:?proof needs a build number}"
@@ -71,7 +95,7 @@ build|bundle|proof|release)
 	generate_project
 	xcodebuild -project "$project" -scheme Mediaforce -configuration Release -destination 'platform=macOS' \
 		-derivedDataPath "$derived_data" build \
-		CODE_SIGN_IDENTITY="Developer ID Application" DEVELOPMENT_TEAM="$team_id" ${identity[@]+"${identity[@]}"}
+		CODE_SIGN_IDENTITY="Developer ID Application" DEVELOPMENT_TEAM="$team_id" "$version" ${identity[@]+"${identity[@]}"}
 	mkdir -p "$output"
 	rm -rf "$output/Mediaforce.app"
 	ditto "$derived_data/Build/Products/Release/Mediaforce.app" "$output/Mediaforce.app"
