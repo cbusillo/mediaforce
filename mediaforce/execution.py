@@ -52,6 +52,7 @@ from mediaforce.remote import execution_mode_for_host, host_media_access_for_hos
     run_remote_command, ssh_client_options, ssh_target_for_host
 from mediaforce.encoding.staged_host import STAGED_JOB_KEY, host_scratch_root, staged_job, staged_job_for_host
 from mediaforce.core.utils import file_fingerprint, timestamp
+from mediaforce.ops.runtime_install import update_hold_reason
 from mediaforce.tuning.stream_budget import StreamBudgetLedger, \
     resolve_stream_budget_ledger as resolve_stream_budget_ledger_impl
 from mediaforce.tuning.size_goals import ResolvedSizeGoal
@@ -467,6 +468,8 @@ def promote_one_item(connection: DBClient, config: MediaforceConfig, item: dict[
     with delivery_lock(config.paths.db_path, int(item["library_item_id"])), archive_activity(config.paths.db_path) as available:
         if not available:
             raise PromotionWaiting("Original backups are being cleaned. Retry publishing after cleanup finishes.")
+        if hold := update_hold_reason(config.paths.db_path.parent):
+            raise PromotionWaiting(hold)
         return promote_one_item_impl(
             connection,
             config,

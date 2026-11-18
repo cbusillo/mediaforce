@@ -1552,3 +1552,34 @@ def test_a_superseded_copy_whose_remake_keeps_being_refused_stops_and_is_never_p
         validation = connection.execute(select(staged_artifacts.c.validation_json)
                                         .where(staged_artifacts.c.library_item_id == item_id)).scalar_one()
     assert not_remade_blockers(validation) == ["original_unreachable"]
+
+
+def _hold_for_install(config: MediaforceConfig) -> Path:
+    record = config.paths.db_path.parent / "runtime/update-intent.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text('{"phase": "installing", "to": "2"}')
+    return record
+
+
+def test_an_install_hold_keeps_every_library_change_waiting(config: MediaforceConfig) -> None:
+    from mediaforce import execution
+    from mediaforce.web.runtime.put_back import put_original_back_action
+
+    published_id, published, _ = _stage(config, "tv/Show/Season 1/published.mkv", checked=True)
+    _run(config)
+    _, waiting, _ = _stage(config, "tv/Show/Season 1/waiting.mkv", checked=True)
+    backups = sorted(path for path in config.archive_root.rglob("*") if path.is_file())
+    record = _hold_for_install(config)
+
+    with open_db(config.paths.db_path) as connection, pytest.raises(PromotionWaiting, match="updating"):
+        execution.promote_one_item(connection, config, waiting, force=False)
+    put_back = put_original_back_action(config, "tv/Show/Season 1", published_id)
+    cleanup = clear_archive_cleanup_action(config)
+
+    assert put_back["ok"] is False and "updating" in put_back["message"]
+    assert cleanup["ok"] is False and cleanup["removed_count"] == 0
+    assert sorted(path for path in config.archive_root.rglob("*") if path.is_file()) == backups and backups
+    assert Path(waiting["source_path"]).read_bytes() == b"original media file"
+    assert Path(published["source_path"]).read_bytes() == b"av1"
+    record.unlink()
+    assert clear_archive_cleanup_action(config)["removed_count"] == len(backups)

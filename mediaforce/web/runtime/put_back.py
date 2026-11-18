@@ -15,6 +15,7 @@ from mediaforce.encoding.put_back import PutBackRefused, PutBackRestoreError, pu
 from mediaforce.encoding.streams import _record_event
 from mediaforce.library.media_scopes import path_matches_scope, resolve_media_scope
 from mediaforce.library.probe import probe_media
+from mediaforce.ops.runtime_install import update_hold_reason
 from mediaforce.web.runtime.folder_actions import active_encode_library_item_ids
 
 
@@ -36,6 +37,8 @@ def put_original_back_action(config: MediaforceConfig, prefix: str, library_item
                     archive_activity(config.paths.db_path) as available:
                 if not available:
                     raise PutBackRefused("busy", "Original backups are being cleaned. Try again when that finishes.")
+                if hold := update_hold_reason(config.paths.db_path.parent):
+                    raise PutBackRefused("busy", hold)
                 original = put_original_back(
                     connection,
                     library_item_id,

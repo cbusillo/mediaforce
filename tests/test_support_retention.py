@@ -298,3 +298,25 @@ def test_unreadable_kind_evidence_preserves_review_files(config: MediaforceConfi
 
     assert watched.exists()
     assert not unrelated_scratch.exists()
+
+
+def test_a_service_reading_files_beside_the_database_keeps_cleanup_running(config: MediaforceConfig, tmp_path: Path) -> None:
+    from mediaforce.ops import login_item
+    from mediaforce.ops.controller_deploy import SavedService
+    from mediaforce.ops.runtime_install import register_runtime_roots
+
+    support = config.paths.db_path.parent
+    app = tmp_path / "Mediaforce.app"
+    for file, contents in ((support / "config.toml", "[state]\n"), (support / ".env", "KEY=1\n"),
+                           (app / "Contents/MacOS/Mediaforce", "app"), (app / "Contents/Info.plist", "")):
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(contents)
+    plist = tmp_path / "service.plist"
+    plist.write_bytes(login_item.plistlib.dumps({"ProgramArguments": [
+        str(app / "Contents/MacOS/mediaforce-server"), "--config", str(support / "config.toml"), "--credentials", str(support / ".env")]}))
+    register_runtime_roots(support, *SavedService.read(plist).protected_roots)
+    old = [_work_folder(support / "deployments", f"deploy-{index}", age_days=10 + index) for index in range(3)]
+
+    _sweep(config)
+
+    assert [folder.exists() for folder in old] == [True, True, False]

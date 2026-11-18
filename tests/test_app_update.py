@@ -249,7 +249,9 @@ def test_verified_candidate_keeps_launch_item_and_every_earlier_pause(update: Up
     assert deploy.reconcile_update(app_update) == "updated"
     candidate = plistlib.loads(app_update.paths.plist.read_bytes())
     assert candidate["MediaforceAppCodeHash"] != saved["MediaforceAppCodeHash"]
-    assert {**candidate, "MediaforceAppCodeHash": None} == {**saved, "MediaforceAppCodeHash": None}
+    assert candidate["MediaforceAppBuild"] == "2"
+    unchanged = {"MediaforceAppCodeHash": None, "MediaforceAppBuild": None}
+    assert {**candidate, **unchanged} == {**saved, **unchanged}
     assert _work(app_update) == (True, False, False) and _phase(app_update) is None
 
 
@@ -278,3 +280,36 @@ def test_bundle_without_its_info_never_takes_the_live_identity(tmp_path: Path) -
     (tmp_path / "Broken.app/Contents").mkdir(parents=True)
     with pytest.raises(FileNotFoundError):
         bundle_service(tmp_path / "Broken.app")
+
+
+@pytest.mark.parametrize("database", ["the live database", "beside the live database", "its own folder"])
+def test_proof_build_refuses_the_controller_database_wherever_its_config_puts_it(tmp_path: Path, database: str) -> None:
+    from mediaforce.ops.runtime_install import RuntimeProtectionError, require_own_support
+
+    proof = _app(tmp_path / "Proof.app", build="1", code=b"", MediaforceServiceLabel="com.mediaforce.web.proof")
+    live_config = tmp_path / "custom/live.toml"
+    live_config.parent.mkdir()
+    live_config.write_text(f'[state]\ndb_path = "{tmp_path}/custom/library.sqlite3"\nrun_manifest_dir = "{tmp_path}/custom/runs"\n'
+                           f'web_state_dir = "{tmp_path}/custom/web"\n[media]\nsource_roots = {{}}\n')
+    live = tmp_path / "Library/LaunchAgents/com.mediaforce.web.plist"
+    live.parent.mkdir(parents=True)
+    live.write_bytes(plistlib.dumps({"ProgramArguments": ["/Applications/Mediaforce.app/Contents/MacOS/mediaforce-server",
+                                                          "--config", str(live_config)]}))
+    proof_database = {"the live database": tmp_path / "custom/library.sqlite3", "beside the live database": tmp_path / "custom/proof.sqlite3",
+                      "its own folder": tmp_path / "proof/library.sqlite3"}[database]
+    if database == "its own folder":
+        require_own_support(proof, proof_database, tmp_path)
+        return
+    with pytest.raises(RuntimeProtectionError):
+        require_own_support(proof, proof_database, tmp_path)
+
+
+def test_proof_build_names_the_live_launch_item_it_cannot_read(tmp_path: Path) -> None:
+    from mediaforce.ops.runtime_install import RuntimeProtectionError, require_own_support
+
+    proof = _app(tmp_path / "Proof.app", build="1", code=b"", MediaforceServiceLabel="com.mediaforce.web.proof")
+    live = tmp_path / "Library/LaunchAgents/com.mediaforce.web.plist"
+    live.parent.mkdir(parents=True)
+    live.write_bytes(plistlib.dumps({"ProgramArguments": ["/old/clone/.venv/bin/mediaforce-web"], "WorkingDirectory": "/old/clone"}))
+    with pytest.raises(RuntimeProtectionError, match="com.mediaforce.web.plist or the config it names cannot be read"):
+        require_own_support(proof, tmp_path / "proof/library.sqlite3", tmp_path)
