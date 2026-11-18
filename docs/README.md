@@ -73,9 +73,7 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 - [Developer guide](development/developer-guide.md): layout, running from
   source, configuration, the command line, page screenshots and how the
   background work behaves.
-- [Releases](development/release-flow.md): how agents deploy `main` to the controller, and read-only work evidence.
-- [Bundled delivery proposal](development/bundled-server-plan.md): server bundle,
-  Sparkle, rollback and publishing design.
+- [Releases](development/release-flow.md): how agents publish notarized releases, install one on the controller, and read work evidence.
 - `docs/development/targeted-child-recovery.md`: exact child recovery for host-setup failures in an active encode batch.
 - `docs/development/database-tooling.md`: SQLAlchemy/Alembic schema workflow,
   legacy-bridge notes, and migration validation commands

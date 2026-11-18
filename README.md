@@ -110,10 +110,8 @@ open .build/mac-app/Build/Products/Debug/Mediaforce.app
 Then add your libraries, working folder and computers in Settings. A source
 build has limits: macOS sends notifications only for an app signed with a
 Developer ID, and the server runs until you stop it
-(`scripts/mediaforce-dev.sh stop`) instead of starting at login. The
-maintainer's signed build and login service come from
-`scripts/deploy-controller.sh`, which signs with the maintainer's Apple
-Developer team.
+(`scripts/mediaforce-dev.sh stop`) instead of starting at login. For the
+signed app that starts at login and updates itself, use the download above.
 
 ## Honest limits
 

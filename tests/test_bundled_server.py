@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import plistlib
@@ -11,6 +12,7 @@ import pytest
 from mediaforce.ops.login_item import LoginItemError, LoginItemPaths, install_login_item, run_login_item_command, verify_bundled_startup
 from mediaforce.web.app import _load_project_env_file
 from scripts.verify_package_contents import PackageContentsError, verify_package_archives
+from scripts import bundle_server
 from scripts.bundle_server import verify_native_target
 
 
@@ -129,7 +131,8 @@ def test_native_qualification_parses_dependencies_and_os_versions() -> None:
             verify_native_target(Path("Mediaforce"), {"arm64"}, "15.0")
 
 
-def test_app_vendor_examples_do_not_hide_current_home_leaks(tmp_path: Path) -> None:
+def test_app_vendor_examples_do_not_hide_current_home_leaks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     app = tmp_path / "Mediaforce.app"
     vendor = app / "Contents/Resources/server/arm64/vendor.py"
     vendor.parent.mkdir(parents=True)
@@ -145,6 +148,43 @@ def test_app_vendor_examples_do_not_hide_current_home_leaks(tmp_path: Path) -> N
         binary.write_bytes(b"\x00/home/private-owner/private\x00")
         with pytest.raises(PackageContentsError):
             verify_package_archives([app])
+
+
+def test_ci_runner_home_is_allowed_only_in_third_party_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = tmp_path / "Mediaforce.app"
+    vendor = app / "Contents/Resources/server/arm64/av/.dylibs/libopus.0.dylib"
+    vendor.parent.mkdir(parents=True)
+    vendor.write_bytes(b"\x00/Users/runner/work/opus/build\x00")
+    binary = app / "Contents/MacOS/Mediaforce"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"safe")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    with patch.object(Path, "home", return_value=Path("/Users/runner")):
+        verify_package_archives([app])
+        binary.write_bytes(b"\x00/Users/runner/work/mediaforce/build\x00")
+        with pytest.raises(PackageContentsError):
+            verify_package_archives([app])
+
+
+def test_server_is_signed_with_the_identity_the_app_was_signed_with(tmp_path: Path) -> None:
+    leaf = b"new-certificate"
+    new = hashlib.sha1(leaf).hexdigest().upper()
+    old = "9C79412E9AE3FE6DE14AA7D59BC396A4ABEE11CB"
+    listing = (f'  1) {old} "Developer ID Application: Example ({bundle_server.MACOS_SIGNING_TEAM})"\n'
+               f'  2) {new} "Developer ID Application: Example ({bundle_server.MACOS_SIGNING_TEAM})"\n')
+
+    def fake_run(*arguments: str | Path, **_options: object) -> str:
+        if arguments[0] == "security":
+            return listing
+        prefix = next(str(arg).split("=", 1)[1] for arg in arguments if str(arg).startswith("--extract-certificates="))
+        Path(prefix).with_name("certificate0").write_bytes(leaf)
+        return ""
+
+    with patch.object(bundle_server, "run", fake_run):
+        assert bundle_server.signing_identity(tmp_path / "Mediaforce.app") == new
+        leaf = b"someone-else"
+        with pytest.raises(ValueError):
+            bundle_server.signing_identity(tmp_path / "Mediaforce.app")
 
 
 def test_moved_bundle_can_repair_only_the_same_saved_app(bundle_paths: LoginItemPaths) -> None:

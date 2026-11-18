@@ -68,9 +68,10 @@ tests and macOS custody tests run in CI.
 ## The installed service
 
 The maintainer's controller runs the server as the per-user LaunchAgent
-`~/Library/LaunchAgents/com.mediaforce.web.plist`, installed by
-`scripts/deploy-controller.sh` from an independent release clone; see
-[Releases](release-flow.md). `uv run mediaforce service
+`~/Library/LaunchAgents/com.mediaforce.web.plist`, which starts the server
+inside the installed, notarized `Mediaforce.app`. The first install comes from
+`scripts/deploy-controller.sh --release`, and later releases update themselves;
+see [Releases](release-flow.md). `uv run mediaforce service
 status|logs|enable|disable|restart` address that installed service from any
 checkout; with no service installed, a development checkout cannot install
 one. The service always runs with

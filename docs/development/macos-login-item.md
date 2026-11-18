@@ -2,8 +2,8 @@
 
 ## Purpose
 
-The `com.mediaforce.web` LaunchAgent starts `mediaforce-web` after a user logs
-in. It starts the application only. It does not watch, mount, or own SMB shares;
+The `com.mediaforce.web` LaunchAgent starts the server inside the installed
+Mediaforce app after a user logs in. It starts the application only. It does not watch, mount, or own SMB shares;
 controller storage recovery remains inside Mediaforce after the app is running.
 
 ## Controller storage recovery
@@ -120,18 +120,23 @@ to qualify storage recovery.
 
 ## Commands
 
-Run these from the Mediaforce checkout:
+The installed app's server runs them; `--config` goes before `service` and
+`--credentials` after it:
 
 ```bash
-uv run mediaforce service install
-uv run mediaforce service enable
-uv run mediaforce service status
-uv run mediaforce service restart
-uv run mediaforce service logs
-uv run mediaforce service logs --stderr
-uv run mediaforce service disable
-uv run mediaforce service uninstall
+server=/Applications/Mediaforce.app/Contents/MacOS/mediaforce-server
+"$server" service status
+"$server" service restart
+"$server" service logs
+"$server" service logs --stderr
+"$server" service disable
+"$server" service enable
 ```
+
+From a checkout, `uv run mediaforce service status|logs|restart|disable`
+address the installed app's service the same way. A checkout cannot install
+itself as the service; [installing a release](release-flow.md#installing-a-release-on-the-controller)
+sets it up or replaces it.
 
 `install` writes the generated plist without loading it. `enable` writes the
 current plist, enables the label, and bootstraps it into the signed-in user's
@@ -142,11 +147,12 @@ also removes the plist. All operations are idempotent.
 
 The generated plist:
 
-- executes `.venv/bin/mediaforce-web --no-reload` directly;
-- uses the checkout as its working directory;
-- reads the normal repo-local `.env` through the web entrypoint;
-- carries the existing runtime's `.env` into a new runtime checkout with mode
-  `0600`, and refuses the checkout switch when neither location has one;
+- executes the app's `Contents/MacOS/mediaforce-server --no-reload` with the
+  saved `--config`, and `--credentials` when the service reads an existing
+  credential file in place;
+- uses the configured database's folder as its working directory;
+- records the app's code hash and build, so a different copy is refused and a
+  damaged app cannot hide which build last ran on the database;
 - contains no `/Volumes`, `WatchPaths`, or `QueueDirectories` dependency;
 - restarts through launchd's `KeepAlive` behavior with a 30-second throttle;
 - writes durable logs to `~/Library/Logs/mediaforce/web.log` and
@@ -169,33 +175,35 @@ by those tests.
 
 For ordinary non-disruptive verification:
 
-1. Run `uv run mediaforce service enable`.
-2. Run `uv run mediaforce service status` and confirm a PID is reported.
+1. Run `"$server" service enable`.
+2. Run `"$server" service status` and confirm a PID is reported.
 3. Open the configured web URL and verify the computers list reports a
    controller storage problem when a required share is missing
    (`GET /api/hosts` returns it as `controller_storage`).
 4. Inspect both durable logs for restart loops or configuration errors.
-5. Run `uv run mediaforce service disable` when the service should remain off.
+5. Run `"$server" service disable` when the service should remain off.
 
 The final login-item acceptance check requires a real logout/login or reboot:
 
 1. Enable the item before ending the desktop session.
 2. Log back in and confirm the app starts without manual action.
 3. Confirm startup succeeds even when media shares are initially unavailable.
-4. Record the name shown in System Settings > General > Login Items. Depending
-   on macOS process attribution, it may display the Python interpreter rather
-   than the console-script filename.
+4. Record the name shown in System Settings > General > Login Items.
 5. Disable the item, repeat login, and confirm it remains stopped before
    enabling it again if desired.
 
 ## Raw Recovery
 
-If the project environment is unavailable, use launchctl directly:
+If the app cannot run its service commands, use launchctl directly:
 
 ```bash
 launchctl bootout "gui/$(id -u)/com.mediaforce.web"
 launchctl disable "gui/$(id -u)/com.mediaforce.web"
 ```
 
-After restoring the checkout and `.venv`, run `uv sync` followed by
-`uv run mediaforce service enable` to regenerate and reload the item.
+To start the saved item again unchanged, use `launchctl enable` and
+`launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.mediaforce.web.plist`.
+A damaged or missing app is repaired by installing the release again with
+`--stopped` ([release flow](release-flow.md#a-controller-intentionally-stopped-for-repair)).
+A clone runtime's saved item, kept in a deployment stage, is restored the same
+raw way; never regenerate it.
