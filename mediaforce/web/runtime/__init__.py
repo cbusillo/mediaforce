@@ -90,7 +90,8 @@ from mediaforce.web.runtime.job_runtime import (
     scan_job_belongs_to_current_process,
     scan_process_is_alive,
 )
-from mediaforce.web.runtime.queue_actions import pause_encode_queue_action, resume_encode_queue_action
+from mediaforce.web.runtime.queue_actions import pause_encode_queue_action, resume_encode_queue_action, \
+    stop_running_file_action
 
 __all__ = [
     "FolderCard",
@@ -152,6 +153,7 @@ __all__ = [
     "proposal_alignment_issue",
     "proposal_signal_copy",
     "resume_encode_queue_action",
+    "stop_running_file_action",
     "review_pack_dir",
     "review_media_context",
     "review_pair_key",

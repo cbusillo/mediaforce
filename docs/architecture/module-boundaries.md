@@ -329,7 +329,16 @@ Guidance:
     scoped containment before its work folder is removed, or the folder is
     kept and the file held as unconfirmed with that folder saved as its scope.
     An owner's Stop stays a Stop and holds the file; any other interruption
-    waits for the queue's recheck to prove the run ended before retrying
+    waits for the queue's recheck to prove the run ended before retrying.
+    The Mac app's Stop on one running file
+    (`POST /api/encode-queue/running/{job_id}/stop`, this Mac only) cancels
+    that job's own process controller with `StartOverCancelledError`; nothing
+    else stops and the pause state is untouched. The worker takes the owner's
+    Stop path, then gives the attempt back and puts the file in retry backoff,
+    whose cleanup removes its unfinished file before it is queued again. When
+    the run is not shown ended, the file is held like any owner's Stop and the
+    same recheck sends it back to waiting once its computer shows the run
+    ended. Sample runs are not covered: they are not shown as running files
   - staged scratch folders (`encoding/staged_host.py`) follow the same rule
     in all three cleanups: the controller, the keeper's exit and the sweep
     remove a folder only once that scoped stop proves its writer ended; an

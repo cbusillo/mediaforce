@@ -6,7 +6,10 @@ final class ActivityTests: XCTestCase {
     static let payload = """
     {"starts_at":"2026-10-31T14:00:00.123456+00:00","ends_at":"2026-11-01T14:00:00.123456+00:00",
      "computers":[{"key":"mini","windows":[{"starts_at":"2026-10-31T14:00:00+00:00","ends_at":"2026-11-01T14:00:00+00:00"}],
-                   "running":[],"finish_current_file":true}],
+                   "running":[{"id":"job-4","prefix":"tv/Show/Season 1","show_prefix":"tv/Show","show":"Show","title":"Episode 4",
+                               "starts_at":"2026-10-31T14:00:00+00:00","finishes_at":"2026-10-31T15:30:00+00:00","computer_key":"mini",
+                               "computer_name":"M1 mini","waiting":null,"progress":0.62}],
+                   "finish_current_file":true}],
      "lined_up":[{"id":"a","prefix":"tv/Show/Season 1","show_prefix":"tv/Show","show":"Show","title":"Episode 1",
                   "starts_at":null,"finishes_at":null,"computer_key":null,"computer_name":null,"waiting":"Waiting for storage","progress":null}],
      "next_season":{"prefix":"tv/Next/Season 2","show_prefix":"tv/Next","show":"Next","season":2}}

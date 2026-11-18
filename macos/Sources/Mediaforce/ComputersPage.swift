@@ -157,7 +157,7 @@ struct ComputersPage: View {
                     ForEach(facts.computers) { computer in
                         Divider()
                         ComputerRow(computer: computer, machine: machines.machine(computer.key), now: machines.now, wide: wide,
-                                    posters: model.posters, open: open) { action, password in
+                                    model: model, open: open) { action, password in
                             await store.act(action, computer.key, password: password, main: model)
                         }
                     }
@@ -172,6 +172,7 @@ struct ComputersPage: View {
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .task { await store.watch(model.client) }
+        .onChange(of: model.stopping) { Task { await store.load(model.client) } }
     }
 }
 
@@ -182,9 +183,10 @@ private struct ComputerRow: View {
     let machine: ComputersFacts.Machine?
     let now: Date
     let wide: Bool
-    let posters: PosterStore
+    let model: MainWindowModel
     let open: (Place) -> Void
     let act: (ComputerAction, String?) async -> HostActionResult?
+    private var posters: PosterStore { model.posters }
 
     static let wideWidth: CGFloat = 1170
     private static let identityWidth: CGFloat = 250
@@ -266,7 +268,7 @@ private struct ComputerRow: View {
         } else if let running = machine?.running, !running.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
                 ForEach(running) { file in
-                    RunningFile(file: file, posters: posters, posterWidth: 40, open: open)
+                    RunningFile(file: file, model: model, posterWidth: 40, open: open)
                 }
             }
         } else {
@@ -359,6 +361,7 @@ struct ComputerPage: View {
         .onAppear { namePage(name) }
         // Recovery runs by itself in the background, so the fixes on offer can change while the page is open.
         .task { await store.watch(model.client) }
+        .onChange(of: model.stopping) { Task { await store.load(model.client) } }
     }
 
     private func header(name: String, computer: MainWindowFacts.Computer?, machine: ComputersFacts.Machine?, now: Date) -> some View {
@@ -378,7 +381,7 @@ struct ComputerPage: View {
         PageSection(Words.nowColumn) {
             if !machine.running.isEmpty {
                 ForEach(machine.running) { file in
-                    RunningFile(file: file, posters: model.posters, posterWidth: 64, open: open)
+                    RunningFile(file: file, model: model, posterWidth: 64, open: open)
                 }
             } else if let computer, !ComputerFix.inTrouble(computer) {
                 ComputerStateLine(computer: computer)
@@ -479,17 +482,26 @@ private struct ComputerStateLine: View {
     }
 }
 
-/// A file compressing now: its show's poster, its name in plain words, how far along it is and when it finishes.
+/// A file compressing now: its show's poster, its name in plain words, how far along it is, when it finishes, and its Stop.
 private struct RunningFile: View {
     let file: ComputersFacts.File
-    let posters: PosterStore
+    let model: MainWindowModel
     let posterWidth: CGFloat
     let open: (Place) -> Void
 
     var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            link
+            if let job = file.job {
+                StopFileButton(id: job, title: Words.fileTitle(file), progress: file.progress, model: model)
+            }
+        }
+    }
+
+    private var link: some View {
         Button { open(.item(file.prefix)) } label: {
             HStack(alignment: .center, spacing: 12) {
-                MediaPoster(titlePrefix: file.showPrefix, name: file.show, kind: file.mediaKind, posters: posters, width: posterWidth)
+                MediaPoster(titlePrefix: file.showPrefix, name: file.show, kind: file.mediaKind, posters: model.posters, width: posterWidth)
                 VStack(alignment: .leading, spacing: 5) {
                     Text(Words.fileTitle(file)).fontWeight(.medium).foregroundStyle(.primary)
                         .fixedSize(horizontal: false, vertical: true)

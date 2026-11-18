@@ -155,7 +155,7 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_
     proposal_context_snapshot, proposal_signal_copy, promote_folder_outputs_action, \
     queue_folder_encode_action, recent_tuning_sessions, \
     reconcile_pending_review_samples, refresh_host_status_cache, reset_folder_card_cache, resume_encode_queue_action, \
-    review_media_context, \
+    review_media_context, stop_running_file_action, \
     review_pack_dir, review_pair_key, review_pairs, safe_collect_host_statuses, save_advice_state, \
     save_calibration_state, save_pending_proposal, save_profile_action, \
     sample_calibration_host_statuses, sample_host_options, sample_host_options_from_statuses, \
@@ -2376,6 +2376,10 @@ def create_app(
         app,
         pause_encode_queue_action=_pause_encode_queue_action,
         resume_encode_queue_action=_resume_encode_queue_action,
+        stop_running_file_action=lambda job_id: stop_running_file_action(
+            job_id, connection_factory=lambda: open_db(config.paths.db_path),
+            live_encode_job_controller=_live_encode_job_controller,
+        ),
     )
 
     return app
