@@ -109,6 +109,14 @@ are never changed. A failed new build rolls back on its own; a stuck update is
 recovered by running `reconcile` or `rollback` from either the installed app or
 the stage's saved copy.
 
+Sparkle checks every hour (`SUScheduledCheckInterval`, its shortest). Check for
+Updates… in the app menu runs that same background check at once, never
+Sparkle's own update window, whose Install button would skip the wait between
+files. It then answers in an alert: "You're up to date.", "Mediaforce 0.5.0
+will install between files.", or why the check failed. The item is off while
+a check or install is under way. A proof copy chooses it when its driver runs
+`notifyutil -p com.mediaforce.web.proof.check-for-updates`.
+
 `scripts/build-mac-app.sh proof OUTPUT CACHE BUILD FEED KEY` builds a copy for
 update proofs with its own app ID, service label, port, support folder and
 logs. Run its service from a folder on the internal drive: a launchd agent

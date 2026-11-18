@@ -9,6 +9,9 @@ struct MediaforceApp: App {
             MainWindow(model: appDelegate.model)
         }
         .windowResizability(.contentMinSize)
+        .commands {
+            CommandGroup(after: .appInfo) { CheckForUpdatesButton(updates: Updates.shared) }
+        }
         // The kind page's player, full screen.
         Window(Words.fullScreen, id: TheaterWindow.id) {
             TheaterWindow(model: appDelegate.model)

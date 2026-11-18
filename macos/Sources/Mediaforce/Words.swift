@@ -5,6 +5,16 @@ enum Words {
     static let updated = "Mediaforce updated itself between files and is running again."
     static let updateWaitingForQuietTime = "Mediaforce installs this update between files."
     static let updateServerUnavailable = "Mediaforce can't update because its background service isn't set up on this Mac."
+    static let checkForUpdates = "Check for Updates…"
+    static let upToDate = "You're up to date."
+
+    static func updateWillInstall(version: String) -> String {
+        "Mediaforce \(version) will install between files."
+    }
+
+    static func updateCheckFailed(_ problem: String) -> String {
+        "Mediaforce couldn't check for updates. \(problem)"
+    }
 
     static func updateNeedsYou(_ problem: String) -> String {
         "Mediaforce couldn't finish an update on its own and needs you: \(problem)"
