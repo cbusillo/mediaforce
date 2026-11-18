@@ -131,7 +131,8 @@ def test_native_qualification_parses_dependencies_and_os_versions() -> None:
             verify_native_target(Path("Mediaforce"), {"arm64"}, "15.0")
 
 
-def test_app_vendor_examples_do_not_hide_current_home_leaks(tmp_path: Path) -> None:
+def test_app_vendor_examples_do_not_hide_current_home_leaks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     app = tmp_path / "Mediaforce.app"
     vendor = app / "Contents/Resources/server/arm64/vendor.py"
     vendor.parent.mkdir(parents=True)
