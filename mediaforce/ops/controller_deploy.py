@@ -1,4 +1,4 @@
-"""Staged installation of a release on the controller, and the app's own update. Invoke only in an authorized deploy window."""
+"""Staged installation of a release on the controller, and the app's own update. Invoke only in an authorized release window."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -25,7 +25,7 @@ from mediaforce.ops.login_item import (
 )
 from mediaforce.ops.runtime_install import (
     SERVICE_LABEL, UPDATE_INTENT_NAME, bundle_build, bundle_service, read_update_intent, register_runtime_roots,
-    require_own_support, retain_deploy_stage, runtime_activity,
+    require_own_support, retain_deploy_stage, runtime_activity, saved_service_config,
 )
 from mediaforce.web.runtime.controller_storage_recovery import READY_FRESHNESS_SECONDS
 from mediaforce.web.runtime.release_work import release_work_payload
@@ -38,6 +38,9 @@ MAC_APP_NAME = "Mediaforce.app"
 APPLICATIONS_APP = Path("/Applications") / MAC_APP_NAME
 STORAGE_CHECK_SECONDS = 60
 UPDATE_FAILED_NAME = "failed-update-builds.json"
+# The update record's phase while a release is installed over the saved service: it holds new work, publication and
+# cleanup until the new server passed its checks, and lets only the release's own server start.
+INSTALLING = "installing"
 # An update drains running files only when every one is expected to finish within this.
 DRAIN_START_SECONDS = 15 * 60
 
@@ -192,26 +195,24 @@ class SavedService:
         payload = plist.read_bytes()
         item = plistlib.loads(payload)
         arguments = item["ProgramArguments"]
-        program = Path(arguments[0])
-        bundled = program.name == "mediaforce-server"
+        bundled = Path(arguments[0]).name == "mediaforce-server"
         legacy_root = None if bundled else Path(item["WorkingDirectory"])
-        config = _argument(arguments, "--config") or (legacy_root and legacy_root / "config/defaults.toml")
-        credentials = _argument(arguments, "--credentials")
+        config = saved_service_config(item)
+        credentials = Path(arguments[arguments.index("--credentials") + 1]) if "--credentials" in arguments else None
         if credentials is None and legacy_root is not None and (legacy_root / ".env").is_file():
             credentials = legacy_root / ".env"
         if config is None or not config.is_absolute():
             raise RuntimeError(f"the saved service at {plist} names no absolute config")
-        build = bundle_build(program.parents[2]) if bundled and program.exists() else None
-        return cls(payload, config, credentials, legacy_root, build)
+        return cls(payload, config, credentials, legacy_root, item.get("MediaforceAppBuild"))
+
+    @property
+    def bundled(self) -> bool:
+        return self.legacy_root is None
 
     @property
     def protected_roots(self) -> tuple[Path, ...]:
-        return tuple(path for path in (self.legacy_root, self.config_path.parent,
-                                       self.credentials_path and self.credentials_path.parent) if path is not None)
-
-
-def _argument(arguments: list[str], option: str) -> Path | None:
-    return Path(arguments[arguments.index(option) + 1]) if option in arguments else None
+        """The clone runtime, and the exact config and credential files the service reads."""
+        return tuple(path for path in (self.legacy_root, self.config_path, self.credentials_path) if path is not None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,23 +246,35 @@ class ReleaseInstall:
 
 def install_release(
     app: Path, stage: Path, home: Path, *, evidence: dict[str, str], install: Path = APPLICATIONS_APP,
-    startup_timeout: int = DEFAULT_STARTUP_TIMEOUT, stopped: bool = False,
+    startup_timeout: int = DEFAULT_STARTUP_TIMEOUT, stopped: bool = False, allow_unknown_build: bool = False,
 ) -> None:
     if (bundle_service(app)[0] == SERVICE_LABEL) != (install == APPLICATIONS_APP):
         raise RuntimeError(f"only the live app installs at {APPLICATIONS_APP}, and it installs nowhere else")
-    saved = SavedService.read(LoginItemPaths(app, home).plist)
-    if saved.build is not None and int(saved.build) > int(bundle_build(app) or 0):
-        raise RuntimeError(f"build {saved.build} is installed; an older release never runs on its database")
-    config = load_config(saved.config_path)
-    support = config.paths.db_path.parent
-    require_own_support(app, config.paths.db_path, home)
-    if read_update_intent(support) is not None:
-        raise RuntimeError("an app update is unfinished; reconcile or roll it back first")
-    # The release flow's own pause request can start the hourly cleanup, so installing waits for it.
+    plist = LoginItemPaths(app, home).plist
+    support = load_config(SavedService.read(plist).config_path).paths.db_path.parent
+    # The release flow's own pause request can start the hourly cleanup, so installing waits for it. Everything this
+    # decides on is read again once it holds the lock: another installation or update may have finished meanwhile.
     with runtime_activity(support, wait_seconds=DEPLOY_LOCK_WAIT_SECONDS) as acquired:
         if not acquired:
             raise RuntimeError(f"cleanup or another deploy stayed active for {DEPLOY_LOCK_WAIT_SECONDS // 60} minutes; retry after it finishes")
-        _switch(ReleaseInstall(app, install, stage, home, saved, config, stopped, startup_timeout), evidence)
+        saved = SavedService.read(plist)
+        config = load_config(saved.config_path)
+        if config.paths.db_path.parent != support:
+            raise RuntimeError("the saved service changed to another database while this install waited; run it again")
+        _require_installable(app, saved, config, home, allow_unknown_build=allow_unknown_build)
+        _switch(ReleaseInstall(app, install, stage, home, saved, config, stopped, startup_timeout), {
+            **evidence, "previous_build": saved.build or ("unknown" if saved.bundled else "clone runtime")})
+
+
+def _require_installable(app: Path, saved: SavedService, config: MediaforceConfig, home: Path, *, allow_unknown_build: bool) -> None:
+    require_own_support(app, config.paths.db_path, home)
+    if read_update_intent(config.paths.db_path.parent) is not None:
+        raise RuntimeError("an app update or install is unfinished; reconcile or roll it back first")
+    if saved.bundled and saved.build is None and not allow_unknown_build:
+        raise RuntimeError("the saved service does not record which build last ran on this database; "
+                           "pass --allow-unknown-build only after confirming the release is not older")
+    if saved.build is not None and int(saved.build) > int(bundle_build(app) or 0):
+        raise RuntimeError(f"build {saved.build} is installed; an older release never runs on its database")
 
 
 def _switch(job: ReleaseInstall, evidence: dict[str, str]) -> None:
@@ -276,8 +289,14 @@ def _switch(job: ReleaseInstall, evidence: dict[str, str]) -> None:
     if _is_present(job.install):
         _copy_app(job.install, job.stage / MAC_APP_NAME)
     register_runtime_roots(support, *job.saved.protected_roots)
-    if not job.stopped:
-        require_paused_idle_dashboard(_api(job.base_url, "/api/dashboard?preview_limit=0"))
+    _write_intent(support, {"phase": INSTALLING, "from": job.saved.build, "to": bundle_build(job.app),
+                            "stage": str(job.stage), "app": str(job.install)})
+    try:
+        if not job.stopped:
+            _require_running_server(job)
+    except Exception:
+        _end_intent(support)
+        raise
     disable_login_item(job.previous)
     candidate_started = port_closed = False
     try:
@@ -296,12 +315,15 @@ def _switch(job: ReleaseInstall, evidence: dict[str, str]) -> None:
     except Exception as failure:
         if candidate_started or not port_closed or job.stopped:
             # Migrations, uncertain listener custody or a database the stopped install already touched require
-            # reconciliation; old code never starts on them.
+            # reconciliation; old code never starts on them, and the record keeps work held until then.
             disable_login_item(job.previous)
+            _write_intent(support, {**(read_update_intent(support) or {}), "failure": str(failure)})
         else:
+            _end_intent(support)
             _restore_previous(job, failure)
         raise
     retain_deploy_stage(support, job.stage)
+    _end_intent(support)
     if resume_queue:
         # A lost resume response is uncertain; leave the healthy release running.
         _api(job.base_url, "/api/encode-queue/resume", post=True)
@@ -323,6 +345,8 @@ def _require_readable(credentials: Path | None) -> None:
 
 def _require_running_server(job: ReleaseInstall) -> None:
     require_paused_idle_dashboard(_api(job.base_url, "/api/dashboard?preview_limit=0"))
+    if running := _running_work(job.base_url, job.config.paths.db_path):
+        raise RuntimeError(f"work is still running: {', '.join(running)}")
     database = str(job.config.paths.db_path.resolve())
     running = (_api(job.base_url, "/api/release/work").get("server") or {}).get("database")
     if running != database:
@@ -334,6 +358,8 @@ def _back_up_stopped_database(job: ReleaseInstall) -> tuple[bool, int]:
     with exclusive_mediaforce_runtime_lock(config, owner_payload={"operation": "release-install"}):
         reserve_mediaforce_database_identity(config)
         was_paused = require_stopped_idle_controller(config, port=job.port)
+        if _publishing(config.paths.db_path):
+            raise RuntimeError("a file is still being published; reconcile it before installing")
         backup_database(config.paths.db_path, job.stage / "before.sqlite", pause_queue=job.stopped)
         if job.stopped:
             pause_stopped_queue(config)
@@ -349,7 +375,8 @@ def _require_server(base_url: str, build: str | None, config: MediaforceConfig, 
 
 
 def _restore_previous(job: ReleaseInstall, failure: Exception) -> None:
-    for step, words in ((_restart_previous_service, "restarting the previous service"), (_restore_previous_app, "restoring the previous app")):
+    # The saved launch item may start the app it names, so that app is back in place first.
+    for step, words in ((_restore_previous_app, "restoring the previous app"), (_restart_previous_service, "restarting the previous service")):
         try:
             step(job)
         except Exception as cleanup:
@@ -477,7 +504,7 @@ def prepare_update(update: AppUpdate, build: str) -> None:
     if intent.get("phase") == "prepared":
         _save_intent(update, intent)
         return
-    running = _running_work(update)
+    running = _running_work(update.base_url, update.config.paths.db_path)
     if running:
         if intent.get("phase") == "draining" or _finishing_soon(update):
             _save_intent(update, {**intent, "phase": "draining", "waiting": running})
@@ -569,7 +596,8 @@ def _finish(update: AppUpdate, intent: dict) -> None:
     try:
         started_at = _utc_now()
         # The saved launch item stays exactly as it was, except for the build it trusts.
-        _atomic_write(update.paths.plist, plistlib.dumps({**saved, "MediaforceAppCodeHash": _bundle_code_hash(update.app)}))
+        _atomic_write(update.paths.plist, plistlib.dumps({**saved, "MediaforceAppCodeHash": _bundle_code_hash(update.app),
+                                                          "MediaforceAppBuild": bundle_build(update.app)}))
         start_saved_launch_item(update.paths.plist)
         wait_until_healthy(update.base_url, DEFAULT_STARTUP_TIMEOUT)
         _require_server(update.base_url, intent["to"], update.config, intent["pending_encode"])
@@ -629,26 +657,31 @@ def require_update_startup_allowed(support_dir: Path, app: Path) -> None:
     intent = read_update_intent(support_dir)
     if intent is None or intent.get("phase") == "draining":
         return
-    if (intent.get("phase"), bundle_build(app)) in {("starting", intent.get("to")), ("restoring", intent.get("from"))}:
+    if (intent.get("phase"), bundle_build(app)) in {("starting", intent.get("to")), ("restoring", intent.get("from")),
+                                                     (INSTALLING, intent.get("to"))}:
         return
     raise UpdateRefused(f"an update to build {intent.get('to')} is {intent.get('phase')}; open Mediaforce to finish it")
 
 
 def _end(update: AppUpdate) -> None:
+    _end_intent(update.support)
+
+
+def _end_intent(support: Path) -> None:
     """Removing the record lifts the hold; every pause a person set was never touched."""
-    update.file(UPDATE_INTENT_NAME).unlink()
+    (support / "runtime" / UPDATE_INTENT_NAME).unlink()
 
 
-def _running_work(update: AppUpdate) -> list[str]:
-    dashboard = _api(update.base_url, "/api/dashboard?preview_limit=0")
-    counts = _api(update.base_url, "/api/release/work")["counts"]
+def _running_work(base_url: str, database: Path) -> list[str]:
+    dashboard = _api(base_url, "/api/dashboard?preview_limit=0")
+    counts = _api(base_url, "/api/release/work")["counts"]
     calibration = dashboard["calibration_queue"]
     found = (
         (dashboard["encode_queue"]["running_count"], "files are compressing"),
         (calibration["sample"]["running_count"] + calibration["full"]["running_count"], "samples are running"),
         (counts["unfinished_scan_rows"], "library checks are running"),
         (counts["active_evidence"], "files are being measured"),
-        (_publishing(update.config.paths.db_path), "files are being published"),
+        (_publishing(database), "files are being published"),
     )
     return [f"{count} {words}" for count, words in found if count]
 
@@ -678,8 +711,12 @@ def _require_intent(update: AppUpdate) -> dict:
 
 
 def _save_intent(update: AppUpdate, intent: dict) -> None:
-    update.file(UPDATE_INTENT_NAME).parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(update.file(UPDATE_INTENT_NAME), json.dumps(intent, indent=2).encode())
+    _write_intent(update.support, intent)
+
+
+def _write_intent(support: Path, intent: dict) -> None:
+    (support / "runtime").mkdir(parents=True, exist_ok=True)
+    _atomic_write(support / "runtime" / UPDATE_INTENT_NAME, json.dumps(intent, indent=2).encode())
 
 
 def _failed(update: AppUpdate) -> list[str]:

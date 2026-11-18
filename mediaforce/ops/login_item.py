@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from mediaforce.ops.runtime_install import SERVICE_LABEL, bundle_service
+from mediaforce.ops.runtime_install import SERVICE_LABEL, bundle_build, bundle_service
 
 
 LOGIN_ITEM_LABEL = SERVICE_LABEL
@@ -99,7 +99,8 @@ def render_login_item_plist(paths: LoginItemPaths) -> bytes:
         "StandardErrorPath": str(paths.stderr_log),
     }
     if paths.bundled:
-        payload["MediaforceAppCodeHash"] = _bundle_code_hash(paths.project_root)
+        # The build is kept beside the app's hash so a damaged or missing app never hides what last ran on the database.
+        payload.update(MediaforceAppCodeHash=_bundle_code_hash(paths.project_root), MediaforceAppBuild=bundle_build(paths.project_root))
     return plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=True)
 
 

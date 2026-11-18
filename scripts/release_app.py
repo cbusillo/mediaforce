@@ -170,7 +170,8 @@ def install(args: argparse.Namespace) -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="mediaforce-release-") as scratch:
         release = verify_release(args.release, Path(scratch), feed=feed, public_key=public_key, proof=proof)
         install_release(release.app, stage, Path.home(), evidence=release.evidence, install=destination,
-                        startup_timeout=args.startup_timeout, stopped=args.stopped)
+                        startup_timeout=args.startup_timeout, stopped=args.stopped,
+                        allow_unknown_build=args.allow_unknown_build)
     require_identity(destination, release.identity)
     rollback = {"stage": str(stage), "retained": retained_deploy_stage(stage.parent.parent) == stage,
                 **{name: (stage / name).is_file() for name in ("before.sqlite", "launch-item.before.plist")}}
@@ -189,6 +190,8 @@ def main() -> int:
     installing.add_argument("--stopped", action="store_true", help="install while the service is stopped, after verifying idle work records")
     installing.add_argument("--startup-timeout", type=int, default=DEFAULT_STARTUP_TIMEOUT,
                             help="seconds allowed for startup and migrations")
+    installing.add_argument("--allow-unknown-build", action="store_true",
+                            help="the saved service records no build: install only after confirming the release is not older")
     for option in ("--feed", "--public-key"):
         installing.add_argument(option, help="proof builds only: the build's own feed and Sparkle key")
     installing.add_argument("--install", type=Path, help="proof builds only: where the proof app goes")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+import contextlib
 from datetime import datetime, timedelta, timezone
 from http.client import RemoteDisconnected
 import json
@@ -64,14 +65,23 @@ class Controller:
         self.running: str | None = None if stopped else "previous"
         self.started: list[str] = []
         self.resumed = 0
+        self.release_held: list[bool] = []
 
     def disable(self, paths: login_item.LoginItemPaths) -> None:
         assert paths.label == LABEL
         self.running = None
 
     def start(self, plist: Path) -> None:
-        started = "previous" if plist.read_bytes() == self.previous_payload else "release"
-        self.running = started
+        # Bundled startup refuses an app whose code is not the build its launch item trusts.
+        item = plistlib.loads(plist.read_bytes())
+        if Path(item["ProgramArguments"][0]).is_relative_to(self.legacy_root):
+            started = "previous"
+        elif item.get("MediaforceAppCodeHash") != plistlib.loads(login_item.render_login_item_plist(
+                login_item.LoginItemPaths(self.install, self.home, self.config)))["MediaforceAppCodeHash"]:
+            started = "refused"
+        else:
+            started = "previous" if plist.read_bytes() == self.previous_payload else "release"
+        self.running = None if started == "refused" else started
         self.started.append(started)
 
     def api(self, _base: str, route: str, *, post: bool = False) -> dict[str, Any]:
@@ -81,8 +91,10 @@ class Controller:
             assert not self.stopped, "a stopped install never asks the old server"
             return {"encode_queue": {"state": {"is_paused": True}, "running_count": 0},
                     "calibration_queue": {"sample": {"running_count": 0}, "full": {"running_count": 0}}}
-        if route == "/api/dashboard/scan-job" and self.running == "release" and self.outcome == "unhealthy":
-            raise URLError("candidate unavailable")
+        if route == "/api/dashboard/scan-job" and self.running == "release":
+            self.release_held.append(runtime_install.update_hold_reason(self.support) is not None)
+            if self.outcome == "unhealthy":
+                raise URLError("candidate unavailable")
         if post:
             self.resumed += 1
             if self.outcome == "resume-lost":
@@ -93,7 +105,9 @@ class Controller:
             database = "/elsewhere/library.sqlite3"
         if self.outcome == "wrong-build" and self.running == "release":
             build = "1"
-        return {"counts": {"pending_encode": 0}, "server": {"build": build, "database": database}}
+        scans = int(self.outcome == "scan-running" and self.running == "previous")
+        return {"counts": {"pending_encode": 0, "unfinished_scan_rows": scans, "active_evidence": 0},
+                "server": {"build": build, "database": database}}
 
 
 @pytest.fixture
@@ -112,22 +126,23 @@ def controller(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Contr
 
     backup = patch.object(controller_deploy, "backup_database", side_effect=OSError("backup volume unavailable")) \
         if outcome == "backup-failed" else patch.object(controller_deploy, "backup_database", controller_deploy.backup_database)
+    refuse_installed = OSError("the installed copy fails its signature check") if outcome == "installed-signature-refused" else None
     with patch.object(controller_deploy, "_api", mac.api), patch.object(controller_deploy, "disable_login_item", mac.disable), \
             patch.object(controller_deploy, "start_saved_launch_item", mac.start), \
-            patch.object(controller_deploy, "_verify_signed_bundle"), patch.object(controller_deploy, "install_app", install), \
+            patch.object(controller_deploy, "_verify_signed_bundle", side_effect=refuse_installed), patch.object(controller_deploy, "install_app", install), \
             patch.object(controller_deploy, "_copy_app", lambda source, target: shutil.copytree(source, target, symlinks=True)), \
             patch.object(controller_deploy, "_listener_is_closed", return_value=outcome != "listener-stuck"), \
             patch.object(controller_deploy, "require_storage_admission"), patch.object(controller_deploy.time, "sleep"), backup:
         yield mac
 
 
-def _install(mac: Controller) -> None:
+def _install(mac: Controller, **options: bool) -> None:
     controller_deploy.install_release(mac.release, mac.support / "deployments/fixture-stage", mac.home,
                                       evidence={"CFBundleVersion": "2"}, install=mac.install, startup_timeout=0,
-                                      stopped=mac.stopped)
+                                      stopped=mac.stopped, **options)
 
 
-OUTCOMES = ["healthy", "backup-failed", "app-install-failed", "app-folder-locked", "listener-stuck", "unhealthy", "wrong-build", "resume-lost"]
+OUTCOMES = ["healthy", "backup-failed", "app-install-failed", "app-folder-locked", "installed-signature-refused", "listener-stuck", "unhealthy", "wrong-build", "resume-lost"]
 
 
 @pytest.mark.parametrize("controller", [
@@ -138,7 +153,8 @@ def test_install_keeps_old_code_off_a_database_the_release_may_have_migrated(con
     stage = mac.support / "deployments/fixture-stage"
     release_started = mac.outcome in {"healthy", "resume-lost", "unhealthy", "wrong-build"}
     # Only a database no release ever opened, and that a stopped installation has not paused, gets the old service back.
-    restored = mac.outcome in {"backup-failed", "app-install-failed", "app-folder-locked"} and not mac.stopped
+    restored = mac.outcome in {"backup-failed", "app-install-failed", "app-folder-locked", "installed-signature-refused"} \
+        and not mac.stopped
     if mac.outcome == "healthy":
         _install(mac)
     else:
@@ -147,12 +163,17 @@ def test_install_keeps_old_code_off_a_database_the_release_may_have_migrated(con
     assert mac.started == (["release"] if release_started else ["previous"] if restored else [])
     assert mac.running == ("release" if mac.outcome in {"healthy", "resume-lost"} else "previous" if restored else None)
     installed = (mac.install / "Contents/MacOS/Mediaforce").read_bytes()
-    assert installed == b"release app" if release_started else installed in {b"legacy app", b"old app"}
+    replaced = release_started or (mac.stopped and mac.outcome == "installed-signature-refused")
+    assert installed == b"release app" if replaced else installed in {b"legacy app", b"old app"}
     assert (mac.plist.read_bytes() == mac.previous_payload) is not release_started
     assert (stage / "launch-item.before.plist").read_bytes() == mac.previous_payload
     assert (stage / "Mediaforce.app/Contents/MacOS/Mediaforce").read_bytes() in {b"legacy app", b"old app"}
     assert runtime_install.retained_deploy_stage(mac.support) == (stage if mac.outcome in {"healthy", "resume-lost"} else None)
     assert mac.resumed == (1 if mac.outcome in {"healthy", "resume-lost"} else 0)
+    # New work and publication stay held while the release is checked, and until a failed one is reconciled.
+    assert mac.release_held and all(mac.release_held) if release_started else not mac.release_held
+    held = runtime_install.read_update_intent(mac.support)
+    assert (held is not None) is (mac.outcome not in {"healthy", "resume-lost"} and not restored)
     if mac.outcome in {"listener-stuck", "backup-failed"}:
         assert not (stage / "before.sqlite").exists()
         return
@@ -168,7 +189,7 @@ def test_first_install_carries_the_clone_runtime_config_and_credentials(controll
     assert arguments == [str(mac.install / "Contents/MacOS/mediaforce-server"), "--no-reload", "--config", str(mac.config),
                          "--credentials", str(mac.legacy_root / ".env")]
     protected = runtime_install.protected_runtime_roots(mac.support)
-    assert mac.legacy_root.resolve() in protected and mac.config.parent.resolve() in protected
+    assert {mac.legacy_root.resolve(), mac.config.resolve(), (mac.legacy_root / ".env").resolve()} <= set(protected)
     assert mac.resumed == 1
 
 
@@ -181,13 +202,65 @@ def test_install_refuses_a_running_server_on_another_database_before_changing_an
 
 
 @pytest.mark.parametrize("controller", [("bundled", False, "healthy")], indirect=True)
-def test_install_refuses_an_older_release_than_the_installed_build(controller: Controller) -> None:
+@pytest.mark.parametrize("bundle", ["intact", "info-damaged", "missing"])
+def test_install_refuses_an_older_release_than_the_build_the_launch_item_records(controller: Controller, bundle: str) -> None:
     mac = controller
-    shutil.rmtree(mac.install)
-    _app(mac.install, build="3", code=b"old app")
+    mac.plist.write_bytes(plistlib.dumps({**plistlib.loads(mac.previous_payload), "MediaforceAppBuild": "3"}))
+    if bundle == "info-damaged":
+        (mac.install / "Contents/Info.plist").write_text("damaged")
+    if bundle == "missing":
+        shutil.rmtree(mac.install)
     with pytest.raises(RuntimeError, match="older release"):
         _install(mac)
     assert mac.running == "previous" and mac.started == []
+
+
+@pytest.mark.parametrize("controller", [("bundled", True, "healthy")], indirect=True)
+def test_stopped_repair_of_a_damaged_app_needs_no_readable_bundle(controller: Controller) -> None:
+    mac = controller
+    (mac.install / "Contents/Info.plist").write_text("damaged")
+    _install(mac)
+    assert mac.running == "release"
+
+
+@pytest.mark.parametrize("controller", [("bundled", True, "healthy")], indirect=True)
+def test_unknown_installed_build_needs_the_explicit_override(controller: Controller) -> None:
+    mac = controller
+    unrecorded = plistlib.loads(mac.previous_payload)
+    del unrecorded["MediaforceAppBuild"]
+    mac.previous_payload = plistlib.dumps(unrecorded)
+    mac.plist.write_bytes(mac.previous_payload)
+    with pytest.raises(RuntimeError, match="--allow-unknown-build"):
+        _install(mac)
+    assert mac.started == []
+    _install(mac, allow_unknown_build=True)
+    assert mac.running == "release"
+
+
+@pytest.mark.parametrize("controller", [("bundled", False, "healthy")], indirect=True)
+def test_install_rereads_the_saved_service_once_it_holds_the_lock(controller: Controller) -> None:
+    mac = controller
+    newer = {**plistlib.loads(mac.previous_payload), "MediaforceAppBuild": "3"}
+    actual_activity = controller_deploy.runtime_activity
+
+    @contextlib.contextmanager
+    def another_install_finishes_first(support: Path, **options: float) -> Iterator[bool]:
+        mac.plist.write_bytes(plistlib.dumps(newer))
+        with actual_activity(support, **options) as acquired:
+            yield acquired
+
+    with patch.object(controller_deploy, "runtime_activity", another_install_finishes_first), \
+            pytest.raises(RuntimeError, match="older release"):
+        _install(mac)
+    assert mac.started == []
+
+
+@pytest.mark.parametrize("controller", [("bundled", False, "scan-running")], indirect=True)
+def test_install_refuses_while_any_work_runs_before_changing_anything(controller: Controller) -> None:
+    mac = controller
+    with pytest.raises(RuntimeError, match="library checks are running"):
+        _install(mac)
+    assert mac.running == "previous" and mac.started == [] and runtime_install.read_update_intent(mac.support) is None
 
 
 @pytest.mark.parametrize("controller", [("bundled", True, "healthy")], indirect=True)
@@ -195,7 +268,7 @@ def test_install_refuses_while_an_app_update_is_unfinished(controller: Controlle
     mac = controller
     (mac.support / "runtime").mkdir(parents=True)
     (mac.support / "runtime" / runtime_install.UPDATE_INTENT_NAME).write_text(json.dumps({"phase": "prepared"}))
-    with pytest.raises(RuntimeError, match="update is unfinished"):
+    with pytest.raises(RuntimeError, match="update or install is unfinished"):
         _install(mac)
     assert mac.started == []
 

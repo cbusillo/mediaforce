@@ -64,10 +64,34 @@ def support_root(home: Path) -> Path:
 
 
 def require_own_support(app: Path, database: Path, home: Path) -> None:
-    """A proof build never opens or records anything beside the live service's database."""
+    """A proof build never opens or records anything beside the live service's database, wherever its config puts it."""
+    if bundle_service(app)[0] == SERVICE_LABEL:
+        return
     live = home.resolve() / "Library" / "Application Support" / "mediaforce"
-    if bundle_service(app)[0] != SERVICE_LABEL and database.resolve().is_relative_to(live):
+    live_database = saved_service_database(home / "Library" / "LaunchAgents" / f"{SERVICE_LABEL}.plist")
+    database = database.resolve()
+    if database.is_relative_to(live) or (live_database is not None and database.parent == live_database.resolve().parent):
         raise RuntimeProtectionError(f"a proof build must use its own config and database, not {database}")
+
+
+def saved_service_config(item: dict) -> Path | None:
+    arguments = item["ProgramArguments"]
+    if "--config" in arguments:
+        return Path(arguments[arguments.index("--config") + 1])
+    if Path(arguments[0]).name == "mediaforce-server":
+        return None
+    return Path(item["WorkingDirectory"]) / "config/defaults.toml"
+
+
+def saved_service_database(plist: Path) -> Path | None:
+    from mediaforce.core.config import load_config
+
+    if not plist.exists():
+        return None
+    config = saved_service_config(plistlib.loads(plist.read_bytes()))
+    if config is None:
+        raise RuntimeProtectionError(f"the saved service at {plist} names no config")
+    return load_config(config).paths.db_path
 
 
 def protected_runtime_roots(support_dir: Path) -> tuple[Path, ...]:
