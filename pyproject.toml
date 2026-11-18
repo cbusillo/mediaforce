@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mediaforce"
-version = "0.1.0"
+version = "0.4.0"
 description = "Manifest-driven AV1 planning and execution workflow for Mediaforce v2"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -42,10 +42,9 @@ exclude = [
     "/**/*.sqlite3",
 ]
 
-# The notarized app release: project.version is its version. Raise build for every release attempt;
-# Sparkle installs only a higher build. public-key is the Sparkle EdDSA key every release ships.
+# The notarized app release: project.version is its version; the release workflow numbers the build from the live feed.
+# public-key is the Sparkle EdDSA key every release ships.
 [tool.mediaforce.release]
-build = 3
 feed = "https://cbusillo.github.io/mediaforce/appcast.xml"
 public-key = "rzpS2jLP0qsgpgYtvdu/lLrpv6ljcfy5zYhkkJAK5dg="
 

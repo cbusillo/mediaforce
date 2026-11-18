@@ -27,8 +27,10 @@ from mediaforce.ops.runtime_install import SERVICE_LABEL, bundle_service, retain
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASES = "https://github.com/cbusillo/mediaforce/releases/download"
-TAG = re.compile(r"v(?P<version>[^/]+)-(?P<build>\d+)")
-ARCHIVE = re.compile(r"Mediaforce-(?P<version>[^/]+)-(?P<build>\d+)\.zip")
+SEMANTIC_VERSION = r"(?P<version>\d+\.\d+\.\d+)"
+TAG = re.compile(rf"v{SEMANTIC_VERSION}")
+ARCHIVE = re.compile(rf"Mediaforce-{SEMANTIC_VERSION}\.zip")
+LAST_HAND_NUMBERED_BUILD = 3
 DOWNLOAD_TIMEOUT_SECONDS = 300
 # An XML namespace name, never fetched.
 # noinspection HttpUrlsUsage
@@ -37,17 +39,44 @@ ElementTree.register_namespace("sparkle", SPARKLE)
 
 
 def release_identity(pyproject: Path = ROOT / "pyproject.toml") -> dict[str, str]:
-    """The one committed source for a release: package version, app build, feed and public update key."""
+    """The one committed source for a release: package version, feed and public update key."""
     data = tomllib.loads(pyproject.read_text())
     release = data["tool"]["mediaforce"]["release"]
-    version, build = data["project"]["version"], int(release["build"])
-    return {"version": version, "build": str(build), "tag": f"v{version}-{build}", "feed": release["feed"],
+    version = data["project"]["version"]
+    version_order(version)
+    return {"version": version, "tag": f"v{version}", "archive": archive_name(version), "feed": release["feed"],
             "public_key": release["public-key"]}
 
 
-def newest_build(feed: str) -> int | None:
-    builds = [int(element.text or "") for element in ElementTree.fromstring(feed).iter(f"{{{SPARKLE}}}version")]
-    return max(builds, default=None)
+def archive_name(version: str) -> str:
+    return f"Mediaforce-{version}.zip"
+
+
+def version_order(version: str) -> tuple[int, int, int]:
+    if not re.fullmatch(SEMANTIC_VERSION, version):
+        raise ValueError(f"{version!r} is not a MAJOR.MINOR.PATCH version")
+    major, minor, patch = (int(part) for part in version.split("."))
+    return major, minor, patch
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedBuild:
+    build: int
+    version: str
+
+
+def newest_published(feed: str) -> PublishedBuild | None:
+    published = [PublishedBuild(int(item.findtext(f"{{{SPARKLE}}}version") or ""),
+                                item.findtext(f"{{{SPARKLE}}}shortVersionString") or "")
+                 for item in ElementTree.fromstring(feed).iter("item")]
+    return max(published, key=lambda candidate: candidate.build, default=None)
+
+
+def next_build(version: str, previous: str | None) -> int:
+    newest = newest_published(previous) if previous else None
+    if newest is not None and version_order(version) <= version_order(newest.version):
+        raise ValueError(f"version {version} is not higher than the published {newest.version}; raise it in pyproject.toml")
+    return max(newest.build if newest else 0, LAST_HAND_NUMBERED_BUILD) + 1
 
 
 def appcast(app: Path, archive: Path, signature: str, url: str, notes_url: str, previous: str | None,
@@ -55,9 +84,9 @@ def appcast(app: Path, archive: Path, signature: str, url: str, notes_url: str, 
     """The feed offering this one notarized build. Refuses to replace a feed that already offers it or a newer one."""
     info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
     build = int(info["CFBundleVersion"])
-    newest = newest_build(previous) if previous else None
-    if newest is not None and newest >= build:
-        raise ValueError(f"The live feed already offers build {newest}; this release is build {build}")
+    newest = newest_published(previous) if previous else None
+    if newest is not None and newest.build >= build:
+        raise ValueError(f"The live feed already offers build {newest.build}; this release is build {build}")
     rss = ElementTree.Element("rss", {"version": "2.0"})
     channel = ElementTree.SubElement(rss, "channel")
     ElementTree.SubElement(channel, "title").text = "Mediaforce"
@@ -84,7 +113,7 @@ class VerifiedRelease:
 
 def archive_location(release: str) -> str:
     tag = TAG.fullmatch(release)
-    return f"{RELEASES}/{release}/Mediaforce-{tag['version']}-{tag['build']}.zip" if tag else release
+    return f"{RELEASES}/{release}/{archive_name(tag['version'])}" if tag else release
 
 
 def fetch(location: str, folder: Path) -> Path:
@@ -107,15 +136,21 @@ def require_listed_digest(archive: Path, sums: Path) -> str:
     return digest
 
 
-def feed_signature(feed: str, build: str, archive: Path) -> str:
+@dataclass(frozen=True, slots=True)
+class FeedOffer:
+    build: str
+    signature: str
+
+
+def feed_offer(feed: str, archive: Path) -> FeedOffer:
     for item in ElementTree.fromstring(feed).iter("item"):
         enclosure = item.find("enclosure")
-        if item.findtext(f"{{{SPARKLE}}}version") != build or enclosure is None:
+        if enclosure is None or enclosure.get("url", "").rsplit("/", 1)[-1] != archive.name:
             continue
-        if enclosure.get("url", "").rsplit("/", 1)[-1] != archive.name or enclosure.get("length") != str(archive.stat().st_size):
-            raise ValueError(f"the feed's build {build} is not {archive.name}")
-        return enclosure.get(f"{{{SPARKLE}}}edSignature", "")
-    raise ValueError(f"the feed does not offer build {build}; install the release it offers")
+        if enclosure.get("length") != str(archive.stat().st_size):
+            raise ValueError(f"the feed's {archive.name} is not this archive")
+        return FeedOffer(item.findtext(f"{{{SPARKLE}}}version") or "", enclosure.get(f"{{{SPARKLE}}}edSignature", ""))
+    raise ValueError(f"the feed does not offer {archive.name}; install the release it offers")
 
 
 def require_signature(public_key: str, signature: str, archive: Path) -> None:
@@ -143,25 +178,26 @@ def require_identity(app: Path, expected: dict[str, str]) -> None:
 
 
 def verify_release(release: str, folder: Path, *, feed: str, public_key: str, proof: bool,
-                   committed: tuple[str, str] | None = None) -> VerifiedRelease:
+                   committed: str | None = None) -> VerifiedRelease:
     location = archive_location(release)
     named = ARCHIVE.fullmatch(location.rsplit("/", 1)[-1])
     if named is None or not public_key:
         raise ValueError(f"{location} is not a release archive, or no Sparkle public key is configured")
-    if committed is not None and (named["version"], named["build"]) != committed:
-        raise ValueError(f"{location} is not the release this checkout names (version {committed[0]}, build "
-                         f"{committed[1]} in pyproject.toml); check out that release's commit")
+    if committed is not None and named["version"] != committed:
+        raise ValueError(f"{location} is not the release this checkout names (version {committed} in pyproject.toml); "
+                         "check out that release's commit")
     downloads, extracted = folder / "download", folder / "app"
     downloads.mkdir()
     extracted.mkdir()
     archive = fetch(location, downloads)
     digest = require_listed_digest(archive, fetch(location.rsplit("/", 1)[0] + "/SHA256SUMS", downloads))
     feed_text = fetch(feed, downloads).read_text()
-    require_signature(public_key, feed_signature(feed_text, named["build"], archive), archive)
+    offer = feed_offer(feed_text, archive)
+    require_signature(public_key, offer.signature, archive)
     app = notarized_app(archive, extracted)
     if (bundle_service(app)[0] != SERVICE_LABEL) != proof:
         raise ValueError("a proof feed and key are for proof builds only, and a proof build never installs as the live app")
-    identity = {"CFBundleShortVersionString": named["version"], "CFBundleVersion": named["build"], "SUFeedURL": feed,
+    identity = {"CFBundleShortVersionString": named["version"], "CFBundleVersion": offer.build, "SUFeedURL": feed,
                 "SUPublicEDKey": public_key}
     require_identity(app, identity)
     return VerifiedRelease(app, identity, {"release": release, "archive": location, "sha256": digest, **identity})
@@ -182,7 +218,7 @@ def install(args: argparse.Namespace) -> dict[str, object]:
     destination = args.install.expanduser().resolve() if args.install else APPLICATIONS_APP
     with tempfile.TemporaryDirectory(prefix="mediaforce-release-") as scratch:
         release = verify_release(args.release, Path(scratch), feed=feed, public_key=public_key, proof=proof,
-                                 committed=None if proof else (identity["version"], identity["build"]))
+                                 committed=None if proof else identity["version"])
         install_release(release.app, stage, Path.home(), evidence=release.evidence, install=destination,
                         startup_timeout=args.startup_timeout, stopped=args.stopped,
                         allow_unknown_build=args.allow_unknown_build)
@@ -197,8 +233,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("identity", help="print the release identity as name=value lines")
+    numbering = commands.add_parser("next-build", help="print build=N, one above the live feed's newest build")
+    numbering.add_argument("--previous", type=Path, help="the live feed, when one is published")
     installing = commands.add_parser("install", help="install a verified release through the staged controller deploy")
-    installing.add_argument("--release", required=True, help="tag (v<version>-<build>), archive URL or local archive")
+    installing.add_argument("--release", required=True, help="tag (v<version>), archive URL or local archive")
     installing.add_argument("--stage", type=Path, required=True, help="fresh folder under the database's deployments/")
     installing.add_argument("--stopped", action="store_true", help="install while the service is stopped, after verifying idle work records")
     installing.add_argument("--startup-timeout", type=int, default=DEFAULT_STARTUP_TIMEOUT,
@@ -226,6 +264,9 @@ def main() -> int:
         print("\n".join(f"{name}={value}" for name, value in release_identity().items()))
         return 0
     previous = args.previous.read_text() if args.previous else None
+    if args.command == "next-build":
+        print(f"build={next_build(release_identity()['version'], previous)}")
+        return 0
     args.output.write_bytes(appcast(args.app, args.archive, args.signature, args.url, args.notes_url, previous,
                                     datetime.now(UTC)))
     return 0

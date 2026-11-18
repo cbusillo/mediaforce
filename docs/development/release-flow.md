@@ -17,12 +17,13 @@ the app once, and repairs an installed app that cannot update itself.
 Ordinary updates need nothing from it.
 
 Run it from a clean checkout of the release's commit: the script refuses a
-release whose version and build differ from `pyproject.toml`'s, whose feed and
-Sparkle public key it also uses:
+release whose version differs from `pyproject.toml`'s, whose feed and Sparkle
+public key it also uses. The build comes from the feed's item for that
+release:
 
 ```bash
-scripts/deploy-controller.sh --release v<version>-<build> \
-  --stage "$HOME/Library/Application Support/mediaforce/deployments/release-<build>-<date>"
+scripts/deploy-controller.sh --release v<version> \
+  --stage "$HOME/Library/Application Support/mediaforce/deployments/release-<version>-<date>"
 ```
 
 `--release` also takes the archive's URL or a local copy with `SHA256SUMS`
@@ -30,11 +31,12 @@ beside it. The stage is a fresh folder in `deployments/` beside the configured
 database. Before anything on the Mac changes, the script checks, in order:
 
 1. the archive matches its `SHA256SUMS`;
-2. the feed offers this build, and the archive carries the feed's Sparkle
-   signature for `public-key`;
+2. the feed offers this archive, and it carries the feed's Sparkle signature
+   for `public-key`;
 3. the app is signed by the team, its notarization ticket is stapled and
    Gatekeeper accepts it as notarized;
-4. the app is that version and build, with the committed feed and key.
+4. the app is that version, with the feed's build and the committed feed and
+   key.
 
 Then, under the deploy lock (it waits up to ten minutes for a running cleanup,
 which the pause request itself can start), it reads the saved launch item. Its
@@ -182,20 +184,25 @@ the controller: the app there updates itself, and
 [the install script](#installing-a-release-on-the-controller) covers the first
 install and repairs.
 
-`[tool.mediaforce.release]` in `pyproject.toml` is the one source of the
-release identity. `project.version` is the version, `build` is the number
-Sparkle compares, `feed` is the
+`pyproject.toml` is the one source of the release identity. `[project]
+version` is the version every build shows, source builds included, as
+`MAJOR.MINOR.PATCH`. In `[tool.mediaforce.release]`, `feed` is the
 [feed](https://cbusillo.github.io/mediaforce/appcast.xml) and `public-key` is
-the Sparkle key every release ships. The tag is `v<version>-<build>`. Source
-builds keep their own version and never read the feed.
+the Sparkle key every release ships. The tag is `v<version>` and the archive
+`Mediaforce-<version>.zip`.
+
+Sparkle compares the build number (`CFBundleVersion`), not the version. The
+workflow sets it to one above the newest build on the live feed, and never
+lower than 4: Mediaforce 0.1.0 was build 3. Source builds are build 1 and never
+read the feed. A version string such as `0.4.0` as the build would not update
+an app on build 3, since Sparkle reads it as older.
 
 ### Cutting a release
 
 1. Start only from a release request the Director made. A merge never
    releases anything.
-2. Land a pull request through the merge train that raises `build`, and
-   `project.version` when the version changes. Every attempt needs a new
-   build; the workflow refuses a used tag.
+2. Land a pull request through the merge train that raises `[project]
+   version`: the patch number for fixes, the minor number for features.
 3. Wait until that commit is the head of `main` and its CI `acceptance` check
    passed. The workflow refuses a commit without it.
 4. Dispatch the workflow on `main` with the automation identity:
@@ -204,19 +211,20 @@ builds keep their own version and never read the feed.
    gh-with-env-token workflow run release.yml --repo cbusillo/mediaforce --ref main
    ```
 
-5. Watch the run. The `release` job checks the tag is unused, the live feed
-   offers an older build and the Sparkle private key matches `public-key`. It
-   builds the app with `scripts/build-mac-app.sh release`, which runs the
+5. Watch the run. The `release` job checks the tag is unused, the version is
+   higher than the live feed's, numbers the build and checks the Sparkle
+   private key matches `public-key`. It builds the app with `scripts/build-mac-app.sh release`, which runs the
    package verifier on the app. Apple notarizes it, the ticket is stapled and
    Gatekeeper must accept it. The notarized app's server must start and answer
    as its build. Then it signs the zip for Sparkle, uploads a draft release,
    downloads it again to check the bytes and signature, publishes it and
    checks anyone can download it. The `feed` job publishes the feed to Pages
    last and checks it is served.
-6. Report the release page, the build and the served feed to the Director.
+6. Report the release page, the version and the served feed to the Director.
 
-If the `release` job fails before publishing, fix the cause, raise `build` and
-dispatch again; delete a leftover draft after reading what failed. Once the
+If the `release` job fails before publishing, read what failed, delete a
+leftover draft, fix the cause and dispatch again: the version stays and the
+build is numbered again from the unchanged feed. Once the
 release is published, never run that job again. If only the `feed` job failed,
 re-run that job alone: it republishes the same feed without rebuilding.
 Removing a feed item does not downgrade an installed app; a bad release is
