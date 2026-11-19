@@ -20,6 +20,11 @@ enum Words {
         "Mediaforce couldn't finish an update on its own and needs you: \(problem)"
     }
 
+    static func updateKeepsFailing(version: String?, _ problem: String) -> String {
+        let reason = problem.hasSuffix(".") ? String(problem.dropLast()) : problem
+        return "\(version.map { "Mediaforce \($0)" } ?? "An update") couldn't get ready to install: \(reason). It keeps trying."
+    }
+
     static func updateFailedBefore(build: String) -> String {
         "Version \(build) didn't start correctly on this Mac, so Mediaforce went back to the earlier version and waits for a newer one."
     }

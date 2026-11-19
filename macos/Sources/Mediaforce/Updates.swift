@@ -8,9 +8,10 @@ import UserNotifications
 /// Mediaforce updates itself between files, with no click (Director decision,
 /// https://github.com/cbusillo/mediaforce/issues/1314#issuecomment-6841277256). Sparkle checks on its schedule but may
 /// download only a build the bundled server has prepared: at once when nothing runs, otherwise after running files that
-/// finish soon. Nothing waits merely because an update exists. Each launch lets the server start and check the new
-/// build, or go back to the saved one on its own. Sparkle checks hourly; Check for Updates… runs that same background
-/// check now and then says plainly what it found.
+/// finish soon, or after an hour of waiting for that. Nothing else waits because an update exists. Each launch lets the
+/// server start and check the new build, or go back to the saved one on its own. Sparkle checks hourly; Check for
+/// Updates… runs that same background check now and then says plainly what it found. A server step that fails is tried again on a backoff while the app
+/// runs; one that keeps failing for an hour is told once, and Check for Updates… gives the same reason.
 @MainActor
 final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
     static let shared = Updates()
@@ -19,12 +20,24 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
     @Published private(set) var canCheckForUpdates = false
     /// Shows the answer to Check for Updates…; a test reads it instead.
     var showAnswer: @MainActor (String) -> Void = Updates.alert
+    /// Tells the Director in a notification; a test reads it instead.
+    var notify: @MainActor (String) -> Void = Updates.post
+    /// The server's update steps, the wait between tries and the time; a test stands in for each.
+    var runStep: @MainActor ([String]) async -> ServerUpdateStep.Answer = ServerUpdateStep.run
+    var sleep: @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+    var now: @MainActor () -> Date = Date.init
+
+    /// How long a failed step waits before the next try: 1, 2 and 5 minutes, then every 10.
+    static let retryWaits: [Duration] = [.seconds(60), .seconds(120), .seconds(300), .seconds(600)]
+    static let failureIsToldAfter: TimeInterval = 60 * 60
 
     private var controller: SPUStandardUpdaterController?
     private var checker: UpdateChecker?
     private var state = ServerUpdateStep.Answer()
-    private var preparing: Task<Void, Never>?
+    private(set) var preparing: Task<Void, Never>?
     private var asked = false
+    /// Why the waiting update has kept failing to get ready, once that has lasted an hour.
+    private var stuck: String?
     /// What this check found, in the words its answer uses.
     private var found: String?
 
@@ -72,8 +85,8 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
             throw UpdateWait(Words.updateFailedBefore(build: version))
         }
         if let intent = state.intent, intent.to == build, intent.phase == "prepared" { return }
-        if preparing == nil { prepare(build) }
-        found = Words.updateWillInstall(version: version)
+        if preparing == nil { prepare(build, version: version) }
+        found = stuck ?? Words.updateWillInstall(version: version)
         throw UpdateWait(Words.updateWaitingForQuietTime)
     }
 
@@ -120,17 +133,32 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
     }
 
     /// Asks the server each minute whether now is the time; once it has prepared, Sparkle checks again and installs.
-    private func prepare(_ build: String) {
+    /// A failed step is tried again on `retryWaits`; it never cuts off a running file, since the server only drains.
+    private func prepare(_ build: String, version: String? = nil) {
         preparing = Task {
             defer { preparing = nil }
+            var failures = 0
+            var failingSince: Date?
             while !Task.isCancelled {
-                state = await ServerUpdateStep.run(["prepare", "--build", build])
-                guard state.error == nil else { return }
+                state = await runStep(["prepare", "--build", build])
+                if let problem = state.error {
+                    let since = failingSince ?? now()
+                    failingSince = since
+                    if stuck == nil, now().timeIntervalSince(since) >= Self.failureIsToldAfter {
+                        let words = Words.updateKeepsFailing(version: version, problem)
+                        stuck = words
+                        notify(words)
+                    }
+                    failures += 1
+                    try? await sleep(Self.retryWaits[min(failures, Self.retryWaits.count) - 1])
+                    continue
+                }
+                (failures, failingSince, stuck) = (0, nil, nil)
                 if state.intent?.phase == "prepared" {
                     checker?.checkForUpdatesInBackground()
                     return
                 }
-                try? await Task.sleep(for: .seconds(60))
+                try? await sleep(.seconds(60))
             }
         }
     }
@@ -159,7 +187,7 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
         }
     }
 
-    private func notify(_ text: String) {
+    private static func post(_ text: String) {
         guard !BackgroundService.isProof else { return }
         let content = UNMutableNotificationContent()
         content.title = Words.appName
