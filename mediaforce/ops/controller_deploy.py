@@ -285,6 +285,45 @@ def install_release(
             **evidence, "previous_build": saved.build or ("unknown" if saved.bundled else "clone runtime")})
 
 
+# Lists running apps as "pid<TAB>bundle path" lines, or asks the app with one pid to quit as it would from its menu.
+RUNNING_APPS_SCRIPT = """ObjC.import('AppKit');
+function run(argv) {
+  if (argv[0] === 'quit') { $.NSRunningApplication.runningApplicationWithProcessIdentifier(Number(argv[1])).terminate; return ''; }
+  const apps = $.NSWorkspace.sharedWorkspace.runningApplications, lines = [];
+  for (let i = 0; i < apps.count; i++) {
+    const app = apps.objectAtIndex(i);
+    if (!app.bundleURL.isNil()) lines.push(app.processIdentifier + '\\t' + app.bundleURL.path.js);
+  }
+  return lines.join('\\n');
+}"""
+APP_QUIT_SECONDS = 30
+
+
+def relaunch_installed_app(install: Path, runner: CommandRunner | None = None) -> str:
+    """After a release replaced the app, a copy still running from that path quits and opens again from the new
+    bundle, as Sparkle does after an update. It is found by its bundle path, so a proof install only ever restarts the
+    proof's own app. One that does not quit in APP_QUIT_SECONDS is left running and needs a manual restart."""
+    run = runner or _run_command
+    pids = _apps_running_from(install, run)
+    if not pids:
+        return "not running"
+    for pid in pids:
+        run(["/usr/bin/osascript", "-l", "JavaScript", "-e", RUNNING_APPS_SCRIPT, "quit", str(pid)])
+    for _ in range(APP_QUIT_SECONDS):
+        if not _apps_running_from(install, run):
+            _require_success(run(["/usr/bin/open", str(install)]), "open the installed app again")
+            return "relaunched"
+        time.sleep(1)
+    return "needs a manual restart"
+
+
+def _apps_running_from(install: Path, run: CommandRunner) -> list[int]:
+    listed = run(["/usr/bin/osascript", "-l", "JavaScript", "-e", RUNNING_APPS_SCRIPT, "list"])
+    _require_success(listed, "list running apps")
+    rows = (line.split("\t", 1) for line in listed.stdout.splitlines() if "\t" in line)
+    return [int(pid) for pid, path in rows if Path(path).resolve() == install.resolve()]
+
+
 def _running_build(app: Path) -> str | None:
     return (_api(f"http://127.0.0.1:{bundle_service(app)[1]}", "/api/release/work").get("server") or {}).get("build")
 

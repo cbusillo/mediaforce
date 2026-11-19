@@ -683,3 +683,44 @@ def _publishing_in_another_thread(database: Path) -> int:
     worker.start()
     worker.join()
     return result[0]
+
+
+class RunningApps:
+    """The Mac's running apps as the relaunch sees them: who is listed, who was asked to quit, what was opened."""
+
+    def __init__(self, apps: dict[int, Path], *, quits: bool = True) -> None:
+        self.apps, self.quits = apps, quits
+        self.asked: list[int] = []
+        self.opened: list[str] = []
+
+    def run(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        if command[0] == "/usr/bin/open":
+            self.opened.append(command[1])
+        elif command[-2] == "quit":
+            self.asked.append(int(command[-1]))
+            if self.quits:
+                self.apps.pop(int(command[-1]))
+        rows = "\n".join(f"{pid}\t{path}" for pid, path in self.apps.items())
+        return subprocess.CompletedProcess(command, 0, rows, "")
+
+
+def test_release_quits_and_reopens_only_the_app_running_from_the_installed_path(tmp_path: Path) -> None:
+    """Breaks if a release leaves the old app's window over the replaced bundle, or touches another copy."""
+    installed, other = tmp_path / "Applications/Mediaforce.app", tmp_path / "Proof/Mediaforce.app"
+    apps = RunningApps({41: installed, 42: other, 43: tmp_path / "Finder.app"})
+    assert controller_deploy.relaunch_installed_app(installed, apps.run) == "relaunched"
+    assert apps.asked == [41] and apps.opened == [str(installed)] and 42 in apps.apps
+
+
+def test_an_app_that_does_not_quit_is_left_open_and_named(tmp_path: Path) -> None:
+    installed = tmp_path / "Mediaforce.app"
+    apps = RunningApps({41: installed}, quits=False)
+    with patch.object(controller_deploy.time, "sleep"):
+        assert controller_deploy.relaunch_installed_app(installed, apps.run) == "needs a manual restart"
+    assert apps.asked == [41] and apps.opened == [] and 41 in apps.apps
+
+
+def test_no_running_app_is_not_opened(tmp_path: Path) -> None:
+    apps = RunningApps({42: tmp_path / "Other.app"})
+    assert controller_deploy.relaunch_installed_app(tmp_path / "Mediaforce.app", apps.run) == "not running"
+    assert apps.asked == [] and apps.opened == []
