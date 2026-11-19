@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import plistlib
 from datetime import datetime, timedelta, timezone
 import shutil
@@ -132,6 +133,36 @@ def test_long_running_work_is_not_held_and_short_work_drains_before_the_update(u
     server.running["encode"] = 0
     deploy.prepare_update(app_update, "2")
     assert _phase(app_update) == "prepared" and server.launchctl[-1][0] == "disable"
+
+
+def test_an_update_waiting_an_hour_drains_files_that_are_not_finishing_soon(update: Update) -> None:
+    """Breaks if an update can wait forever for every computer to be nearly done at once."""
+    app_update, server = update
+    server.running["encode"] = 1  # no estimate: never finishing soon
+    started = datetime.now(timezone.utc)
+    waiting = app_update.file(deploy.UPDATE_WAITING_NAME)
+    for minutes in (0, 30, 59):
+        with patch.object(deploy, "_utc_now", return_value=started + timedelta(minutes=minutes)):
+            deploy.prepare_update(app_update, "2")
+        assert _phase(app_update) is None and _work(app_update) == (True, False, False)
+    assert datetime.fromisoformat(json.loads(waiting.read_text())["since"]) == started
+    with patch.object(deploy, "_utc_now", return_value=started + timedelta(minutes=61)):
+        deploy.prepare_update(app_update, "2")
+    assert _phase(app_update) == "draining" and _work(app_update) == (True, False, True) and server.launchctl == []
+    assert not waiting.exists()
+    server.running["encode"] = 0
+    deploy.prepare_update(app_update, "2")
+    assert _phase(app_update) == "prepared"
+
+
+def test_a_wait_noted_for_another_update_starts_over(update: Update) -> None:
+    app_update, server = update
+    server.running["encode"] = 1
+    waiting = app_update.file(deploy.UPDATE_WAITING_NAME)
+    waiting.parent.mkdir(parents=True)
+    waiting.write_text(json.dumps({"from": "0", "to": "2", "since": "2026-01-01T00:00:00+00:00"}))
+    deploy.prepare_update(app_update, "2")
+    assert _phase(app_update) is None and json.loads(waiting.read_text())["from"] == "1"
 
 
 def test_publication_holding_its_lock_keeps_the_old_server_running(update: Update) -> None:

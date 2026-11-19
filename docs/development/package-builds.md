@@ -103,7 +103,13 @@ source builds leave both empty. The steps around Sparkle are in
 `mediaforce/ops/controller_deploy.py`, run by the app as
 `mediaforce-server service update reconcile|prepare|cancel|rollback`. Updates
 install automatically between files: at once when nothing runs, otherwise after
-draining files that finish within 15 minutes. While `runtime/update-intent.json`
+draining files that finish within 15 minutes. An update that has waited an hour
+for that starts draining anyway; `runtime/update-waiting.json` notes when it
+began waiting until the intent record takes over. Draining never cuts off a
+running file. A step that fails is tried again after 1, 2 and 5 minutes, then
+every 10, while the app runs; one still failing after an hour is told once in a
+notification, and Check for Updates… gives the same reason until a step
+succeeds. While `runtime/update-intent.json`
 exists beside the database, it holds new work and cleanup; pauses a person set
 are never changed. A failed new build rolls back on its own; a stuck update is
 recovered by running `reconcile` or `rollback` from either the installed app or

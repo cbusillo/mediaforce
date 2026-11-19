@@ -73,8 +73,13 @@ given after confirming the release is not older.
    reason such as an unmounted share (#1340).
 7. The stage becomes the protected rollback, the record is removed and the
    queue resumes.
+8. A Mediaforce app still running from the installed path, found by its
+   bundle path, is asked to quit as from its menu and opens again from the new
+   bundle, as after an update. A proof install restarts only the proof's own
+   app. One that has not quit within 30 seconds is left open.
 
-It prints the installed identity and the saved rollback. Runtime settings, the
+It prints the installed identity, the saved rollback, and under `app` whether
+the app was `relaunched`, was `not running`, or `needs a manual restart`. Runtime settings, the
 work window, queued jobs, originals and rollback copies stay where they are.
 
 A failure before the new server starts, such as a failed backup or app copy,

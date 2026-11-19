@@ -19,7 +19,7 @@ from urllib.request import urlopen
 from xml.etree import ElementTree
 
 from mediaforce.ops.controller_deploy import (
-    APPLICATIONS_APP, DEFAULT_STARTUP_TIMEOUT, usable_app, install_release, saved_app_is_needed,
+    APPLICATIONS_APP, DEFAULT_STARTUP_TIMEOUT, usable_app, install_release, relaunch_installed_app, saved_app_is_needed,
 )
 from mediaforce.ops.login_item import _verify_signed_bundle
 from mediaforce.ops.runtime_install import SERVICE_LABEL, bundle_service, retained_deploy_stage
@@ -226,7 +226,8 @@ def install(args: argparse.Namespace) -> dict[str, object]:
     rollback = retained_rollback(stage)
     if not all(rollback.values()):
         raise RuntimeError(f"the release runs, but its saved rollback is incomplete: {rollback}")
-    return {"installed": str(destination), **release.identity, "rollback": rollback}
+    return {"installed": str(destination), **release.identity, "rollback": rollback,
+            "app": relaunch_installed_app(destination)}
 
 
 def main() -> int:

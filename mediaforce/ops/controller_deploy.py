@@ -41,8 +41,12 @@ UPDATE_FAILED_NAME = "failed-update-builds.json"
 # The update record's phase while a release is installed over the saved service: it holds new work, publication and
 # cleanup until the new server passed its checks, and lets only the release's own server start.
 INSTALLING = "installing"
-# An update drains running files only when every one is expected to finish within this.
+# An update drains running files only when every one is expected to finish within this, or once it has waited
+# DRAIN_CAP_SECONDS for that moment; draining never cuts a running file off.
 DRAIN_START_SECONDS = 15 * 60
+DRAIN_CAP_SECONDS = 60 * 60
+# When an update first waited for that moment, kept beside the intent record until the record takes over.
+UPDATE_WAITING_NAME = "update-waiting.json"
 
 
 def _api(base_url: str, route: str, *, post: bool = False) -> dict:
@@ -281,6 +285,45 @@ def install_release(
             **evidence, "previous_build": saved.build or ("unknown" if saved.bundled else "clone runtime")})
 
 
+# Lists running apps as "pid<TAB>bundle path" lines, or asks the app with one pid to quit as it would from its menu.
+RUNNING_APPS_SCRIPT = """ObjC.import('AppKit');
+function run(argv) {
+  if (argv[0] === 'quit') { $.NSRunningApplication.runningApplicationWithProcessIdentifier(Number(argv[1])).terminate; return ''; }
+  const apps = $.NSWorkspace.sharedWorkspace.runningApplications, lines = [];
+  for (let i = 0; i < apps.count; i++) {
+    const app = apps.objectAtIndex(i);
+    if (!app.bundleURL.isNil()) lines.push(app.processIdentifier + '\\t' + app.bundleURL.path.js);
+  }
+  return lines.join('\\n');
+}"""
+APP_QUIT_SECONDS = 30
+
+
+def relaunch_installed_app(install: Path, runner: CommandRunner | None = None) -> str:
+    """After a release replaced the app, a copy still running from that path quits and opens again from the new
+    bundle, as Sparkle does after an update. It is found by its bundle path, so a proof install only ever restarts the
+    proof's own app. One that does not quit in APP_QUIT_SECONDS is left running and needs a manual restart."""
+    run = runner or _run_command
+    pids = _apps_running_from(install, run)
+    if not pids:
+        return "not running"
+    for pid in pids:
+        run(["/usr/bin/osascript", "-l", "JavaScript", "-e", RUNNING_APPS_SCRIPT, "quit", str(pid)])
+    for _ in range(APP_QUIT_SECONDS):
+        if not _apps_running_from(install, run):
+            _require_success(run(["/usr/bin/open", str(install)]), "open the installed app again")
+            return "relaunched"
+        time.sleep(1)
+    return "needs a manual restart"
+
+
+def _apps_running_from(install: Path, run: CommandRunner) -> list[int]:
+    listed = run(["/usr/bin/osascript", "-l", "JavaScript", "-e", RUNNING_APPS_SCRIPT, "list"])
+    _require_success(listed, "list running apps")
+    rows = (line.split("\t", 1) for line in listed.stdout.splitlines() if "\t" in line)
+    return [int(pid) for pid, path in rows if Path(path).resolve() == install.resolve()]
+
+
 def _running_build(app: Path) -> str | None:
     return (_api(f"http://127.0.0.1:{bundle_service(app)[1]}", "/api/release/work").get("server") or {}).get("build")
 
@@ -476,9 +519,9 @@ def _is_present(path: Path) -> bool:
 
 # The bundled app's update: the same staged transaction, run around Sparkle's automatic installer (Director decision,
 # https://github.com/cbusillo/mediaforce/issues/1314#issuecomment-6841277256). Sparkle may download only a prepared
-# build; Mediaforce prepares at once when nothing runs, or drains files that finish soon. Nothing is held merely because
-# an update exists. The intent record beside the database is the hold while it exists, across quit, replacement and
-# reboot. Phases: draining -> saving -> prepared -> (Sparkle installs) -> starting -> done; a candidate that fails its
+# build; Mediaforce prepares at once when nothing runs, or drains files that finish soon, or that have kept it waiting an
+# hour (https://github.com/cbusillo/mediaforce/issues/1476). The intent record beside the database is the hold while it
+# exists, across quit, replacement and reboot. Phases: draining -> saving -> prepared -> (Sparkle installs) -> starting -> done; a candidate that fails its
 # checks rolls back on its own: failed -> rolling-back -> restoring -> done.
 
 
@@ -543,8 +586,9 @@ def run_update_step(step: str, app: Path, build: str | None) -> int:
 
 def prepare_update(update: AppUpdate, build: str) -> None:
     """Get ready to install `build` when the time is right: at once when nothing runs; otherwise, once every running
-    file is expected to finish within DRAIN_START_SECONDS, stop starting new ones and wait for those. Then save the old
-    app, launch item and database and stop the server. Phase "prepared" lets Sparkle install exactly `build`."""
+    file is expected to finish within DRAIN_START_SECONDS or the update has waited DRAIN_CAP_SECONDS for that, stop
+    starting new ones and wait for those. Then save the old app, launch item and database and stop the server. Phase
+    "prepared" lets Sparkle install exactly `build`."""
     if build in _failed(update):
         raise UpdateRefused(f"build {build} failed before; it is not offered again")
     existing = read_update_intent(update.support)
@@ -557,7 +601,7 @@ def prepare_update(update: AppUpdate, build: str) -> None:
         return
     running = _running_work(update.base_url, update.config.paths.db_path)
     if running:
-        if intent.get("phase") == "draining" or _finishing_soon(update):
+        if intent.get("phase") == "draining" or _finishing_soon(update) or _waited_too_long(update, intent):
             _save_intent(update, {**intent, "phase": "draining", "waiting": running})
         return
     stage = update.support / "deployments" / f"update-{intent['from']}-to-{build}-{_utc_now():%Y%m%dT%H%M%SZ}"
@@ -765,6 +809,22 @@ def _finishing_soon(update: AppUpdate) -> bool:
     return all(finish and datetime.fromisoformat(finish) <= deadline for finish in finishes)
 
 
+def _waited_too_long(update: AppUpdate, intent: dict) -> bool:
+    """Whether this update has waited DRAIN_CAP_SECONDS for a moment when files finish soon. The first wait is noted
+    once and kept across calls and relaunches; a note left by another update starts a new wait."""
+    path = update.file(UPDATE_WAITING_NAME)
+    try:
+        note = json.loads(path.read_text())
+        if (note["from"], note["to"]) != (intent["from"], intent["to"]):
+            raise ValueError("another update")
+        since = datetime.fromisoformat(note["since"])
+    except (OSError, ValueError, KeyError, TypeError):
+        since = _utc_now()
+        _write_runtime(update.support, UPDATE_WAITING_NAME, {"from": intent["from"], "to": intent["to"],
+                                                              "since": since.isoformat()})
+    return _utc_now() - since >= timedelta(seconds=DRAIN_CAP_SECONDS)
+
+
 def _publishing(database: Path) -> int:
     """How many file deliveries, or publishing and cleanup as a whole, are holding their locks right now."""
     held = 0
@@ -785,12 +845,18 @@ def _require_intent(update: AppUpdate) -> dict:
 
 
 def _save_intent(update: AppUpdate, intent: dict) -> None:
+    """The intent record takes over from the waiting note."""
     _write_intent(update.support, intent)
+    update.file(UPDATE_WAITING_NAME).unlink(missing_ok=True)
 
 
 def _write_intent(support: Path, intent: dict) -> None:
+    _write_runtime(support, UPDATE_INTENT_NAME, intent)
+
+
+def _write_runtime(support: Path, name: str, value: dict) -> None:
     (support / "runtime").mkdir(parents=True, exist_ok=True)
-    _atomic_write(support / "runtime" / UPDATE_INTENT_NAME, json.dumps(intent, indent=2).encode())
+    _atomic_write(support / "runtime" / name, json.dumps(value, indent=2).encode())
 
 
 def _failed(update: AppUpdate) -> list[str]:
