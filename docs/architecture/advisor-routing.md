@@ -84,37 +84,6 @@ lower-overhead transport would replace only this adapter; routing policy and
 advisor contracts would not change. See the stock baseline below for why one is
 not currently pursued.
 
-## App-server benchmark
-
-The repository includes a non-production benchmark for evaluating an already
-running Codex app server before requesting another upstream transport:
-
-```bash
-uv run --with websockets python scripts/benchmark_advisor_app_server.py \
-  --case terra-seed-size-first \
-  --output /tmp/mediaforce-advisor-app-server.json
-```
-
-The default run sends the same synthetic seed-policy prompt and strict schema
-through the current `codex exec` adapter and `ws://127.0.0.1:4766`. It uses
-an ephemeral read-only app-server thread, disables turn environments and client
-dynamic tools, rejects approval requests, and records latency, token usage,
-MCP startup status counts, tool attempts, schema/evaluation checks, and durable
-session-artifact deltas. It does not read media or write Mediaforce runtime
-state. Output is written only when `--output` is supplied.
-
-Combined runs execute the app-server candidate before the current `exec`
-baseline. The app-server measurement uses the exact `codexHome` returned by
-`initialize` rather than assuming it matches the benchmark process environment.
-Because both transports may share that home, combined reports intentionally omit
-the later `exec` artifact delta instead of claiming an isolated baseline. Use
-`--transport exec` when an independent `exec` artifact measurement is required.
-
-The WebSocket app-server transport is experimental. A successful benchmark is
-evidence for transport selection, not authorization to replace the production
-adapter. Production adoption still requires deterministic lifecycle and failure
-handling plus proof that agent/tool context overhead is acceptably bounded.
-
 ## Privacy and retention
 
 Before prompt assembly, Mediaforce removes machine-local path fields, relative

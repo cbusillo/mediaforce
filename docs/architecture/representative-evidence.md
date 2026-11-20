@@ -24,7 +24,7 @@ Input order is not a selection signal.
 
 The folder page caches a selection for up to a minute, keyed by database,
 prefix, and config file times, so an eligibility change such as a season hold
-releasing shows up within that minute or when the folder cache is reset.
+releasing shows up within that minute or when the selection cache is reset.
 
 The primary representative is the non-outlier candidate nearest the dominant
 video codec, resolution tier, measured cadence class, audio layout, runtime

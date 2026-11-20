@@ -6,7 +6,6 @@ from datetime import UTC, datetime, timedelta
 import json
 import math
 from pathlib import PurePosixPath
-from statistics import median, quantiles
 from typing import Any, Literal
 
 from sqlalchemy import func, select
@@ -14,7 +13,6 @@ from sqlalchemy import func, select
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
 from mediaforce.core.evidence import stable_json_hash
-from mediaforce.library.media_scopes import MediaScope
 from mediaforce.tuning.compression_intent import LEGACY_COMPRESSION_INTENT_ID
 
 QUALITY_MEMORY_SIGNATURE_VERSION = 2
@@ -34,11 +32,6 @@ _ENCODER_PARAMETER_OPTION = {
     "libsvtav1": "-svtav1-params",
     "libx264": "-x264-params",
     "libx265": "-x265-params",
-}
-_MIN_HINT_SAMPLES: dict[QualityMemoryScope, int] = {
-    "item": 4,
-    "season": 4,
-    "series": 6,
 }
 
 
@@ -132,57 +125,6 @@ class QualitySearchContext:
 
 
 @dataclass(frozen=True, slots=True)
-class QualityMemoryExclusion:
-    reason: str
-    count: int
-
-
-@dataclass(frozen=True, slots=True)
-class QualityMemoryCohort:
-    scope: QualityMemoryScope
-    cohort_id: str
-    evidence_count: int
-    confidence: QualityMemoryConfidence
-    median_crf: float | None
-    minimum_crf: float | None
-    maximum_crf: float | None
-    iqr: float | None
-    median_absolute_deviation: float | None
-    central_crf: float | None
-    reason: str
-
-
-@dataclass(frozen=True, slots=True)
-class QualityMemoryResult:
-    signature_id: str
-    cohorts: tuple[QualityMemoryCohort, ...]
-    selected: QualityMemoryCohort | None
-    global_metric_evidence_count: int
-    exclusions: tuple[QualityMemoryExclusion, ...]
-    reason: str
-
-    @property
-    def scope(self) -> QualityMemoryScope | None:
-        return self.selected.scope if self.selected is not None else None
-
-    @property
-    def confidence(self) -> QualityMemoryConfidence:
-        return self.selected.confidence if self.selected is not None else "none"
-
-    @property
-    def evidence_count(self) -> int:
-        return self.selected.evidence_count if self.selected is not None else 0
-
-    @property
-    def central_crf(self) -> float | None:
-        return self.selected.central_crf if self.selected is not None else None
-
-    @property
-    def dispersion(self) -> float | None:
-        return self.selected.median_absolute_deviation if self.selected is not None else None
-
-
-@dataclass(frozen=True, slots=True)
 class AcceptedQualityOutcome:
     library_item_id: int
     rel_path: str
@@ -208,89 +150,6 @@ class AcceptedQualityOutcome:
     encode_host_key: str | None
     quality_search_run_id: str | None
     target_size_trace: dict[str, Any] | None
-
-
-def load_quality_memory(
-        connection: DBClient,
-        *,
-        exact_scope: MediaScope,
-        season_scope: MediaScope | None,
-        series_scope: MediaScope | None,
-        expected_context: QualitySearchContext,
-        current_source_fingerprint: str | None,
-        as_of: datetime,
-) -> QualityMemoryResult:
-    _validate_scope_chain(exact_scope, season_scope, series_scope)
-    current_time = _as_utc(as_of)
-    observations, exclusion_counts = accepted_quality_outcomes(
-        connection,
-        metric=expected_context.metric,
-        as_of=current_time,
-    )
-
-    global_metric_evidence_count = len(observations)
-    matching_context: list[AcceptedQualityOutcome] = []
-    for observation in observations:
-        if observation.context.signature_id != expected_context.signature_id:
-            exclusion_counts["search_signature_changed"] += 1
-            continue
-        matching_context.append(observation)
-
-    scope_chain: list[tuple[QualityMemoryScope, MediaScope]] = [("item", exact_scope)]
-    if season_scope is not None:
-        scope_chain.append(("season", season_scope))
-    if series_scope is not None:
-        scope_chain.append(("series", series_scope))
-
-    cohorts: list[QualityMemoryCohort] = []
-    normalized_current_fingerprint = _optional_text(current_source_fingerprint)
-    for scope_name, media_scope in scope_chain:
-        scoped_observations = [
-            observation
-            for observation in matching_context
-            if media_scope.includes(observation.rel_path)
-        ]
-        if scope_name == "item":
-            matching_fingerprints: list[AcceptedQualityOutcome] = []
-            for observation in scoped_observations:
-                if normalized_current_fingerprint is None:
-                    exclusion_counts["source_fingerprint_unavailable"] += 1
-                elif observation.source_fingerprint is None:
-                    exclusion_counts["historical_source_fingerprint_missing"] += 1
-                elif observation.source_fingerprint != normalized_current_fingerprint:
-                    exclusion_counts["source_fingerprint_changed"] += 1
-                else:
-                    matching_fingerprints.append(observation)
-            scoped_observations = matching_fingerprints
-        cohorts.append(
-            _summarize_cohort(
-                scope=scope_name,
-                scope_prefix=media_scope.prefix,
-                signature_id=expected_context.signature_id,
-                observations=scoped_observations,
-            )
-        )
-
-    selected = next((cohort for cohort in cohorts if cohort.central_crf is not None), None)
-    reason = _result_reason(
-        selected=selected,
-        cohorts=cohorts,
-        metric=expected_context.metric,
-        global_metric_evidence_count=global_metric_evidence_count,
-    )
-    exclusions = tuple(
-        QualityMemoryExclusion(reason=reason_code, count=count)
-        for reason_code, count in sorted(exclusion_counts.items())
-        if count > 0
-    )
-    return QualityMemoryResult(
-        signature_id=expected_context.signature_id,
-        cohorts=tuple(cohorts),
-        selected=selected,
-        global_metric_evidence_count=global_metric_evidence_count,
-        exclusions=exclusions,
-        reason=reason,
-    )
 
 
 def accepted_quality_outcomes(
@@ -592,134 +451,6 @@ def _search_objective(
         source_duration_seconds=duration_seconds,
     )
     return "target_size", minimum_quality_score, size_target_bytes, target_video_bitrate
-
-
-def _summarize_cohort(
-        *,
-        scope: QualityMemoryScope,
-        scope_prefix: str,
-        signature_id: str,
-        observations: list[AcceptedQualityOutcome],
-) -> QualityMemoryCohort:
-    crfs = sorted(observation.chosen_crf for observation in observations)
-    evidence_count = len(crfs)
-    cohort_id = f"qmc1_{stable_json_hash({
-        'schema_version': QUALITY_MEMORY_SIGNATURE_VERSION,
-        'scope': scope,
-        'scope_prefix': scope_prefix,
-        'signature_id': signature_id,
-    })[:32]}"
-    if not crfs:
-        return QualityMemoryCohort(
-            scope=scope,
-            cohort_id=cohort_id,
-            evidence_count=0,
-            confidence="none",
-            median_crf=None,
-            minimum_crf=None,
-            maximum_crf=None,
-            iqr=None,
-            median_absolute_deviation=None,
-            central_crf=None,
-            reason=f"No accepted {scope} outcomes matched the current quality-search signature.",
-        )
-
-    median_crf = float(median(crfs))
-    absolute_deviations = [abs(value - median_crf) for value in crfs]
-    median_absolute_deviation = float(median(absolute_deviations))
-    iqr = None
-    if evidence_count >= 4:
-        first_quartile, _, third_quartile = quantiles(crfs, n=4, method="inclusive")
-        iqr = float(third_quartile - first_quartile)
-    confidence = _confidence(scope, evidence_count)
-    minimum_samples = _MIN_HINT_SAMPLES[scope]
-    central_crf = None
-    if evidence_count < minimum_samples:
-        reason = (
-            f"{scope.title()} evidence has {evidence_count} matching accepted outcome(s); "
-            f"at least {minimum_samples} are required for a CRF hint."
-        )
-    else:
-        assert iqr is not None
-    if evidence_count >= minimum_samples and (
-            iqr > MAX_HINT_IQR or median_absolute_deviation > MAX_HINT_MAD
-    ):
-        reason = (
-            f"{scope.title()} evidence is too dispersed for a CRF hint "
-            f"(IQR {iqr:.2f}, MAD {median_absolute_deviation:.2f})."
-        )
-    elif evidence_count >= minimum_samples:
-        central_crf = median_crf
-        reason = (
-            f"{scope.title()} hint uses median CRF {median_crf:.2f} from {evidence_count} "
-            f"matching accepted outcomes ({confidence} confidence, IQR {iqr:.2f}, "
-            f"MAD {median_absolute_deviation:.2f})."
-        )
-
-    return QualityMemoryCohort(
-        scope=scope,
-        cohort_id=cohort_id,
-        evidence_count=evidence_count,
-        confidence=confidence,
-        median_crf=median_crf,
-        minimum_crf=min(crfs),
-        maximum_crf=max(crfs),
-        iqr=iqr,
-        median_absolute_deviation=median_absolute_deviation,
-        central_crf=central_crf,
-        reason=reason,
-    )
-
-
-def _confidence(scope: QualityMemoryScope, evidence_count: int) -> QualityMemoryConfidence:
-    if evidence_count <= 0:
-        return "none"
-    if evidence_count < 4:
-        return "limited"
-    if evidence_count < 10 or scope == "series":
-        return "moderate"
-    return "high"
-
-
-def _result_reason(
-        *,
-        selected: QualityMemoryCohort | None,
-        cohorts: list[QualityMemoryCohort],
-        metric: str,
-        global_metric_evidence_count: int,
-) -> str:
-    if selected is not None:
-        return selected.reason
-    local_evidence = next((cohort for cohort in cohorts if cohort.evidence_count > 0), None)
-    if local_evidence is not None:
-        return f"No local cohort met the sample and dispersion rules. {local_evidence.reason}"
-    if global_metric_evidence_count > 0:
-        return (
-            f"{global_metric_evidence_count} accepted {metric} outcome(s) exist, but global evidence is "
-            "metrics-only and cannot guide CRF."
-        )
-    return f"No accepted {metric} outcomes are available for quality-memory analysis."
-
-
-def _validate_scope_chain(
-        exact_scope: MediaScope,
-        season_scope: MediaScope | None,
-        series_scope: MediaScope | None,
-) -> None:
-    if exact_scope.match != "exact_item":
-        raise ValueError("Quality memory requires an exact-item scope")
-    if season_scope is not None:
-        if season_scope.kind != "tv_season" or season_scope.match != "descendants":
-            raise ValueError("Quality-memory season scope must be a TV season descendant scope")
-        if not season_scope.includes(exact_scope.prefix):
-            raise ValueError("Quality-memory season scope does not contain the exact item")
-    if series_scope is not None:
-        if series_scope.kind != "tv_series" or series_scope.match != "descendants":
-            raise ValueError("Quality-memory series scope must be a TV series descendant scope")
-        if not series_scope.includes(exact_scope.prefix):
-            raise ValueError("Quality-memory series scope does not contain the exact item")
-        if season_scope is not None and not series_scope.includes(season_scope.prefix):
-            raise ValueError("Quality-memory series scope does not contain the season scope")
 
 
 def _command_option(command: list[str], *names: str) -> str:
