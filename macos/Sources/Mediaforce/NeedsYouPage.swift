@@ -82,6 +82,15 @@ struct NeedsYouPage: View {
         case .originals(let preview): originalPreview = preview
         case .file(.releaseHold, let prefix, let file): releasing = HeldFile(item: item.id, prefix: prefix, file: file)
         case .file(let action, let prefix, let file): answerFile(action, prefix, file, item: item.id)
+        case .motion(let files, let compress):
+            act(item.id) {
+                let result = try await $0.answerMotion(files, compress: compress)
+                return result.ok ? nil : ActionNotice(title: Words.motionQuestion, message: result.message ?? ActionNotice.unanswered.message)
+            }
+        case .genreSound(let enabled):
+            act(item.id) {
+                try await $0.decideGenreSound(enabled) ? nil : .unanswered
+            }
         case .useSettings(let kind, let from):
             act(item.id) {
                 let result = try await $0.approveKind(kind, from: from)
@@ -156,6 +165,8 @@ struct NeedsYouAsk: Identifiable {
 struct NeedsYouAnswer {
     enum Action {
         case open(Place)
+        case motion(ItemFacts, compress: Bool)
+        case genreSound(Bool)
         case useSettings(kind: String, from: String)
         case makeSample(prefix: String)
         case file(ItemAction, prefix: String, file: ItemFacts.File)
@@ -209,6 +220,13 @@ extension NeedsYouItem {
                                 asks: [NeedsYouAsk(line: Words.originalsAsk(preview),
                                                    answers: [NeedsYouAnswer(title: Words.reviewFileList, action: .originals(preview))])],
                                 stopsWork: true)
+        }
+        if notice.id == Attention.genreSoundID {
+            return NeedsYouItem(id: notice.id, title: notice.title, picture: .symbol("waveform"),
+                                asks: [NeedsYouAsk(line: notice.body, answers: [
+                                    NeedsYouAnswer(title: "Yes", action: .genreSound(true)),
+                                    NeedsYouAnswer(title: "No", action: .genreSound(false)),
+                                ])])
         }
         if notice.id == Attention.backupsNoticeID {
             let backups = facts.originalBackups
@@ -284,10 +302,17 @@ extension NeedsYouItem {
 
     private static func seasonItem(_ notice: AttentionNotice, _ season: TVShowsFacts.Season, files: ItemFacts?) -> NeedsYouItem {
         let waiting = files?.waiting ?? []
-        let asks = waiting.isEmpty
-            ? [NeedsYouAsk(line: Words.sampleFailure(season.failure) ?? Words.tvSeasonState(season),
+        var asks = waiting.map { fileAsk($0, season: season.prefix) }
+        if let files, files.motionFiles.contains(where: \.needsMotionChoice) {
+            asks.insert(NeedsYouAsk(line: files.motionQuestion, answers: [
+                NeedsYouAnswer(title: Words.compressAsIs, action: .motion(files, compress: true)),
+                NeedsYouAnswer(title: Words.keepTheOriginal, action: .motion(files, compress: false)),
+            ]), at: 0)
+        }
+        if asks.isEmpty {
+            asks = [NeedsYouAsk(line: Words.sampleFailure(season.failure) ?? Words.tvSeasonState(season),
                            answers: [NeedsYouAnswer(title: Words.showSeason, action: .open(.item(season.prefix)))])]
-            : waiting.map { fileAsk($0, season: season.prefix) }
+        }
         return NeedsYouItem(id: notice.id, title: season.showName, context: Words.seasonName(season),
                             bytes: waiting.isEmpty ? season.bytes : waiting.reduce(0) { $0 + ($1.originalBytes ?? $1.bytes) },
                             picture: .posters([MediaPoster.titlePrefix(season.prefix)]), asks: asks, opens: .item(season.prefix))

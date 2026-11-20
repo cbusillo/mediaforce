@@ -39,11 +39,11 @@ def register_folder_routes(
     *,
     save_series_lifecycle_action: Callable[[str, str], dict[str, Any]],
     save_audio_preset_action: Callable[[str, str], dict[str, Any]],
-    dismiss_audio_preset_suggestion_action: Callable[[str], dict[str, Any]],
+    decide_genre_sound: Callable[[bool], dict[str, Any]],
     queue_folder_encode_action: Callable[[str, str, bool, bool, str, bool], dict[str, Any]],
     validate_folder_outputs_action: Callable[[str, str], dict[str, Any]],
     promote_folder_outputs_action: Callable[[str, str], dict[str, Any]],
-    accept_ambiguous_motion_action: Callable[[str], dict[str, Any]] | None = None,
+    accept_ambiguous_motion_action: Callable[[str, list[int] | None, bool], dict[str, Any]] | None = None,
     keep_motion_held_originals_action: Callable[[str, list[int]], dict[str, Any]] | None = None,
     undo_motion_keep_action: Callable[[str, list[int]], dict[str, Any]] | None = None,
     put_original_back_action: Callable[[str, int, Callable[[], None]], dict[str, Any]] | None = None,
@@ -69,9 +69,12 @@ def register_folder_routes(
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
-    @app.post("/api/folders/{prefix:path}/audio-preset-suggestion/dismiss")
-    async def api_folder_audio_preset_suggestion_dismiss(prefix: str) -> JSONResponse:
-        result = await run_in_threadpool(dismiss_audio_preset_suggestion_action, prefix.strip("/"))
+    @app.post("/api/app/sound/reality-and-talk")
+    async def api_decide_genre_sound(request: Request) -> JSONResponse:
+        enabled = (await request_body(request)).get("enabled")
+        if not isinstance(enabled, bool):
+            raise HTTPException(status_code=400, detail="Choose Yes or No.")
+        result = await run_in_threadpool(decide_genre_sound, enabled)
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/queue-encode")
@@ -93,7 +96,14 @@ def register_folder_routes(
 
         @app.post("/api/folders/{prefix:path}/accept-ambiguous-motion")
         async def api_folder_accept_ambiguous_motion(prefix: str) -> JSONResponse:
-            result = await run_in_threadpool(accept_ambiguous_motion, prefix.strip("/"))
+            result = await run_in_threadpool(accept_ambiguous_motion, prefix.strip("/"), None, False)
+            return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+        @app.post("/api/folders/{prefix:path}/compress-as-is")
+        async def api_folder_compress_as_is(prefix: str, request: Request) -> JSONResponse:
+            body = await request_body(request)
+            result = await run_in_threadpool(accept_ambiguous_motion, prefix.strip("/"), _request_item_ids(body),
+                                             _request_flag(body, "reconsider_kept"))
             return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     if keep_motion_held_originals_action is not None:

@@ -1,18 +1,18 @@
-"""Named sound choices an owner picks per show, or as a TV library default.
-
-A preset only ever changes the audio policy of the shows it is chosen for.
-Genre or names never apply one; they can at most suggest one for the owner
-to confirm.
-"""
-
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
+
+from mediaforce.core.db import read_catalog_value
+from mediaforce.core.db_tables import series_metadata
 from mediaforce.core.type_defs import object_list
 
+SPEECH_GENRE_SETTING = "speech_heavy_for_reality_and_talk"
 KEEP_SURROUND = "keep_surround"
 SPEECH_STEREO = "speech_stereo"
 # Keys a preset writes. Choosing another preset rewrites or removes all of them.
@@ -42,6 +42,15 @@ AUDIO_PRESETS: dict[str, AudioPreset] = {
         summary="Stereo at 96 kbps. Also re-encodes AAC sound to save space.",
     ),
 }
+
+
+
+def is_reality_or_talk(db_path: Path, show_prefix: str) -> bool:
+    genres = read_catalog_value(db_path, select(series_metadata.c.tmdb_genres_json).where(series_metadata.c.series_prefix == show_prefix))
+    try:
+        return any(genre in ("Reality", "Talk") for genre in object_list(json.loads(genres or "[]")))
+    except json.JSONDecodeError:
+        return False
 
 
 def audio_preset_values(key: str, base_audio: Mapping[str, Any]) -> tuple[dict[str, Any], tuple[str, ...]]:

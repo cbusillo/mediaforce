@@ -1292,6 +1292,7 @@ extension Words {
         if facts.compressedCount > 0 { parts.append("\(count(facts.compressedCount, noun)) compressed") }
         if facts.keptCount > 0 { parts.append("\(facts.keptCount) kept original") }
         if !facts.waiting.isEmpty { parts.append("\(facts.waiting.count) waiting for you") }
+        if !facts.motionFiles.isEmpty { parts.append("\(facts.motionFiles.count) held for motion") }
         if parts.isEmpty { return "Nothing compressed yet." }
         return parts.joined(separator: ", ") + "."
     }
@@ -1306,7 +1307,7 @@ extension Words {
         switch file.stage {
         case "needs_you": file.sizeQuestion != nil ? "Needs more than its size goal" : waitLabel(file.waitReason?.code ?? file.validation)
         case "kept_original": "\(keptOriginal): \(keptReason("motion_\(file.keptReason ?? "")"))"
-        case "held": file.heldReason == "motion_pattern" ? "Kept original: Mediaforce can't convert its motion safely" : "Waiting to start"
+        case "held": file.needsMotionChoice ? motionQuestion : file.heldReason == "motion_pattern" ? unsafeMotion : "Waiting to start"
         case "compressing": file.percentComplete.map { "Compressing, \($0)%" } ?? "Compressing"
         case "measuring": "Finding the right size"
         case "getting_ready": "Getting ready"
@@ -1423,6 +1424,10 @@ extension Words {
         }
     }
 
+    static let compressAsIs = "Compress it as it is"
+    static let motionQuestion = "Its motion pattern is unclear."
+    static let unsafeMotion = "Held because its motion can’t be compressed safely as it is."
+    static let genreSoundQuestion = "Use Speech-heavy for reality and talk shows?"
     static let keepTheOriginal = "Keep the original"
 
     static func allowLarger(_ question: ItemFacts.SizeQuestion) -> String {
@@ -1440,6 +1445,7 @@ extension Words {
         case .putOriginalBack: "The original was not put back"
         case .allowLarger: "The larger size was not allowed"
         case .keepOriginal: "Not kept original"
+        case .compressAsIs: "Compression didn’t start"
         case .releaseHold: "Not tried again"
         }
     }
@@ -1550,14 +1556,13 @@ extension Words {
         case .reviewFiles: "Review Files"
         case .replaceOriginals: "Replace Originals…"
         case .retryUnfinished: "Retry Unfinished Episodes"
-        case .decideMotion: "Keep These Originals…"
+        case .decideMotion: "Review Motion"
         }
     }
 
     static func workQuestion(_ action: WorkAction) -> String {
         switch action {
         case .replaceOriginals: "Replace the originals with the checked copies?"
-        case .keepMotionOriginals: "Keep these files original?"
         default: ""
         }
     }
@@ -1565,7 +1570,6 @@ extension Words {
     static func workButton(_ action: WorkAction) -> String {
         switch action {
         case .replaceOriginals: "Replace Originals"
-        case .keepMotionOriginals: "Keep Original"
         default: ""
         }
     }
@@ -1574,8 +1578,6 @@ extension Words {
         switch action {
         case .replaceOriginals:
             "Each checked copy takes its original's place in the library. The originals become backups you can put back until you delete them."
-        case .keepMotionOriginals:
-            "Mediaforce can't convert their motion pattern safely, so they stay as they are. You can undo this later."
         default: ""
         }
     }
@@ -1586,7 +1588,6 @@ extension Words {
         case .checkFiles: "Nothing was checked"
         case .replaceOriginals: "No originals were replaced"
         case .retryUnfinished: "Nothing was retried"
-        case .keepMotionOriginals: "Nothing was kept original"
         }
     }
 }

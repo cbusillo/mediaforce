@@ -13,13 +13,13 @@ from typing import Any
 from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import DBClient, open_readonly_db
+from mediaforce.core.db import open_readonly_db
 from mediaforce.core.db_tables import library_items, motion_keep_decisions, staged_artifacts
 from mediaforce.core.type_defs import int_value
 from mediaforce.library.candidate_selection import encode_candidate_decisions, scope_lifecycle_payload_from_decisions, \
     workflow_eligibility
 from mediaforce.library.media_scopes import MediaScope, resolve_media_scope
-from mediaforce.library.motion_holds import queue_motion_holds
+from mediaforce.library.motion_holds import compressible_motion_files, queue_motion_holds
 from mediaforce.library.motion_keep_state import library_item_source_sql
 from mediaforce.library.staged_validation import staged_validation_outcome
 from mediaforce.library.workflow_state import build_folder_workflow_state
@@ -35,7 +35,7 @@ def item_payload(
         config: MediaforceConfig,
         prefix: str,
         *,
-        sound: Callable[[DBClient, str], dict[str, Any] | None],
+        sound: Callable[[str], dict[str, Any] | None],
 ) -> dict[str, Any] | None:
     """Everything the item page shows for this prefix, or None when it names nothing in the library."""
     with open_readonly_db(config.paths.db_path) as connection:
@@ -82,9 +82,10 @@ def item_payload(
                 .where(library_items.c.id.in_(ids), motion_keep_decisions.c.source_fingerprint == library_item_source_sql())
             )
         }
+        motion_choices = motion_holds.as_is | compressible_motion_files(connection, list(kept)).keys()
         removed = confirmed_originals_removed_item_ids(connection)
         lifecycle = scope_lifecycle_payload_from_decisions(scope.prefix, decisions, motion_holds)
-        sound_facts = sound(connection, scope.prefix) if scope.domain == "tv" else None
+        sound_facts = sound(scope.prefix) if scope.domain == "tv" else None
     files = []
     for item in items:
         episode = episodes.get(item.rel_path) or {}
@@ -103,6 +104,7 @@ def item_payload(
             "wait_reason": episode.get("wait_reason"),
             "additional_wait_reasons": episode.get("additional_wait_reasons", []),
             "kept_reason": kept.get(item.item_id),
+            "can_compress_as_is": item.item_id in motion_choices,
             "held_reason": "motion_pattern" if item.motion_held else None,
             "percent_complete": episode.get("percent_complete"),
             "size_question": episode.get("size_question"),

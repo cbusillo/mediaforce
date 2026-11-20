@@ -19,9 +19,10 @@ final class NeedsYouTests: XCTestCase {
 
     /// The shared main-window facts (a sample to make again, a computer needing its password, 46 backups), with two groups
     /// of shows and a season whose files need the Director added.
-    private func facts() throws -> MainWindowFacts {
+    private func facts(askGenreSound: Bool = false) throws -> MainWindowFacts {
         var value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(MainWindowTests.facts.utf8)) as? [String: Any])
         var work = try XCTUnwrap(value["work"] as? [String: Any])
+        work["needs_genre_sound_decision"] = askGenreSound
         work["kinds_needing_you"] = [
             ["kind": "live_action", "sample_season": NSNull(), "sample_status": "not_started", "sample_ready": false,
              "one_time": false, "settings_available": true],
@@ -54,6 +55,30 @@ final class NeedsYouTests: XCTestCase {
         ask.answers.compactMap { answer in
             if case .file(let action, _, _) = answer.action { action } else { nil }
         }
+    }
+
+    func testMotionQuestionOffersBothAnswersAndKeepsSettledFilesOutOfTheGroup() throws {
+        let season = "tv/Suits/Season 6"
+        let rows: [[String: Any]] = [(1, true, false), (2, false, false), (3, true, true)].map { id, safe, kept in
+            ["library_item_id": id, "rel_path": "\(season)/\(id).mkv", "name": "\(id).mkv", "stage": kept ? "kept_original" : "held",
+             "bytes": 100, "original_backup": false, "can_compress_as_is": safe,
+             "held_reason": kept ? NSNull() as Any : "motion_pattern", "kept_reason": kept ? "unclear" as Any : NSNull()]
+        }
+        let data = try JSONSerialization.data(withJSONObject: ["prefix": season, "domain": "tv", "kind": "tv_season",
+                                                               "title": "Season 6", "files": rows])
+        let item = try JSONDecoder.mediaforce.decode(ItemFacts.self, from: data)
+        let answers = NeedsYouItem.items(try facts(), kinds: nil, files: [season: item]).flatMap(\.asks).flatMap(\.answers)
+        XCTAssertEqual(answers.compactMap { if case .motion(_, let compress) = $0.action { compress } else { nil } }, [true, false])
+        XCTAssertEqual(item.motionFiles.filter(\.needsMotionChoice).map(\.id), [1])
+        XCTAssertEqual(item.motionFiles.map(\.id), [1, 2])
+    }
+
+    func testTheOneTimeSoundQuestionCountsOnceAndOffersBothAnswers() throws {
+        let before = try facts(askGenreSound: true)
+        let after = try facts()
+        XCTAssertEqual(Attention.waitingOnYou(before), Attention.waitingOnYou(after) + 1)
+        let answers = NeedsYouItem.items(before, kinds: nil).flatMap(\.asks).flatMap(\.answers)
+        XCTAssertEqual(answers.compactMap { if case .genreSound(let enabled) = $0.action { enabled } else { nil } }, [true, false])
     }
 
     func testThePageDrawsWhatTheBadgeCountsWithWhatStopsWorkFirstThenTheMostSpace() throws {
