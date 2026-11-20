@@ -338,7 +338,7 @@ def _active_encode_outputs(
     active_paths: set[str] = set()
     for row in connection.execute(query).mappings().all():
         try:
-            manifest = json.loads(Path(row["manifest_path"]).read_text())
+            manifest = json.loads(Path(row["manifest_path"]).read_text(encoding="utf-8"))
             indexes = json.loads(row["manifest_indexes_json"] or "null")
             items = object_list(manifest.get("items"))
             if not items:
@@ -557,7 +557,7 @@ def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig
             continue
         selected_items: list[Any] = []
         try:
-            items = object_list(json.loads(Path(job["manifest_path"]).read_text()).get("items"))
+            items = object_list(json.loads(Path(job["manifest_path"]).read_text(encoding="utf-8")).get("items"))
             indexes = encode_run_manifest_indexes(job, len(items), strict_indexes=True)
             selected_items = [items[index] for index in indexes]
             receipt = _remote_cleanup_receipt(config, job, [object_dict(item) for item in selected_items])
@@ -1252,7 +1252,7 @@ def _process_is_running(process_id: int, *, started_before: datetime | None = No
     if started_before is not None:
         try:
             result = subprocess.run(
-                ["ps", "-p", str(process_id), "-o", "lstart="], capture_output=True, text=True, timeout=2,
+                ["ps", "-p", str(process_id), "-o", "lstart="], capture_output=True, encoding="utf-8", timeout=2,
                 env={"PATH": os.defpath, "LC_ALL": "C", "TZ": "UTC"},
             )
             if result.returncode == 0:
@@ -2171,7 +2171,7 @@ def _transition_encode_job_schedule_close(
 def encode_job_outputs_completed(connection: DBClient, job: dict[str, Any]) -> bool:
     manifest_path = Path(str(job.get("manifest_path") or "").strip())
     try:
-        manifest = json.loads(manifest_path.read_text())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
     manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
@@ -2604,7 +2604,7 @@ def _encode_failure_analysis(
     if not manifest_path.exists():
         return None
     try:
-        manifest = json.loads(manifest_path.read_text())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
@@ -2866,7 +2866,7 @@ def _apply_auto_quality_policy_retry(job: dict[str, Any], analysis: dict[str, An
         return False
     with _locked_manifest_file(manifest_path):
         try:
-            manifest = json.loads(manifest_path.read_text())
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return False
         manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
@@ -2977,7 +2977,7 @@ def apply_quality_floor_size_exception(
     )
     with _locked_manifest_file(manifest_path):
         try:
-            manifest = json.loads(manifest_path.read_text())
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return False
         manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
@@ -3197,7 +3197,7 @@ def _quality_policy_retry_caps_by_index(
 def restore_manifest_item(manifest_path: Path, index: int, item: dict[str, Any]) -> None:
     """Put one manifest item back as it was, leaving every sibling's later updates in place."""
     with _locked_manifest_file(manifest_path):
-        manifest = json.loads(manifest_path.read_text())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["items"][index] = item
         _write_manifest(manifest_path, manifest)
 
@@ -4051,7 +4051,7 @@ def _cached_encode_estimate_manifest_items(
         _mtime_ns: int,
         _size_bytes: int,
 ) -> tuple[dict[str, Any], ...]:
-    manifest = json.loads(Path(manifest_path).read_text())
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     return tuple(object_dict(item) for item in object_list(manifest.get("items")))
 
 
@@ -4906,7 +4906,7 @@ def run_encode_job(
             sync_encode_job_parent(connection, job, deps)
             return
         manifest_path = Path(job["manifest_path"])
-        manifest = json.loads(manifest_path.read_text())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
         indexes = _manifest_indexes_for_job(job, manifest_items)
         # Re-read under the lock: a lease renewed while the manifest was read must not be put back.
@@ -5499,7 +5499,7 @@ def _cleanup_encode_retry_artifacts_locked(
                 detail="The queue attempt changed; refresh the file before retrying.",
             )
     try:
-        manifest = json.loads(manifest_path.read_text())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE)
     active = _active_encode_outputs(connection, config, exclude_job_id=(

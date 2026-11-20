@@ -38,7 +38,7 @@ class GroupCustodyError(RuntimeError):
 
 def group_members(pgid: int) -> set[int]:
     output = subprocess.check_output(
-        ["ps", "-A", "-o", "pid=,pgid="], text=True, timeout=2,
+        ["ps", "-A", "-o", "pid=,pgid="], encoding="utf-8", timeout=2,
     )
     return {int(pid) for pid, group in (line.split() for line in output.splitlines())
             if int(group) == pgid}
@@ -196,7 +196,7 @@ def serve(component: str, command: list[str], cwd: Path, host: str, port: int) -
     # PID before group completion. Both launcher and watchdog retain exit status.
     signal.signal(signal.SIGCHLD, signal.SIG_DFL)
     socket_name = component + ".sock"
-    with open(component + ".lock", "a") as lock, socket.socket(socket.AF_UNIX) as server:
+    with open(component + ".lock", "a", encoding="utf-8") as lock, socket.socket(socket.AF_UNIX) as server:
         lock_deadline = time.monotonic() + LOCK_SECONDS
         while True:
             try:
@@ -311,7 +311,7 @@ def request(component: str, action: str) -> Status:
             try:
                 client.connect(component + ".sock")
             except (FileNotFoundError, ConnectionRefusedError):
-                with open(component + ".lock", "a") as lock:
+                with open(component + ".lock", "a", encoding="utf-8") as lock:
                     try:
                         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     except BlockingIOError:

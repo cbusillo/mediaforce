@@ -13,6 +13,6 @@ ManifestReader: TypeAlias = Callable[[Path], dict[str, Any] | None]
 def read_manifest(path: Path) -> dict[str, Any] | None:
     """Return None for an unreadable record, distinct from a readable empty object."""
     try:
-        return object_dict(json.loads(path.read_text()))
+        return object_dict(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError):
         return None

@@ -403,7 +403,7 @@ def _require_success(result: subprocess.CompletedProcess[str], action: str) -> N
 
 
 def _run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, capture_output=True, text=True, check=False)
+    return subprocess.run(command, capture_output=True, encoding="utf-8", check=False)
 
 
 def _command_detail(result: subprocess.CompletedProcess[str]) -> str:

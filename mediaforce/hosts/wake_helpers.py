@@ -35,7 +35,7 @@ def _local_broadcast_addresses(host: dict[str, Any]) -> list[str]:
             if routed_interface:
                 addresses.extend(_broadcast_addresses_for_interface(routed_interface))
     try:
-        result = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(["ifconfig"], capture_output=True, encoding="utf-8", timeout=5)
     except (OSError, subprocess.SubprocessError):
         return list(dict.fromkeys(addresses))
     current_interface = ""
@@ -54,7 +54,7 @@ def _local_broadcast_addresses(host: dict[str, Any]) -> list[str]:
 
 def _interface_for_ip(ip_address: str) -> str | None:
     try:
-        result = subprocess.run(["route", "-n", "get", ip_address], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(["route", "-n", "get", ip_address], capture_output=True, encoding="utf-8", timeout=5)
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
@@ -69,7 +69,7 @@ def _interface_for_ip(ip_address: str) -> str | None:
 
 def _broadcast_addresses_for_interface(interface: str) -> list[str]:
     try:
-        result = subprocess.run(["ifconfig", interface], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(["ifconfig", interface], capture_output=True, encoding="utf-8", timeout=5)
     except (OSError, subprocess.SubprocessError):
         return []
     if result.returncode != 0:
@@ -95,7 +95,7 @@ def _normalize_mac_address(value: str) -> str | None:
 def _resolved_ssh_network_host(ssh_host: str) -> str | None:
     fallback = _ssh_lookup_host(ssh_host)
     try:
-        result = subprocess.run(["ssh", "-G", ssh_host], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(["ssh", "-G", ssh_host], capture_output=True, encoding="utf-8", timeout=5)
     except (OSError, subprocess.SubprocessError):
         return fallback or None
     if result.returncode != 0:
@@ -124,15 +124,15 @@ def _looks_like_ipv4_address(value: str) -> bool:
 
 def _mac_from_arp(ip_address: str) -> str | None:
     try:
-        result = subprocess.run(["arp", "-n", ip_address], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(["arp", "-n", ip_address], capture_output=True, encoding="utf-8", timeout=5)
     except (OSError, subprocess.SubprocessError):
         return None
     found = _mac_from_arp_output(result.stdout, result.stderr)
     if found is not None:
         return found
     try:
-        subprocess.run(["ping", "-c", "1", ip_address], capture_output=True, text=True, timeout=5)
-        result = subprocess.run(["arp", "-n", ip_address], capture_output=True, text=True, timeout=5)
+        subprocess.run(["ping", "-c", "1", ip_address], capture_output=True, encoding="utf-8", timeout=5)
+        result = subprocess.run(["arp", "-n", ip_address], capture_output=True, encoding="utf-8", timeout=5)
     except (OSError, subprocess.SubprocessError):
         return None
     return _mac_from_arp_output(result.stdout, result.stderr)

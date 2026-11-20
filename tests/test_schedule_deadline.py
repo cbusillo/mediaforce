@@ -184,7 +184,7 @@ class ScheduleDeadlineTests(TestCase):
 def _wait_for_pid_file(path: Path, timeout_seconds: float = 5.0) -> int:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        text = path.read_text().strip() if path.exists() else ""
+        text = path.read_text(encoding="utf-8").strip() if path.exists() else ""
         if text:
             return int(text)
         time.sleep(0.02)

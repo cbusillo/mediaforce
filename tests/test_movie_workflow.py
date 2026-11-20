@@ -1221,7 +1221,7 @@ class MovieWorkflowTests(unittest.TestCase):
 
         self.assertTrue(result["ok"], result)
         parent = next(job for job in queued if job["job_kind"] == "folder")
-        manifest = json.loads(Path(cast(str, parent["manifest_path"])).read_text())
+        manifest = json.loads(Path(cast(str, parent["manifest_path"])).read_text(encoding="utf-8"))
         self.assertEqual([item["library_item_id"] for item in manifest["items"]], [feasible_id])
         self.assertEqual(
             [(entry["library_item_id"], entry["code"]) for entry in result["left_out"]],
@@ -1539,7 +1539,7 @@ class MovieWorkflowTests(unittest.TestCase):
         )
         self.assertEqual([job["manifest_indexes"] for job in prepared], [[1]])
         parent = next(job for job in queued if job["job_kind"] == "folder")
-        manifest = json.loads(Path(cast(str, parent["manifest_path"])).read_text())
+        manifest = json.loads(Path(cast(str, parent["manifest_path"])).read_text(encoding="utf-8"))
         self.assertEqual([item["library_item_id"] for item in manifest["items"]], [feature_id])
 
     def _record_sampled_calibration(

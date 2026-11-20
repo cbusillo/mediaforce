@@ -32,7 +32,7 @@ def reset_remote_host_trust(config: MediaforceConfig, host_key: str) -> HostSetu
     if not lookup_host:
         return HostSetupResult(ok=False, message="Remote host is missing an SSH target")
 
-    result = subprocess.run(["ssh-keygen", "-R", lookup_host], capture_output=True, text=True, timeout=15)
+    result = subprocess.run(["ssh-keygen", "-R", lookup_host], capture_output=True, encoding="utf-8", timeout=15)
     if result.returncode != 0:
         return HostSetupResult(
             ok=False,

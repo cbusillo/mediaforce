@@ -47,7 +47,7 @@ def system_timezone_name() -> str | None:
         ["/usr/sbin/systemsetup", "-gettimezone"],
     ):
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+            result = subprocess.run(command, capture_output=True, encoding="utf-8", timeout=5)
         except (OSError, subprocess.SubprocessError):
             continue
         if result.returncode != 0:

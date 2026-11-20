@@ -529,7 +529,7 @@ def migrate_config_state(config: MediaforceConfig) -> None:
 def load_runtime_settings(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
-    payload = json.loads(path.read_text())
+    payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"Runtime settings at {path} must be a JSON object")
     return payload

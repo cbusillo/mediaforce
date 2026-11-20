@@ -25,7 +25,7 @@ MACHO_MAGICS = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe", b
 
 def run(*arguments: str | Path, env: dict[str, str] | None = None) -> str:
     try:
-        return subprocess.run([str(arg) for arg in arguments], check=True, text=True, capture_output=True, cwd=ROOT,
+        return subprocess.run([str(arg) for arg in arguments], check=True, encoding="utf-8", capture_output=True, cwd=ROOT,
                               env=env).stdout
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f"{arguments[0]} failed: {exc.stderr or exc.stdout}") from exc

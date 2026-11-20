@@ -36,7 +36,7 @@ def has_videotoolbox_hwaccel(hwaccels_output: str) -> bool:
 def local_videotoolbox_support() -> bool:
     ffmpeg_cmd = ffmpeg_binary()
     try:
-        result = subprocess.run([ffmpeg_cmd, "-hide_banner", "-hwaccels"], capture_output=True, text=True, timeout=2)
+        result = subprocess.run([ffmpeg_cmd, "-hide_banner", "-hwaccels"], capture_output=True, encoding="utf-8", timeout=2)
     except (OSError, subprocess.SubprocessError):
         return False
 

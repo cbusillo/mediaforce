@@ -204,6 +204,9 @@ jobs:
           test_command="$(jq -er '.qualityGate.test.ci | select(type == "string" and length > 0)' .github/github.json)"
           bash -euo pipefail -c "$test_command"
 
+      - name: Lint
+        run: uv run --with ruff ruff check .
+
       - name: Run CLI smoke
         run: uv run mediaforce --help
 

@@ -48,6 +48,11 @@ int main(int argc, char **argv) {
         arguments[2] = "mediaforce.ops.bundled_server";
     }
     for (int i = 1; i < argc; i++) arguments[i + offset] = argv[i];
+    PyPreConfig preconfig;
+    PyPreConfig_InitIsolatedConfig(&preconfig);
+    preconfig.utf8_mode = 1;
+    PyStatus preinit = Py_PreInitialize(&preconfig);
+    if (PyStatus_Exception(preinit)) Py_ExitStatusException(preinit);
     PyConfig config;
     PyConfig_InitIsolatedConfig(&config);
     config.parse_argv = 1;

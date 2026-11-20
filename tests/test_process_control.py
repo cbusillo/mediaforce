@@ -31,7 +31,7 @@ from mediaforce.core.process_control import (
 def _pid_is_alive(pid: int) -> bool:
     if sys.platform.startswith("linux"):
         try:
-            stat = Path(f"/proc/{pid}/stat").read_text()
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
         except (FileNotFoundError, PermissionError, ProcessLookupError):
             return False
         except OSError:
@@ -202,7 +202,7 @@ class ProcessControlTests(TestCase):
 
     def _assert_child_reaped(self, child_pid_path: Path) -> None:
         self.assertTrue(child_pid_path.exists())
-        child_pid = int(child_pid_path.read_text())
+        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
         exit_deadline = time.monotonic() + 2
         while _pid_is_alive(child_pid) and time.monotonic() < exit_deadline:
             time.sleep(0.02)
