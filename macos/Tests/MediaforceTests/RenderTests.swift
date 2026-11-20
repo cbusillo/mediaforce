@@ -19,6 +19,13 @@ final class RenderTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(rendered["needs-you"]).isEmpty)
     }
 
+    func testAFinishedMovieOpensTheSameFileFromTheShelfAndNotification() throws {
+        let facts = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(RenderFixtureServer.busierDay.utf8))
+        let movie = try XCTUnwrap(facts.finishedLately.first { $0.mediaType == "movie" })
+        let notices = Attention.review(facts, remembered: AttentionMemory()).notices
+        XCTAssertTrue(notices.contains { $0.opens == .item(movie.prefix) })
+    }
+
     func testMainPagesRenderWithFixtureDataInBothAppearances() async throws {
         let retained = ProcessInfo.processInfo.environment["MEDIAFORCE_RENDER_OUTPUT"]
         let directory = retained ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path

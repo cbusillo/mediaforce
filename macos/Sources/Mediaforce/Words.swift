@@ -426,6 +426,9 @@ extension Words {
     }
 
     static func finishedNotice(_ season: MainWindowFacts.FinishedSeason, keptReasons: [String]) -> String {
+        if MediaKind(libraryType: season.mediaType) != .tv {
+            return season.keptEntirelyOriginal ? "The file was kept original." : "\(size(season.bytesSaved)) saved."
+        }
         if season.keptEntirelyOriginal {
             var reasons: [String] = []
             for reason in keptReasons.map(keptReason) where !reasons.contains(reason) {
@@ -467,7 +470,7 @@ extension Words {
 extension Words {
     static let watchSample = "Watch sample"
     static let watchApprovedSample = "Watch approved sample"
-    static let approveOnlySeason = "Approve only this season"
+    static let approveOnlySeason = "Approve this sample only"
 
     static func sampleApproval(scope: String) -> String {
         scope == "season" ? approveSample : "Approve \(kindName(scope))"
@@ -486,7 +489,7 @@ extension Words {
         return result.needsChoice ? .compressNeedsChoice : .approvedNotCompressing
     }
 
-    static let approveSample = "Approve and compress the season"
+    static let approveSample = "Approve and start compressing"
     static let makeSampleAgain = "Make sample again"
     static let makeSample = "Make sample"
     static let sampleBalance = "Next sample"
@@ -642,25 +645,25 @@ extension Words {
         case ("making_test", _): "Making the sample now."
         case ("sample_waiting", _): "The sample waits for a free computer."
         case ("ready_to_compare", _): facts.approvalKind.map {
-            "Watch the sample. Approving it sets how all \(kindName($0).lowercased()) shows should look."
+            "Watch the sample. Approving it sets the look for all \(kindName($0).lowercased())."
         } ?? "The sample is ready. Watch it next to the original."
         case ("needs_help", "choose_size"): "The sample can't reach the size goal at good quality. Choose another size."
-        case ("needs_help", "retry_encode"): "Compressing stopped. Finished episodes are safe; the rest need trying again."
-        case ("needs_help", "check_computer"): "An episode is on hold until a computer is checked."
-        case ("needs_help", "review_files"): "Some files need you before the season can go on."
+        case ("needs_help", "retry_encode"): "Compressing stopped. Finished files are safe. Try the unfinished files again."
+        case ("needs_help", "check_computer"): "A file is on hold until a computer is checked."
+        case ("needs_help", "review_files"): "Some files need your attention."
         case ("needs_help", _): "The sample needs making again."
-        case (_, "choose_size"): "Choose a size for this season's first sample."
-        case ("needs_test", _), ("waiting_for_kind", "make_sample"): "This season has no sample yet."
-        case ("waiting_for_measurement", _): facts.waitDetail ?? "This season needs original measurements before its kind can be chosen."
-        case ("waiting_for_kind", _): "This season will follow the choice for its kind of content."
-        case ("ready_to_make", _): "Approved. The season waits to be compressed."
-        case ("making_season", _): "Compressing the season."
-        case ("motion_held", "decide_motion"): "Some episodes need a decision about their motion pattern."
-        case ("motion_held", _): "The remaining episodes stay original because their motion can't be converted safely."
-        case ("ready_to_check", _): "The compressed episodes are ready for their safety check."
-        case ("finish_blocked", _): "Some compressed episodes aren't ready to replace their originals yet."
-        case ("ready_to_finish", _): "The compressed episodes passed their checks and can replace the originals."
-        case ("finished", _): "This season is finished."
+        case (_, "choose_size"): "Choose a size for the first sample."
+        case ("needs_test", _), ("waiting_for_kind", "make_sample"): "No sample has been made yet."
+        case ("waiting_for_measurement", _): facts.waitDetail ?? "The originals need measuring before a look can be chosen."
+        case ("waiting_for_kind", _): "Waiting for a look for this kind of content."
+        case ("ready_to_make", _): "Approved. Waiting to start compressing."
+        case ("making_season", _): "Compressing now."
+        case ("motion_held", "decide_motion"): "Some files need a decision about their motion pattern."
+        case ("motion_held", _): "The remaining files stay original because their motion can't be converted safely."
+        case ("ready_to_check", _): "The compressed files are ready for their safety check."
+        case ("finish_blocked", _): "Some compressed files aren't ready to replace their originals yet."
+        case ("ready_to_finish", _): "The compressed files passed their checks and can replace the originals."
+        case ("finished", _): "Finished."
         default: "Nothing needs you here right now."
         }
     }
@@ -674,7 +677,7 @@ extension Words {
         case "confirm_absolute": "Keep this size"
         default: "Size goal"
         }
-        return "\(name), \(size(choice.targetBytes)) an episode"
+        return "\(name), \(size(choice.targetBytes)) per file"
     }
 
     static func clipSize(_ clip: SampleFacts.Clip) -> String {
@@ -687,10 +690,10 @@ extension Words {
 
     static func sampleFacts(_ facts: SampleFacts) -> [(label: String, value: String)] {
         [
-            ("This episode now", facts.episodeBytes > 0 ? size(facts.episodeBytes) : "Not known"),
+            ("Original file size", facts.episodeBytes > 0 ? size(facts.episodeBytes) : "Not known"),
             ("Estimated after", facts.estimatedEpisodeBytes > 0 ? "About \(size(facts.estimatedEpisodeBytes))" : "No estimate yet"),
-            ("Season space saved", facts.estimatedSavedBytes.map { "About \(size($0)) from \(count(facts.seasonEpisodeCount, "episode"))" } ?? "No estimate yet"),
-            ("Size goal", facts.goalBytes > 0 ? "\(size(facts.goalBytes)) an episode" : "Not set"),
+            ("Estimated space saved", facts.estimatedSavedBytes.map { "About \(size($0)) from \(count(facts.seasonEpisodeCount, "file"))" } ?? "No estimate yet"),
+            ("Size goal", facts.goalBytes > 0 ? "\(size(facts.goalBytes)) per file" : "Not set"),
         ]
     }
 
@@ -702,7 +705,7 @@ extension Words {
         )
         case "confirm_size_tradeoff": (
             "This sample missed your size goal.",
-            "The season may come out larger or smaller than the goal. The estimate on this page is the size you would accept."
+            "The finished files may be larger or smaller than the goal. The estimate on this page is the size you would accept."
         )
         default: nil
         }
@@ -711,7 +714,7 @@ extension Words {
 
 extension ActionNotice {
     static func kindNotExtended(_ code: String) -> ActionNotice {
-        ActionNotice(title: "This season was approved; its kind wasn't", message: Words.kindRefusal(code))
+        ActionNotice(title: "Sample approved for this title only", message: Words.kindRefusal(code))
     }
 
     static let sampleRefused = ActionNotice(
@@ -721,12 +724,12 @@ extension ActionNotice {
 
     static let approvedNotCompressing = ActionNotice(
         title: "Compressing didn't start",
-        message: "The sample is approved, but the season isn't compressing. Press Start compressing to try again."
+        message: "The sample is approved, but compression hasn't started. Press Start compressing to try again."
     )
 
     static let approvalScopeChanged = ActionNotice(
         title: "This sample no longer decides the kind",
-        message: "Approve only this season, or open the kind to review its current choice. Nothing was approved."
+        message: "Approve this sample only, or open the kind to review its current choice. Nothing was approved."
     )
 
     static let sampleChanged = ActionNotice(
@@ -736,7 +739,7 @@ extension ActionNotice {
 
     static let compressNeedsChoice = ActionNotice(
         title: "Compressing needs a choice first",
-        message: "The season is approved, but compression did not start. Choose a size for a fresh sample on the sample page."
+        message: "The sample is approved, but compression did not start. Choose a size for a fresh sample on the sample page."
     )
 
 }
@@ -1562,7 +1565,7 @@ extension Words {
         case .checkFiles: "Check New Files"
         case .reviewFiles: "Review Files"
         case .replaceOriginals: "Replace Originals…"
-        case .retryUnfinished: "Retry Unfinished Episodes"
+        case .retryUnfinished: "Retry Unfinished Files"
         case .decideMotion: "Review Motion"
         }
     }
@@ -1643,10 +1646,10 @@ extension Words {
     static func oneAtATimeHelp(_ other: String) -> String {
         "Click the picture to switch between the original and the \(other.lowercased())"
     }
-    static let couldNotPlayEpisode = "Couldn't play this episode."
+    static let couldNotPlayEpisode = "Couldn't play this file."
     static let couldNotPlaySample = "Couldn't play this moment of the sample."
     static let gettingSampleReady = "Getting the sample ready to play"
-    static let gettingEpisodeReady = "Getting the episode ready to play"
+    static let gettingEpisodeReady = "Getting the file ready to play"
     static let seasonsWithoutKindTitle = "Not measured yet"
     static let showEverything = "Show Everything"
 

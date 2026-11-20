@@ -42,8 +42,13 @@ def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[s
         retry_balance = operator_intent_from_policy(object_dict(retry_policy.get("video"))).compression_intent
         selected = {option["key"] for option in compression_intent_options(retry_balance) if option["selected"]}
         effective_balance = next((option for option in balances if option["key"] in selected), None)
+    prefix = str(folder["prefix"])
+    scope = object_dict(folder.get("media_scope"))
+    identity = season_identity(prefix)
+    if scope.get("domain") in {"movie", "other"}:
+        identity.update(show=scope["title"], season=None, season_folder=None)
     return {
-        **season_identity(str(folder["prefix"])),
+        **identity,
         "state": page_state.get("key"),
         "wait_detail": page_state.get("wait_detail"),
         "action": page_state.get("primary_action"),

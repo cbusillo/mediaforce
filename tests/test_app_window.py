@@ -682,8 +682,9 @@ def test_latest_opens_nested_movie_and_vr_files_without_inventing_seasons(connec
 
 
 def test_work_headline_names_a_running_vr_file_under_a_season_named_folder(connection: DBClient) -> None:
+    _item(connection, "other/Travel/Season 2/Coast.mkv")
     _encode_job(connection, "other/Travel/Season 2/Coast.mkv", status="running")
 
     [running] = _payload(connection)["work"]["running_seasons"]
 
-    assert (running["show"], running["season"]) == ("Coast.mkv", None)
+    assert (running["show"], running["season"]) == ("Coast", None)

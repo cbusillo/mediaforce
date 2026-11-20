@@ -51,8 +51,10 @@ without waiting for a cache to expire.
   `action` and `failure` are the folder page's own codes, from
   `mediaforce/web/runtime/page_state.py`. Their
   waiting-list membership is selected from the season's canonical `needs_you`
-  fact. Library also lists approved samples from movie and VR & 3D scopes
-  with a recorded sample job and a current ready-to-make page state.
+  fact. Movie and VR & 3D files and folders with a recorded sample use the
+  same page states. The read checks those scopes only while present files
+  still have work left. A sample being made or queued takes its title off
+  Biggest not started; a sample waiting for review links to that review.
 - `computers`: each computer's `state`, from the same rows as the computers
   page: `ready`, `busy`, `finishing_file` (a running file without a close deadline
   or an explicit bypass), `schedule_disabled`, `outside_schedule` (with `schedule_opens_at`),

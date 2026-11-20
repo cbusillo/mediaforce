@@ -33,7 +33,7 @@ from mediaforce.web.runtime.episode_progress import load_season_episode_progress
 from mediaforce.web.runtime.app_samples import approve_sample, kind_sample_candidates, sample_moments
 from mediaforce.web.runtime.folder_actions import queue_folder_encode_action
 from mediaforce.web.runtime.folder_state import save_calibration_state
-from mediaforce.web.runtime.app_window import approved_file_samples
+from mediaforce.web.runtime.app_window import app_window_payload, library_file_sample_cards
 from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash, review_gate
 from mediaforce.web.runtime.kind_approvals import APPROVABLE_KINDS, APPROVAL_NOT_CURRENT_CODE, KIND_IS_ONE_TIME_CODE, \
@@ -1270,7 +1270,6 @@ def test_undecided_kind_preserves_an_older_sample_with_a_saved_parent_sample(tmp
 
 @pytest.mark.parametrize("measured_kind", [LIVE_ACTION, "cartoon"])
 def test_measurement_releases_old_samples_to_the_kind_or_its_own_decision(tmp_path: Path, measured_kind: str) -> None:
-    from mediaforce.web.runtime.app_window import app_window_payload
 
     config = _config(tmp_path)
     saved = _review_ready()
@@ -1767,8 +1766,20 @@ def test_library_lists_an_approved_non_tv_sample_until_its_file_is_finished(tmp_
     approval["sample_item"]["rel_path"] = path
     sources = PageStateSources(_loader({path: approval}, {}), lambda _config, _prefix: None)
     with open_db(config.paths.db_path) as connection:
-        listed = approved_file_samples(connection, config, sources)
+        def window() -> dict[str, Any]:
+            return app_window_payload(connection, library_types=config.library_type_map, season_cards=[], computers=[],
+                                      controller_storage={}, storage_admits_work=True, observed_at=datetime.now(UTC),
+                                      file_sample_cards=lambda paths: library_file_sample_cards(connection, config, sources, paths))
 
+        listed = window()["samples"]["approved_not_started"]
         assert [(entry["prefix"], entry["show"], entry.get("season")) for entry in listed] == [(path, "Coast", None)]
+        sources = PageStateSources(_loader({path: _review_ready()}, {}), lambda _config, _prefix: None)
+        pending = window()
+        assert [entry["prefix"] for entry in pending["samples"]["waiting_on_you"]] == [path]
+        assert pending["biggest_not_started"][0]["waiting_sample_prefix"] == path
+
+        connection.execute(calibration_jobs.update().where(calibration_jobs.c.prefix == path).values(status="running"))
+        assert not window()["biggest_not_started"]
+
         connection.execute(library_items.update().where(library_items.c.rel_path == path).values(status="promoted"))
-        assert not approved_file_samples(connection, config, sources)
+        assert not window()["samples"]["waiting_on_you"]

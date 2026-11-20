@@ -15,7 +15,7 @@ struct LibraryPage: View {
                     WorkStatus(facts: facts, open: open)
                 }
                 StorageBar(facts: facts, kind: .everything, listing: listing, open: open)
-                FinishedShelf(items: Array((facts.recentlyFinished ?? facts.recentlyFinishedSeasons).prefix(6)), posters: model.posters, open: open)
+                FinishedShelf(items: Array(facts.finishedLately.prefix(6)), posters: model.posters, open: open)
                 if !facts.samples.approvedNotStarted.isEmpty {
                     SampleShelf(facts: facts, posters: model.posters) { open(.sample($0)) }
                 }

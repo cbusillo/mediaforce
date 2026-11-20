@@ -255,8 +255,8 @@ struct BiggestTable: View {
     private func waitingNote(_ title: MainWindowFacts.NotStartedTitle) -> String? {
         guard let prefix = title.waitingSamplePrefix,
               let sample = samples.first(where: { $0.prefix == prefix }) else { return nil }
-        let season = sample.season.map { "Season \($0)" } ?? "A season"
-        return "\(season): \(Words.sampleState(sample).lowercased())"
+        guard let season = sample.season else { return Words.sampleState(sample) }
+        return "Season \(season): \(Words.sampleState(sample).lowercased())"
     }
 }
 

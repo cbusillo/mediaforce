@@ -29,7 +29,7 @@ struct NeedsYouPage: View {
                     }
                 }
                 .padding(.bottom, 10)
-                FinishedShelf(items: Array(facts.recentlyFinishedSeasons.prefix(6)), posters: posters, open: open)
+                FinishedShelf(items: Array(facts.finishedLately.prefix(6)), posters: posters, open: open)
             } else {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(items.enumerated()), id: \.element.id) { index, item in

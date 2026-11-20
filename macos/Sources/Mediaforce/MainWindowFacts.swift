@@ -6,7 +6,8 @@ struct MainWindowFacts: Decodable, Sendable {
     let library: Library
     let spaceSaved: SpaceSaved
     let recentlyFinishedSeasons: [FinishedSeason]
-    let recentlyFinished: [FinishedSeason]?
+    private let recentlyFinished: [FinishedSeason]?
+    var finishedLately: [FinishedSeason] { recentlyFinished ?? recentlyFinishedSeasons }
     let biggestNotStarted: [NotStartedTitle]
     let samples: Samples
     let computers: [Computer]
