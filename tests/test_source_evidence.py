@@ -856,7 +856,7 @@ def test_interrupted_owner_cleanup_reconciles_on_next_cleanup(connection: DBClie
                 archived.unlink()
         operation = connection.execute(select(source_transitions.c.operation_id).where(
             source_transitions.c.kind == "owner-cleanup")).scalar_one()
-        assert version_location(connection, version) is None
+        assert version_location(connection, version) == (str(archived) if interruption == "unlink_error" else None)
         # The next owner action must reconcile even when there are no files left to enumerate.
         result = clear_archive_cleanup_action(config)
         assert result["ok"]

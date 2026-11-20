@@ -165,6 +165,8 @@ def _clear_archive_cleanup_action(
                     safe_unlink(path)
                 except OSError as error:
                     progress.skipped(str(path.relative_to(archive_root)), error)
+                    if operations:
+                        reconcile_archive_removals(connection, operation_ids=operations)
                     continue
                 commit_archive_removal(connection, operations)
         except BaseException as error:

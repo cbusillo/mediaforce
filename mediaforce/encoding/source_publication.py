@@ -224,13 +224,15 @@ def commit_archive_removal(connection: DBClient, operations: list[str]) -> None:
     connection.commit()
 
 
-def reconcile_archive_removals(connection: DBClient) -> None:
+def reconcile_archive_removals(connection: DBClient, *, operation_ids: list[str] | None = None) -> None:
     """Finish interrupted owner cleanup without attempting another deletion."""
-    moves = connection.execute(select(source_moves).join(source_transitions).where(
+    query = select(source_moves).join(source_transitions).where(
         source_transitions.c.kind == "owner-cleanup",
         source_transitions.c.outcome.in_(("prepared", "unresolved")),
-    )).mappings().all()
-    for move in moves:
+    )
+    if operation_ids is not None:
+        query = query.where(source_moves.c.operation_id.in_(operation_ids))
+    for move in connection.execute(query).mappings().all():
         try:
             Path(move["from_path"]).stat()
         except FileNotFoundError:
