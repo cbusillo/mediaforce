@@ -640,6 +640,7 @@ extension Words {
 
     static func sampleHeadline(_ facts: SampleFacts) -> String {
         switch (facts.state, facts.action) {
+        case ("preparing_sample", _): preparingSample
         case ("making_test", _): "Making the sample now."
         case ("sample_waiting", _): "The sample waits for a free computer."
         case ("ready_to_compare", _): facts.approvalKind.map {

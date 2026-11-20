@@ -661,7 +661,7 @@ def folder_ai_tune_preview_action(
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         existing_job = deps.load_job_state(connection, config, normalized_prefix)
         if existing_job and existing_job.get("status") in {"queued", "starting", "running"}:
-            return {"ok": False, "message": "A calibration job is already active for this folder."}
+            return {"ok": False, "message": "A sample for this folder is already queued or running."}
         latest_failed_sample_job_loader = deps.load_latest_failed_sample_job_state or deps.load_retryable_sample_job_state
         latest_failed_sample_job = _latest_failed_sample_job_payload(
             latest_failed_sample_job_loader(connection, config, normalized_prefix)
@@ -672,7 +672,7 @@ def folder_ai_tune_preview_action(
         summary = inspect_prefix(connection, config, normalized_prefix)
         sample_item = deps.sample_item(connection, config, normalized_prefix)
         if sample_item is None:
-            raise HTTPException(status_code=404, detail=f"No sample item found for {normalized_prefix}")
+            raise HTTPException(status_code=404, detail="Mediaforce could not find a file to sample in this folder.")
         cadence_blocker = cadence_evidence_blocker(
             connection,
             config,
@@ -792,10 +792,10 @@ def folder_ai_tune_confirm_action(
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         existing_job = deps.load_job_state(connection, config, normalized_prefix)
         if existing_job and existing_job.get("status") in {"queued", "starting", "running"}:
-            return {"ok": False, "message": "A calibration job is already active for this folder."}
+            return {"ok": False, "message": "A sample for this folder is already queued or running."}
         sample_item = deps.sample_item(connection, config, normalized_prefix)
         if sample_item is None:
-            raise HTTPException(status_code=404, detail=f"No sample item found for {normalized_prefix}")
+            raise HTTPException(status_code=404, detail="Mediaforce could not find a file to sample in this folder.")
         cadence_blocker = cadence_evidence_blocker(
             connection,
             config,
@@ -813,7 +813,7 @@ def folder_ai_tune_confirm_action(
                 "message": "A measured sample already exists. Prepare the sample plan again before starting another sample.",
             }
         if action == "ai_tune" and calibration is None:
-            return {"ok": False, "message": "The folder needs a first sample before the bench can tune a retry."}
+            return {"ok": False, "message": "Make a first sample for this folder before trying again."}
 
         resolved_policy = object_dict(sample_item.get("resolved_policy"))
         policy_source = _tuning_base_policy(resolved_policy, calibration)
@@ -950,17 +950,17 @@ def _retry_latest_sample_job(
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         existing_job = deps.load_retryable_sample_job_state(connection, config, normalized_prefix)
         if existing_job is None:
-            return {"ok": False, "message": "Ask the bench for a draft first."}
+            return {"ok": False, "message": "Make a new sample first. There is no saved sample to retry."}
         status = str(existing_job.get("status") or "").strip()
         if status in {"queued", "starting", "running"}:
-            return {"ok": False, "message": "A calibration job is already active for this folder."}
+            return {"ok": False, "message": "A sample for this folder is already queued or running."}
         if status not in {"failed", "stopped"}:
-            return {"ok": False, "message": "Ask the bench for a draft first."}
+            return {"ok": False, "message": "Make a new sample first. There is no saved sample to retry."}
         if str(existing_job.get("mode") or "sample").strip() != "sample":
-            return {"ok": False, "message": "Ask the bench for a draft first."}
+            return {"ok": False, "message": "Make a new sample first. There is no saved sample to retry."}
         action = str(existing_job.get("action") or "").strip()
         if action not in {"baseline", "ai_tune"}:
-            return {"ok": False, "message": "Ask the bench for a draft first."}
+            return {"ok": False, "message": "Make a new sample first. There is no saved sample to retry."}
         legacy_size_issue = _unconfirmed_legacy_size_issue(config, object_dict(existing_job.get("policy")))
         if legacy_size_issue is not None:
             return {"ok": False, "message": legacy_size_issue}
@@ -976,7 +976,7 @@ def _retry_latest_sample_job(
         if current_sample_item is not None:
             stored_sample_item = object_dict(current_sample_item)
         elif not stored_sample_item or not int(stored_sample_item.get("library_item_id") or 0):
-            raise HTTPException(status_code=404, detail=f"No current sample item found for {normalized_prefix}")
+            raise HTTPException(status_code=404, detail="Mediaforce could not find a file to sample in this folder.")
         cadence_blocker = cadence_evidence_blocker(
             connection,
             config,
@@ -1316,7 +1316,7 @@ def _tuned_preview_action(
         blocking_failed_sample_job: dict[str, Any] | None,
 ) -> dict[str, Any]:
     if not trimmed_note:
-        raise HTTPException(status_code=400, detail="Add a note so the tuner knows what to change before running another sample.")
+        raise HTTPException(status_code=400, detail="The sample request is missing what to change. Choose the settings for the next sample.")
     resolved_policy = object_dict(sample_item.get("resolved_policy"))
     current_policy = _tuning_base_policy(resolved_policy, calibration)
     quality_risk_feedback_state = _persist_quality_risk_feedback(

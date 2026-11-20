@@ -41,6 +41,13 @@ final class SampleTests: XCTestCase {
         XCTAssertNotEqual(Words.workAction(.chooseSize), Words.workAction(.openSample))
     }
 
+    func testServerPreparationKeepsTheSamplePageWatchingAfterTheRequestTimesOut() throws {
+        let facts = try decode(Self.facts(state: "preparing_sample", action: nil))
+        XCTAssertTrue(facts.isInProgress)
+        XCTAssertFalse(facts.actions.contains(.makeSample))
+        XCTAssertEqual(Words.sampleHeadline(facts), Words.preparingSample)
+    }
+
     func testEachStateShowsOnlyItsActions() throws {
         XCTAssertEqual(try decode(Self.facts()).actions, [.approve, .makeAgain, .tryAnotherSize])
         XCTAssertEqual(try decode(Self.facts(state: "needs_help", action: "retry_sample", choices: "[]")).actions, [.makeSample])

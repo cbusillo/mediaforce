@@ -180,7 +180,7 @@ the sound is scored too.
 
 Make sample shows “Preparing the sample…” while Mediaforce chooses settings and queues the job.
 If preparation stops, the app shows the reason. If the server takes too long to answer,
-check the sample page before trying again because the request may still finish.
+the sample page can still show preparation. A second request for the same season reports that preparation is already underway.
 
 ### Checking, publishing and rollback
 

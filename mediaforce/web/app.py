@@ -123,7 +123,7 @@ from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.library import service_keys
 from mediaforce.library.metadata_sync import cached_poster, metadata_configuration_status, metadata_connection_states
 from mediaforce.reviewing.clips import review_file_from_url
-from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, SampleStartWait, approve_sample, make_sample, sample_facts, \
+from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, SamplePreparations, SampleStartWait, approve_sample, make_sample, sample_facts, \
     prepare_waiting_samples, samples_to_remake, start_compressing, with_first_sample_question
 from mediaforce.web.runtime.app_window import app_window_payload, movies_payload, other_media_payload, tv_shows_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
@@ -549,6 +549,7 @@ def create_app(
     config = load_config(config_path or DEFAULT_CONFIG_PATH)
     advisor_routing = advisor_routing_from_config(config)
     cleanup_lock = threading.Lock()
+    sample_preparations = SamplePreparations()
     backup_deletion = BackupDeletion()
     shutdown_event = threading.Event()
     evidence_runner = BoundedEvidenceRunner(
@@ -1894,18 +1895,24 @@ def create_app(
         record_kind_attempt(config, chosen, result, at=wall_time())
         LOGGER.info("Approved season %s: %s", chosen.season, result.get("message") or result.get("code") or result.get("ok"))
 
+    def _prepare_sample(
+            folder: Mapping[str, Any], status: Mapping[str, Any], size: str | None = None,
+            balance: str | None = None, keep_full_height: bool | None = None,
+    ) -> dict[str, Any]:
+        result = sample_preparations.run(str(folder["prefix"]), lambda: make_sample(
+            folder, status, size, balance, ai_tune=_folder_ai_tune_action, retry_saved=_folder_ai_tune_confirm_action,
+            keep_full_height=keep_full_height,
+        ))
+        LOGGER.info("Making the sample for %s: %s", folder["prefix"], result.get("message") or result.get("code") or result["ok"])
+        return result
+
     def _remake_waiting_samples() -> None:
         nonlocal sample_start_waits
         with open_db(config.paths.db_path) as connection:
             cards = [asdict(card) for card in _list_library_detail_cards(config, connection)]
 
-        def make(folder: Mapping[str, Any], status: Mapping[str, Any]) -> Mapping[str, Any]:
-            result = make_sample(folder, status, None, ai_tune=_folder_ai_tune_action, retry_saved=_folder_ai_tune_confirm_action)
-            LOGGER.info("Making the sample for %s: %s", folder["prefix"], result.get("code") or result.get("ok"))
-            return result
-
         sample_start_waits = prepare_waiting_samples(cards, _kinds_payload()["kinds"], load_payloads=_season_payloads,
-                                                     failed_in_a_row=_sample_failures_in_a_row, make=make, previous=sample_start_waits)
+                                                     failed_in_a_row=_sample_failures_in_a_row, make=_prepare_sample, previous=sample_start_waits)
 
     def _sample_failures_in_a_row(season: str) -> int:
         with open_db(config.paths.db_path) as connection:
@@ -2301,10 +2308,13 @@ def create_app(
         )
 
     def _app_sample_payload(normalized_prefix: str) -> dict[str, Any] | None:
+        preparing = normalized_prefix in sample_preparations
         payloads = _season_payloads(normalized_prefix)
         if payloads is None:
             return None
         facts = with_first_sample_question(sample_facts(*payloads), sample_start_waits.values())
+        if preparing or normalized_prefix in sample_preparations:
+            return {**facts, "state": "preparing_sample", "action": None, "failure": None, "approval_kind": None}
         return {**facts, "approval_kind": _app_sample_kind(normalized_prefix) if facts["state"] == "ready_to_compare" else None}
 
     def _approve_app_kind(kind: str, from_prefix: str, reviewed_draft_hash: str | None = None) -> dict[str, Any]:
@@ -2318,11 +2328,8 @@ def create_app(
     ) -> dict[str, Any]:
         payloads = _season_payloads(normalized_prefix)
         if payloads is None:
-            return {"ok": False, "code": "refused"}
-        return make_sample(
-            *payloads, size, balance, ai_tune=_folder_ai_tune_action, retry_saved=_folder_ai_tune_confirm_action,
-            keep_full_height=keep_full_height,
-        )
+            return {"ok": False, "code": "refused", "message": "Mediaforce could not find a file to sample in this folder."}
+        return _prepare_sample(*payloads, size, balance, keep_full_height)
 
     register_app_window_routes(
         app,
@@ -2906,11 +2913,11 @@ def _resolve_sample_host(config: MediaforceConfig, host_key: str) -> HostStatus:
             )
         raise HTTPException(
             status_code=400,
-            detail="Configure at least one sample-calibration host in Settings before running sampled calibration.",
+            detail="Choose a computer to make samples in Settings.",
         )
     host = statuses.get(requested_key)
     if host is None:
-        raise HTTPException(status_code=400, detail="Unknown sampled calibration host")
+        raise HTTPException(status_code=400, detail="This computer is not available to make samples. Check its settings.")
     if not host.available and not remote_mount_recovery_supported(config, _host_config_for_key(config, host.key), host):
         raise HTTPException(status_code=400, detail=host.message)
     if not _sample_host_window_open(config, host):

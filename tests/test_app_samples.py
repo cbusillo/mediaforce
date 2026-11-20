@@ -14,7 +14,7 @@ from mediaforce.tuning.size_goals import DECIMAL_MEGABYTE_BYTES, measured_follow
 from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime import folder_actions
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_sample, make_sample, sample_facts, \
-    kind_sample_candidates, prepare_waiting_samples, samples_to_remake, start_compressing, with_first_sample_question, SampleStartWait
+    kind_sample_candidates, prepare_waiting_samples, samples_to_remake, start_compressing, with_first_sample_question, SampleStartWait, SamplePreparations
 
 PREFIX = "tv/Lucifer/Season 2"
 
@@ -236,6 +236,21 @@ def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_di
     ]:
         refused = asyncio.run(endpoint(None, refusal, "compress")(PREFIX))
         assert json.loads(refused.body) == {"ok": True, "compressing": False, "reason": reason}
+
+
+def test_a_second_request_during_preparation_leaves_the_first_request_in_charge() -> None:
+    preparing = SamplePreparations()
+
+    def prepare() -> dict[str, Any]:
+        assert PREFIX in preparing
+        assert not preparing.run(PREFIX, lambda: pytest.fail("started the same sample twice"))["ok"]
+        assert preparing.run("other season", lambda: {"ok": True})["ok"]
+        raise ValueError("preparation stopped")
+
+    with pytest.raises(ValueError, match="preparation stopped"):
+        preparing.run(PREFIX, prepare)
+    assert PREFIX not in preparing
+    assert preparing.run(PREFIX, lambda: {"ok": True})["ok"]
 
 
 @pytest.mark.parametrize("blocked", [False, True])
