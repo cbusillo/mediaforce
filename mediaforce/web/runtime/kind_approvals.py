@@ -39,7 +39,7 @@ from mediaforce.web.runtime.production_approval import KEEP_FULL_HEIGHT_FIELD, E
     SampleWait, approval_prefixes, cached_calibration_loader, effective_production_approval, holds_approval, production_approval_contract, \
     offered_library_types, production_calibration, sample_allows_kind, sample_kept_full_height, season_prefix_of
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
-from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES, SIZE_GOAL_FAILURES, sample_failure
+from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES, SIZE_GOAL_FAILURES, sample_failure, sample_review_status
 from mediaforce.web.runtime.production_holds import approval_identity
 from mediaforce.web.runtime.file_encode_outcomes import file_encode_outcomes
 
@@ -645,6 +645,11 @@ def kinds_payload(
     for entry in payload["kinds"]:
         season = entry["sample_season"]
         entry["sample_ready"] = False
+        if entry["sample_status"] in SAMPLE_FAILED_STATUSES:
+            job = contents.samples[entry["kind"]]
+            entry["sample_status"] = sample_review_status(job, contents.load_calibration(config, job["prefix"]))
+            if entry["sample_status"] in SAMPLE_FAILED_STATUSES and sample_failure(job) in SIZE_GOAL_FAILURES:
+                entry["sample_status"] = "choose_size"
         if season and entry["sample_status"] in {"pending_review", "completed"}:
             calibration = contents.load_calibration(config, season)
             if sample_moments(object_dict(calibration)):
@@ -654,8 +659,6 @@ def kinds_payload(
             else:
                 approval = effective_production_approval(config, season, contents.load_calibration)
                 entry["sample_status"] = "choose_another_show" if approval is not None and approval.current else "missing_clips"
-        elif entry["sample_status"] in SAMPLE_FAILED_STATUSES and sample_failure(contents.samples[entry["kind"]]) in SIZE_GOAL_FAILURES:
-            entry["sample_status"] = "choose_size"
         entry["needs_you"] = entry["needs_you"] or (approvals[entry["kind"]] is None and entry["sample_ready"])
     return payload
 
