@@ -361,66 +361,6 @@ def open_stable_directory(
         raise FileIntegrityError("stable directory binding failed") from exc
 
 
-def ensure_owner_only_directory(path: Path) -> tuple[Path, int]:
-    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
-        raise FileIntegrityError("stable directory creation is unavailable")
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    descriptor = -1
-    try:
-        _reject_existing_final_symlink(path, allow_missing=True)
-        normalized = stable_absolute_path(path)
-        descriptor = os.open(normalized.anchor, flags)
-        for index, component in enumerate(normalized.parts[1:], start=1):
-            created = False
-            try:
-                next_descriptor = os.open(
-                    component,
-                    flags,
-                    dir_fd=descriptor,
-                )
-            except FileNotFoundError:
-                os.mkdir(component, mode=0o700, dir_fd=descriptor)
-                os.fsync(descriptor)
-                created = True
-                next_descriptor = os.open(
-                    component,
-                    flags,
-                    dir_fd=descriptor,
-                )
-            try:
-                descriptor_info = _validate_directory_entry(
-                    parent_descriptor=descriptor,
-                    entry_name=component,
-                    descriptor=next_descriptor,
-                )
-                if (
-                        (created or index == len(normalized.parts) - 1)
-                        and (
-                            descriptor_info.st_uid != os.getuid()
-                            or stat.S_IMODE(descriptor_info.st_mode) & 0o077
-                        )
-                ):
-                    raise FileIntegrityError("directory must be owner-only")
-            except BaseException:
-                os.close(next_descriptor)
-                raise
-            os.close(descriptor)
-            descriptor = next_descriptor
-        descriptor_info = os.fstat(descriptor)
-        if (
-                descriptor_info.st_uid != os.getuid()
-                or stat.S_IMODE(descriptor_info.st_mode) & 0o077
-        ):
-            raise FileIntegrityError("directory must be owner-only")
-        return normalized, descriptor
-    except BaseException as exc:
-        if descriptor >= 0:
-            os.close(descriptor)
-        if isinstance(exc, FileIntegrityError):
-            raise
-        raise FileIntegrityError("owner-only directory creation failed") from exc
-
-
 def _validate_directory_entry(
         *,
         parent_descriptor: int,
@@ -443,18 +383,10 @@ def _validate_directory_entry(
     return descriptor_info
 
 
-def _reject_existing_final_symlink(
-        path: Path,
-        *,
-        allow_missing: bool = False,
-) -> None:
+def _reject_existing_final_symlink(path: Path) -> None:
     absolute = Path(os.path.abspath(os.fspath(path.expanduser())))
     try:
         info = absolute.lstat()
-    except FileNotFoundError:
-        if allow_missing:
-            return
-        raise FileIntegrityError("path identity is unavailable")
     except OSError as exc:
         raise FileIntegrityError("path identity is unavailable") from exc
     if stat.S_ISLNK(info.st_mode):

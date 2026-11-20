@@ -1,5 +1,3 @@
-import threading
-from copy import deepcopy
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -91,73 +89,6 @@ class SavingsHistory:
         if dominant_codec is None or self.sample_count <= 0:
             return 0.0
         return self.codec_counts[dominant_codec] / self.sample_count
-
-
-_FOLDER_CARD_CACHE_LOCK = threading.Lock()
-_FOLDER_CARD_CACHE_KEY: tuple[str, int, int] | None = None
-_FOLDER_CARD_CACHE_VALUE: list[FolderCard] = []
-_FOLDER_CARD_CACHE_GENERATION = 0
-
-
-def cached_folder_cards(
-        config: MediaforceConfig,
-        connection: DBClient,
-        *,
-        minimum_recommended_savings_bytes: int,
-        folder_group: Callable[[str], FolderGroup | None],
-        age_days: Callable[[str], float],
-        estimate_savings_bytes: Callable[..., int],
-        review_badge_for_prefix: Callable[[str], FolderBadge],
-        candidate_decisions: list[CandidateDecision] | None = None,
-) -> list[FolderCard]:
-    global _FOLDER_CARD_CACHE_KEY, _FOLDER_CARD_CACHE_VALUE, _FOLDER_CARD_CACHE_GENERATION
-
-    while True:
-        cache_key = folder_card_cache_key(config)
-        cached_cards: list[FolderCard] = []
-        with _FOLDER_CARD_CACHE_LOCK:
-            cache_generation = _FOLDER_CARD_CACHE_GENERATION
-            cache_hit = _FOLDER_CARD_CACHE_KEY == cache_key
-            if cache_hit:
-                cached_cards = _copy_folder_cards(_FOLDER_CARD_CACHE_VALUE, include_review_badges=False)
-        if cache_hit:
-            _apply_folder_review_badges(cached_cards, review_badge_for_prefix)
-            return cached_cards
-        cards: list[FolderCard] = list_folder_cards(
-            connection,
-            config=config,
-            minimum_recommended_savings_bytes=minimum_recommended_savings_bytes,
-            folder_group=folder_group,
-            age_days=age_days,
-            estimate_savings_bytes=estimate_savings_bytes,
-            review_badge_for_prefix=review_badge_for_prefix,
-            candidate_decisions=candidate_decisions,
-        )
-        with _FOLDER_CARD_CACHE_LOCK:
-            current_cache_key = folder_card_cache_key(config)
-            if cache_generation != _FOLDER_CARD_CACHE_GENERATION or cache_key != current_cache_key:
-                continue
-            if _FOLDER_CARD_CACHE_KEY == cache_key:
-                cached_cards = _copy_folder_cards(_FOLDER_CARD_CACHE_VALUE, include_review_badges=False)
-                use_cached_cards = True
-            else:
-                _FOLDER_CARD_CACHE_KEY = cache_key
-                _FOLDER_CARD_CACHE_VALUE = _copy_folder_cards(cards, include_review_badges=False)
-                use_cached_cards = False
-        if use_cached_cards:
-            _apply_folder_review_badges(cached_cards, review_badge_for_prefix)
-            return cached_cards
-        return cards
-    raise RuntimeError("folder card cache loop exited unexpectedly")
-
-
-def reset_folder_card_cache() -> None:
-    global _FOLDER_CARD_CACHE_KEY, _FOLDER_CARD_CACHE_VALUE, _FOLDER_CARD_CACHE_GENERATION
-
-    with _FOLDER_CARD_CACHE_LOCK:
-        _FOLDER_CARD_CACHE_GENERATION += 1
-        _FOLDER_CARD_CACHE_KEY = None
-        _FOLDER_CARD_CACHE_VALUE = []
 
 
 def preview_folder_cards(
@@ -272,69 +203,6 @@ def preview_folder_cards(
         ),
         reverse=True,
     )
-
-
-def list_library_structure_cards(
-        connection: DBClient,
-        *,
-        config: MediaforceConfig | None = None,
-        folder_group: Callable[[str], FolderGroup | None],
-        review_badge_for_prefix: Callable[[str], FolderBadge],
-) -> list[FolderCard]:
-    query = select(
-        library_items.c.rel_path,
-        library_items.c.size_bytes,
-        library_items.c.status,
-    ).where(LIBRARY_ITEM_PRESENT)
-    if config is None:
-        query = query.where(library_items.c.rel_path.startswith("tv/", autoescape=True))
-    else:
-        tv_roots = [root for root, library_type in config.library_type_map.items() if library_type == "tv"]
-        if not tv_roots:
-            return []
-        query = query.where(library_items.c.media_root.in_(tv_roots))
-    rows = connection.execute(query.order_by(library_items.c.rel_path)).mappings().fetchall()
-    grouped: dict[str, FolderCard] = {}
-    for row in rows:
-        group = folder_group(str(row["rel_path"]))
-        if group is None:
-            continue
-        prefix, title, subtitle, scope_label = group
-        if scope_label != "Season":
-            continue
-        card = grouped.get(prefix)
-        if card is None:
-            card = FolderCard(
-                prefix=prefix,
-                title=title,
-                subtitle=subtitle,
-                scope_label=scope_label,
-                item_count=0,
-                pending_count=0,
-                total_size_bytes=0,
-                estimated_savings_bytes=0,
-                known_saved_bytes=0,
-                projected_reclaim_bytes=0,
-                average_age_days=0.0,
-                sort_score=0.0,
-                statuses={},
-                video_codecs={},
-                details_loading=True,
-            )
-            grouped[prefix] = card
-        card.item_count += 1
-        card.total_size_bytes += max(0, int(row["size_bytes"] or 0))
-        status = str(row["status"] or "unknown")
-        card.statuses[status] = card.statuses.get(status, 0) + 1
-        if status != "promoted":
-            card.pending_count += 1
-    cards = sorted(
-        (card for card in grouped.values() if card.pending_count > 0),
-        key=lambda card: (card.total_size_bytes, card.title),
-        reverse=True,
-    )
-    _apply_folder_review_badges(cards, review_badge_for_prefix)
-    return cards
 
 
 def list_folder_cards(
@@ -610,38 +478,6 @@ def _folder_delivery_badge(card: FolderCard) -> FolderBadge | None:
     if encoded_count > 0 and encoded_count == card.pending_count:
         return {"label": "Ready to validate", "tone": "attention", "detail": "All pending outputs are encoded."}
     return None
-
-
-def _copy_folder_cards(cards: list[FolderCard], *, include_review_badges: bool = True) -> list[FolderCard]:
-    return [_copy_folder_card(card, include_review_badges=include_review_badges) for card in cards]
-
-
-def _copy_folder_card(card: FolderCard, *, include_review_badges: bool = True) -> FolderCard:
-    return FolderCard(
-        prefix=card.prefix,
-        title=card.title,
-        subtitle=card.subtitle,
-        scope_label=card.scope_label,
-        item_count=card.item_count,
-        pending_count=card.pending_count,
-        total_size_bytes=card.total_size_bytes,
-        estimated_savings_bytes=card.estimated_savings_bytes,
-        known_saved_bytes=card.known_saved_bytes,
-        projected_reclaim_bytes=card.projected_reclaim_bytes,
-        average_age_days=card.average_age_days,
-        sort_score=card.sort_score,
-        statuses=dict(card.statuses),
-        video_codecs=dict(card.video_codecs),
-        review_badge_label=card.review_badge_label if include_review_badges else None,
-        review_badge_tone=card.review_badge_tone if include_review_badges else None,
-        review_badge_detail=card.review_badge_detail if include_review_badges else None,
-        workflow_state=deepcopy(card.workflow_state),
-        lifecycle=deepcopy(card.lifecycle),
-        media_scope=deepcopy(card.media_scope),
-        details_loading=card.details_loading,
-        estimate_unavailable_count=card.estimate_unavailable_count,
-        page_state=deepcopy(card.page_state),
-    )
 
 
 def _apply_lifecycle(

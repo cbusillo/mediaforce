@@ -56,8 +56,8 @@ rules are unchanged.
 Only those IDs can become filter graphs. Raw policy or model-generated filter
 strings are never accepted.
 
-Mixed, unknown, low-coverage, and low-confidence results block sample search,
-bakeoff, and production before ffmpeg starts. The LLM cannot choose a cadence
+Mixed, unknown, low-coverage, and low-confidence results block sample search
+and production before ffmpeg starts. The LLM cannot choose a cadence
 transform.
 
 The evidence state separates two kinds of `unknown`. When some sampled range
@@ -104,7 +104,7 @@ A stored decision is also compared with what the current classifier makes of the
 stored measurements. When they differ, because the classifier changed after the
 file was measured, the file needs only reclassification. The evidence worker
 re-derives the decision from the stored counts without running ffmpeg again.
-Sampling, preview clips, bakeoff plans, and production all call the same filter
+Sampling, preview clips, and production all call the same filter
 compiler, so the reviewed transform cannot drift before the final encode.
 
 Folder, season, older-season, and recovery actions partition their candidate

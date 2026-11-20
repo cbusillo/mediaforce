@@ -28,18 +28,7 @@ from mediaforce.advisor import TuningPolicyResponse
 from mediaforce.advising.routing import advisor_routing_from_config
 from mediaforce.tuning.calibration_jobs import load_job, \
     list_queue_summary, sample_failures_in_a_row, update_job_telemetry
-from mediaforce.tuning.quality_observations import (
-    backfill_quality_search_observations,
-    load_current_quality_search_observations,
-)
-from mediaforce.tuning.quality_shadow import (
-    quality_shadow_public_view,
-    select_latest_quality_shadow_observation,
-)
-from mediaforce.tuning.target_default_context import (
-    load_target_default_evidence,
-    unavailable_target_default_evidence,
-)
+from mediaforce.tuning.quality_observations import backfill_quality_search_observations
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, base_config_digest, load_config, \
     load_runtime_settings, migrate_config_state, set_runtime_folder_audio_preset, update_runtime_settings, \
     update_runtime_folder_policy_values, upsert_runtime_folder_policy_override
@@ -143,19 +132,19 @@ from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
 from mediaforce.web.runtime.folder_state import state_slug
 from mediaforce.web.runtime.kind_approvals import KindAwareLoader, SeasonKinds, approve_kind_action, \
     background_queue_blocker, choose_kind_picture_height, kind_snapshot, kinds_payload, migrate_kind_approvals, next_kind_season, next_approved_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
-from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
+from mediaforce.web.runtime import FolderCard, cached_host_statuses, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
     archive_cleanup_summary, clear_archive_cleanup_action, \
     completed_page_payload, record_deleted_original_backups, \
     ensure_encode_host_ready, ensure_sample_host_ready, \
     folder_ai_tune_action, folder_ai_tune_confirm_action, folder_card_cache_key, folder_status_payload, host_config_for_key, host_lifecycle_start_command, \
     host_lifecycle_start_timeout_seconds, host_lifecycle_stop_command, host_runtime_rows, \
-    list_library_structure_cards, load_calibration_state, load_json_object, load_pending_proposal, \
+    load_calibration_state, load_json_object, load_pending_proposal, \
     multimodal_review_pack_public_view, pause_encode_queue_action, pending_proposal_public_view, \
     planned_audio_review_context, preview_folder_cards, proposal_alignment_issue, \
     proposal_context_snapshot, proposal_signal_copy, promote_folder_outputs_action, \
     queue_folder_encode_action, recent_tuning_sessions, \
-    reconcile_pending_review_samples, refresh_host_status_cache, reset_folder_card_cache, resume_encode_queue_action, \
+    reconcile_pending_review_samples, refresh_host_status_cache, resume_encode_queue_action, \
     review_media_context, stop_running_file_action, \
     review_pack_dir, review_pair_key, review_pairs, safe_collect_host_statuses, save_advice_state, \
     save_calibration_state, save_pending_proposal, save_profile_action, \
@@ -170,7 +159,6 @@ from mediaforce.library.workflow_state import build_folder_workflow_state, encod
 from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
     restore_staged_artifact as runtime_restore_staged_artifact, \
     run_calibration_job as runtime_run_calibration_job, \
-    run_full_calibration as runtime_run_full_calibration, \
     run_sampled_calibration as runtime_run_sampled_calibration, \
     remove_path as runtime_remove_path, snapshot_staged_artifact as runtime_snapshot_staged_artifact
 from mediaforce.web.runtime_lock import (
@@ -210,7 +198,6 @@ from mediaforce.web.runtime.controller_storage_recovery import (
 )
 from mediaforce.web.runtime.encode_runtime import EncodeQueueRuntimeDeps, \
     clear_stale_encoding_items_when_idle as runtime_clear_stale_encoding_items_when_idle, \
-    encode_job_heartbeat_loop as runtime_encode_job_heartbeat_loop, \
     encode_job_manifest_totals as runtime_encode_job_manifest_totals, \
     encode_queue_worker_loop as runtime_encode_queue_worker_loop, \
     load_next_runnable_encode_job as runtime_load_next_runnable_encode_job, \
@@ -1498,11 +1485,6 @@ def create_app(
             latest_failed_sample_job_payload = object_dict(
                 _load_latest_failed_target_size_job_state(connection, config, normalized_prefix)
             ) or None
-            quality_memory = quality_shadow_public_view(
-                select_latest_quality_shadow_observation(
-                    load_current_quality_search_observations(connection, scope=media_scope)
-                )
-            )
         policy = _folder_display_policy(
             sample_item=sample_item,
             calibration=calibration,
@@ -1546,15 +1528,6 @@ def create_app(
             prefer_persisted=False,
         )
         budget_item["stream_budget_ledger"] = stream_budget.to_payload()
-        if media_scope.match == "exact_item":
-            target_default_evidence = load_target_default_evidence(
-                config.paths.db_path,
-                budget_item=budget_item,
-                calibration=calibration,
-                advice_state=advice_state,
-            )
-        else:
-            target_default_evidence = unavailable_target_default_evidence("not_exact_item")
         size_goal_options = guided_size_goal_options(
             video_policy,
             item_runtime_seconds=item_runtime_seconds,
@@ -1617,13 +1590,11 @@ def create_app(
                 "size_target_analysis": size_target_analysis or None,
                 "resolved_operator_intent": resolved_operator_intent,
                 "target_size_provenance": budget_item["target_size_provenance"],
-                "target_default_evidence": target_default_evidence,
                 "compression_intent_options": compression_intent_options(operator_intent.compression_intent),
                 "stream_budget_ledger": stream_budget.to_payload(),
                 "size_goal_options": size_goal_options,
                 "tallest_picture": tallest_picture(config.video),
                 "quality_risk": quality_risk_public_view(quality_risk_contract),
-                "quality_memory": quality_memory,
                 "failed_target_size_search": target_size_search_public_view(latest_failed_target_trace),
                 "pending_proposal": pending_proposal,
                 "recent_tuning_sessions": recent_sessions,
@@ -2606,27 +2577,8 @@ def _folder_card_cache_key(config: MediaforceConfig) -> tuple[str, int, int]:
 
 
 def _reset_folder_card_cache() -> None:
-    reset_folder_card_cache()
     with _REPRESENTATIVE_SELECTION_CACHE_LOCK:
         _REPRESENTATIVE_SELECTION_CACHE.clear()
-
-
-def _list_library_structure_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
-    needs_attention_badges = _folder_needs_attention_badges(connection)
-    calibration_job_badges = _folder_calibration_job_badges(connection)
-    library_types = config.library_type_map
-    cards = list_library_structure_cards(
-        connection,
-        config=config,
-        folder_group=lambda rel_path: _folder_group(rel_path, library_types=library_types),
-        review_badge_for_prefix=lambda prefix: _folder_review_badge(
-            config,
-            prefix,
-            needs_attention_badges=needs_attention_badges,
-            calibration_job_badges=calibration_job_badges,
-        ),
-    )
-    return _attach_page_states(connection, config, _attach_media_scopes(connection, config, cards))
 
 
 def _list_library_detail_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
@@ -2661,42 +2613,6 @@ def _season_group_by_folder(library_types: Mapping[str, str]) -> Callable[[str],
         return groups[folder]
 
     return folder_group
-
-
-def _list_folder_cards(
-        config: MediaforceConfig,
-        connection: DBClient,
-        *,
-        candidate_decisions: list[CandidateDecision] | None = None,
-) -> list[FolderCard]:
-    needs_attention_badges: dict[str, dict[str, str | None]] | None = None
-    calibration_job_badges: dict[str, dict[str, str | None]] | None = None
-    library_types = config.library_type_map
-
-    def review_badge_for_prefix(prefix: str) -> dict[str, str | None]:
-        nonlocal calibration_job_badges, needs_attention_badges
-        if needs_attention_badges is None:
-            needs_attention_badges = _folder_needs_attention_badges(connection)
-        if calibration_job_badges is None:
-            calibration_job_badges = _folder_calibration_job_badges(connection)
-        return _folder_review_badge(
-            config,
-            prefix,
-            needs_attention_badges=needs_attention_badges,
-            calibration_job_badges=calibration_job_badges,
-        )
-
-    cards = cached_folder_cards(
-        config,
-        connection,
-        minimum_recommended_savings_bytes=MIN_RECOMMENDED_SAVINGS_BYTES,
-        folder_group=lambda rel_path: _folder_group(rel_path, library_types=library_types),
-        age_days=_age_days,
-        estimate_savings_bytes=_estimate_savings_bytes,
-        review_badge_for_prefix=review_badge_for_prefix,
-        candidate_decisions=candidate_decisions,
-    )
-    return _attach_page_states(connection, config, _attach_media_scopes(connection, config, cards))
 
 
 def _folder_cards_for_group(
@@ -2999,13 +2915,6 @@ def _resolve_sample_host(config: MediaforceConfig, host_key: str) -> HostStatus:
             detail=f"{host.label or host.key} is outside its work window. Choose a machine inside its window.",
         )
     return host
-
-
-def _encode_queue_scheduler_from_form(form_data: dict[str, str]) -> dict[str, Any]:
-    _ = form_data
-    # The shared Queue Window is retired; hosts now use Always or an explicit
-    # custom schedule profile.
-    return _normalize_encode_queue_scheduler({"mode": "anytime", "timezone": "host_local"})
 
 
 def _folder_badge_prefix(raw_prefix: Any) -> str:
@@ -4093,25 +4002,6 @@ def _select_encode_host(connection: DBClient, config: MediaforceConfig, job: dic
     return runtime_select_encode_host(connection, config, job, _encode_queue_runtime_deps())
 
 
-def _encode_job_heartbeat_loop(
-        *,
-        config_path: Path,
-        job_id: str,
-        worker_id: str,
-        stop_event: threading.Event,
-        process_controller: ManagedProcessController | None = None,
-) -> None:
-    controller = process_controller if process_controller is not None else ManagedProcessController()
-    runtime_encode_job_heartbeat_loop(
-        config_path=config_path,
-        job_id=job_id,
-        worker_id=worker_id,
-        stop_event=stop_event,
-        process_controller=controller,
-        deps=_encode_queue_runtime_deps(),
-    )
-
-
 def _dispatch_calibration_job(config: MediaforceConfig, job_payload: dict[str, Any]) -> None:
     runtime_dispatch_calibration_job(config, job_payload, _calibration_queue_runtime_deps())
 
@@ -4944,34 +4834,4 @@ def _run_sampled_calibration(
         process_controller=process_controller,
         deps=_calibration_run_deps(),
         source_path_override=source_path_override,
-    )
-
-
-def _run_full_calibration(
-        *,
-        connection: DBClient,
-        config: MediaforceConfig,
-        prefix: str,
-        action: str,
-        host_data: dict[str, Any],
-        notes: str,
-        policy: dict[str, Any],
-        seed_metadata: dict[str, Any] | None,
-        sample_item: dict[str, Any],
-        calibration_run_id: str,
-        process_controller: ManagedProcessController,
-) -> tuple[dict[str, Any], Path, Path]:
-    return runtime_run_full_calibration(
-        connection=connection,
-        config=config,
-        prefix=prefix,
-        action=action,
-        host_data=host_data,
-        notes=notes,
-        policy=policy,
-        seed_metadata=seed_metadata,
-        sample_item=sample_item,
-        calibration_run_id=calibration_run_id,
-        process_controller=process_controller,
-        deps=_calibration_run_deps(),
     )

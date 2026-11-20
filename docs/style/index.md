@@ -15,8 +15,7 @@
 - `docs/style/python.md`: Python and FastAPI style
 - `docs/style/workstation-ui.md`: doctrine for Mediaforce's primary user
   surfaces
-- `docs/design/README.md`: source-of-truth routing for active reset docs and
-  archived UI evidence
+- `docs/design/README.md`: index of UI design guidance
 - `docs/design/movies-workflow.md`: Movies Library and movie page contract
 - `docs/design/basic-user-vocabulary.md`: user-facing term and workflow state
   reference for UI copy

@@ -60,13 +60,10 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 
 ## Design briefs
 
-- `docs/design/README.md`: source-of-truth routing for current versus
-  historical UI reset guidance
+- `docs/design/README.md`: index of UI design guidance
 - `docs/design/movies-workflow.md`: Movies Library and movie page contract
 - `docs/design/basic-user-vocabulary.md`: user-facing vocabulary and workflow
   state reference for the UI/UX reset
-- Historical/superseded briefs live in `docs/design/archive/`; read
-  `docs/design/README.md` before using them as evidence.
 
 ## Developer workflows
 

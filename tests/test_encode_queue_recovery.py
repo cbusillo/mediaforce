@@ -5309,7 +5309,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(list(self.config.configured_source_root_map), ["shows"])
         self.assertEqual(list(self.config.source_root_map), ["shows"])
 
-    def test_custom_typed_tv_root_appears_in_library_structure(self) -> None:
+    def test_custom_typed_tv_root_appears_in_library_details(self) -> None:
         self.config.raw["media"]["libraries"] = [
             {
                 "key": "shows",
@@ -5336,7 +5336,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     "_folder_review_badge",
                     return_value={"label": None, "tone": None, "detail": None},
             ):
-                cards = web_app._list_library_structure_cards(self.config, connection)
+                cards = web_app._list_library_detail_cards(self.config, connection)
 
         self.assertEqual([card.prefix for card in cards], ["shows/Example/Season 1"])
 
@@ -6912,7 +6912,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     )
                 )
 
-            cards = web_app._list_folder_cards(self.config, connection)
+            cards = web_app._preview_folder_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 1"]
         self.assertEqual(len(matching_cards), 1)
@@ -6923,48 +6923,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(card.statuses["planned"], 1)
         self.assertEqual(card.statuses["validated"], 1)
         self.assertEqual(card.statuses["promoted"], 1)
-
-    def test_library_structure_cards_return_pending_seasons_without_enrichment(self) -> None:
-        planned = self._create_source_file("library-structure-planned.mkv")
-        promoted = self._create_source_file("library-structure-promoted.mkv")
-        finished = self._create_source_file("library-structure-finished.mkv")
-
-        with open_db(self.config.paths.db_path) as connection:
-            planned_id = self._insert_library_item(connection, planned)
-            promoted_id = self._insert_library_item(connection, promoted, status="promoted")
-            finished_id = self._insert_library_item(connection, finished, status="promoted")
-            for item_id, rel_path, size_bytes in (
-                    (planned_id, "tv/show/Season 1/planned.mkv", 3 * 1024 ** 3),
-                    (promoted_id, "tv/show/Season 1/promoted.mkv", 2 * 1024 ** 3),
-                    (finished_id, "tv/show/Season 2/finished.mkv", 4 * 1024 ** 3),
-            ):
-                connection.execute(
-                    update(library_items)
-                    .where(library_items.c.id == item_id)
-                    .values(
-                        rel_path=rel_path,
-                        parent_dir=rel_path.rsplit("/", 1)[0],
-                        size_bytes=size_bytes,
-                    )
-                )
-
-            with patch.object(
-                    web_app,
-                    "_folder_review_badge",
-                    return_value={"label": "Ready to review", "tone": "attention", "detail": None},
-            ):
-                cards = web_app._list_library_structure_cards(self.config, connection)
-
-        self.assertEqual([card.prefix for card in cards], ["tv/show/Season 1"])
-        card = cards[0]
-        self.assertEqual(card.item_count, 2)
-        self.assertEqual(card.pending_count, 1)
-        self.assertEqual(card.total_size_bytes, 5 * 1024 ** 3)
-        self.assertEqual(card.statuses, {"planned": 1, "promoted": 1})
-        self.assertEqual(card.projected_reclaim_bytes, 0)
-        self.assertIsNone(card.workflow_state)
-        self.assertTrue(card.details_loading)
-        self.assertEqual(card.review_badge_label, "Ready to review")
 
     def test_library_detail_cards_include_seasons_below_recommendation_threshold(self) -> None:
         source = self._create_source_file("library-detail-small.mkv")
@@ -6981,8 +6939,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 )
             )
 
-            web_app._reset_folder_card_cache()
-            recommended_cards = web_app._list_folder_cards(self.config, connection)
+            recommended_cards = web_app._preview_folder_cards(self.config, connection)
             library_cards = web_app._list_library_detail_cards(self.config, connection)
 
         self.assertEqual(recommended_cards, [])
@@ -7159,7 +7116,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 )
             )
 
-            cards = web_app._list_folder_cards(self.config, connection)
+            cards = web_app._preview_folder_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 5"]
         self.assertEqual(len(matching_cards), 1)
@@ -7213,7 +7170,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             def fake_estimate_savings(*args: Any, **kwargs: Any) -> int:
                 return 300 * 1024 * 1024
 
-            for build_cards in (web_app._preview_folder_cards, web_app._list_folder_cards):
+            for build_cards in (web_app._preview_folder_cards, web_app._list_library_detail_cards):
                 with self.subTest(builder=build_cards.__name__):
                     with (
                             patch.object(web_app, "_age_days", autospec=True, return_value=42.0),
@@ -7266,7 +7223,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     )
                 )
 
-            for build_cards in (web_app._preview_folder_cards, web_app._list_folder_cards):
+            for build_cards in (web_app._preview_folder_cards, web_app._list_library_detail_cards):
                 with self.subTest(builder=build_cards.__name__):
                     with (
                             patch.object(web_app, "_age_days", autospec=True, return_value=42.0),
@@ -7314,7 +7271,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 )
             )
 
-            for build_cards in (web_app._preview_folder_cards, web_app._list_folder_cards):
+            for build_cards in (web_app._preview_folder_cards, web_app._list_library_detail_cards):
                 with self.subTest(builder=build_cards.__name__):
                     with (
                             patch.object(web_app, "_age_days", autospec=True, return_value=42.0),
@@ -7372,7 +7329,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 )
 
             with patch.object(web_app, "_estimate_savings_bytes", autospec=True, return_value=0):
-                cards = web_app._list_folder_cards(self.config, connection)
+                cards = web_app._preview_folder_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 6"]
         self.assertEqual(len(matching_cards), 1)
@@ -7422,7 +7379,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     )
                 )
 
-            cards = web_app._list_folder_cards(self.config, connection)
+            cards = web_app._preview_folder_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 1"]
         self.assertEqual(len(matching_cards), 1)
@@ -7476,46 +7433,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     autospec=True,
                     return_value=50 * 1024 * 1024,
             ):
-                cards = web_app._list_folder_cards(self.config, connection)
+                cards = web_app._preview_folder_cards(self.config, connection)
 
         self.assertEqual([card for card in cards if card.prefix == "tv/show/Season 7"], [])
-
-    def test_list_folder_cards_recomputes_review_badges_on_cache_hit(self) -> None:
-        folder_cards_runtime.reset_folder_card_cache()
-        pending = self._create_source_file("episode-cache-hit.mkv")
-
-        with open_db(self.config.paths.db_path) as connection:
-            pending_id = self._insert_library_item(connection, pending)
-            connection.execute(
-                update(library_items)
-                .where(library_items.c.id == pending_id)
-                .values(
-                    size_bytes=2 * 1024 * 1024 * 1024,
-                    rel_path=f"tv/show/Season 8/{pending.name}",
-                    parent_dir="tv/show/Season 8",
-                    video_codec="h264",
-                )
-            )
-
-            with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
-                with patch.object(web_app, "_estimate_savings_bytes", autospec=True, return_value=2 * 1024 * 1024 * 1024):
-                    with patch.object(
-                            web_app,
-                            "_folder_needs_attention_badges",
-                            autospec=True,
-                            side_effect=[{}, {"tv/show/Season 8": {"label": "Encode failed", "tone": "danger"}}],
-                    ), patch.object(web_app, "_folder_calibration_job_badges", autospec=True, return_value={}):
-                        first_cards = web_app._list_folder_cards(self.config, connection)
-                        second_cards = web_app._list_folder_cards(self.config, connection)
-
-        self.assertEqual([card.prefix for card in first_cards], ["tv/show/Season 8"])
-        self.assertEqual([card.prefix for card in second_cards], ["tv/show/Season 8"])
-        self.assertIsNone(first_cards[0].review_badge_label)
-        self.assertEqual(second_cards[0].review_badge_label, "Encode failed")
-        self.assertEqual(second_cards[0].review_badge_tone, "danger")
-        self.assertEqual(second_cards[0].media_scope["kind"], "tv_season")
-        self.assertEqual(second_cards[0].media_scope["match"], "descendants")
-        folder_cards_runtime.reset_folder_card_cache()
 
     def test_folder_cards_show_delivery_badge_after_approved_draft_validates(self) -> None:
         validated = self._create_source_file("episode-validated-badge.mkv")
@@ -8568,204 +8488,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertIsNone(folder_cards_runtime._folder_delivery_badge(card))
 
-    def test_cached_folder_cards_recomputes_after_reset_during_cache_miss(self) -> None:
-        folder_cards_runtime.reset_folder_card_cache()
-
-        stale_card = folder_cards_runtime.FolderCard(
-            prefix="tv/show/Season 8",
-            title="Season 8",
-            subtitle="TV",
-            scope_label="Season",
-            item_count=1,
-            pending_count=1,
-            total_size_bytes=2 * 1024 * 1024 * 1024,
-            estimated_savings_bytes=200 * 1024 * 1024,
-            known_saved_bytes=0,
-            projected_reclaim_bytes=200 * 1024 * 1024,
-            average_age_days=10.0,
-            sort_score=0.2,
-            statuses={"planned": 1},
-            video_codecs={"h264": 1},
-        )
-        fresh_card = folder_cards_runtime.FolderCard(
-            prefix="tv/show/Season 9",
-            title="Season 9",
-            subtitle="TV",
-            scope_label="Season",
-            item_count=1,
-            pending_count=1,
-            total_size_bytes=3 * 1024 * 1024 * 1024,
-            estimated_savings_bytes=300 * 1024 * 1024,
-            known_saved_bytes=0,
-            projected_reclaim_bytes=300 * 1024 * 1024,
-            average_age_days=20.0,
-            sort_score=0.3,
-            statuses={"planned": 1},
-            video_codecs={"h264": 1},
-        )
-        calls = {"count": 0}
-
-        def fake_list_folder_cards(*args: Any, **kwargs: Any) -> list[folder_cards_runtime.FolderCard]:
-            calls["count"] += 1
-            if calls["count"] == 1:
-                folder_cards_runtime.reset_folder_card_cache()
-                return [stale_card]
-            return [fresh_card]
-
-        with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
-            with patch.object(folder_cards_runtime, "list_folder_cards", side_effect=fake_list_folder_cards):
-                cards = folder_cards_runtime.cached_folder_cards(
-                    self.config,
-                    Mock(),
-                    minimum_recommended_savings_bytes=100 * 1024 * 1024,
-                    folder_group=Mock(),
-                    age_days=Mock(),
-                    estimate_savings_bytes=Mock(),
-                    review_badge_for_prefix=Mock(return_value={"label": None, "tone": None}),
-                )
-
-        self.assertEqual(calls["count"], 2)
-        self.assertEqual([card.prefix for card in cards], [fresh_card.prefix])
-        folder_cards_runtime.reset_folder_card_cache()
-
-    def test_cached_folder_cards_reapplies_review_badges_without_shared_mutation(self) -> None:
-        folder_cards_runtime.reset_folder_card_cache()
-
-        cached_source_card = folder_cards_runtime.FolderCard(
-            prefix="tv/show/Season 10",
-            title="Season 10",
-            subtitle="TV",
-            scope_label="Season",
-            item_count=1,
-            pending_count=1,
-            total_size_bytes=2 * 1024 * 1024 * 1024,
-            estimated_savings_bytes=200 * 1024 * 1024,
-            known_saved_bytes=0,
-            projected_reclaim_bytes=200 * 1024 * 1024,
-            average_age_days=10.0,
-            sort_score=0.2,
-            statuses={"planned": 1},
-            video_codecs={"h264": 1},
-            review_badge_label="First badge",
-            review_badge_tone="attention",
-            review_badge_detail="First detail",
-        )
-        list_folder_cards = Mock(return_value=[cached_source_card])
-
-        with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
-            with patch.object(folder_cards_runtime, "list_folder_cards", list_folder_cards):
-                first_cards = folder_cards_runtime.cached_folder_cards(
-                    self.config,
-                    Mock(),
-                    minimum_recommended_savings_bytes=100 * 1024 * 1024,
-                    folder_group=Mock(),
-                    age_days=Mock(),
-                    estimate_savings_bytes=Mock(),
-                    review_badge_for_prefix=Mock(return_value={"label": "First badge", "tone": "attention"}),
-                )
-                second_cards = folder_cards_runtime.cached_folder_cards(
-                    self.config,
-                    Mock(),
-                    minimum_recommended_savings_bytes=100 * 1024 * 1024,
-                    folder_group=Mock(),
-                    age_days=Mock(),
-                    estimate_savings_bytes=Mock(),
-                    review_badge_for_prefix=Mock(return_value={"label": "Second badge", "tone": "ready", "detail": "Second detail"}),
-                )
-
-        self.assertEqual(list_folder_cards.call_count, 1)
-        self.assertIsNot(first_cards[0], second_cards[0])
-        self.assertEqual(first_cards[0].review_badge_label, "First badge")
-        self.assertEqual(first_cards[0].review_badge_tone, "attention")
-        self.assertEqual(first_cards[0].review_badge_detail, "First detail")
-        self.assertEqual(second_cards[0].review_badge_label, "Second badge")
-        self.assertEqual(second_cards[0].review_badge_tone, "ready")
-        self.assertEqual(second_cards[0].review_badge_detail, "Second detail")
-
-        with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
-            with patch.object(folder_cards_runtime, "list_folder_cards", list_folder_cards):
-                second_cards[0].review_badge_label = "Mutated response copy"
-                third_cards = folder_cards_runtime.cached_folder_cards(
-                    self.config,
-                    Mock(),
-                    minimum_recommended_savings_bytes=100 * 1024 * 1024,
-                    folder_group=Mock(),
-                    age_days=Mock(),
-                    estimate_savings_bytes=Mock(),
-                    review_badge_for_prefix=Mock(return_value={"label": "Third badge", "tone": "attention"}),
-                )
-
-        self.assertEqual(third_cards[0].review_badge_label, "Third badge")
-        self.assertEqual(third_cards[0].review_badge_tone, "attention")
-        self.assertIsNone(third_cards[0].review_badge_detail)
-        folder_cards_runtime.reset_folder_card_cache()
-
-    def test_cached_folder_cards_copies_workflow_state_without_shared_mutation(self) -> None:
-        folder_cards_runtime.reset_folder_card_cache()
-
-        cached_source_card = folder_cards_runtime.FolderCard(
-            prefix="tv/show/Season 10",
-            title="Season 10",
-            subtitle="TV",
-            scope_label="Season",
-            item_count=1,
-            pending_count=1,
-            total_size_bytes=2 * 1024 * 1024 * 1024,
-            estimated_savings_bytes=200 * 1024 * 1024,
-            known_saved_bytes=0,
-            projected_reclaim_bytes=200 * 1024 * 1024,
-            average_age_days=10.0,
-            sort_score=0.2,
-            statuses={"encoded": 1},
-            video_codecs={"h264": 1},
-            workflow_state={
-                "state": "ready_to_validate",
-                "counts": {"ready_to_validate": 1},
-                "next_action": {"kind": "validate_outputs"},
-            },
-            media_scope={
-                "schema_version": 1,
-                "prefix": "tv/show/Season 10",
-                "domain": "tv",
-                "kind": "tv_season",
-                "match": "descendants",
-            },
-        )
-        list_folder_cards = Mock(return_value=[cached_source_card])
-
-        with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
-            with patch.object(folder_cards_runtime, "list_folder_cards", list_folder_cards):
-                first_cards = folder_cards_runtime.cached_folder_cards(
-                    self.config,
-                    Mock(),
-                    minimum_recommended_savings_bytes=100 * 1024 * 1024,
-                    folder_group=Mock(),
-                    age_days=Mock(),
-                    estimate_savings_bytes=Mock(),
-                    review_badge_for_prefix=Mock(return_value={"label": None, "tone": None}),
-                )
-
-        first_cards[0].workflow_state["counts"]["ready_to_validate"] = 99
-        first_cards[0].workflow_state["next_action"]["kind"] = "mutated"
-        first_cards[0].media_scope["kind"] = "mutated"
-
-        with patch.object(folder_cards_runtime, "folder_card_cache_key", return_value=("cache", 1, 1)):
-            with patch.object(folder_cards_runtime, "list_folder_cards", list_folder_cards):
-                second_cards = folder_cards_runtime.cached_folder_cards(
-                    self.config,
-                    Mock(),
-                    minimum_recommended_savings_bytes=100 * 1024 * 1024,
-                    folder_group=Mock(),
-                    age_days=Mock(),
-                    estimate_savings_bytes=Mock(),
-                    review_badge_for_prefix=Mock(return_value={"label": None, "tone": None}),
-                )
-
-        self.assertEqual(second_cards[0].workflow_state["counts"]["ready_to_validate"], 1)
-        self.assertEqual(second_cards[0].workflow_state["next_action"]["kind"], "validate_outputs")
-        self.assertEqual(second_cards[0].media_scope["kind"], "tv_season")
-        folder_cards_runtime.reset_folder_card_cache()
-
     def test_folder_cards_reuse_group_scope_when_building_workflow_state(self) -> None:
         card = folder_cards_runtime.FolderCard(
             prefix="tv/show/Season 10",
@@ -8876,7 +8598,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     .values(**update_values)
                 )
 
-            cards = web_app._list_folder_cards(self.config, connection)
+            cards = web_app._preview_folder_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 2"]
         self.assertEqual(len(matching_cards), 1)
@@ -8923,7 +8645,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 )
             )
 
-            cards = web_app._list_folder_cards(self.config, connection)
+            cards = web_app._preview_folder_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 3"]
         self.assertEqual(len(matching_cards), 1)
@@ -8978,7 +8700,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     .values(**update_values)
                 )
 
-            cards = web_app._list_folder_cards(self.config, connection)
+            cards = web_app._preview_folder_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 4"]
         self.assertEqual(len(matching_cards), 1)
@@ -9025,7 +8747,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 )
             )
 
-            cards = web_app._list_folder_cards(self.config, connection)
+            cards = web_app._preview_folder_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 2"]
         self.assertEqual(len(matching_cards), 1)

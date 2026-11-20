@@ -87,20 +87,6 @@ class SettingsValidationError(ValueError):
         super().__init__("Settings validation failed.")
 
 
-def settings_library_rows(source_root_map: dict[str, Path], *, min_rows: int = 3) -> list[dict[str, Any]]:
-    rows = [
-        {
-            "key": key,
-            "label": key.replace("_", " ").replace("-", " ").title(),
-            "path": str(path),
-            "color": DEFAULT_LIBRARY_COLOR_PALETTE[index % len(DEFAULT_LIBRARY_COLOR_PALETTE)],
-            "library_type": normalize_library_type(None, key=key),
-        }
-        for index, (key, path) in enumerate(source_root_map.items())
-    ]
-    return index_settings_library_rows(rows, min_rows=min_rows)
-
-
 def settings_library_rows_for_config(config: MediaforceConfig, *, min_rows: int = 3) -> list[dict[str, Any]]:
     library_colors = library_color_map_for_config(config)
     plex = config.metadata.get("plex")
@@ -246,11 +232,6 @@ def library_readiness(
             "detail": "Files and folders here use the selected compression setting once Mediaforce can read them.",
         }
     return {"state": "ready", "label": "Ready", "detail": "Scanning and production processing are enabled."}
-
-
-def settings_remote_rows(remote_hosts: list[dict[str, Any]], *, min_rows: int = 3) -> list[dict[str, Any]]:
-    rows = [_settings_remote_row(host) for host in remote_hosts]
-    return index_settings_remote_rows(rows, min_rows=min_rows)
 
 
 def settings_remote_rows_for_config(config: MediaforceConfig, *, min_rows: int = 3) -> list[dict[str, Any]]:
@@ -504,17 +485,6 @@ def _settings_number_text(value: JSONValue, default: str) -> str:
 def _settings_choice_text(value: JSONValue, *, default: str, supported: Collection[str]) -> str:
     text = str(value or "").strip().lower()
     return text if text in supported else default
-
-
-def settings_form_indexes(form_data: dict[str, str], prefix: str) -> list[int]:
-    indexes: set[int] = set()
-    for key in form_data:
-        if not key.startswith(prefix):
-            continue
-        suffix = key[len(prefix):]
-        if suffix.isdigit():
-            indexes.add(int(suffix))
-    return sorted(indexes)
 
 
 def clamp_hour(value: JSONValue, default: int) -> int:

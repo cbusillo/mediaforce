@@ -163,17 +163,6 @@ def load_job(connection: DBClient, job_id: str) -> dict[str, Any] | None:
     return _hydrate_job(row) if row is not None else None
 
 
-def load_active_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
-    row = connection.execute(
-        _calibration_job_select()
-        .where(calibration_jobs.c.prefix == prefix)
-        .where(calibration_jobs.c.status.in_(tuple(ACTIVE_JOB_STATUSES)))
-        .order_by(calibration_jobs.c.created_at.desc(), _rowid_column().desc())
-        .limit(1)
-    ).mappings().fetchone()
-    return _hydrate_job(row) if row is not None else None
-
-
 def load_active_overlapping_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
     scope = resolve_media_scope(connection, prefix)
     row = connection.execute(
@@ -227,15 +216,6 @@ def resolve_pending_review_job(
         .values(status=status, updated_at=updated_at)
     )
     return bool(result.rowcount)
-
-
-def list_queued_jobs(connection: DBClient) -> list[dict[str, Any]]:
-    rows = connection.execute(
-        _calibration_job_select()
-        .where(calibration_jobs.c.status == "queued")
-        .order_by(calibration_jobs.c.created_at.asc(), _rowid_column().asc())
-    ).mappings().fetchall()
-    return [_hydrate_job(row) for row in rows]
 
 
 def claim_next_queued_calibration_job(
