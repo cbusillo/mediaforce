@@ -69,11 +69,9 @@ recovery from recognized internal trace failure codes after restart.
   `docs/architecture/sample-sound-check.md`).
 - `audio.preset` and `audio.downmix_to_stereo` are owner-only: a proposal that
   changes them is rejected (see `sound-choices.md`).
-- A TMDB genre (Reality, Talk) may suggest a sound choice for the owner to
-  confirm; it never applies one (see `sound-choices.md`).
-- Names, era, genre, or category may be carried as non-authoritative context,
-  but they do not trigger denoise, deinterlace, grain handling, resizing, or
-  audio changes.
+- Only the owner's one-time Reality and Talk choice can apply Speech-heavy
+  by TMDB genre (see `sound-choices.md`). Names, era, genre and category do
+  not authorize a model proposal to change sound or picture.
 - Model interpretation may request comparison or add typed rationale, but it
   cannot create an approval or turn a pending human decision into
   `safe_to_sample`.

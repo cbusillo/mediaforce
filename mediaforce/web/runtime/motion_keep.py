@@ -71,7 +71,7 @@ def keep_motion_held_originals(
     return {
         "ok": True,
         "kept_count": count,
-        "message": f"Kept {_count(count, noun)} original. You can undo this here.",
+        "message": f"Kept {_count(count, noun)} original.",
     }
 
 

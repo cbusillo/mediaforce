@@ -5,13 +5,15 @@ from typing import Any
 import pytest
 
 from mediaforce.advisor import apply_seed_policy
-from mediaforce.core.audio_presets import KEEP_SURROUND, SPEECH_STEREO, SPEECH_STEREO_BITRATE, audio_preset_values
+from mediaforce.core.audio_presets import KEEP_SURROUND, SPEECH_GENRE_SETTING, SPEECH_STEREO, SPEECH_STEREO_BITRATE, audio_preset_values
 from mediaforce.core.config import (
     FOLDER_POLICY_OVERRIDES_KEY,
     ConfigPaths,
     MediaforceConfig,
     set_runtime_folder_audio_preset,
 )
+from mediaforce.core.db import open_db
+from mediaforce.core.db_tables import series_metadata
 from mediaforce.encoding.commands import build_ffmpeg_command
 from mediaforce.encoding.quality import QualitySearchResult
 from mediaforce.encoding.streams import (
@@ -25,7 +27,7 @@ from mediaforce.encoding.streams import (
 from mediaforce.tuning.quality_risk import compile_allow_listed_transform_fragment
 from mediaforce.web.runtime.folder_ai_tuning import _tuning_base_policy
 from mediaforce.web.runtime.folder_tuning_advice import apply_policy_fragment, operator_request_from_intent
-from mediaforce.web.runtime.audio_preset_runtime import dismiss_suggestion, show_audio_preset_payload
+from mediaforce.web.runtime.audio_preset_runtime import show_audio_preset_payload
 from mediaforce.web.settings_runtime import SettingsValidationError, normalize_submitted_library_policy
 
 BASE_AUDIO: dict[str, Any] = {
@@ -328,43 +330,24 @@ def test_library_setting_accepts_only_known_sound_choices() -> None:
         normalize_submitted_library_policy("tv", {"audio_preset": "louder"})
 
 
-
-def test_reality_and_talk_shows_are_offered_speech_heavy(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-
-    reality = show_audio_preset_payload(config, SHOW, genres=("Drama", "Reality"))
-    talk = show_audio_preset_payload(config, SHOW, genres=("Talk",))
-    drama = show_audio_preset_payload(config, SHOW, genres=("Drama",))
-
-    assert reality is not None and talk is not None and drama is not None
-    assert reality["suggestion"] == {
-        "preset": SPEECH_STEREO,
-        "label": "Speech-heavy",
-        "reason": "TMDB lists this show as Reality.",
-    }
-    assert talk["suggestion"]["reason"] == "TMDB lists this show as Talk."
-    assert drama["suggestion"] is None
-    assert reality["current"] == KEEP_SURROUND
-
-
-def test_a_suggestion_never_changes_the_policy(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-
-    show_audio_preset_payload(config, SHOW, genres=("Reality",))
-
-    assert config.resolve_policy(f"{SHOW}/Season 10")["audio"] == BASE_AUDIO
-
-
-def test_no_suggestion_once_the_owner_has_decided(tmp_path: Path) -> None:
-    runtime = tmp_path / "runtime.json"
-    runtime.write_text(json.dumps({FOLDER_POLICY_OVERRIDES_KEY: []}))
-    set_runtime_folder_audio_preset(runtime, SHOW, KEEP_SURROUND, BASE_AUDIO)
-    chosen = show_audio_preset_payload(_config(tmp_path, overrides=_saved_overrides(runtime)), SHOW, genres=("Reality",))
-    library = show_audio_preset_payload(_config(tmp_path, library_preset=KEEP_SURROUND), "tv/Survivor", genres=("Reality",))
-    dismiss_suggestion(runtime, "tv/Survivor")
-    dismissed = show_audio_preset_payload(_config(tmp_path), "tv/Survivor/Season 2", genres=("Reality",))
-
-    assert chosen is not None and library is not None and dismissed is not None
-    assert chosen["suggestion"] is None
-    assert library["suggestion"] is None
-    assert dismissed["suggestion"] is None
+@pytest.mark.parametrize("enabled", [False, True])
+def test_one_sound_decision_follows_current_genres_and_preserves_hand_picked_sound(tmp_path: Path, enabled: bool) -> None:
+    config = _config(tmp_path, overrides=[
+        {"path_prefix": "tv/Interview", "audio": audio_preset_values(KEEP_SURROUND, BASE_AUDIO)[0]},
+        {"path_prefix": f"{SHOW}/Season 1", "audio": BASE_AUDIO},
+    ])
+    with open_db(config.paths.db_path) as connection:
+        for prefix, genre in [(SHOW, "Reality"), ("tv/Interview", "Talk"), ("tv/News", "News")]:
+            connection.execute(series_metadata.insert().values(series_prefix=prefix, tmdb_genres_json=json.dumps([genre]), updated_at="now"))
+    assert config.resolve_policy(SHOW)["audio"] == BASE_AUDIO
+    config.raw[SPEECH_GENRE_SETTING] = enabled
+    with open_db(config.paths.db_path) as connection:
+        for prefix, genre in [("tv/New Show", "Reality"), ("tv/New Talk", "Talk")]:
+            connection.execute(series_metadata.insert().values(series_prefix=prefix, tmdb_genres_json=json.dumps([genre]), updated_at="later"))
+        assert config.has_sound_choice("tv/New Show") == enabled
+    for prefix in (f"{SHOW}/Season 1", "tv/New Show/Season 2", "tv/New Talk"):
+        audio = config.resolve_policy(prefix)["audio"]
+        assert audio == (BASE_AUDIO | audio_preset_values(SPEECH_STEREO, BASE_AUDIO)[0] if enabled else BASE_AUDIO)
+        assert config.has_sound_choice(prefix) == enabled
+    assert config.resolve_policy("tv/Interview/Season 1")["audio"]["preset"] == KEEP_SURROUND
+    assert config.resolve_policy("tv/News")["audio"] == BASE_AUDIO

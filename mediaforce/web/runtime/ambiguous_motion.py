@@ -17,17 +17,17 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
-from mediaforce.core.db_tables import item_events, library_items, production_holds
+from mediaforce.core.db_tables import item_events, library_item_evidence_state, library_items, motion_keep_decisions, production_holds
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, accept_cadence_as_is, cadence_awaits_as_is_decision, \
     cadence_measurement_complete, reclassify_cadence_summary
-from mediaforce.library.evidence_state import sync_library_item_evidence_state
+from mediaforce.library.evidence_state import EVIDENCE_STATE_CURRENT, project_library_item_evidence_state, sync_library_item_evidence_state
 from mediaforce.encoding.encode_queue import list_encode_runs_for_prefix
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
-from mediaforce.library.motion_keep_state import kept_original_item_ids
+from mediaforce.library.motion_keep_state import kept_original_item_ids, library_item_source_sql
 from mediaforce.library.media_scopes import path_matches_scope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.web.runtime.left_out_files import LeftOutFile
@@ -94,10 +94,40 @@ def ambiguous_motion_files(
     return AmbiguousMotionFiles(tuple(eligible), tuple(partly_interlaced))
 
 
+def compressible_motion_files(connection: DBClient, item_ids: list[int]) -> dict[int, Mapping[str, Any]]:
+    if not item_ids:
+        return {}
+    previous = {row["library_item_id"]: object_dict(row) for row in connection.execute(
+        select(library_item_evidence_state).where(
+            library_item_evidence_state.c.library_item_id.in_(item_ids),
+            library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+        )
+    ).mappings()}
+    rows = connection.execute(
+        select(library_items, motion_keep_decisions.c.reason_code)
+        .outerjoin(motion_keep_decisions, (motion_keep_decisions.c.library_item_id == library_items.c.id)
+                   & (motion_keep_decisions.c.source_fingerprint == library_item_source_sql()))
+        .where(library_items.c.id.in_(item_ids), LIBRARY_ITEM_PRESENT, library_items.c.status != "promoted")
+    ).mappings()
+    eligible = {}
+    for record in rows:
+        row = object_dict(record)
+        if row["reason_code"] not in (None, "unclear", "partly_interlaced", "mixed") or not row["fingerprint"]:
+            continue
+        if not cadence_awaits_as_is_decision(_summary(row)):
+            continue
+        evidence = project_library_item_evidence_state(row, CADENCE_EVIDENCE_KIND, previous_state=previous.get(row["id"]))
+        if evidence.state == EVIDENCE_STATE_CURRENT:
+            eligible[int(row["id"])] = row
+    return eligible
+
+
 def accept_ambiguous_motion_action(
         config: MediaforceConfig,
         prefix: str,
         *,
+        library_item_ids: list[int] | None = None,
+        reconsider_kept: bool = False,
         now_iso: str,
         current_approval: Callable[[str], str | None],
 ) -> dict[str, Any]:
@@ -108,9 +138,22 @@ def accept_ambiguous_motion_action(
     with open_db(config.paths.db_path) as connection:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         scope = resolve_media_scope(connection, prefix, library_types=config.library_type_map)
-        if scope.kind != "tv_series":
-            raise HTTPException(status_code=400, detail="Decide ambiguous motion once for a whole show.")
-        files = ambiguous_motion_files(connection, prefix, library_types=config.library_type_map)
+        if library_item_ids is None:
+            if scope.kind != "tv_series":
+                raise HTTPException(status_code=400, detail="Decide ambiguous motion once for a whole show.")
+            files = ambiguous_motion_files(connection, prefix, library_types=config.library_type_map)
+        else:
+            eligible = tuple(row for row in compressible_motion_files(connection, library_item_ids).values()
+                             if scope.includes(str(row["rel_path"])) and (row["reason_code"] is not None) == reconsider_kept)
+            if not eligible:
+                return {"ok": False, "message": "These files can’t be compressed safely as they are. Check their current motion on the item page."}
+            files = AmbiguousMotionFiles(eligible, ())
+            if reconsider_kept:
+                if len(library_item_ids) != 1:
+                    raise HTTPException(status_code=400, detail="Choose one kept file.")
+                connection.execute(delete(motion_keep_decisions).where(motion_keep_decisions.c.library_item_id == library_item_ids[0]))
+            if scope.domain == "tv":
+                prefix = "/".join(scope.prefix.split("/")[:2])
         for row in files.eligible:
             accepted = accept_cadence_as_is(
                 _summary(row),

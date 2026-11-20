@@ -1,12 +1,14 @@
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 from importlib.resources import files
 from pathlib import Path
+from threading import get_ident
 from typing import Any
 from typing import TypeAlias
 
-from sqlalchemy import create_engine
+from sqlalchemy import Select, create_engine
 from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import RowMapping
@@ -131,6 +133,28 @@ def _connect_with_reserved_identity(
     return connection
 
 
+_catalog_reader: ContextVar[tuple[Path, int, Connection] | None] = ContextVar("catalog_reader", default=None)
+
+
+@contextmanager
+def _reading_catalog(path: Path, connection: Connection) -> Iterator[None]:
+    token = _catalog_reader.set((path, get_ident(), connection))
+    try:
+        yield
+    finally:
+        _catalog_reader.reset(token)
+
+
+def read_catalog_value[T](path: Path, query: Select[tuple[T]]) -> T | None:
+    reader = _catalog_reader.get()
+    if reader is not None:
+        catalog, thread, connection = reader
+        if catalog == path and thread == get_ident() and not connection.closed:
+            return connection.execute(query).scalar_one_or_none()
+    with open_readonly_db(path) as connection:
+        return connection.execute(query).scalar_one_or_none()
+
+
 @contextmanager
 def open_db(
         db_path: Path,
@@ -150,7 +174,8 @@ def open_db(
         reserved_lease_identity,
     )
     try:
-        yield connection
+        with _reading_catalog(resolved_path, connection):
+            yield connection
     except BaseException:
         try:
             if connection.in_transaction():
@@ -223,7 +248,8 @@ def open_readonly_db(db_path: Path) -> Iterator[Connection]:
         connection.exec_driver_sql("PRAGMA query_only=ON")
         if identity_guard is not None:
             identity_guard()
-        yield connection
+        with _reading_catalog(resolved_path, connection):
+            yield connection
         if identity_guard is not None:
             identity_guard()
     finally:

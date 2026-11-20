@@ -25847,6 +25847,30 @@ raise SystemExit(0)
         self.assertEqual(claim.library_item_id, other_id)
         self.assertIsNone(released)
 
+    def test_compress_as_is_only_accepts_the_selected_eligible_file(self) -> None:
+        show = self._motion_show({"Season 1/A.mkv": "as_is", "Season 1/B.mkv": "as_is", "Season 1/C.mkv": "partly",
+                                  "Season 1/D.mkv": "held"})
+        season = "tv/show/Season 1"
+        self.assertTrue(self._keep_original(show, season, "Season 1/B.mkv", "Season 1/C.mkv")["ok"])
+
+        def compress(*names: str, kept: bool = False) -> dict[str, Any]:
+            return ambiguous_motion_runtime.accept_ambiguous_motion_action(
+                show.config, season, library_item_ids=[show.item_ids[name] for name in names], reconsider_kept=kept,
+                now_iso=web_app._now_iso(), current_approval=lambda _: None,
+            )
+
+        page = item_payload(show.config, season, sound=lambda _prefix: None)
+        assert page is not None
+        self.assertEqual({row["name"] for row in page["files"] if row["can_compress_as_is"]}, {"A.mkv", "B.mkv"})
+        self.assertEqual(compress(*show.item_ids)["accepted_count"], 1)
+        self.assertEqual(len(self._kept_rows()), 2)
+        self.assertFalse(compress("Season 1/C.mkv", kept=True)["ok"])
+        self.assertTrue(compress("Season 1/B.mkv", kept=True)["ok"])
+        self.assertEqual(self._kept_rows(), {show.item_ids["Season 1/C.mkv"]})
+        lifecycle = self._motion_page(show, season).lifecycle
+        self.assertEqual(lifecycle["eligible_candidate_count"], 2)
+        self.assertEqual(lifecycle["motion_held_candidate_count"], 1)
+
     def test_a_kept_episode_is_not_offered_or_accepted_as_is_on_the_show_page(self) -> None:
         show = self._motion_show({"Season 1/Unclear.mkv": "as_is", "Season 1/Other.mkv": "as_is"})
         self.assertTrue(self._keep_original(show, "tv/show", "Season 1/Unclear.mkv")["ok"])

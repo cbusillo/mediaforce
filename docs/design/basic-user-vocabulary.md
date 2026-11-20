@@ -290,6 +290,14 @@ backups`, `selected original backups`, `Cleanup folder`, and `ready to delete`.
   `cleanup folder`, `remote computers`, and `work windows` should be visible
   before `transcode root`, `archive root`, `SSH host`, or `staging root`.
 
+## Motion and sound decisions
+
+- **Compress it as it is** keeps the file's frames as they are and checks the
+  compressed copy. **Keep the original** settles that file. A kept file can
+  still be compressed this way when its measured motion allows it.
+- **Use Speech-heavy for reality and talk shows?** appears once in Needs you.
+  Shows where you chose the sound keep your choice.
+
 ## Dangerous Actions
 
 Destructive or broad actions need three pieces of copy near the control:

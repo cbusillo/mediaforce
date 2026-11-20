@@ -21,8 +21,8 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
-from mediaforce.core.audio_presets import AUDIO_PRESETS, PRESET_AUDIO_KEYS, apply_audio_preset, audio_preset_values, \
-    owner_sound_keys
+from mediaforce.core.audio_presets import AUDIO_PRESETS, PRESET_AUDIO_KEYS, SPEECH_GENRE_SETTING, SPEECH_STEREO, apply_audio_preset, audio_preset_values, \
+    is_reality_or_talk, owner_sound_keys
 from mediaforce.core.evidence import canonical_json_bytes
 from mediaforce.core.file_integrity import (
     FileIntegrityError,
@@ -300,14 +300,29 @@ class MediaforceConfig:
         policy, _ = self.resolve_policy_with_target_provenance(rel_path)
         return policy
 
+    @property
+    def genre_sound_decision(self) -> bool | None:
+        value = self.raw.get(SPEECH_GENRE_SETTING)
+        return value if isinstance(value, bool) else None
+
+    @property
+    def needs_genre_sound_decision(self) -> bool:
+        return self.genre_sound_decision is None and "tv" in self.library_type_map.values()
+
+    def uses_genre_sound(self, rel_path: str) -> bool:
+        if not self.genre_sound_decision:
+            return False
+        parts = rel_path.strip("/").split("/")
+        return (len(parts) >= 2 and self.library_type_map.get(parts[0]) == "tv"
+                and is_reality_or_talk(self.paths.db_path, "/".join(parts[:2])))
+
     def has_sound_choice(self, rel_path: str) -> bool:
-        """True when a sound choice applies here: the TV library's default or a folder override's."""
         normalized_rel_path = rel_path.strip("/")
         library = self.library_definition_map.get(normalized_rel_path.split("/", 1)[0])
         if library and library.get("type") == "tv":
             if str(object_dict(library.get("policy")).get("audio_preset") or "") in AUDIO_PRESETS:
                 return True
-        return any(
+        return self.uses_genre_sound(rel_path) or any(
             object_dict(override.get("audio")).get("preset")
             and _path_prefix_matches(normalized_rel_path, str(override.get("path_prefix", "")).strip("/"))
             for override in self.overrides
@@ -353,6 +368,7 @@ class MediaforceConfig:
                 continue
             matching_overrides.append((len(prefix), index, override))
 
+        hand_picked_sound = False
         for _, _, override in sorted(matching_overrides):
             prefix = str(override.get("path_prefix", "")).strip("/")
             for section in ("video", "audio", "subtitle", "planning"):
@@ -372,11 +388,14 @@ class MediaforceConfig:
                                 "override_prefix": prefix,
                             }
                     if section == "audio" and normalized_values.get("preset"):
+                        hand_picked_sound = hand_picked_sound or "/" in prefix
                         # A chosen sound owns every preset key, including ones it leaves unset.
                         for preset_key in PRESET_AUDIO_KEYS:
                             if preset_key not in normalized_values:
                                 policy["audio"].pop(preset_key, None)
                     policy[section].update(normalized_values)
+        if not hand_picked_sound and self.uses_genre_sound(normalized_rel_path):
+            apply_audio_preset(policy["audio"], SPEECH_STEREO, self.audio)
         return policy, target_provenance
 
 

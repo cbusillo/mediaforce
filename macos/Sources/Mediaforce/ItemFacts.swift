@@ -26,6 +26,7 @@ struct ItemFacts: Decodable, Sendable {
         let additionalWaitReasons: [WaitReason]?
         let keptReason: String?
         let heldReason: String?
+        var canCompressAsIs: Bool?
         let percentComplete: Int?
         let sizeQuestion: SizeQuestion?
         let bytes: Int64
@@ -38,7 +39,7 @@ struct ItemFacts: Decodable, Sendable {
 
         private enum CodingKeys: String, CodingKey {
             case libraryItemId, relPath, name, season, episode, stage, validation, waitReason, additionalWaitReasons, keptReason, heldReason
-            case percentComplete, sizeQuestion, bytes, originalBytes, originalBackup, heldCopy
+            case canCompressAsIs, percentComplete, sizeQuestion, bytes, originalBytes, originalBackup, heldCopy
         }
 
         /// What the player shows: a held copy against the file as it is, a compressed file against its backup, or the
@@ -55,6 +56,7 @@ struct ItemFacts: Decodable, Sendable {
             ([waitReason].compactMap { $0 } + (additionalWaitReasons ?? [])).first { $0.code == "containment_unproven" }
         }
         var heldForUnconfirmedStop: Bool { unconfirmedStop != nil }
+        var needsMotionChoice: Bool { heldReason == "motion_pattern" && keptReason == nil && canCompressAsIs == true }
         var needsYou: Bool { stage == "needs_you" || !(additionalWaitReasons ?? []).isEmpty }
     }
 
@@ -115,9 +117,20 @@ struct ItemFacts: Decodable, Sendable {
             ?? files.first
     }
 
+    var motionFiles: [File] { files.filter { $0.heldReason == "motion_pattern" && $0.keptReason == nil } }
+    var motionQuestion: String {
+        let eligible = motionFiles.filter(\.needsMotionChoice).count
+        let held = motionFiles.count - eligible
+        var line = "\(Words.count(eligible, "file")) can be compressed without changing the frames."
+        if held > 0 {
+            line += held == 1 ? " One stays held because its motion can’t be compressed safely." :
+                " \(held) stay held because their motion can’t be compressed safely."
+        }
+        return line
+    }
     var waiting: [File] { files.filter(\.needsYou) }
     var compressedCount: Int { files.filter(\.compressed).count }
-    var keptCount: Int { files.filter { $0.stage == "kept_original" || $0.stage == "held" }.count }
+    var keptCount: Int { files.filter { $0.stage == "kept_original" || ($0.stage == "held" && $0.heldReason != "motion_pattern") }.count }
     var bytes: Int64 { files.reduce(0) { $0 + $1.bytes } }
     var originalBytes: Int64 { files.reduce(0) { $0 + ($1.originalBytes ?? $1.bytes) } }
 }
@@ -168,6 +181,7 @@ extension MediaforceClient {
     /// One file's answer, from its season's page or from Needs you.
     func answer(_ action: ItemAction, in prefix: String, for file: ItemFacts.File) async throws -> ItemActionResult {
         switch action {
+        case .compressAsIs: try await compressAsIs(prefix, [file.id], reconsiderKept: true)
         case .makeAgain: try await makeAgain(prefix, file.libraryItemId)
         case .keepThisCopy: try await keepThisCopy(prefix, file.libraryItemId)
         case .putOriginalBack: try await putOriginalBack(prefix, file.libraryItemId)
@@ -222,12 +236,19 @@ extension MediaforceClient {
         try await folderAction(prefix, "queue-encode", body: ["notes": "Retry unfinished episodes.", "bypass_schedule": false])
     }
 
-    func keepMotionOriginals(_ prefix: String, _ libraryItemIds: [Int]) async throws -> ItemActionResult {
-        try await folderAction(prefix, "keep-motion-original", body: ["library_item_ids": libraryItemIds])
+    func answerMotion(_ facts: ItemFacts, compress: Bool) async throws -> ItemActionResult {
+        if compress {
+            return try await compressAsIs(facts.prefix, facts.motionFiles.filter(\.needsMotionChoice).map(\.id))
+        }
+        return try await keepMotionOriginals(facts.prefix, facts.motionFiles.map(\.id))
     }
 
-    func compressAsIs(_ prefix: String) async throws -> ItemActionResult {
-        try await folderAction(prefix, "accept-ambiguous-motion", body: [:])
+    func compressAsIs(_ prefix: String, _ ids: [Int], reconsiderKept: Bool = false) async throws -> ItemActionResult {
+        try await folderAction(prefix, "compress-as-is", body: ["library_item_ids": ids, "reconsider_kept": reconsiderKept])
+    }
+
+    func keepMotionOriginals(_ prefix: String, _ libraryItemIds: [Int]) async throws -> ItemActionResult {
+        try await folderAction(prefix, "keep-motion-original", body: ["library_item_ids": libraryItemIds])
     }
 
     func setSound(_ showPrefix: String, _ preset: String) async throws -> ItemActionResult {

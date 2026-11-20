@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI, Request
 from starlette.routing import Route
 
+from mediaforce.core.config import load_config
 from mediaforce.library.library_settings import normalize_library_definition
 from mediaforce.web import app as web_app
 
@@ -122,6 +123,18 @@ def _facts_body(app: FastAPI) -> dict[str, Any]:
         "catalog_refresh_hours": facts["catalog_refresh_hours"],
         "revision": facts["revision"],
     }
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_genre_sound_remembers_the_first_answer(library_app: tuple[FastAPI, Path], enabled: bool) -> None:
+    app, _path = library_app
+    assert app.state.config.needs_genre_sound_decision
+    decide = _endpoint(app, "POST", "/api/app/sound/reality-and-talk")
+    assert asyncio.run(decide(_json_request({"enabled": enabled}))).status_code == 200
+    assert asyncio.run(decide(_json_request({"enabled": not enabled}))).status_code == 409
+    reopened = load_config(app.state.config.paths.config_path)
+    assert reopened.genre_sound_decision is enabled
+    assert not reopened.needs_genre_sound_decision
 
 
 def test_library_save_changes_only_the_library_section(library_app: tuple[FastAPI, Path], tmp_path: Path) -> None:
