@@ -61,6 +61,24 @@ final class SpaceSavedTests: XCTestCase {
         XCTAssertNil(status.outcome)
     }
 
+    func testSkippedBackupsShowEachReasonAndLeaveDeleteAvailable() throws {
+        let folder = try cleanup("""
+        {"file_count": 2, "total_size_bytes": 92, "deletion": {"state": "finished", "total_count": 5,
+         "deleted_count": 3, "freed_bytes": 51000000000, "kept_count": 0, "skipped_files": [
+         {"file": "tv/Lost/Pilot.mkv", "reason": "Permission denied"}, {"file": "movie/Pilot.mkv", "reason": "File is busy"}]}}
+        """)
+        let status = BackupsStatus(cleanup: folder, asking: false)
+        let outcome = try XCTUnwrap(status.outcome)
+        XCTAssertTrue(status.canDelete)
+        XCTAssertTrue(outcome.failed)
+        XCTAssertTrue(outcome.text.contains(Words.count(3, "original backup")))
+        XCTAssertTrue(outcome.text.contains(Words.size(51000000000)))
+        let lines = outcome.text.split(separator: "\n")
+        for (file, reason) in [("tv/Lost/Pilot.mkv", "Permission denied"), ("movie/Pilot.mkv", "File is busy")] {
+            XCTAssertTrue(lines.contains { $0.contains(file) && $0.contains(reason) }, outcome.text)
+        }
+    }
+
     func testAFailedDeletionNamesTheFileAndWhyAndAllowsAnotherTry() throws {
         let folder = try cleanup("""
         {"file_count": 22, "total_size_bytes": 92, "deletion": {"state": "failed", "total_count": 34,

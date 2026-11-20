@@ -1535,28 +1535,37 @@ class TuningRuntimeTests(unittest.TestCase):
         assert finished is not None
         self.assertEqual((finished["state"], finished["deleted_count"], finished["freed_bytes"]), ("finished", 3, 6))
 
-    def test_a_failed_deletion_names_its_file_and_reason_and_stops_there(self) -> None:
-        backups = self._archived_backups("episode-1.mkv", "episode-2.mkv", "episode-3.mkv")
+    def test_cleanup_skips_only_failed_backups_and_can_retry_them(self) -> None:
+        backups = self._archived_backups("first.mkv", "second.mkv", "third.mkv", "fourth.mkv")
         progress = BackupDeletion()
         attempted: list[Path] = []
+        removed: list[Path] = []
+        sizes = {path: path.stat().st_size for path in backups}
+        failures = {1: "Permission denied", 3: "File is busy"}
 
-        def refuse_second(path: Path) -> None:
+        def refuse_alternating(path: Path) -> None:
             attempted.append(path)
-            if len(attempted) == 2:
-                raise PermissionError(13, "Permission denied", str(path))
+            if reason := failures.get(len(attempted)):
+                raise OSError(reason)
             safe_unlink(path)
 
-        with patch("mediaforce.web.runtime.archive_cleanup.safe_unlink", side_effect=refuse_second):
-            with self.assertRaises(PermissionError):
-                clear_archive_cleanup_action(self.config, progress=progress)
+        with patch("mediaforce.web.runtime.archive_cleanup.safe_unlink", side_effect=refuse_alternating):
+            result = clear_archive_cleanup_action(self.config, progress=progress, on_removed=removed.append)
 
-        failed = progress.facts()
-        assert failed is not None
-        self.assertEqual(
-            (failed["state"], failed["failed_file"], failed["failure_reason"], failed["deleted_count"], failed["total_count"]),
-            ("failed", str(attempted[1].relative_to(self.config.archive_root)), "Permission denied", 1, 3),
-        )
-        self.assertEqual([path.exists() for path in backups].count(True), 2)
+        self.assertCountEqual(attempted, backups)
+        self.assertEqual(removed, attempted[1::2])
+        self.assertCountEqual([path for path in backups if path.exists()], attempted[::2])
+        skipped = [{"file": str(attempted[i - 1].relative_to(self.config.archive_root)), "reason": reason}
+                   for i, reason in failures.items()]
+        freed = sum(sizes[path] for path in removed)
+        self.assertEqual((result["removed_count"], result["removed_size_bytes"], result["skipped_files"]), (2, freed, skipped))
+        facts = progress.facts()
+        assert facts is not None
+        self.assertEqual((facts["state"], facts["deleted_count"], facts["freed_bytes"], facts["skipped_files"]),
+                         ("finished", 2, freed, skipped))
+        self.assertEqual(result["archive_cleanup"]["file_count"], 2)
+        retry = clear_archive_cleanup_action(self.config, progress=progress)
+        self.assertEqual((retry["removed_count"], retry["skipped_files"], retry["archive_cleanup"]["file_count"]), (2, [], 0))
 
     def test_clear_archive_cleanup_action_tolerates_missing_archive_root(self) -> None:
         config = MediaforceConfig(

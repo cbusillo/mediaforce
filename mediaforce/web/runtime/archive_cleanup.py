@@ -52,12 +52,14 @@ class BackupDeletion:
 
     def facts(self) -> dict[str, Any] | None:
         with self._lock:
-            return None if self._facts is None else dict(self._facts)
+            if self._facts is None:
+                return None
+            return {**self._facts, "skipped_files": self._facts["skipped_files"].copy()}
 
     def begin(self) -> None:
         with self._lock:
             self._facts = {"state": "running", "total_count": None, "total_bytes": None, "deleted_count": 0,
-                           "freed_bytes": 0, "kept_count": 0, "failed_file": None, "failure_reason": None}
+                           "freed_bytes": 0, "kept_count": 0, "skipped_files": [], "failed_file": None, "failure_reason": None}
 
     def counted(self, total_count: int, total_bytes: int, kept_count: int) -> None:
         self._update(total_count=total_count, total_bytes=total_bytes, kept_count=kept_count)
@@ -68,12 +70,16 @@ class BackupDeletion:
             self._facts["deleted_count"] += 1
             self._facts["freed_bytes"] += size_bytes
 
+    def skipped(self, file: str, error: OSError) -> None:
+        with self._lock:
+            assert self._facts is not None
+            self._facts["skipped_files"].append({"file": file, "reason": _failure_reason(error)})
+
     def failed(self, error: BaseException, *, file: str | None = None) -> None:
         with self._lock:
             if self._facts is None or self._facts["state"] != "running":
                 return
-            reason = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
-            self._facts.update(state="failed", failed_file=file, failure_reason=reason or type(error).__name__)
+            self._facts.update(state="failed", failed_file=file, failure_reason=_failure_reason(error))
 
     def finished(self) -> None:
         self._update(state="finished")
@@ -82,6 +88,12 @@ class BackupDeletion:
         with self._lock:
             assert self._facts is not None
             self._facts.update(changes)
+
+
+def _failure_reason(error: BaseException) -> str:
+    if isinstance(error, OSError) and error.strerror:
+        return error.strerror
+    return str(error) or type(error).__name__
 
 
 def clear_archive_cleanup_action(
@@ -145,19 +157,19 @@ def _clear_archive_cleanup_action(
     deletable = [(path, _size_bytes(path)) for path in files if not archive_path_needs_recovery(path, protected)]
     preserved_count = len(files) - len(deletable)
     progress.counted(len(deletable), sum(size for _path, size in deletable), preserved_count)
-    removed_count = 0
-    removed_size_bytes = 0
     for path, size_bytes in deletable:
         try:
             with open_db(config.paths.db_path) as connection:
                 operations = prepare_archive_removal(connection, path)
-                safe_unlink(path)
+                try:
+                    safe_unlink(path)
+                except OSError as error:
+                    progress.skipped(str(path.relative_to(archive_root)), error)
+                    continue
                 commit_archive_removal(connection, operations)
         except BaseException as error:
             progress.failed(error, file=str(path.relative_to(archive_root)))
             raise
-        removed_count += 1
-        removed_size_bytes += size_bytes
         progress.removed(size_bytes)
         if on_removed is not None:
             on_removed(path)
@@ -171,6 +183,9 @@ def _clear_archive_cleanup_action(
         except OSError:
             continue
 
+    facts = progress.facts()
+    assert facts is not None
+    removed_count = facts["deleted_count"]
     return {
         "ok": True,
         "message": f"Deleted {removed_count} original backup{'s' if removed_count != 1 else ''}."
@@ -178,7 +193,8 @@ def _clear_archive_cleanup_action(
                       if preserved_count else ""),
         "preserved_count": preserved_count,
         "removed_count": removed_count,
-        "removed_size_bytes": removed_size_bytes,
+        "removed_size_bytes": facts["freed_bytes"],
+        "skipped_files": facts["skipped_files"],
         "archive_cleanup": archive_cleanup_summary(config, transcode_root=transcode_root),
     }
 

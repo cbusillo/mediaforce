@@ -8,11 +8,14 @@ struct CleanupFolder: Decodable, Sendable {
     var deletion: BackupDeletion?
 }
 
-/// One deletion of the original backups. Counts are known once Mediaforce has read the Cleanup folder; a failure
-/// stops it at the file that couldn't be deleted.
 struct BackupDeletion: Decodable, Sendable, Equatable {
     enum State: String, Decodable, Sendable {
         case running, finished, failed
+    }
+
+    struct SkippedFile: Decodable, Sendable, Equatable {
+        let file: String
+        let reason: String
     }
 
     let state: State
@@ -20,6 +23,7 @@ struct BackupDeletion: Decodable, Sendable, Equatable {
     let deletedCount: Int
     let freedBytes: Int64
     let keptCount: Int
+    let skippedFiles: [SkippedFile]?
     let failedFile: String?
     let failureReason: String?
 }

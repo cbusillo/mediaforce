@@ -846,8 +846,9 @@ def test_interrupted_owner_cleanup_reconciles_on_next_cleanup(connection: DBClie
     with patch("mediaforce.web.runtime.archive_cleanup.open_db", side_effect=lambda _path: nullcontext(connection)):
         if interruption == "unlink_error":
             with patch("mediaforce.web.runtime.archive_cleanup.safe_unlink", side_effect=PermissionError("denied")):
-                with pytest.raises(PermissionError):
-                    clear_archive_cleanup_action(config)
+                skipped = clear_archive_cleanup_action(config)
+                assert skipped["removed_count"] == 0
+                assert skipped["skipped_files"] == [{"file": archived.name, "reason": "denied"}]
         else:
             prepare_archive_removal(connection, archived)
             connection.rollback()

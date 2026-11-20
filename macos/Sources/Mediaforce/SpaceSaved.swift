@@ -333,7 +333,7 @@ struct BackupsStatus {
     var line: String {
         if deleting { return Words.deletingBackups(cleanup.deletion) }
         if cleanup.fileCount > 0 { return Words.deleteBackupsLine(cleanup.fileCount, cleanup.totalSizeBytes) }
-        if let deletion = cleanup.deletion, deletion.state == .finished { return Words.backupsDeleted(deletion) }
+        if let deletion = cleanup.deletion, deletion.state == .finished { return Words.backupDeletionResult(deletion) }
         return Words.noBackupsWaiting
     }
 
@@ -341,8 +341,8 @@ struct BackupsStatus {
     var outcome: (text: String, failed: Bool)? {
         guard !deleting, let deletion = cleanup.deletion else { return nil }
         switch deletion.state {
-        case .failed: return (Words.backupsNotDeleted(deletion), true)
-        case .finished where cleanup.fileCount > 0: return (Words.backupsDeleted(deletion), false)
+        case .failed: return (Words.backupDeletionResult(deletion), true)
+        case .finished where cleanup.fileCount > 0: return (Words.backupDeletionResult(deletion), deletion.skippedFiles?.isEmpty == false)
         default: return nil
         }
     }

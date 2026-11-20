@@ -583,12 +583,18 @@ extension Words {
         return "Deleting \(count(total, "original backup"))… \(deletion.deletedCount) of \(total), \(size(deletion.freedBytes)) back so far"
     }
 
-    static func backupsDeleted(_ deletion: BackupDeletion) -> String {
+    static func backupDeletionResult(_ deletion: BackupDeletion) -> String {
+        let summary = deletion.state == .failed ? backupsNotDeleted(deletion) : backupsDeleted(deletion)
+        let skipped = (deletion.skippedFiles ?? []).map { "Skipped \($0.file): \($0.reason)" }
+        return ([summary] + skipped).joined(separator: "\n")
+    }
+
+    private static func backupsDeleted(_ deletion: BackupDeletion) -> String {
         let kept = deletion.keptCount > 0 ? " Kept \(count(deletion.keptCount, "original")) that files still being finished need." : ""
         return "Deleted \(count(deletion.deletedCount, "original backup")), \(size(deletion.freedBytes)) back.\(kept)"
     }
 
-    static func backupsNotDeleted(_ deletion: BackupDeletion) -> String {
+    private static func backupsNotDeleted(_ deletion: BackupDeletion) -> String {
         let reason = deletion.failureReason ?? "Mediaforce didn't say why"
         guard let file = deletion.failedFile else { return "Couldn't delete the original backups: \(reason)." }
         let sofar = deletion.totalCount.map { " \(deletion.deletedCount) of \($0) were deleted, \(size(deletion.freedBytes)) back; the rest are still there." } ?? ""
