@@ -199,7 +199,8 @@ the Sparkle key every release ships. The tag is `v<version>` and the archive
 Sparkle compares the build number (`CFBundleVersion`), not the version. The
 workflow sets it to one above the newest build on the live feed, and never
 lower than 4: Mediaforce 0.1.0 was build 3. Source builds are build 1 and never
-read the feed. A version string such as `0.4.0` as the build would not update
+read the feed. If a release already exists and the feed has no build history,
+restore the feed before publishing. A version string such as `0.4.0` as the build would not update
 an app on build 3, since Sparkle reads it as older.
 
 ### Cutting a release
@@ -224,7 +225,7 @@ an app on build 3, since Sparkle reads it as older.
    as its build. Then it signs the zip for Sparkle, uploads a draft release,
    downloads it again to check the bytes and signature, publishes it and
    checks anyone can download it. The `feed` job publishes the feed to Pages
-   last and checks it is served.
+   last and checks the served feed offers the new build.
 6. Report the release page, the version and the served feed to the Director.
 
 If the `release` job fails before publishing, read what failed, delete a

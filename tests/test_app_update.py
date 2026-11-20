@@ -31,6 +31,7 @@ class FakeServer:
         self.update = update
         self.running = {"encode": 0, "sample": 0}
         self.finishes_in: int | None = None
+        self.sample_seconds: int | None = None
         self.failing_build: str | None = None
         self.answering_build: str | None = None
         self.launchctl: list[list[str]] = []
@@ -39,7 +40,9 @@ class FakeServer:
         _ = post
         if route.startswith("/api/dashboard?"):
             return {"encode_queue": {"running_count": self.running["encode"]},
-                    "calibration_queue": {"sample": {"running_count": self.running["sample"]}, "full": {"running_count": 0}}}
+                    "calibration_queue": {"sample": {"running_count": self.running["sample"],
+                        "running": [{"progress": {"estimate": {"remaining_seconds_high": self.sample_seconds}}}] * self.running["sample"]},
+                        "full": {"running_count": 0, "running": []}}}
         if route == "/api/app/activity":
             finishes = (datetime.now(timezone.utc) + timedelta(seconds=self.finishes_in)).isoformat() if self.finishes_in else None
             return {"computers": [{"running": [{"finishes_at": finishes}] * self.running["encode"]}]}
@@ -59,7 +62,7 @@ Update = tuple[deploy.AppUpdate, FakeServer]
 
 @pytest.fixture
 def update(tmp_path: Path) -> Iterator[Update]:
-    support = tmp_path / "support"
+    support = tmp_path / "Application Support %20"
     config = tmp_path / "config.toml"
     config.write_text(
         f'[state]\ndb_path = "{support}/library.sqlite3"\nrun_manifest_dir = "{support}/runs"\n'
@@ -155,6 +158,34 @@ def test_an_update_waiting_an_hour_drains_files_that_are_not_finishing_soon(upda
     assert _phase(app_update) == "prepared"
 
 
+def test_running_sample_drains_only_with_a_short_estimate(update: Update) -> None:
+    app_update, server = update
+    server.running["sample"] = 1
+    for seconds in (None, 3600, 60):
+        server.sample_seconds = seconds
+        deploy.prepare_update(app_update, "2")
+        assert _phase(app_update) == ("draining" if seconds == 60 else None)
+
+
+def test_activity_timeouts_cannot_outlast_the_drain_cap(update: Update) -> None:
+    app_update, server = update
+    server.running["encode"] = 1
+    started = datetime.now(timezone.utc)
+
+    def timeout_activity(base: str, route: str) -> dict[str, Any]:
+        if route == "/api/app/activity":
+            raise TimeoutError("Activity timed out")
+        return server.api(base, route)
+
+    with patch.object(deploy, "_api", side_effect=timeout_activity):
+        for minutes in (0, 30, 59):
+            with patch.object(deploy, "_utc_now", return_value=started + timedelta(minutes=minutes)), pytest.raises(TimeoutError):
+                deploy.prepare_update(app_update, "2")
+        with patch.object(deploy, "_utc_now", return_value=started + timedelta(minutes=61)):
+            deploy.prepare_update(app_update, "2")
+    assert _phase(app_update) == "draining" and server.launchctl == []
+
+
 def test_a_wait_noted_for_another_update_starts_over(update: Update) -> None:
     app_update, server = update
     server.running["encode"] = 1
@@ -185,6 +216,54 @@ def test_publication_holding_its_lock_keeps_the_old_server_running(update: Updat
     publisher.join()
     deploy.prepare_update(app_update, "2")
     assert _phase(app_update) == "prepared"
+
+
+def test_encode_claimed_before_hold_is_not_interrupted(update: Update) -> None:
+    app_update, server = update
+    server.running["encode"] = 1
+    deploy.prepare_update(app_update, "2")
+    waiting = app_update.file(deploy.UPDATE_WAITING_NAME)
+    waited_since = waiting.read_bytes()
+    server.running["encode"] = 0
+    save = deploy._write_intent
+
+    def claim_before_hold(support: Path, intent: dict[str, Any]) -> None:
+        server.running["encode"] = 1
+        save(support, intent)
+
+    with patch.object(deploy, "_write_intent", side_effect=claim_before_hold):
+        deploy.prepare_update(app_update, "2")
+    assert server.launchctl == [] and _phase(app_update) is None
+    assert waiting.read_bytes() == waited_since
+
+
+def test_failed_idle_recheck_releases_only_the_temporary_hold(update: Update) -> None:
+    app_update, server = update
+
+    def unavailable_under_hold(base: str, route: str) -> dict[str, Any]:
+        if _phase(app_update) == "draining":
+            raise TimeoutError("cannot verify idle")
+        return server.api(base, route)
+
+    with patch.object(deploy, "_api", side_effect=unavailable_under_hold), pytest.raises(TimeoutError):
+        deploy.prepare_update(app_update, "2")
+    assert _phase(app_update) is None and server.launchctl == []
+
+
+@pytest.mark.parametrize("worker_counts", [True, False], ids=["scan-worker", "earlier-server"])
+def test_update_waits_for_scan_after_its_database_row_finishes(update: Update, worker_counts: bool) -> None:
+    app_update, server = update
+    def scan_refreshing_metadata(base: str, route: str) -> dict[str, Any]:
+        response = server.api(base, route)
+        if worker_counts and route == "/api/release/work":
+            response["running_scan_passes"] = 1
+        if not worker_counts and route.startswith("/api/dashboard?"):
+            response["scan_job"] = {"status": "running"}
+        return response
+
+    with patch.object(deploy, "_api", side_effect=scan_refreshing_metadata):
+        deploy.prepare_update(app_update, "2")
+    assert server.launchctl == []
 
 
 def test_quiet_server_saves_complete_old_pair_before_sparkle_may_install(update: Update) -> None:

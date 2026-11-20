@@ -74,9 +74,22 @@ def newest_published(feed: str) -> PublishedBuild | None:
 
 def next_build(version: str, previous: str | None) -> int:
     newest = newest_published(previous) if previous else None
+    if newest is None:
+        published = subprocess.check_output(
+            ["gh", "release", "list", "--exclude-drafts", "--limit", "1", "--json", "tagName", "--jq", ".[].tagName"],
+            cwd=ROOT, text=True,
+        ).strip()
+        if published:
+            raise ValueError(f"The feed has no build history but release {published} is published; restore the feed")
     if newest is not None and version_order(version) <= version_order(newest.version):
         raise ValueError(f"version {version} is not higher than the published {newest.version}; raise it in pyproject.toml")
     return max(newest.build if newest else 0, LAST_HAND_NUMBERED_BUILD) + 1
+
+
+def require_served_build(feed: str, build: int) -> None:
+    newest = newest_published(feed)
+    if newest is None or newest.build != build:
+        raise ValueError(f"The served feed does not offer the expected build {build}")
 
 
 def appcast(app: Path, archive: Path, signature: str, url: str, notes_url: str, previous: str | None,
@@ -236,6 +249,9 @@ def main() -> int:
     commands.add_parser("identity", help="print the release identity as name=value lines")
     numbering = commands.add_parser("next-build", help="print build=N, one above the live feed's newest build")
     numbering.add_argument("--previous", type=Path, help="the live feed, when one is published")
+    served = commands.add_parser("check-feed", help="check the newest build in the served feed")
+    served.add_argument("feed", type=Path)
+    served.add_argument("build", type=int)
     installing = commands.add_parser("install", help="install a verified release through the staged controller deploy")
     installing.add_argument("--release", required=True, help="tag (v<version>), archive URL or local archive")
     installing.add_argument("--stage", type=Path, required=True, help="fresh folder under the database's deployments/")
@@ -263,6 +279,9 @@ def main() -> int:
         return 0
     if args.command == "identity":
         print("\n".join(f"{name}={value}" for name, value in release_identity().items()))
+        return 0
+    if args.command == "check-feed":
+        require_served_build(args.feed.read_text(), args.build)
         return 0
     previous = args.previous.read_text() if args.previous else None
     if args.command == "next-build":

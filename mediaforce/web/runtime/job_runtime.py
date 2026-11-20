@@ -48,6 +48,7 @@ SUCCESSFUL_SCAN_RUN_STATUS = "completed"
 DEFAULT_SCAN_INTERRUPTED_ERROR = "Background scan was interrupted by a web process restart."
 _SCAN_SCHEDULE_LOCK = threading.Lock()
 _SCAN_JOB_STATE_LOCK = threading.Lock()
+_RUNNING_SCAN_PASSES: dict[threading.Thread, Path] = {}
 _SCAN_WINDOW_POLL_SECONDS = 1.0
 _LOGGER = logging.getLogger(__name__)
 
@@ -736,6 +737,11 @@ def _wait_for_scan_window(
         config = refreshed
 
 
+def running_scan_pass_count(database: Path) -> int:
+    with _SCAN_JOB_STATE_LOCK:
+        return sum(path == database for path in _RUNNING_SCAN_PASSES.values())
+
+
 def run_scan_job(
         *, config_path: Any, prefix: str | None, job_id: str,
         process_controller: ManagedProcessController, deps: JobRuntimeDeps,
@@ -762,8 +768,15 @@ def run_scan_job(
             return
         if current_config is None:
             return
-        current_id = _run_scan_job_pass(config=current_config, prefix=prefix, job_id=current_id,
-                                       process_controller=process_controller, deps=deps)
+        thread = threading.current_thread()
+        with _SCAN_JOB_STATE_LOCK:
+            _RUNNING_SCAN_PASSES[thread] = current_config.paths.db_path
+        try:
+            current_id = _run_scan_job_pass(config=current_config, prefix=prefix, job_id=current_id,
+                                            process_controller=process_controller, deps=deps)
+        finally:
+            with _SCAN_JOB_STATE_LOCK:
+                del _RUNNING_SCAN_PASSES[thread]
 
 
 def _run_scan_job_pass(
@@ -1014,6 +1027,9 @@ def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRu
             )
             while running_by_lane[lane] < capacity:
                 started_at = deps.now_iso()
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                if update_hold_reason(config.paths.db_path.parent):
+                    return
                 payload = claim_next_queued_calibration_job(
                     connection,
                     lane=lane,
@@ -1022,9 +1038,9 @@ def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRu
                     excluded_prefixes=tuple(sorted(active_prefixes)),
                     excluded_job_ids=not_startable,
                 )
+                connection.commit()
                 if payload is None:
                     break
-                connection.commit()
                 try:
                     dispatch_calibration_job(config, payload, deps)
                 except Exception as exc:
