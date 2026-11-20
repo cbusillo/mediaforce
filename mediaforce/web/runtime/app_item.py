@@ -6,6 +6,7 @@ player streams each file a few seconds at a time; see player_stream.
 """
 
 import re
+from time import time
 from collections.abc import Callable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -25,6 +26,8 @@ from mediaforce.library.staged_validation import staged_validation_outcome
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.web.runtime.app_window import season_identity
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
+from mediaforce.web.runtime.kind_approvals import movie_queue_facts
+from mediaforce.web.runtime.production_approval import LoadCalibrationState
 from mediaforce.web.runtime.episode_progress import load_season_episode_progress
 
 PLAYER_SIDES = ("compressed", "original")
@@ -36,6 +39,7 @@ def item_payload(
         prefix: str,
         *,
         sound: Callable[[str], dict[str, Any] | None],
+        load_calibration_state: LoadCalibrationState | None = None,
 ) -> dict[str, Any] | None:
     """Everything the item page shows for this prefix, or None when it names nothing in the library."""
     with open_readonly_db(config.paths.db_path) as connection:
@@ -56,6 +60,8 @@ def item_payload(
             for episode in load_season_episode_progress(connection, items, config=config)
         }
         ids = [item.item_id for item in items]
+        queue = (movie_queue_facts(connection, config, prefix, ids, load_calibration_state, now=time())
+                 if scope.domain == "movie" and load_calibration_state is not None else None)
         sizes = {
             int(item_id): int(size or 0)
             for item_id, size in connection.execute(
@@ -133,6 +139,7 @@ def item_payload(
         "parent_prefix": scope.parent_prefix,
         "files": files,
         "sound": _sound(sound_facts),
+        "movie_queue": queue,
         "still_airing": _still_airing(lifecycle) if scope.domain == "tv" else None,
     }
 

@@ -1315,6 +1315,22 @@ extension Words {
         return parts.joined(separator: ", ") + "."
     }
 
+    static func movieQueueStatus(_ work: SampleFacts, queue: ItemFacts.MovieQueue?) -> String {
+        guard work.state == "ready_to_make", let queue else { return sampleHeadline(work) }
+        var lines: [String] = []
+        if queue.waits.contains("queue_paused") { lines.append("Compression is paused.") }
+        if queue.waits.contains("production_active") { lines.append("The current compression run finishes first.") }
+        if let refusal = queue.refusal {
+            if refusal.code == "free_space_reserve" {
+                lines.append("Mediaforce needs to confirm there’s enough space for the original and the compressed copy.")
+            } else if let reason = refusal.message {
+                lines.append(reason)
+            }
+            lines.append("Mediaforce will try this movie again.")
+        }
+        return lines.isEmpty ? "Approved. Movies and TV seasons take their turn by size, largest first." : lines.joined(separator: " ")
+    }
+
     static func fileName(_ file: ItemFacts.File) -> String {
         guard let episode = file.episode else { return file.name }
         if file.inShowPage, let season = file.season { return "Season \(season), Episode \(episode)" }
@@ -1382,9 +1398,9 @@ extension Words {
         case "target_lower_bound_exceeds_source_relative_cap":
             "The size goal is larger than this file is allowed to be. Lower the goal or raise the largest allowed size."
         case "source_relative_cap_consumed_by_non_video_budget":
-            "The sound and subtitles alone use the whole allowed file size."
+            "The sound and subtitles alone use the whole allowed file size. Keep fewer tracks or raise the largest allowed size."
         case "target_consumed_by_minimum_non_video_bytes", "target_consumed_by_reserved_non_video_bytes":
-            "The sound and subtitles leave no room for the picture at this size goal."
+            "The sound and subtitles leave no room for the picture at this size goal. Keep fewer tracks or raise the goal."
         case "settings_block": "Mediaforce can't start it with its library's current settings."
         case let code: recordedStop(code) ?? "It needs a decision from you."
         }

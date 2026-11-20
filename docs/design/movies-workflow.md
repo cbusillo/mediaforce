@@ -40,6 +40,8 @@ second encode path.
   or season when the current production run clears.
 - The movie page explains when a title is waiting for measurement, when a file
   falls outside title-wide compression, and when its size limits conflict.
+  An approved title shows a paused or busy queue and, during a retry wait,
+  the reason its last attempt could not start.
 - Movie scopes reuse the existing folder APIs, calibration, manifests, queue,
   validation, promotion, and recovery machinery.
 - The route selects movie or TV presentation from `media_scope.domain`.

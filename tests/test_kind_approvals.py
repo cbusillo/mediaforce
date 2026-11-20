@@ -39,7 +39,7 @@ from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash,
 from mediaforce.web.runtime.kind_approvals import APPROVABLE_KINDS, APPROVAL_NOT_CURRENT_CODE, KIND_IS_ONE_TIME_CODE, \
     KIND_QUEUE_WAITS_CODE, KIND_RETRY_SECONDS, SIZE_GOAL_NOT_SCALABLE_CODE, KindAwareLoader, KindSeason, SeasonKinds, \
     NO_FOLDER_APPROVAL_CODE, SOURCE_KIND_DIFFERS_CODE, approve_kind, approve_kind_action, background_queue_blocker, choose_kind_picture_height, kind_snapshot, kinds_payload, load_kind_approval, \
-    migrate_kind_approvals, next_kind_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
+    migrate_kind_approvals, movie_queue_facts, next_kind_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
 from mediaforce.web.runtime.page_state import PageStateFacts, PageStateSources, card_page_states, decide_page_state
 from mediaforce.web.runtime.folder_cards import list_folder_cards
 from mediaforce.web.runtime.production_approval import approved_output_sizes, effective_production_approval, \
@@ -347,7 +347,7 @@ def _next(config: MediaforceConfig, load: KindAwareLoader, *, now: float = 0.0) 
 
 
 @pytest.mark.parametrize("availability", ["production", "browse_only"])
-def test_movies_follow_the_live_action_look_like_waiting_seasons_but_never_extras_or_vr(tmp_path: Path, availability: str) -> None:
+def test_movies_and_tv_share_one_size_order_excluding_extras_and_vr(tmp_path: Path, availability: str) -> None:
     config = _config(tmp_path)
     config.raw["media"]["libraries"] += [{"key": "movies", "path": str(tmp_path / "movies"), "type": "movie", "availability": availability},
                                          {"key": "other", "path": str(tmp_path / "other"), "type": "other", "availability": "production"}]
@@ -360,6 +360,12 @@ def test_movies_follow_the_live_action_look_like_waiting_seasons_but_never_extra
     _waiting_episode(config, "other/VR/clip.mp4", 100_000)
     load = _loader({}, {title: LIVE_ACTION, solo: LIVE_ACTION, SEASON: LIVE_ACTION, "other/VR": LIVE_ACTION})
     approve_kind(config, LIVE_ACTION, APPROVED_SEASON, _approved(config), approved_at="now")
+
+    _encode_job(config, SEASON, "running")
+    with open_db(config.paths.db_path) as connection:
+        assert next_kind_season(connection, config, load_calibration_state=load, now=0) is None
+        assert movie_queue_facts(connection, config, title, [feature], load, now=0)["waits"] == ["production_active"]
+        connection.execute(encode_jobs.update().values(status="completed"))
 
     offered = []
     while (chosen := _next(config, load)) is not None:
@@ -484,7 +490,11 @@ def test_a_refused_season_is_tried_again_later_or_when_its_files_change(tmp_path
     chosen = _next(config, load)
     assert chosen is not None
 
-    record_kind_attempt(config, chosen, {"ok": False, "message": "Not enough free space."}, at=0.0)
+    message = "Not enough free space."
+    record_kind_attempt(config, chosen, {"ok": False, "message": message}, at=0.0)
+    with open_db(config.paths.db_path) as connection:
+        assert movie_queue_facts(connection, config, SEASON, chosen.files, load, now=1)["refusal"] == {"message": message}
+        assert movie_queue_facts(connection, config, SEASON, chosen.files, load, now=KIND_RETRY_SECONDS + 1)["refusal"] is None
     assert _next(config, load, now=3600.0) is None
     assert _next(config, load, now=KIND_RETRY_SECONDS + 1) == chosen
     record_kind_attempt(config, chosen, {"ok": True}, at=0.0)
