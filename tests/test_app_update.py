@@ -59,7 +59,7 @@ Update = tuple[deploy.AppUpdate, FakeServer]
 
 @pytest.fixture
 def update(tmp_path: Path) -> Iterator[Update]:
-    support = tmp_path / "support"
+    support = tmp_path / "Application Support %20"
     config = tmp_path / "config.toml"
     config.write_text(
         f'[state]\ndb_path = "{support}/library.sqlite3"\nrun_manifest_dir = "{support}/runs"\n'

@@ -39,6 +39,13 @@ DATABASE_BUSY_FAILURE_MARKERS = (
 )
 
 
+def database_file_path(connection: DBClient) -> Path | None:
+    for _, name, filename in connection.exec_driver_sql("PRAGMA database_list"):
+        if name == "main" and filename:
+            return Path(filename)
+    return None
+
+
 def is_database_busy_failure(message: str) -> bool:
     """Another controller connection held the write lock past the busy timeout; the work itself was not judged."""
     lowered = message.lower()
