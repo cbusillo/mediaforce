@@ -238,6 +238,20 @@ def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_di
         assert json.loads(refused.body) == {"ok": True, "compressing": False, "reason": reason}
 
 
+@pytest.mark.parametrize("blocked", [False, True])
+def test_make_sample_keeps_the_reason_preparation_stopped(blocked: bool) -> None:
+    reason = "The sample computer is outside its work window."
+
+    def tune(*_args: Any) -> dict[str, Any]:
+        if blocked:
+            raise HTTPException(400, reason)
+        return {"ok": False, "message": reason}
+
+    result = make_sample(_folder(), _status("needs_help", "make_sample"), None, ai_tune=tune, retry_saved=tune)
+    assert result["ok"] is False
+    assert result.get("message") == reason
+
+
 def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() -> None:
     calls: list[tuple[Any, ...]] = []
 

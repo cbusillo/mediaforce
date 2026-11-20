@@ -352,6 +352,20 @@ class AdvisorRoutingTests(unittest.TestCase):
         self.assertFalse(tool_used)
         self.assertTrue(completed)
 
+    def test_instruction_budget_notice_allows_the_answer_but_still_rejects_a_tool_call(self) -> None:
+        warning = json.dumps({"type": "item.completed", "item": {
+            "type": "error", "message": "Combined user instructions use 46610 bytes, above the 32768-byte "
+            "`project_doc_max_bytes` setting. The total includes global and thread instructions. "
+            "The limit applies only to project files.",
+        }})
+        answer = _jsonl('{"ok":true}')
+        text, _usage, tool_used, completed = _codex_output(f"{warning}\n{answer}")
+        self.assertTrue(completed)
+        self.assertEqual(text, '{"ok":true}')
+        self.assertFalse(tool_used)
+        command = _jsonl("", item_type="command_execution", completed=False)
+        self.assertTrue(_codex_output(f"{warning}\n{command}\n{answer}")[2])
+
     def test_jsonl_parser_rejects_unrecognized_error_item(self) -> None:
         events = [
             {

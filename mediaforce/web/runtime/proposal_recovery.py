@@ -36,7 +36,7 @@ def proposal_recovery(
         return {
             "cause": "assistant_failure",
             "headline": "Mediaforce could not prepare this sample",
-            "detail": "The assistant did not answer or returned unusable output. Your request and worker are unchanged.",
+            "detail": "The sample advisor couldn't provide usable settings. Try preparing the sample again.",
             "nothing_queued": True,
             "action": "prepare_again",
             "same_request_retryable": True,

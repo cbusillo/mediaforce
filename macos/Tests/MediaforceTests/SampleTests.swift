@@ -219,6 +219,40 @@ final class SampleClientTests: XCTestCase {
         XCTAssertFalse(waiting.needsChoice)
     }
 
+    @MainActor
+    func testPreparingASampleIsVisibleUntilTheServerAnswers() async {
+        let prefix = "tv/Example/Season 1"
+        let model = MainWindowModel(client: client(status: 200, body: #"{"ok":true}"#))
+        let started = expectation(description: "Make reached the server")
+        let reply = DispatchSemaphore(value: 0)
+        StubServer.respond = { request in
+            started.fulfill()
+            guard reply.wait(timeout: .now() + 5) == .success else { throw URLError(.timedOut) }
+            return HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        }
+        let making = Task { await model.makeSample(prefix) }
+        await fulfillment(of: [started], timeout: 5)
+        XCTAssertTrue(model.preparingSamples.contains(prefix))
+        reply.signal()
+        let result = await making.value
+        XCTAssertEqual(result?.ok, true)
+        XCTAssertFalse(model.preparingSamples.contains(prefix))
+    }
+
+    @MainActor
+    func testSamplePreparationShowsTheRefusalAndDistinguishesAnUnconfirmedTimeout() async {
+        let reason = "The sample computer is outside its work window."
+        let model = MainWindowModel(client: client(status: 409, body: #"{"ok":false,"code":"refused","message":"\#(reason)"}"#))
+        let refused = await model.makeSample("tv/Example/Season 1")
+        XCTAssertNil(refused)
+        XCTAssertEqual(model.notice?.message, reason)
+        StubServer.respond = { _ in throw URLError(.timedOut) }
+        let unanswered = await model.makeSample("tv/Example/Season 1")
+        XCTAssertNil(unanswered)
+        XCTAssertEqual(model.notice, .sampleStartTimedOut)
+        XCTAssertTrue(model.preparingSamples.isEmpty)
+    }
+
     func testAServerErrorOnAnActionThrows() async {
         do {
             _ = try await client(status: 500, body: "").makeSample("tv/Lucifer/Season 2", size: nil, balance: "balanced")

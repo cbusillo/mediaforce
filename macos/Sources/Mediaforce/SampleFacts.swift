@@ -141,6 +141,7 @@ struct SampleActionResult: Decodable, Sendable {
     let ok: Bool
     let code: String?
     let compressing: Bool?
+    var message: String? = nil
     let kindCode: String?
     let reason: String?
 

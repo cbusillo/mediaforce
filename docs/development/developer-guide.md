@@ -178,6 +178,10 @@ comes down to the tallest picture in Settings. Seasons missing original
 measurements wait for measuring first. When a sample re-encodes the audio,
 the sound is scored too.
 
+Make sample shows “Preparing the sample…” while Mediaforce chooses settings and queues the job.
+If preparation stops, the app shows the reason. If the server takes too long to answer,
+check the sample page before trying again because the request may still finish.
+
 ### Checking, publishing and rollback
 
 Each finished production file is checked and published on its own under its

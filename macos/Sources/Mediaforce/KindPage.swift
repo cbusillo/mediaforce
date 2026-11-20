@@ -27,6 +27,9 @@ struct KindPage: View {
                     SampleWork(prefix: season, model: model, facts: $sample, namesSeason: true, openItem: openItem)
                         .id(season)
                 } else if offering, let biggest = kind.shows.first {
+                    if asking {
+                        ProgressView(Words.preparingSample).controlSize(.small)
+                    }
                     Button(Words.makeSampleOf(biggest.name)) { makeSample(biggest) }
                         .buttonStyle(.borderedProminent)
                         .disabled(asking)
@@ -83,12 +86,8 @@ struct KindPage: View {
     private func makeSample(_ show: KindsFacts.Show) {
         asking = true
         Task {
-            do {
-                if try await !model.client.makeSample(show.sampleSeason, size: nil, balance: nil).ok {
-                    openSample(show.sampleSeason)
-                }
-            } catch {
-                model.notice = .unanswered
+            if let result = await model.makeSample(show.sampleSeason), !result.ok {
+                openSample(show.sampleSeason)
             }
             await model.refreshKinds()
             asking = false

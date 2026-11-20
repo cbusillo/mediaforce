@@ -169,9 +169,14 @@ def make_sample(
                 return {"ok": False, "code": request}
             note, operator_intent = request
             result = ai_tune(prefix, note, "", operator_intent, "")
-    except HTTPException:
+    except HTTPException as exc:
+        if 400 <= exc.status_code < 500 and isinstance(exc.detail, str):
+            return {**REFUSED, "message": exc.detail}
         return REFUSED
-    return {"ok": True, "code": None} if result.get("ok") else REFUSED
+    if result.get("ok"):
+        return {"ok": True, "code": None}
+    message = result.get("message")
+    return {**REFUSED, "message": message} if isinstance(message, str) and message else REFUSED
 
 
 def kind_sample_candidates(kinds: Iterable[Mapping[str, Any]], cards: Iterable[Mapping[str, Any]]) -> dict[str, list[str]]:
