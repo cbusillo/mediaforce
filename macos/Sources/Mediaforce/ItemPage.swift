@@ -75,6 +75,12 @@ struct ItemPage: View {
                                         }
                                     }
                                 }
+                                if facts.domain == "movie", let work,
+                                   work.state == "waiting_for_measurement" || work.state == "waiting_for_kind" ||
+                                   (work.state == "ready_to_make" && facts.files.contains(where: { $0.stage == "not_started" })) {
+                                    Text(Words.sampleHeadline(work))
+                                        .foregroundStyle(.secondary)
+                                }
                                 if let file = facts.selectedFile(selected) {
                                     FilePlayer(file: file, model: model) {
                                         Task { await act(.putOriginalBack, file) }

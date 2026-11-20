@@ -15,13 +15,13 @@ final class ItemTests: XCTestCase {
 
     private func file(_ id: Int, stage: String, bytes: Int64, original: Int64? = nil, backup: Bool = false,
                       validation: String? = nil, kept: String? = nil, question: String = "null",
-                      waitReason: String = "null", additionalWaitReasons: String = "[]", held: String = "null") -> String {
+                      waitReason: String = "null", additionalWaitReasons: String = "[]", held: String = "null", heldReason: String? = nil) -> String {
         let quoted = { (value: String?) in value.map { #""\#($0)""# } ?? "null" }
         return #"""
         {"library_item_id": \#(id), "rel_path": "tv/Futurama/Season 2/Futurama.S02E0\#(id).mkv",
          "name": "Futurama.S02E0\#(id).mkv", "episode": \#(id), "stage": "\#(stage)", "validation": \#(quoted(validation)),
          "wait_reason": \#(waitReason), "additional_wait_reasons": \#(additionalWaitReasons),
-         "kept_reason": \#(quoted(kept)), "held_reason": null, "percent_complete": null, "size_question": \#(question),
+         "kept_reason": \#(quoted(kept)), "held_reason": \#(quoted(heldReason)), "percent_complete": null, "size_question": \#(question),
          "bytes": \#(bytes), "original_bytes": \#(original.map(String.init) ?? "null"), "original_backup": \#(backup),
          "held_copy": \#(held)}
         """#
@@ -100,6 +100,19 @@ final class ItemTests: XCTestCase {
 
         XCTAssertEqual(retrying.workActions(actions), [.retryUnfinished])
         XCTAssertEqual(waiting.workActions(actions), actions)
+    }
+
+    func testMoviePageDistinguishesExcludedFilesAndSizeLimits() throws {
+        let page = try facts([
+            file(1, stage: "held", bytes: 1),
+            file(2, stage: "held", bytes: 1, heldReason: "movie_extra"),
+            file(3, stage: "held", bytes: 1, heldReason: "movie_uncertain"),
+            file(4, stage: "needs_you", bytes: 1, waitReason: #"{"code":"settings_block"}"#),
+            file(5, stage: "needs_you", bytes: 1, waitReason: #"{"code":"target_lower_bound_exceeds_source_relative_cap"}"#),
+            file(6, stage: "needs_you", bytes: 1, waitReason: #"{"code":"source_relative_cap_consumed_by_non_video_budget"}"#),
+        ])
+        XCTAssertEqual(Set(page.files.prefix(3).map(Words.fileState)).count, 3)
+        XCTAssertEqual(Set(page.waiting.map(Words.waitingReason)).count, 3)
     }
 
     func testEachWaitSaysWhyInPlainWords() throws {

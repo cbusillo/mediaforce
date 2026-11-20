@@ -86,6 +86,8 @@ def item_payload(
         removed = confirmed_originals_removed_item_ids(connection)
         lifecycle = scope_lifecycle_payload_from_decisions(scope.prefix, decisions, motion_holds)
         sound_facts = sound(scope.prefix) if scope.domain == "tv" else None
+    movie_decisions = {decision.item_id: decision for decision in decisions} if scope.domain == "movie" else {}
+    can_compress = scope.root in config.source_root_map
     files = []
     for item in items:
         episode = episodes.get(item.rel_path) or {}
@@ -93,6 +95,14 @@ def item_payload(
         replaced = stage.get("promoted_at") is not None
         name = PurePosixPath(item.rel_path).name
         number = _EPISODE_NUMBER.search(name)
+        wait_reason = episode.get("wait_reason")
+        held_reason = "motion_pattern" if item.motion_held else None
+        movie = movie_decisions.get(item.item_id)
+        if movie is not None:
+            if wait_reason == {"code": "settings_block"} and movie.target_size_blocker is not None:
+                wait_reason = {"code": movie.target_size_blocker.code}
+            if episode.get("stage") == "held" and not movie.production_included:
+                held_reason = f"movie_{movie.media_role}" if can_compress else "browse_only"
         files.append({
             "library_item_id": item.item_id,
             "rel_path": item.rel_path,
@@ -101,11 +111,11 @@ def item_payload(
             "episode": int(number.group(2)) if number else None,
             "stage": episode.get("stage") or "not_started",
             "validation": episode.get("validation"),
-            "wait_reason": episode.get("wait_reason"),
+            "wait_reason": wait_reason,
             "additional_wait_reasons": episode.get("additional_wait_reasons", []),
             "kept_reason": kept.get(item.item_id),
             "can_compress_as_is": item.item_id in motion_choices,
-            "held_reason": "motion_pattern" if item.motion_held else None,
+            "held_reason": held_reason,
             "percent_complete": episode.get("percent_complete"),
             "size_question": episode.get("size_question"),
             "bytes": sizes.get(item.item_id, 0),

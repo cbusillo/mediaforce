@@ -1325,7 +1325,14 @@ extension Words {
         switch file.stage {
         case "needs_you": file.sizeQuestion != nil ? "Needs more than its size goal" : waitLabel(file.waitReason?.code ?? file.validation)
         case "kept_original": "\(keptOriginal): \(keptReason("motion_\(file.keptReason ?? "")"))"
-        case "held": file.needsMotionChoice ? motionQuestion : file.heldReason == "motion_pattern" ? unsafeMotion : "Waiting to start"
+        case "held":
+            switch file.heldReason {
+            case "motion_pattern": file.needsMotionChoice ? motionQuestion : unsafeMotion
+            case "movie_extra": "This is an extra. It stays out when the movie is compressed."
+            case "movie_uncertain": "Mediaforce can’t tell whether this file is part of the movie."
+            case "browse_only": "This library is set to browse only."
+            default: "Waiting to start"
+            }
         case "compressing": file.percentComplete.map { "Compressing, \($0)%" } ?? "Compressing"
         case "measuring": "Finding the right size"
         case "getting_ready": "Getting ready"
@@ -1372,6 +1379,12 @@ extension Words {
         case "storage_repair": "The storage it's on needs to be mounted or repaired."
         case "storage_reconnect": "The storage it's on needs to be reconnected."
         case "copy_missing": "Its compressed copy is missing, so there's nothing to check."
+        case "target_lower_bound_exceeds_source_relative_cap":
+            "The size goal is larger than this file is allowed to be. Lower the goal or raise the largest allowed size."
+        case "source_relative_cap_consumed_by_non_video_budget":
+            "The sound and subtitles alone use the whole allowed file size."
+        case "target_consumed_by_minimum_non_video_bytes", "target_consumed_by_reserved_non_video_bytes":
+            "The sound and subtitles leave no room for the picture at this size goal."
         case "settings_block": "Mediaforce can't start it with its library's current settings."
         case let code: recordedStop(code) ?? "It needs a decision from you."
         }
@@ -1398,6 +1411,8 @@ extension Words {
         case "storage_repair": "Storage needs a repair"
         case "storage_reconnect": "Storage disconnected"
         case "copy_missing": "Compressed copy missing"
+        case "target_lower_bound_exceeds_source_relative_cap", "source_relative_cap_consumed_by_non_video_budget",
+             "target_consumed_by_minimum_non_video_bytes", "target_consumed_by_reserved_non_video_bytes": "Size settings conflict"
         case "settings_block": "Can't start"
         default: "Needs a decision"
         }

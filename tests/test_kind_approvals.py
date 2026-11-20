@@ -356,8 +356,9 @@ def test_movies_follow_the_live_action_look_like_waiting_seasons_but_never_extra
     feature = _waiting_episode(config, f"{title}/Heat.mkv", 8_000)
     _waiting_episode(config, f"{title}/Featurettes/Making of.mkv", 90_000)
     loose = _waiting_episode(config, solo, 5_000)
+    episode = _waiting_episode(config, EPISODE, 7_000)
     _waiting_episode(config, "other/VR/clip.mp4", 100_000)
-    load = _loader({}, {title: LIVE_ACTION, solo: LIVE_ACTION, "other/VR": LIVE_ACTION})
+    load = _loader({}, {title: LIVE_ACTION, solo: LIVE_ACTION, SEASON: LIVE_ACTION, "other/VR": LIVE_ACTION})
     approve_kind(config, LIVE_ACTION, APPROVED_SEASON, _approved(config), approved_at="now")
 
     offered = []
@@ -367,7 +368,8 @@ def test_movies_follow_the_live_action_look_like_waiting_seasons_but_never_extra
 
     # Each movie title is offered like a season, largest first; its extras and VR & 3D never are, and a library that
     # is not set to compress offers nothing.
-    assert offered == ([(title, LIVE_ACTION, (feature,)), (solo, LIVE_ACTION, (loose,))] if availability == "production" else [])
+    tv = (SEASON, LIVE_ACTION, (episode,))
+    assert offered == ([(title, LIVE_ACTION, (feature,)), tv, (solo, LIVE_ACTION, (loose,))] if availability == "production" else [tv])
     approval = effective_production_approval(config, f"{title}/Heat.mkv", load)
     assert approval is not None and approval.kind == LIVE_ACTION and approval.prefix == title
     assert effective_production_approval(config, f"{title}/Featurettes/Making of.mkv", load) is None
