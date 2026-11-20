@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import re
 import subprocess
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -28,7 +27,6 @@ FRAGMENTED_MP4 = {
     "frag_duration": "100000000",
     "avoid_negative_ts": "disabled",
 }
-_PIECE = re.compile(r"(?P<index>\d+)\.m4s")
 
 
 class SegmentNotFound(LookupError):
@@ -61,10 +59,10 @@ def serve(source: Path, name: str) -> Served:
         return Served(playlist(facts).encode(), "application/vnd.apple.mpegurl")
     if name == "init.mp4":
         return Served(_init_segment(source, *_identity(source)), "video/mp4")
-    match = _PIECE.fullmatch(name)
-    if match is None:
+    index = name.removesuffix(".m4s")
+    if index == name or not index.isascii() or not index.isdigit() or len(index) > 6:
         raise SegmentNotFound(name)
-    return Served(_split(_segment(source, facts, int(match["index"])))[1], "video/iso.segment")
+    return Served(_split(_segment(source, facts, int(index)))[1], "video/iso.segment")
 
 
 def episode(source: Path) -> Episode:
