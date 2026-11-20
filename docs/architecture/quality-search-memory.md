@@ -376,27 +376,6 @@ a suitable crf`, confirming that an unsatisfied constrained search fails rather
 than silently selecting a boundary. This verifies the tool contract only; it
 does not justify implementing narrowed bounds.
 
-## Show Page Projection
-
-The show page reads the newest current selected observation inside the active
-media scope when it is either learning-eligible or an audited warm-start
-selection, then projects its immutable shadow record. The
-surface keeps the production result and the counterfactual recommendation
-separate: chosen CRF, measured quality, final size, candidate count, and search
-time describe what actually ran; the shadow first CRF, evidence scope, sample
-count, confidence, dispersion, and comparison describe what memory would have
-tried first. These are engineering facts; on screen they must use plain words,
-not internal terms such as CRF or shadow (`DIRECTION.md`).
-
-When no recommendation was safe, the show page shows the stored typed fallback
-as sparse, stale, or conflicting evidence instead of recomputing guidance in the
-web layer. A folder with no shadow-bearing observation gets a compact empty
-state. Every state says that the evidence is observation-only: quality floors,
-saved policy, production search order, bounds, and fallback behavior remain
-unchanged. For active runs it instead says whether the first candidate passed or
-was discarded before the full baseline fallback, while keeping measured output
-facts separate from historical guidance.
-
 ## Cohorts And Confidence
 
 Compatible outcomes are evaluated in this order:
@@ -418,7 +397,7 @@ aggregate metric evidence counts and never produces CRF guidance.
 
 ## Current Limitations
 
-- `load_quality_memory` still reads the latest accepted staged artifact per item;
+- Historical backfill reads the latest accepted staged artifact per item;
   active qualification and shadow inference use the append-only log.
 - full validation replaces the encode-time validation payload, so older staged
   rows may not retain target-size search traces.

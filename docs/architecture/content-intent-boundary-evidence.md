@@ -53,8 +53,8 @@ record is missing, or the builder excludes it for any reason a live approval
 would. A review series that already has a row counts as already recorded, so
 re-running it, or running it after a live approval, adds nothing. Backfilled
 rows carry `recorded_by: approval_file_backfill` in their provenance. The
-command does not change the advice files, so Studio's exact-item evidence and
-production lineage still need a fresh approval to link to a backfilled row.
+command does not change the advice files, so production lineage
+still needs a fresh approval to link to a backfilled row.
 
 Production receipts cannot be backfilled: they need the source and toolchain
 identity captured while encoding. The report counts published approved samples
@@ -190,11 +190,7 @@ plan's approved, in-band, promoted production-outcome authority. Applying a prop
 requires checking the current source, intent, policy and stream budget, explicitly
 confirming the new target, and testing a representative sample. The command
 does not claim the reference's historical target is the current configured
-default. Studio shows this evidence for exact TV, Movie, and Other items only after
-matching the current calibration, source/content, intent, policy, technical
-compatibility and stream ledger. Stale or missing context exposes an unavailable
-reason. The disclosure preserves the current target and offers no apply or queue
-action. Automatic adoption and empirical threshold calibration remain separate
+default. Automatic adoption and empirical threshold calibration remain separate
 work; no production setting changes from a report.
 
 ## Production outcome lineage

@@ -1,9 +1,7 @@
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
-from sqlalchemy.exc import OperationalError
 
 import pytest
 import test_content_intent_observations as boundary_fixtures
@@ -15,7 +13,7 @@ from mediaforce.tuning.content_intent_observations import (
     correct_content_intent_boundary_observation,
     withdraw_content_intent_boundary_observation,
 )
-from mediaforce.tuning.target_default_context import build_target_default_evidence, load_target_default_evidence
+from mediaforce.tuning.target_default_context import current_target_boundary
 from mediaforce.web.runtime.calibration_runtime import _stored_sample_item_payload
 
 
@@ -27,18 +25,18 @@ def _context() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     return item, calibration, observation.values()
 
 
-def _payload(
+def _boundary(
         db_path: Path,
         item: dict[str, Any],
         calibration: dict[str, Any],
         row: dict[str, Any],
         *,
         observation_id: str | None = None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any] | None, str | None]:
     with open_db(db_path) as connection:
         append_content_intent_boundary_observation(connection, _rehash_observation(row))
         connection.commit()
-        return build_target_default_evidence(
+        return current_target_boundary(
             connection,
             budget_item=item,
             calibration=calibration,
@@ -50,15 +48,13 @@ def _payload(
         )
 
 
-def test_current_exact_item_context_exposes_review_only_fallback(tmp_path: Path) -> None:
+def test_current_exact_item_resolves_its_recorded_observation(tmp_path: Path) -> None:
     item, calibration, row = _context()
-    evidence = _payload(tmp_path / "evidence.sqlite3", item, calibration, row)
+    reference, reason = _boundary(tmp_path / "evidence.sqlite3", item, calibration, row)
 
-    assert evidence["status"] == "available"
-    assert evidence["reason"] is None
-    assert evidence["report"]["mode"] == "review_only"
-    assert evidence["report"]["proposed_scope"] is None
-    assert evidence["report"]["fallback_reason"] == "no_supported_default_keep_reference_target"
+    assert reason is None
+    assert reference is not None
+    assert reference["observation_id"] == row["observation_id"]
 
 
 def test_context_read_does_not_mutate_database(tmp_path: Path) -> None:
@@ -69,7 +65,7 @@ def test_context_read_does_not_mutate_database(tmp_path: Path) -> None:
         connection.commit()
     before = db_path.read_bytes()
     with open_readonly_db(db_path) as connection:
-        evidence = build_target_default_evidence(
+        reference, reason = current_target_boundary(
             connection,
             budget_item=item,
             calibration=calibration,
@@ -79,12 +75,13 @@ def test_context_read_does_not_mutate_database(tmp_path: Path) -> None:
                 },
             },
         )
-    assert evidence["status"] == "available"
+    assert reference is not None
+    assert reason is None
     assert db_path.read_bytes() == before
 
 
 @pytest.mark.parametrize(
-    ("field", "value", "reason"),
+    ("field", "value", "expected_reason"),
     [
         ("duration_seconds", 2800, "duration_mismatch"),
         ("rel_path", "tv/Futurama/Season 8/Other.mkv", "source_rel_path_mismatch"),
@@ -108,64 +105,61 @@ def test_current_binding_drift_is_unavailable(
         tmp_path: Path,
         field: str,
         value: Any,
-        reason: str,
+        expected_reason: str,
 ) -> None:
     item, calibration, row = _context()
     item[field] = value
 
-    evidence = _payload(tmp_path / f"{field}.sqlite3", item, calibration, row)
+    reference, reason = _boundary(tmp_path / f"{field}.sqlite3", item, calibration, row)
 
-    assert evidence == {
-        "schema_version": 1,
-        "status": "unavailable",
-        "reason": reason,
-        "report": None,
-    }
+    assert reference is None
+    assert reason == expected_reason
 
 
 def test_compatibility_and_stream_ledger_drift_are_unavailable(tmp_path: Path) -> None:
     item, calibration, row = _context()
     calibration["sample_result"]["content_intent_compatibility"]["encoder_runtime_version"] = "changed"
-    evidence = _payload(tmp_path / "compatibility.sqlite3", item, calibration, row)
-    assert evidence["status"] == "unavailable"
-    assert evidence["reason"] == "compatibility_mismatch"
+    reference, reason = _boundary(tmp_path / "compatibility.sqlite3", item, calibration, row)
+    assert reference is None
+    assert reason == "compatibility_mismatch"
 
     item, calibration, row = _context()
     item["stream_budget_ledger"] = deepcopy(item["stream_budget_ledger"])
     item["stream_budget_ledger"]["policy_hash"] = "stale"
-    evidence = _payload(tmp_path / "ledger.sqlite3", item, calibration, row)
-    assert evidence["status"] == "unavailable"
-    assert evidence["reason"] == "stream_ledger_missing"
+    reference, reason = _boundary(tmp_path / "ledger.sqlite3", item, calibration, row)
+    assert reference is None
+    assert reason == "stream_ledger_missing"
 
 
 @pytest.mark.parametrize(
-    ("field", "reason"),
+    ("field", "expected_reason"),
     [("job_id", "calibration_job_mismatch"), ("review_artifact_fingerprint", "calibration_artifact_mismatch")],
 )
 def test_newer_calibration_cannot_reuse_an_old_reference(
         tmp_path: Path,
         field: str,
-        reason: str,
+        expected_reason: str,
 ) -> None:
     item, calibration, row = _context()
     calibration[field] = f"new-{field}"
 
-    evidence = _payload(tmp_path / f"{field}.sqlite3", item, calibration, row)
+    reference, reason = _boundary(tmp_path / f"{field}.sqlite3", item, calibration, row)
 
-    assert evidence["status"] == "unavailable"
-    assert evidence["reason"] == reason
+    assert reference is None
+    assert reason == expected_reason
 
 
 def test_missing_corrected_and_withdrawn_evidence_is_unavailable(tmp_path: Path) -> None:
     item, calibration, row = _context()
-    missing = _payload(
+    reference, reason = _boundary(
         tmp_path / "missing.sqlite3",
         item,
         calibration,
         row,
         observation_id="missing",
     )
-    assert missing["reason"] == "boundary_observation_missing"
+    assert reference is None
+    assert reason == "boundary_observation_missing"
 
     db_path = tmp_path / "superseded.sqlite3"
     with open_db(db_path) as connection:
@@ -179,14 +173,14 @@ def test_missing_corrected_and_withdrawn_evidence_is_unavailable(tmp_path: Path)
             recorded_at="2026-07-27T21:00:00+00:00",
         )
         append_content_intent_boundary_observation(connection, corrected)
-        corrected_evidence = build_target_default_evidence(
+        reference, reason = current_target_boundary(
             connection,
             budget_item=item,
             calibration=calibration,
             advice_state={"content_intent_boundary_observation": {"observation_id": row["observation_id"]}},
         )
-        assert corrected_evidence["status"] == "unavailable"
-        assert corrected_evidence["reason"] == "boundary_observation_not_current"
+        assert reference is None
+        assert reason == "boundary_observation_not_current"
 
         withdrawn = withdraw_content_intent_boundary_observation(
             corrected,
@@ -194,23 +188,11 @@ def test_missing_corrected_and_withdrawn_evidence_is_unavailable(tmp_path: Path)
             recorded_at="2026-07-28T21:00:00+00:00",
         )
         append_content_intent_boundary_observation(connection, withdrawn)
-        withdrawn_evidence = build_target_default_evidence(
+        reference, reason = current_target_boundary(
             connection,
             budget_item=item,
             calibration=calibration,
             advice_state={"content_intent_boundary_observation": {"observation_id": withdrawn.observation_id}},
         )
-        assert withdrawn_evidence["status"] == "unavailable"
-        assert withdrawn_evidence["reason"] == "boundary_observation_withdrawn"
-
-
-@pytest.mark.parametrize("failure", [FileNotFoundError("missing"), OperationalError("query", {}, Exception("locked"))])
-def test_advisory_database_failure_is_unavailable(tmp_path: Path, failure: Exception) -> None:
-    item, calibration, row = _context()
-    with patch("mediaforce.tuning.target_default_context.open_readonly_db", side_effect=failure):
-        evidence = load_target_default_evidence(
-            tmp_path / "unavailable.sqlite3", budget_item=item, calibration=calibration,
-            advice_state={"content_intent_boundary_observation": {"observation_id": row["observation_id"]}},
-        )
-    assert evidence["status"] == "unavailable"
-    assert evidence["reason"] == "evidence_unavailable"
+        assert reference is None
+        assert reason == "boundary_observation_withdrawn"

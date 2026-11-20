@@ -53,7 +53,6 @@ and logs live under
 `MEDIAFORCE_DEV_STATE_DIR`. The helper manages only servers it launched and
 refuses an occupied port. The backend also holds a singleton lock, so a second
 `mediaforce-web` exits instead of binding another port.
-`scripts/mediaforce-web-dev.sh` remains as an alias for backend-only actions.
 
 Enable the checked-in pre-commit hook once per clone:
 
@@ -163,8 +162,6 @@ recovery and one-off runs; `uv run mediaforce --help` lists every command.
   `promote`, `approve`: the manual run path over a run manifest (written under
   `~/Library/Application Support/mediaforce/runs/`; later commands default to
   the latest). `promote` is an explicit override of automatic publishing.
-- `bakeoff MANIFEST --all --output FILE`: a repeatable plan for comparing
-  encoding engines with the current `ab-av1` path.
 
 ## How the background work behaves
 

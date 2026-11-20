@@ -10,11 +10,9 @@ from sqlalchemy import event
 
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
-from mediaforce.library.media_scopes import media_scope_from_prefix
 from mediaforce.tuning.quality_memory import (
-    QualityMemoryResult,
     QualitySearchContext,
-    load_quality_memory,
+    accepted_quality_outcomes,
 )
 
 
@@ -61,71 +59,6 @@ class QualityMemoryTests(unittest.TestCase):
         ):
             self.assertNotEqual(baseline.signature_id, changed.signature_id)
 
-    def test_compression_intent_isolates_named_and_legacy_cohorts(self) -> None:
-        named = replace(self._context(), compression_intent_id="ci1_perceptual_floor")
-        legacy = self._context()
-        for item_id in range(1, 5):
-            self._add_outcome(
-                item_id,
-                f"tv/Example Show/Season 01/Named {item_id:02d}.mkv",
-                crf=40.0,
-                context=named,
-            )
-        for item_id in range(5, 9):
-            self._add_outcome(
-                item_id,
-                f"tv/Example Show/Season 01/Legacy {item_id:02d}.mkv",
-                crf=30.0,
-                context=legacy,
-            )
-
-        named_result = self._load("tv/Example Show/Season 01/New Named.mkv", named)
-        other_named_result = self._load(
-            "tv/Example Show/Season 01/New Transparent.mkv",
-            replace(named, compression_intent_id="ci1_transparent"),
-        )
-
-        self.assertEqual(named_result.central_crf, 40.0)
-        self.assertEqual(self._exclusions(named_result)["search_signature_changed"], 4)
-        self.assertIsNone(other_named_result.selected)
-        self.assertEqual(self._exclusions(other_named_result)["search_signature_changed"], 8)
-
-    def test_season_baseline_is_selected_after_sparse_exact_item(self) -> None:
-        context = self._context()
-        exact_rel_path = "tv/Example Show/Season 01/Episode 01.mkv"
-        self._add_outcome(1, exact_rel_path, crf=30.0, context=context, source_fingerprint="current-fp")
-        self._add_outcome(2, "tv/Example Show/Season 01/Episode 02.mkv", crf=30.0, context=context)
-        self._add_outcome(3, "tv/Example Show/Season 01/Episode 03.mkv", crf=31.0, context=context)
-        self._add_outcome(4, "tv/Example Show/Season 01/Episode 04.mkv", crf=32.0, context=context)
-
-        result = self._load(exact_rel_path, context, current_source_fingerprint="current-fp")
-
-        self.assertEqual([cohort.scope for cohort in result.cohorts], ["item", "season", "series"])
-        self.assertEqual(result.cohorts[0].evidence_count, 1)
-        self.assertIsNone(result.cohorts[0].central_crf)
-        self.assertEqual(result.scope, "season")
-        self.assertEqual(result.evidence_count, 4)
-        self.assertEqual(result.confidence, "moderate")
-        self.assertEqual(result.central_crf, 30.5)
-
-    def test_series_baseline_falls_back_across_seasons(self) -> None:
-        context = self._context()
-        exact_rel_path = "tv/Example Show/Season 01/Episode 99.mkv"
-        self._add_outcome(1, "tv/Example Show/Season 01/Episode 01.mkv", crf=30.0, context=context)
-        self._add_outcome(2, "tv/Example Show/Season 01/Episode 02.mkv", crf=31.0, context=context)
-        self._add_outcome(3, "tv/Example Show/Season 02/Episode 01.mkv", crf=31.0, context=context)
-        self._add_outcome(4, "tv/Example Show/Season 02/Episode 02.mkv", crf=32.0, context=context)
-        self._add_outcome(5, "tv/Example Show/Season 02/Episode 03.mkv", crf=32.0, context=context)
-        self._add_outcome(6, "tv/Example Show/Season 02/Episode 04.mkv", crf=33.0, context=context)
-
-        result = self._load(exact_rel_path, context)
-
-        self.assertEqual(result.cohorts[1].evidence_count, 2)
-        self.assertIsNone(result.cohorts[1].central_crf)
-        self.assertEqual(result.scope, "series")
-        self.assertEqual(result.evidence_count, 6)
-        self.assertEqual(result.central_crf, 31.5)
-
     def test_warm_selected_completion_is_not_reintroduced_by_historical_loader(self) -> None:
         context = self._context()
         rel_path = "tv/Example Show/Season 01/Episode 01.mkv"
@@ -137,47 +70,12 @@ class QualityMemoryTests(unittest.TestCase):
             warm_start_status="accepted",
         )
 
-        result = self._load(rel_path, context)
+        outcomes, exclusions = accepted_quality_outcomes(self.connection, metric=context.metric, as_of=self.as_of)
 
-        self.assertEqual(result.evidence_count, 0)
-        self.assertEqual(result.global_metric_evidence_count, 0)
-        self.assertEqual(self._exclusions(result)["warm_start_selected"], 1)
+        self.assertFalse(outcomes)
+        self.assertEqual(exclusions["warm_start_selected"], 1)
 
-    def test_global_history_is_metrics_only(self) -> None:
-        context = self._context()
-        for item_id in range(1, 5):
-            self._add_outcome(
-                item_id,
-                f"tv/Other Show/Season 01/Episode {item_id:02d}.mkv",
-                crf=30.0 + item_id,
-                context=context,
-            )
-
-        result = self._load("tv/Example Show/Season 01/Episode 01.mkv", context)
-
-        self.assertIsNone(result.selected)
-        self.assertIsNone(result.central_crf)
-        self.assertEqual(result.global_metric_evidence_count, 4)
-        self.assertIn("global evidence is metrics-only", result.reason)
-
-    def test_signature_changes_invalidate_local_guidance(self) -> None:
-        expected = self._context()
-        changed = replace(expected, preset="6")
-        for item_id in range(1, 5):
-            self._add_outcome(
-                item_id,
-                f"tv/Example Show/Season 01/Episode {item_id:02d}.mkv",
-                crf=30.0 + item_id,
-                context=changed,
-            )
-
-        result = self._load("tv/Example Show/Season 01/Episode 99.mkv", expected)
-
-        self.assertIsNone(result.selected)
-        self.assertEqual(result.global_metric_evidence_count, 4)
-        self.assertEqual(self._exclusions(result)["search_signature_changed"], 4)
-
-    def test_target_size_and_quality_objectives_never_share_crf_cohorts(self) -> None:
+    def test_accepted_outcomes_keep_the_measured_search_objective(self) -> None:
         quality_context = self._context()
         target_size_context = replace(
             quality_context,
@@ -186,32 +84,11 @@ class QualityMemoryTests(unittest.TestCase):
             size_target_bytes=225_000_000,
             target_video_bitrate=533_000,
         )
-        for item_id in range(1, 5):
-            self._add_outcome(
-                item_id,
-                f"tv/Example Show/Season 01/Quality {item_id:02d}.mkv",
-                crf=30.0,
-                context=quality_context,
-            )
-        for item_id in range(5, 9):
-            self._add_outcome(
-                item_id,
-                f"tv/Example Show/Season 01/Target {item_id:02d}.mkv",
-                crf=50.0,
-                context=target_size_context,
-                quality_score=82.0,
-            )
+        for item_id, context in enumerate((quality_context, target_size_context), start=1):
+            self._add_outcome(item_id, f"tv/Show/Season 01/{item_id}.mkv", crf=40.0, context=context)
 
-        quality_result = self._load("tv/Example Show/Season 01/New Quality.mkv", quality_context)
-        target_size_result = self._load(
-            "tv/Example Show/Season 01/New Target.mkv",
-            target_size_context,
-        )
-
-        self.assertEqual(quality_result.central_crf, 30.0)
-        self.assertEqual(target_size_result.central_crf, 50.0)
-        self.assertEqual(self._exclusions(quality_result)["search_signature_changed"], 4)
-        self.assertEqual(self._exclusions(target_size_result)["search_signature_changed"], 4)
+        outcomes, _ = accepted_quality_outcomes(self.connection, metric=quality_context.metric, as_of=self.as_of)
+        self.assertCountEqual([outcome.context for outcome in outcomes], [quality_context, target_size_context])
 
     def test_historical_rows_fail_closed_with_typed_exclusions(self) -> None:
         context = self._context()
@@ -234,10 +111,9 @@ class QualityMemoryTests(unittest.TestCase):
         self._add_outcome(11, "tv/Example Show/Season 01/No event.mkv", crf=31.0, context=context, event_present=False)
         self._add_outcome(12, "tv/Example Show/Season 01/Below floor.mkv", crf=31.0, context=context, quality_score=80.0)
 
-        result = self._load("tv/Example Show/Season 01/New.mkv", context)
-        exclusions = self._exclusions(result)
+        outcomes, exclusions = accepted_quality_outcomes(self.connection, metric=context.metric, as_of=self.as_of)
 
-        self.assertEqual(result.global_metric_evidence_count, 1)
+        self.assertEqual(len(outcomes), 1)
         self.assertEqual(exclusions["unsupported_encode_origin"], 1)
         self.assertEqual(exclusions["validation_not_passed"], 1)
         self.assertEqual(exclusions["acceptance_timestamp_order_invalid"], 1)
@@ -248,70 +124,6 @@ class QualityMemoryTests(unittest.TestCase):
         self.assertEqual(exclusions["artifact_changed_after_acceptance"], 1)
         self.assertEqual(exclusions["completion_event_missing"], 1)
         self.assertEqual(exclusions["quality_floor_not_met"], 1)
-
-    def test_changed_exact_source_falls_back_to_season_evidence(self) -> None:
-        context = self._context()
-        exact_rel_path = "tv/Example Show/Season 01/Episode 01.mkv"
-        self._add_outcome(1, exact_rel_path, crf=30.0, context=context, source_fingerprint="old-fp")
-        self._add_outcome(2, "tv/Example Show/Season 01/Episode 02.mkv", crf=30.0, context=context)
-        self._add_outcome(3, "tv/Example Show/Season 01/Episode 03.mkv", crf=31.0, context=context)
-        self._add_outcome(4, "tv/Example Show/Season 01/Episode 04.mkv", crf=31.0, context=context)
-
-        result = self._load(exact_rel_path, context, current_source_fingerprint="new-fp")
-
-        self.assertEqual(result.cohorts[0].evidence_count, 0)
-        self.assertEqual(result.scope, "season")
-        self.assertEqual(self._exclusions(result)["source_fingerprint_changed"], 1)
-
-    def test_missing_historical_fingerprint_has_distinct_exclusion_reason(self) -> None:
-        context = self._context()
-        exact_rel_path = "tv/Example Show/Season 01/Episode 01.mkv"
-        self._add_outcome(
-            1,
-            exact_rel_path,
-            crf=30.0,
-            context=context,
-            source_fingerprint_missing=True,
-        )
-
-        result = self._load(exact_rel_path, context, current_source_fingerprint="current-fp")
-
-        self.assertEqual(result.cohorts[0].evidence_count, 0)
-        self.assertEqual(self._exclusions(result)["historical_source_fingerprint_missing"], 1)
-
-    def test_robust_summary_resists_one_extreme_outlier(self) -> None:
-        context = self._context()
-        for item_id, crf in enumerate((30.0, 30.0, 31.0, 31.0, 60.0), start=1):
-            self._add_outcome(
-                item_id,
-                f"tv/Example Show/Season 01/Episode {item_id:02d}.mkv",
-                crf=crf,
-                context=context,
-            )
-
-        result = self._load("tv/Example Show/Season 01/Episode 99.mkv", context)
-
-        self.assertEqual(result.scope, "season")
-        self.assertEqual(result.central_crf, 31.0)
-        self.assertEqual(result.selected.maximum_crf, 60.0)
-        self.assertLessEqual(result.selected.iqr, 1.0)
-        self.assertLessEqual(result.selected.median_absolute_deviation, 1.0)
-
-    def test_excessive_dispersion_rejects_crf_hint(self) -> None:
-        context = self._context()
-        for item_id, crf in enumerate((20.0, 30.0, 40.0, 50.0), start=1):
-            self._add_outcome(
-                item_id,
-                f"tv/Example Show/Season 01/Episode {item_id:02d}.mkv",
-                crf=crf,
-                context=context,
-            )
-
-        result = self._load("tv/Example Show/Season 01/Episode 99.mkv", context)
-
-        self.assertIsNone(result.selected)
-        self.assertIsNone(result.central_crf)
-        self.assertIn("too dispersed", result.cohorts[1].reason)
 
     def test_loader_executes_selects_only_and_launches_no_work(self) -> None:
         context = self._context()
@@ -341,62 +153,14 @@ class QualityMemoryTests(unittest.TestCase):
                 "subprocess.Popen",
                 side_effect=AssertionError("unexpected subprocess"),
             ) as popen_mock:
-                result = self._load("tv/Example Show/Season 01/Episode 99.mkv", context)
+                outcomes, _ = accepted_quality_outcomes(self.connection, metric=context.metric, as_of=self.as_of)
         finally:
             event.remove(self.connection.engine, "before_cursor_execute", capture_statement)
 
-        self.assertEqual(result.scope, "season")
+        self.assertEqual(len(outcomes), 4)
         self.assertEqual(statements, ["SELECT"])
         run_mock.assert_not_called()
         popen_mock.assert_not_called()
-
-    def test_invalid_scope_chain_is_rejected(self) -> None:
-        context = self._context()
-        exact_scope = media_scope_from_prefix(
-            "tv/Example Show/Season 01/Episode 01.mkv",
-            match="exact_item",
-        )
-        wrong_season = media_scope_from_prefix("tv/Other Show/Season 01", match="descendants")
-
-        with self.assertRaisesRegex(ValueError, "does not contain"):
-            load_quality_memory(
-                self.connection,
-                exact_scope=exact_scope,
-                season_scope=wrong_season,
-                series_scope=None,
-                expected_context=context,
-                current_source_fingerprint=None,
-                as_of=self.as_of,
-            )
-
-    def _load(
-            self,
-            exact_rel_path: str,
-            context: QualitySearchContext,
-            *,
-            current_source_fingerprint: str | None = None,
-    ) -> QualityMemoryResult:
-        path_parts = PurePosixPath(exact_rel_path).parts
-        exact_scope = media_scope_from_prefix(exact_rel_path, match="exact_item")
-        season_scope = (
-            media_scope_from_prefix("/".join(path_parts[:3]), match="descendants")
-            if len(path_parts) >= 4 and path_parts[0].casefold() == "tv"
-            else None
-        )
-        series_scope = (
-            media_scope_from_prefix("/".join(path_parts[:2]), match="descendants")
-            if len(path_parts) >= 3 and path_parts[0].casefold() == "tv"
-            else None
-        )
-        return load_quality_memory(
-            self.connection,
-            exact_scope=exact_scope,
-            season_scope=season_scope,
-            series_scope=series_scope,
-            expected_context=context,
-            current_source_fingerprint=current_source_fingerprint,
-            as_of=self.as_of,
-        )
 
     def test_new_cli_origins_preserve_promoted_quality_learning(self) -> None:
         context = self._context()
@@ -404,8 +168,8 @@ class QualityMemoryTests(unittest.TestCase):
             with self.subTest(origin=origin):
                 rel_path = f"tv/Example Show/Season 01/CLI {item_id}.mkv"
                 self._add_outcome(item_id, rel_path, crf=30.0, context=context, origin=origin, source_fingerprint=origin)
-                result = self._load(rel_path, context, current_source_fingerprint=origin)
-                self.assertEqual(result.cohorts[0].evidence_count, 1)
+                outcomes, _ = accepted_quality_outcomes(self.connection, metric=context.metric, as_of=self.as_of)
+                self.assertIn(rel_path, [outcome.rel_path for outcome in outcomes])
 
     @staticmethod
     def _context() -> QualitySearchContext:
@@ -435,7 +199,6 @@ class QualityMemoryTests(unittest.TestCase):
             crf: float,
             context: QualitySearchContext,
             source_fingerprint: str | None = None,
-            source_fingerprint_missing: bool = False,
             quality_score: float = 86.0,
             origin: str = "queue",
             promoted: bool = True,
@@ -509,11 +272,7 @@ class QualityMemoryTests(unittest.TestCase):
                 source_size_bytes=1_000_000_000,
                 source_duration_seconds=2_700.0,
                 source_video_codec=context.source_codec,
-                source_fingerprint=(
-                    None
-                    if source_fingerprint_missing
-                    else source_fingerprint or f"source-fingerprint-{item_id}"
-                ),
+                source_fingerprint=source_fingerprint or f"source-fingerprint-{item_id}",
                 encode_completed_at=encode_completed_at.isoformat(),
                 staging_path=f"/nonexistent/staging-{item_id}.{context.output_container}",
                 staging_size_bytes=500_000_000,
@@ -600,13 +359,6 @@ class QualityMemoryTests(unittest.TestCase):
                 "target": context.target,
                 "minimum": context.minimum_quality_score,
             },
-        }
-
-    @staticmethod
-    def _exclusions(result: QualityMemoryResult) -> dict[str, int]:
-        return {
-            exclusion.reason: exclusion.count
-            for exclusion in result.exclusions
         }
 
 
