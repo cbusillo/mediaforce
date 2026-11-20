@@ -235,12 +235,13 @@ only from inside a configured staging root, and `original` is the library
 file. The Mac player cannot open MKV, and reading a whole file off
 the library takes too long, so the playlist comes from the file's keyframe
 index and each segment of about six seconds is made when the player asks for
-it (`mediaforce/web/runtime/player_stream.py`). Picture and sound are separate
-tracks. The picture is copied packet by packet from one keyframe to the next.
-The sound is copied when the Mac plays it (AAC, AC-3, E-AC-3, Opus) and
-otherwise becomes stereo PCM, decoding only a DTS track's core; it is read from
-twelve seconds before each cut, since an encode can store sound ahead of its
-picture. Each player buffers about twenty seconds ahead.
+it (`mediaforce/web/runtime/player_stream.py`). Each segment holds both picture
+and sound in one playlist, because the Mac refuses an HDR picture offered as a
+variant on a screen without HDR. The picture is copied packet by packet from
+one keyframe to the next. The sound is copied when the Mac plays it (AAC with a
+standard speaker layout, AC-3, E-AC-3, Opus) and otherwise becomes stereo PCM,
+decoding only a DTS track's core; it is read from twelve seconds before each
+cut, since an encode can store sound ahead of its picture. Each player buffers about twenty seconds ahead.
 
 An episode opens straight onto its opening moment: the player reads the
 episode's length from the playlist and asks both sides for that moment before
