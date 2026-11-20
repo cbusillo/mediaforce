@@ -88,7 +88,7 @@ struct PosterView: View {
 }
 
 struct FinishedShelf: View {
-    let seasons: [MainWindowFacts.FinishedSeason]
+    let items: [MainWindowFacts.FinishedSeason]
     let posters: PosterStore
     let open: (Place) -> Void
 
@@ -96,28 +96,28 @@ struct FinishedShelf: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Finished lately")
                 .font(.headline)
-            if seasons.isEmpty {
-                Text("Finished seasons appear here.")
+            if items.isEmpty {
+                Text("Nothing finished yet.")
                     .foregroundStyle(.secondary)
             }
             HStack(alignment: .top, spacing: 10) {
-                ForEach(seasons) { season in
-                    Button { open(.item(season.prefix)) } label: {
+                ForEach(items) { item in
+                    Button { open(.item(item.prefix)) } label: {
                         VStack(alignment: .leading, spacing: 5) {
                             PosterView(
-                                show: season.show,
-                                image: posters.image(for: season.showPrefix),
-                                headline: Words.finishedSaved(season),
-                                detail: season.season.map { "Season \($0)" } ?? season.show
+                                show: item.show,
+                                image: posters.image(for: item.showPrefix),
+                                headline: Words.finishedSaved(item),
+                                detail: item.season.map { "Season \($0)" } ?? item.show
                             )
-                            Text(Words.day(season.finishedAt))
+                            Text(Words.day(item.finishedAt))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                     }
                     .buttonStyle(.plain)
                     .pointerStyle(.link)
-                    .help(Words.finishedSummary(season))
+                    .help(Words.finishedSummary(item))
                 }
             }
         }
@@ -134,36 +134,38 @@ struct SampleShelf: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Approved samples")
                 .font(.headline)
-            HStack(alignment: .top, spacing: 10) {
-                ForEach(Array(samples.approvedNotStarted.prefix(6).enumerated()), id: \.element.id) { index, sample in
-                    VStack(alignment: .leading, spacing: 7) {
-                        Button { openSample(sample.prefix) } label: {
-                            PosterView(
-                                show: sample.show,
-                                image: posters.image(for: sample.showPrefix),
-                                headline: sample.season.map { "Season \($0)" } ?? sample.show,
-                                detail: Words.sampleState(sample)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .pointerStyle(.link)
-                        .help([Words.season(sample.show, sample.season), Words.sampleFailure(sample.failure)].compactMap { $0 }.joined(separator: ": "))
-                        if let action = Words.sampleAction(sample.action) {
-                            let open = { openSample(sample.prefix) }
-                            if index == 0 {
-                                Button(action, action: open)
-                                    .buttonStyle(.borderedProminent)
-                                    .controlSize(.small)
-                            } else {
-                                Button(action, action: open)
-                                    .controlSize(.small)
+            ScrollView(.horizontal) {
+                LazyHStack(alignment: .top, spacing: 10) {
+                    ForEach(Array(samples.approvedNotStarted.enumerated()), id: \.element.id) { index, sample in
+                        VStack(alignment: .leading, spacing: 7) {
+                            Button { openSample(sample.prefix) } label: {
+                                PosterView(
+                                    show: sample.show,
+                                    image: posters.image(for: sample.showPrefix),
+                                    headline: sample.season.map { "Season \($0)" } ?? sample.show,
+                                    detail: Words.sampleState(sample)
+                                )
                             }
-                        } else if let reason = Words.waitingReason(sample, facts) {
-                            Text(reason)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(width: 84, alignment: .leading)
+                            .buttonStyle(.plain)
+                            .pointerStyle(.link)
+                            .help([Words.season(sample.show, sample.season), Words.sampleFailure(sample.failure)].compactMap { $0 }.joined(separator: ": "))
+                            if let action = Words.sampleAction(sample.action) {
+                                let open = { openSample(sample.prefix) }
+                                if index == 0 {
+                                    Button(action, action: open)
+                                        .buttonStyle(.borderedProminent)
+                                        .controlSize(.small)
+                                } else {
+                                    Button(action, action: open)
+                                        .controlSize(.small)
+                                }
+                            } else if let reason = Words.waitingReason(sample, facts) {
+                                Text(reason)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(width: 84, alignment: .leading)
+                            }
                         }
                     }
                 }
@@ -188,7 +190,6 @@ struct SizeBar: View {
 }
 
 struct BiggestTable: View {
-    static let rowLimit = 9
     static let headerHeight: CGFloat = 28
     // Tall enough for the poster beside each name.
     static let rowHeight: CGFloat = 29
@@ -196,24 +197,24 @@ struct BiggestTable: View {
     // A poster that fits inside a row.
     static let posterWidth: CGFloat = 14
 
-    let shows: [MainWindowFacts.NotStartedShow]
+    let titles: [MainWindowFacts.NotStartedTitle]
     let samples: [MainWindowFacts.Sample]
     let posters: PosterStore
     let open: (Place) -> Void
 
     var body: some View {
-        let largest = Double(shows.map(\.bytes).max() ?? 1)
+        let largest = Double(titles.map(\.bytes).max() ?? 1)
         VStack(alignment: .leading, spacing: 10) {
-            Text("Biggest shows not started")
+            Text("Biggest not started")
                 .font(.headline)
-            Table(shows) {
-                TableColumn("Show") { (show: MainWindowFacts.NotStartedShow) in
+            Table(titles) {
+                TableColumn("Title") { (title: MainWindowFacts.NotStartedTitle) in
                     HStack(spacing: 8) {
-                        MediaPoster(titlePrefix: show.showPrefix, name: show.show, kind: .tv, posters: posters, width: Self.posterWidth)
+                        MediaPoster(titlePrefix: title.showPrefix, name: title.show, kind: MediaKind(libraryType: title.mediaType), posters: posters, width: Self.posterWidth)
                         VStack(alignment: .leading, spacing: 1) {
-                            Button(show.show) { open(.item(show.showPrefix)) }
+                            Button(title.show) { open(.item(title.showPrefix)) }
                                 .buttonStyle(QuietLinkStyle(primary: true))
-                            if let note = waitingNote(show), let prefix = show.waitingSamplePrefix {
+                            if let note = waitingNote(title), let prefix = title.waitingSamplePrefix {
                                 HStack(spacing: 4) {
                                     // The note beside it already says it waits.
                                     WaitingMark().accessibilityHidden(true)
@@ -224,39 +225,35 @@ struct BiggestTable: View {
                             }
                         }
                     }
-                    .padding(.vertical, waitingNote(show) == nil ? 0 : 2)
+                    .padding(.vertical, waitingNote(title) == nil ? 0 : 2)
                 }
-                TableColumn("Size") { (show: MainWindowFacts.NotStartedShow) in
+                TableColumn("Size") { (title: MainWindowFacts.NotStartedTitle) in
                     HStack(spacing: 8) {
-                        SizeBar(fraction: Double(show.bytes) / largest)
-                        Text(Words.size(show.bytes))
+                        SizeBar(fraction: Double(title.bytes) / max(1, largest))
+                        Text(Words.size(title.bytes))
                             .monospacedDigit()
                             .frame(width: 58, alignment: .trailing)
                     }
                     .accessibilityElement(children: .combine)
                 }
                 .width(94)
-                TableColumn("Episodes") { (show: MainWindowFacts.NotStartedShow) in
-                    Text("\(show.episodeCount)")
-                        .monospacedDigit()
-                        .frame(maxWidth: .infinity, alignment: .trailing)
+                TableColumn("Details") { (title: MainWindowFacts.NotStartedTitle) in
+                    if MediaKind(libraryType: title.mediaType) == .tv {
+                        Text([Words.count(title.episodeCount, "episode"), Words.count(title.seasonCount, "season")].joined(separator: " · "))
+                    } else {
+                        Text(title.mediaType == "movie" ? "Movie" : Words.mediaKind(.other))
+                    }
                 }
-                .width(58)
-                TableColumn("Seasons") { (show: MainWindowFacts.NotStartedShow) in
-                    Text("\(show.seasonCount)")
-                        .monospacedDigit()
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                }
-                .width(52)
+                .width(160)
             }
             .tableStyle(.inset(alternatesRowBackgrounds: true))
             .scrollDisabled(true)
-            .frame(height: Self.headerHeight + Self.rowHeight * CGFloat(shows.count) + Self.noteHeight * CGFloat(shows.filter { waitingNote($0) != nil }.count))
+            .frame(height: Self.headerHeight + Self.rowHeight * CGFloat(titles.count) + Self.noteHeight * CGFloat(titles.filter { waitingNote($0) != nil }.count))
         }
     }
 
-    private func waitingNote(_ show: MainWindowFacts.NotStartedShow) -> String? {
-        guard let prefix = show.waitingSamplePrefix,
+    private func waitingNote(_ title: MainWindowFacts.NotStartedTitle) -> String? {
+        guard let prefix = title.waitingSamplePrefix,
               let sample = samples.first(where: { $0.prefix == prefix }) else { return nil }
         let season = sample.season.map { "Season \($0)" } ?? "A season"
         return "\(season): \(Words.sampleState(sample).lowercased())"
@@ -282,16 +279,11 @@ struct Latest: View {
                         // The poster sits centred beside the sentence; the row keeps the time on its first line.
                         HStack(spacing: 8) {
                             MediaPoster(titlePrefix: MediaPoster.titlePrefix(event.relPath), name: Words.eventSentence(event),
-                                        kind: MediaKind(rawValue: String(event.relPath.split(separator: "/").first ?? "")) ?? .other,
+                                        kind: MediaKind(libraryType: event.mediaType ?? (event.season == nil ? "other" : "tv")),
                                         posters: posters, width: 16)
-                            if let season = event.season {
-                                Button(Words.eventSentence(event)) { open(.item(season.prefix)) }
-                                    .buttonStyle(QuietLinkStyle(primary: true))
-                                    .fixedSize(horizontal: false, vertical: true)
-                            } else {
-                                Text(Words.eventSentence(event))
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
+                            Button(Words.eventSentence(event)) { open(.item(event.itemPrefix)) }
+                                .buttonStyle(QuietLinkStyle(primary: true))
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }

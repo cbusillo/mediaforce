@@ -277,10 +277,10 @@ extension Words {
         }
         sentences.append(contentsOf: work.originalCheckWaitReasons)
         if work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
-            sentences.append("Nothing is being compressed. \(count(facts.samples.waitingOnYou.count, "sample")) under Samples need you first.")
+            sentences.append("Nothing is being compressed. \(count(facts.samples.waitingOnYou.count, "sample")) in Needs you.")
         }
         if !work.kindsNeedingYou.isEmpty {
-            sentences.append("\(count(work.kindsNeedingYou.count, "group")) of shows waiting in Needs you.")
+            sentences.append("\(count(work.kindsNeedingYou.count, "group")) waiting in Needs you.")
         }
         if !work.seasonsNeedingYou.isEmpty {
             sentences.append("\(count(work.seasonsNeedingYou.count, "season")) waiting for you in \(mediaKind(.tv)).")
@@ -310,14 +310,14 @@ extension Words {
         switch code {
         case "arithmetic_infeasible", "bound_exhausted", "quality_conflict":
             "It can't reach the size goal at good quality."
-        case "goal_too_small": "The size goal is too small for this season."
+        case "goal_too_small": "The size goal is too small for this sample."
         case "size_under_target", "size_over_target", "size_unverified": "The sample came out the wrong size."
         case "no_access": "Mediaforce couldn't open the source files."
         case "missing_clips": "Its comparison clips are gone."
         case "restarted": "It was interrupted by a restart."
         case "stopped": "It was stopped."
         case "containment_unproven":
-            "Mediaforce couldn't confirm a computer finished an episode's picture check. Once it's idle, try that episode again."
+            "Mediaforce couldn't confirm a computer finished the picture check. Once it's idle, try that file again."
         default: recordedStop(code)
         }
     }
@@ -444,6 +444,7 @@ extension Words {
 
     static func finishedSummary(_ season: MainWindowFacts.FinishedSeason) -> String {
         let name = Words.season(season.show, season.season)
+        if let mediaType = season.mediaType, mediaType != "tv" { return "\(name): \(finishedSaved(season))" }
         if season.keptEntirelyOriginal { return "\(name): every episode kept original" }
         let kept = season.keptOriginalCount > 0 ? ", \(season.keptOriginalCount) kept original" : ""
         return "\(name): \(count(season.episodeCount, "episode")) replaced\(kept), \(size(season.bytesSaved)) saved"
@@ -1621,13 +1622,13 @@ extension Words {
 // The page for how each kind of content should look.
 extension Words {
     static let howItShouldLook = "How it should look"
-    static let showsOfThisKind = "Shows and movies"
+    static let titlesOfThisKind = "Titles with this look"
     static let fourK = "4K"
     static let keepFourK = "Keep 4K"
     static func bringDownTo(_ height: Int) -> String { "Bring down to \(height)p" }
     static let approvedShow = "Approved"
     // Stopping removes the shared setting, so each show of the kind goes back to its own sample.
-    static let stopUsingKind = "Decide Show by Show"
+    static let stopUsingKind = "Decide Each Title Separately"
     static let kindRefusedTitle = "Mediaforce didn't use that setting"
     static let ok = "OK"
     static let backOneFrame = "Back one frame"
@@ -1661,7 +1662,8 @@ extension Words {
     static func kindMembers(_ kind: KindsFacts.Kind) -> [String] {
         let movies = kind.shows.filter(\.isMovie).count
         let shows = kind.shows.count - movies
-        return [shows > 0 || movies == 0 ? count(shows, "show") : nil, movies > 0 ? count(movies, "movie") : nil].compactMap { $0 }
+        if kind.shows.isEmpty { return [count(0, "title")] }
+        return [shows > 0 ? count(shows, "show") : nil, movies > 0 ? count(movies, "movie") : nil].compactMap { $0 }
     }
 
     static func kindSubtitle(_ kind: KindsFacts.Kind) -> String {
@@ -1675,7 +1677,7 @@ extension Words {
     static func sizeSetting(_ setting: KindsFacts.Setting) -> String {
         guard let megabytes = setting.sizeGoalMb else { return "its approved size" }
         let amount = "\(Int(megabytes.rounded())) MB"
-        return setting.sizeGoalMode == "normalized" ? "\(amount) per 45-minute episode" : "\(amount) per episode"
+        return setting.sizeGoalMode == "normalized" ? "\(amount) per 45 minutes" : "\(amount) per file"
     }
 
     static func showSetting(_ show: String, _ setting: KindsFacts.Setting) -> String {
@@ -1689,14 +1691,14 @@ extension Words {
     }
 
     static func decidedShowByShow(_ code: String) -> String {
-        code == "cartoon" ? "Each cartoon is decided on its own." : "Each \(kindName(code)) show is decided on its own."
+        code == "cartoon" ? "Each cartoon is decided on its own." : "Each title is decided on its own."
     }
 
     static func kindEmpty(_ code: String) -> String {
         "Nothing measures as \(kindName(code).lowercased()) yet."
     }
 
-    static let kindNothingToWatch = "No episode made with this setting is kept to compare yet."
+    static let kindNothingToWatch = "No file made with this setting is available to compare yet."
     static let makeASample = "Make a Sample"
 
     static func makeSampleOf(_ show: String) -> String {
@@ -1706,11 +1708,11 @@ extension Words {
     static func kindRefusal(_ code: String?) -> String {
         switch code {
         case "sample_changed": "The approved sample changed before it could be used for this kind. The kind wasn't changed."
-        case "approval_not_current": "That show's sample approval has changed. Approve its sample again first."
-        case "size_goal_not_scalable": "That setting is a size per episode, so it can't carry to other shows."
-        case "source_kind_differs": "That show's sample was made on a season of another kind."
-        case "no_folder_approval": "That show has no approved sample of its own."
-        case "kind_is_one_time": "Each of these shows is decided on its own sample."
+        case "approval_not_current": "The approval has changed. Review the sample again first."
+        case "size_goal_not_scalable": "That size is fixed per file, so it can’t carry to other titles."
+        case "source_kind_differs": "That sample was made for a different kind of content."
+        case "no_folder_approval": "This title has no approved sample of its own."
+        case "kind_is_one_time": "Each title needs its own approved sample."
         default: "Mediaforce didn't say why."
         }
     }
@@ -1740,7 +1742,7 @@ extension Words {
     static let watchIt = "Watch it"
     static let chooseSettings = "Choose settings"
     static let chooseDetail = "Choose detail"
-    static let chooseAnotherShow = "Choose another show"
+    static let chooseAnotherShow = "Choose another title"
     static let openSample = "Open sample"
     static let showSeason = "Show season"
     static let showComputer = "Show computer"
@@ -1764,7 +1766,7 @@ extension Words {
     }
 
     static func useSettingsAsk(_ setting: KindsFacts.Setting?) -> String {
-        guard let setting else { return "Use the settings you approved for another show?" }
+        guard let setting else { return "Use settings from another title?" }
         return "Use \(setting.name)'s settings, \(sizeSetting(setting))?"
     }
 

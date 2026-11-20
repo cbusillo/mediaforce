@@ -6,7 +6,8 @@ struct MainWindowFacts: Decodable, Sendable {
     let library: Library
     let spaceSaved: SpaceSaved
     let recentlyFinishedSeasons: [FinishedSeason]
-    let biggestNotStarted: [NotStartedShow]
+    let recentlyFinished: [FinishedSeason]?
+    let biggestNotStarted: [NotStartedTitle]
     let samples: Samples
     let computers: [Computer]
     let events: [Event]
@@ -111,17 +112,19 @@ struct MainWindowFacts: Decodable, Sendable {
         let keptOriginalCount: Int
         let bytesSaved: Int64
         let finishedAt: String?
+        let mediaType: String?
         var id: String { prefix }
         var keptEntirelyOriginal: Bool { episodeCount == 0 && keptOriginalCount > 0 }
     }
 
-    struct NotStartedShow: Decodable, Sendable, Identifiable {
+    struct NotStartedTitle: Decodable, Sendable, Identifiable {
         let showPrefix: String
         let show: String
         let bytes: Int64
         let episodeCount: Int
         let seasonCount: Int
         let waitingSamplePrefix: String?
+        let mediaType: String?
         var id: String { showPrefix }
     }
 
@@ -176,6 +179,8 @@ struct MainWindowFacts: Decodable, Sendable {
         let kind: String
         let at: String
         let relPath: String
+        let mediaType: String?
+        var itemPrefix: String { season?.prefix ?? relPath }
         let season: Season?
         let bytesSaved: Int64?
     }

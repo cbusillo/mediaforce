@@ -16,15 +16,9 @@ struct WorkStatus: View {
             }
             if let lastChange {
                 let line = "Last change: \(Words.event(lastChange)), \(Words.moment(lastChange.at))"
-                Group {
-                    if let season = lastChange.season {
-                        Button(line) { open(.item(season.prefix)) }
-                            .buttonStyle(QuietLinkStyle())
-                    } else {
-                        Text(line).foregroundStyle(.tertiary)
-                    }
-                }
-                .font(.callout)
+                Button(line) { open(.item(lastChange.itemPrefix)) }
+                    .buttonStyle(QuietLinkStyle())
+                    .font(.callout)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

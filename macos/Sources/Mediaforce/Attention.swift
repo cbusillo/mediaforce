@@ -149,17 +149,17 @@ struct Attention: Equatable, Sendable {
 
     private static func kindWaitingReason(_ kind: MainWindowFacts.PendingKind) -> String {
         if kind.settingsAvailable == true {
-            return "Use the settings you approved for another show. No new sample is needed."
+            return "Use settings from another title. No new sample is needed."
         }
         if kind.sampleReady ?? true {
             let name = kind.sampleSeason?.split(separator: "/").dropFirst().joined(separator: " • ") ?? "The sample"
             return kind.oneTime == true
                 ? "\(name) is ready to watch."
-                : "Watch the sample and choose how these shows should look."
+                : "Watch the sample and choose how this group should look."
         }
         switch kind.sampleStatus {
         case "pending_review", "completed":
-            return "This sample can't decide the whole group. Choose another show's sample."
+            return "This sample can't decide the whole group. Choose a sample from another title."
         case "choose_size":
             return "Choose a size for the first sample."
         case "choose_balance":

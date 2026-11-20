@@ -33,6 +33,7 @@ from mediaforce.web.runtime.episode_progress import load_season_episode_progress
 from mediaforce.web.runtime.app_samples import approve_sample, kind_sample_candidates, sample_moments
 from mediaforce.web.runtime.folder_actions import queue_folder_encode_action
 from mediaforce.web.runtime.folder_state import save_calibration_state
+from mediaforce.web.runtime.app_window import approved_file_samples
 from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash, review_gate
 from mediaforce.web.runtime.kind_approvals import APPROVABLE_KINDS, APPROVAL_NOT_CURRENT_CODE, KIND_IS_ONE_TIME_CODE, \
@@ -536,7 +537,7 @@ def test_the_kinds_facts_say_what_each_kind_covers_and_how_it_is_decided(tmp_pat
     # Only folder approvals are counted, so the page never works out a season's kind just to skip it.
     assert asked == []
     kinds = {kind["kind"]: kind for kind in facts["kinds"]}
-    assert kinds[LIVE_ACTION]["shows"] == [{"prefix": "tv/Drama", "seasons": 1, "waiting_bytes": 1000,
+    assert kinds[LIVE_ACTION]["shows"] == [{"prefix": "tv/Drama", "media_type": "tv", "seasons": 1, "waiting_bytes": 1000,
                                        "sample_season": APPROVED_SEASON}]
     assert kinds[LIVE_ACTION]["sample_season"] is None
     assert kinds[LIVE_ACTION]["settings"] == []
@@ -1753,3 +1754,21 @@ def test_the_same_path_finds_its_season_by_the_library_type_it_is_read_with() ->
     episode = "media/Show/Season 1/e01.mkv"
     assert [look_group({"media": "tv"}, episode), look_group({"media": "movie"}, episode)] == ["media/Show/Season 1", None]
     assert [look_group({"media": "movie"}, episode), look_group({"media": "tv"}, episode)] == [None, "media/Show/Season 1"]
+
+
+@pytest.mark.parametrize(("root", "kind"), [("Cinema", "movie"), ("Headset", "other")])
+def test_library_lists_an_approved_non_tv_sample_until_its_file_is_finished(tmp_path: Path, root: str, kind: str) -> None:
+    config = _config(tmp_path)
+    config.raw["media"]["libraries"].append({"key": root, "path": str(tmp_path / root), "type": kind, "availability": "production"})
+    path = f"{root}/River/Scenes/Coast.mkv"
+    _waiting_episode(config, path, 5000)
+    _finished_sample(config, path)
+    approval = _approved(config)
+    approval["sample_item"]["rel_path"] = path
+    sources = PageStateSources(_loader({path: approval}, {}), lambda _config, _prefix: None)
+    with open_db(config.paths.db_path) as connection:
+        listed = approved_file_samples(connection, config, sources)
+
+        assert [(entry["prefix"], entry["show"], entry.get("season")) for entry in listed] == [(path, "Coast", None)]
+        connection.execute(library_items.update().where(library_items.c.rel_path == path).values(status="promoted"))
+        assert not approved_file_samples(connection, config, sources)

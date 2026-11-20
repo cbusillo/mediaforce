@@ -15,11 +15,11 @@ struct LibraryPage: View {
                     WorkStatus(facts: facts, open: open)
                 }
                 StorageBar(facts: facts, kind: .everything, listing: listing, open: open)
-                FinishedShelf(seasons: Array(facts.recentlyFinishedSeasons.prefix(6)), posters: model.posters, open: open)
+                FinishedShelf(items: Array((facts.recentlyFinished ?? facts.recentlyFinishedSeasons).prefix(6)), posters: model.posters, open: open)
                 if !facts.samples.approvedNotStarted.isEmpty {
                     SampleShelf(facts: facts, posters: model.posters) { open(.sample($0)) }
                 }
-                BiggestTable(shows: Array(facts.biggestNotStarted.prefix(BiggestTable.rowLimit)),
+                BiggestTable(titles: facts.biggestNotStarted,
                              samples: facts.samples.waitingOnYou, posters: model.posters, open: open)
             }
             Button("Browse all", action: { open(.media) }).buttonStyle(QuietLinkStyle())

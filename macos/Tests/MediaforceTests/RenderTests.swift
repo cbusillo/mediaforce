@@ -234,9 +234,22 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
                         "season_folder": "Season 4", "season": 4, "state": "ready_to_compare", "action": "review_sample",
                         "failure": NSNull()])
         samples["waiting_on_you"] = waiting
+        samples["approved_not_started"] = [["prefix": "tv/Lucifer/Season 1", "show_prefix": "tv/Lucifer", "show": "Lucifer",
+                                            "season": 1, "state": "ready_to_make"],
+                                           ["prefix": "movies/Cloudbreak", "show_prefix": "movies/Cloudbreak",
+                                            "show": "Cloudbreak", "state": "ready_to_make"]]
         facts["samples"] = samples
+        var finished = facts["recently_finished_seasons"] as! [[String: Any]]
+        finished.insert(["prefix": "movies/Night Sky/Feature.mkv", "show_prefix": "movies/Night Sky", "show": "Night Sky",
+                         "media_type": "movie", "episode_count": 0, "kept_original_count": 0, "bytes_saved": 2480000000,
+                         "finished_at": "2026-10-23T04:14:18+00:00"], at: 0)
+        facts["recently_finished"] = finished
         var biggest = facts["biggest_not_started"] as! [[String: Any]]
         biggest[0]["waiting_sample_prefix"] = "tv/ER/Season 1"
+        biggest.append(["show_prefix": "movies/After Midnight", "show": "After Midnight", "media_type": "movie",
+                        "bytes": 84000000000, "episode_count": 0, "season_count": 0])
+        biggest.append(["show_prefix": "other/Coast.mkv", "show": "Coast", "media_type": "other",
+                        "bytes": 12000000000, "episode_count": 0, "season_count": 0])
         facts["biggest_not_started"] = biggest
         return String(decoding: try! JSONSerialization.data(withJSONObject: facts), as: UTF8.self)
     }()
