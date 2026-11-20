@@ -408,8 +408,9 @@ def _require_fresh_stage(stage: Path, support: Path) -> None:
 
 
 def _require_running_server(job: ReleaseInstall) -> None:
-    require_paused_idle_dashboard(_api(job.base_url, "/api/dashboard?preview_limit=0"))
-    if running := _running_work(job.base_url, job.config.paths.db_path):
+    dashboard = _api(job.base_url, "/api/dashboard?preview_limit=0")
+    require_paused_idle_dashboard(dashboard)
+    if running := _running_work(job.base_url, job.config.paths.db_path, dashboard):
         raise RuntimeError(f"work is still running: {', '.join(running)}")
     database = str(job.config.paths.db_path.resolve())
     running = (_api(job.base_url, "/api/release/work").get("server") or {}).get("database")
@@ -599,16 +600,17 @@ def prepare_update(update: AppUpdate, build: str) -> None:
     if intent.get("phase") == "prepared":
         _save_intent(update, intent)
         return
-    running = _running_work(update.base_url, update.config.paths.db_path)
+    dashboard = _api(update.base_url, "/api/dashboard?preview_limit=0")
+    running = _running_work(update.base_url, update.config.paths.db_path, dashboard)
     if running:
-        if intent.get("phase") == "draining" or _finishing_soon(update) or _waited_too_long(update, intent):
+        if intent.get("phase") == "draining" or _waited_too_long(update, intent) or _finishing_soon(update, dashboard):
             _save_intent(update, {**intent, "phase": "draining", "waiting": running})
         return
     with sqlite3.connect(update.config.paths.db_path.resolve().as_uri() + "?mode=rw", uri=True) as database:
         database.execute("BEGIN IMMEDIATE")
         if existing is None:
             _save_intent(update, {**intent, "phase": "draining", "waiting": []})
-    if _running_work(update.base_url, update.config.paths.db_path):
+    if _running_work(update.base_url, update.config.paths.db_path, _api(update.base_url, "/api/dashboard?preview_limit=0")):
         if existing is None:
             back_out_update(update)
         return
@@ -794,8 +796,7 @@ def _end_intent(support: Path) -> None:
     (support / "runtime" / UPDATE_INTENT_NAME).unlink()
 
 
-def _running_work(base_url: str, database: Path) -> list[str]:
-    dashboard = _api(base_url, "/api/dashboard?preview_limit=0")
+def _running_work(base_url: str, database: Path, dashboard: dict) -> list[str]:
     counts = _api(base_url, "/api/release/work")["counts"]
     calibration = dashboard["calibration_queue"]
     found = (
@@ -808,13 +809,25 @@ def _running_work(base_url: str, database: Path) -> list[str]:
     return [f"{count} {words}" for count, words in found if count]
 
 
-def _finishing_soon(update: AppUpdate) -> bool:
+def _finishing_soon(update: AppUpdate, dashboard: dict) -> bool:
     """Whether every running file is expected to finish within DRAIN_START_SECONDS, from the app's own estimates. Work
     without an estimate is never cut short: draining waits until one says it is nearly done."""
+    for lane in ("sample", "full"):
+        queue = dashboard["calibration_queue"][lane]
+        jobs = queue.get("running", [])
+        if len(jobs) < queue["running_count"]:
+            return False
+        for job in jobs:
+            estimate = (job.get("progress") or {}).get("estimate") or {}
+            remaining = estimate.get("remaining_seconds_high")
+            if remaining is None or remaining > DRAIN_START_SECONDS:
+                return False
     activity = _api(update.base_url, "/api/app/activity")
     deadline = _utc_now() + timedelta(seconds=DRAIN_START_SECONDS)
     finishes = [running.get("finishes_at") for computer in activity["computers"] for running in computer["running"]]
-    return all(finish and datetime.fromisoformat(finish) <= deadline for finish in finishes)
+    return len(finishes) >= dashboard["encode_queue"]["running_count"] and all(
+        finish and datetime.fromisoformat(finish) <= deadline for finish in finishes
+    )
 
 
 def _waited_too_long(update: AppUpdate, intent: dict) -> bool:
