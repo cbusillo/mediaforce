@@ -72,9 +72,9 @@ class LoginItemTests(unittest.TestCase):
         instructions = readme.split("### Download", 1)[1].split("### ", 1)[0]
         calls: list[str] = []
 
-        def launchctl(command: list[str]) -> subprocess.CompletedProcess[str]:
-            calls.append(command[1])
-            return subprocess.CompletedProcess(command, 113 if command[1] == "print" else 0, "", "")
+        def launchctl(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+            calls.append(arguments[1])
+            return subprocess.CompletedProcess(arguments, 113 if arguments[1] == "print" else 0, "", "")
 
         with patch("mediaforce.ops.login_item._require_supported_platform"), patch(
             "mediaforce.ops.login_item._run_command", side_effect=launchctl
