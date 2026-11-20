@@ -26,6 +26,7 @@ from mediaforce.library.planner import build_manifest_item
 from mediaforce.library.representatives import load_representative_selection
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.tuning.calibration_jobs import save_job
+from mediaforce.web.runtime.app_item import item_payload
 from mediaforce.web.runtime.folder_actions import _promotion_conflict_response, _promotion_refresh_prefix
 from mediaforce.web.runtime.folder_actions import _reset_stale_prefix_encoding_items_for_requeue
 from mediaforce.web.runtime.folder_actions import promote_folder_outputs_action, queue_folder_encode_action, \
@@ -648,6 +649,18 @@ class MovieWorkflowTests(unittest.TestCase):
             {"covered_included_members": 1, "required_included_members": 2, "complete": False},
         )
 
+    def test_movie_page_explains_files_excluded_from_the_title(self) -> None:
+        prefix = "films/Example"
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_item(connection, f"{prefix}/Featurettes/Making Of.mkv")
+            self._insert_item(connection, f"{prefix}/Disc 2/Alternate.mkv")
+            connection.commit()
+
+        page = item_payload(self.config, prefix, sound=lambda _prefix: None)
+        assert page is not None
+        reasons = {file["name"]: file["held_reason"] for file in page["files"]}
+        self.assertEqual(reasons, {"Making Of.mkv": "movie_extra", "Alternate.mkv": "movie_uncertain"})
+
     def test_movie_library_handles_titles_without_default_included_members(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             self._insert_item(connection, "films/Extras Only/Featurettes/Making Of.mkv", size_bytes=300)
@@ -879,7 +892,10 @@ class MovieWorkflowTests(unittest.TestCase):
             )
 
         blocker = decisions_by_id[blocked_id].target_size_blocker
-        self.assertIsNotNone(blocker)
+        assert blocker is not None
+        page = item_payload(config, blocked_prefix, sound=lambda _prefix: None)
+        assert page is not None
+        self.assertEqual(page["files"][0]["wait_reason"], {"code": blocker.code})
         self.assertEqual(blocker.code, "target_lower_bound_exceeds_source_relative_cap")
         self.assertFalse(decisions_by_id[blocked_id].eligible)
         self.assertEqual(blocked_workflow.state, "blocked")

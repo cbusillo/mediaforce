@@ -2349,7 +2349,7 @@ def create_app(
         ),
         make_sample_action=_make_app_sample_action,
         compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=_queue_folder_encode_action),
-        item_payload=lambda prefix: item_payload(config, prefix, sound=_audio_preset_payload),
+        item_payload=lambda prefix: item_payload(config, prefix, sound=_audio_preset_payload, load_calibration_state=_load_calibration_state),
         player_source=lambda library_item_id, side: player_source(config, library_item_id, side),
         kinds_payload=_kinds_payload,
         approve_kind_action=_approve_app_kind,

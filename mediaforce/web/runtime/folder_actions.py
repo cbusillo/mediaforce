@@ -1372,6 +1372,7 @@ def queue_folder_encode_action(
             return {
                 "ok": False,
                 "code": "free_space_reserve",
+                "measurable": reserve.measurable,
                 "message": str(reserve.waiting_reason or "Waiting for a measurable free-space reserve."),
                 "queued_count": 0,
             }

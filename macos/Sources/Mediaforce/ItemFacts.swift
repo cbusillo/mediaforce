@@ -13,6 +13,18 @@ struct ItemFacts: Decodable, Sendable {
     private(set) var files: [File]
     let sound: Sound?
     let stillAiring: StillAiring?
+    let movieQueue: MovieQueue?
+
+    struct MovieQueue: Decodable, Sendable {
+        let waits: [String]
+        let refusal: Refusal?
+
+        struct Refusal: Decodable, Sendable {
+            let code: String?
+            let message: String?
+            let measurable: Bool?
+        }
+    }
 
     struct File: Decodable, Sendable, Identifiable, Equatable {
         let libraryItemId: Int
