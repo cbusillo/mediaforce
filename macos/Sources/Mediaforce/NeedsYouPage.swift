@@ -97,9 +97,8 @@ struct NeedsYouPage: View {
                 return result.ok ? nil : ActionNotice(title: Words.kindRefusedTitle, message: Words.kindRefusal(result.code))
             }
         case .makeSample(let prefix):
-            act(item.id) {
-                // A sample that can't be made as it was opens its page, which says what to choose.
-                if try await !$0.makeSample(prefix, size: nil, balance: nil).ok { open(.sample(prefix)) }
+            act(item.id) { _ in
+                if await model.makeSample(prefix)?.ok != true { open(.sample(prefix)) }
                 return nil
             }
         }
@@ -386,6 +385,9 @@ private struct NeedsYouRow: View {
                     DecisionLine {
                         Text(ask.line).fixedSize(horizontal: false, vertical: true)
                     } buttons: {
+                        if working, case .sample = item.opens {
+                            ProgressView(Words.preparingSample).controlSize(.small)
+                        }
                         if let look = ask.look {
                             Button(look.title) { perform(look) }
                                 .buttonStyle(QuietLinkStyle())

@@ -65,7 +65,9 @@ struct SampleWork: View {
                         Text(Words.sampleHeadline(facts, namesSeason: false, now: .now))
                     }
                 } buttons: {
-                    if facts.isInProgress {
+                    if model.preparingSamples.contains(prefix) {
+                        ProgressView(Words.preparingSample).controlSize(.small)
+                    } else if facts.isInProgress {
                         ProgressView()
                             .controlSize(.small)
                     }
@@ -202,9 +204,9 @@ struct SampleWork: View {
     }
 
     private func make(size: String?) {
-        act {
-            let result = try await $0.makeSample(prefix, size: size, balance: choices.balance(in: facts),
-                                                 keepFullHeight: choices.picture(in: facts))
+        act { _ in
+            guard let result = await model.makeSample(prefix, size: size, balance: choices.balance(in: facts),
+                                                      keepFullHeight: choices.picture(in: facts)) else { return nil }
             return choices.made(result, facts: facts)
         }
     }
@@ -213,7 +215,7 @@ struct SampleWork: View {
         working = true
         Task {
             do {
-                model.notice = try await action(model.client)
+                if let notice = try await action(model.client) { model.notice = notice }
             } catch {
                 model.notice = .unanswered
             }

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -19,6 +20,11 @@ from mediaforce.advising.telemetry import append_advisor_telemetry, estimated_co
 
 _FALLBACK_STATUSES = ASSISTANT_RETRYABLE_FAILURE_CODES
 _CODEX_SKILL_TRUNCATION_NOTICE_PREFIX = "Skill descriptions were shortened to fit the skills context budget."
+
+_CODEX_INSTRUCTION_BUDGET_NOTICE = re.compile(
+    r"Combined user instructions use [0-9]+ bytes, above the [0-9]+-byte `project_doc_max_bytes` setting\. "
+    r"The total includes global and thread instructions\. The limit applies only to project files\."
+)
 
 
 @dataclass(slots=True)
@@ -373,7 +379,7 @@ def _codex_output(raw: str) -> tuple[str, dict[str, int], bool, bool]:
                 final_text = str(item.get("text") or "").strip()
             elif item_type == "error":
                 message = str(item.get("message") or "")
-                if not message.startswith(_CODEX_SKILL_TRUNCATION_NOTICE_PREFIX):
+                if not (message.startswith(_CODEX_SKILL_TRUNCATION_NOTICE_PREFIX) or _CODEX_INSTRUCTION_BUDGET_NOTICE.fullmatch(message)):
                     tool_used = True
             elif item_type != "reasoning":
                 tool_used = True
