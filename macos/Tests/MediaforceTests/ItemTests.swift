@@ -106,10 +106,14 @@ final class ItemTests: XCTestCase {
         let approved = try JSONDecoder.mediaforce.decode(SampleFacts.self, from: Data(SampleTests.facts(state: "ready_to_make").utf8))
         let message = "Not enough free space."
         let busy = ItemFacts.MovieQueue(waits: ["production_active"], refusal: nil)
-        let refused = ItemFacts.MovieQueue(waits: busy.waits, refusal: .init(code: nil, message: message))
+        let refused = ItemFacts.MovieQueue(waits: busy.waits, refusal: .init(code: nil, message: message, measurable: nil))
         let status = Words.movieQueueStatus(approved, queue: refused)
         XCTAssertTrue(status.contains(message))
         XCTAssertTrue(status.contains(Words.movieQueueStatus(approved, queue: busy)))
+        let storageWaits = [true, false].map { measured in
+            Words.movieQueueStatus(approved, queue: .init(waits: [], refusal: .init(code: "free_space_reserve", message: nil, measurable: measured)))
+        }
+        XCTAssertNotEqual(storageWaits.first, storageWaits.last)
     }
 
     func testMoviePageDistinguishesExcludedFilesAndSizeLimits() throws {

@@ -60,8 +60,8 @@ def item_payload(
             for episode in load_season_episode_progress(connection, items, config=config)
         }
         ids = [item.item_id for item in items]
-        queue = (movie_queue_facts(connection, config, prefix, ids, load_calibration_state, now=time())
-                 if scope.domain == "movie" and load_calibration_state is not None else None)
+        queue = (movie_queue_facts(connection, config, scope.prefix, ids, load_calibration_state, now=time())
+                 if scope.kind in {"movie_title", "movie_file"} and load_calibration_state is not None else None)
         sizes = {
             int(item_id): int(size or 0)
             for item_id, size in connection.execute(

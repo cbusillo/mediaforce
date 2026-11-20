@@ -77,7 +77,7 @@ struct ItemPage: View {
                                 }
                                 if facts.domain == "movie", let work,
                                    work.state == "waiting_for_measurement" || work.state == "waiting_for_kind" ||
-                                   (work.state == "ready_to_make" && facts.files.contains(where: { $0.stage == "not_started" })) {
+                                   (work.state == "ready_to_make" && facts.movieQueue != nil && facts.files.contains(where: { $0.stage == "not_started" })) {
                                     Text(Words.movieQueueStatus(work, queue: facts.movieQueue))
                                         .foregroundStyle(.secondary)
                                 }

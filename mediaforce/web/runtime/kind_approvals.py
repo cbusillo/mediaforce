@@ -348,7 +348,7 @@ def record_kind_attempt(config: MediaforceConfig, chosen: KindSeason, result: Ma
     attempts = _load_attempts(config)
     attempts[chosen.season] = {"approval": chosen.approval, "files": list(chosen.files), "ok": bool(result.get("ok")), "at": at}
     if not result.get("ok"):
-        attempts[chosen.season]["refusal"] = {key: result[key] for key in ("code", "message") if result.get(key)}
+        attempts[chosen.season]["refusal"] = {key: result[key] for key in ("code", "message", "measurable") if key in result}
     path = _attempts_file(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False, suffix=".tmp") as handle:

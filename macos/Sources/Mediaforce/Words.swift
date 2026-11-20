@@ -1321,8 +1321,9 @@ extension Words {
         if queue.waits.contains("queue_paused") { lines.append("Compression is paused.") }
         if queue.waits.contains("production_active") { lines.append("The current compression run finishes first.") }
         if let refusal = queue.refusal {
-            if refusal.code == "free_space_reserve" {
-                lines.append("Mediaforce needs to confirm there’s enough space for the original and the compressed copy.")
+            if refusal.code == "free_space_reserve", let measured = refusal.measurable {
+                lines.append(measured ? "There isn’t enough free space for the original and the compressed copy."
+                                      : "Mediaforce can’t check how much free space is available.")
             } else if let reason = refusal.message {
                 lines.append(reason)
             }

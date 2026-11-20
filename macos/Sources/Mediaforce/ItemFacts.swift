@@ -22,6 +22,7 @@ struct ItemFacts: Decodable, Sendable {
         struct Refusal: Decodable, Sendable {
             let code: String?
             let message: String?
+            let measurable: Bool?
         }
     }
 
