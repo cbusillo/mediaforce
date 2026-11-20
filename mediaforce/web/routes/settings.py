@@ -37,7 +37,8 @@ def register_settings_routes(
     @app.post("/api/archive-cleanup/clear")
     async def api_archive_cleanup_clear(request: Request) -> JSONResponse:
         body = await request.json()
-        return JSONResponse(clear_archive_cleanup_action(str(body.get("transcode_root", "")).strip() or None))
+        transcode_root = str(body.get("transcode_root", "")).strip() or None
+        return JSONResponse(await run_in_threadpool(clear_archive_cleanup_action, transcode_root))
 
 
 def register_library_settings_routes(

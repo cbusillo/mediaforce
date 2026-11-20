@@ -12,6 +12,9 @@ struct SpaceSavedPage: View {
     @State private var shows: [SpaceSavedFacts.Show]?
     @State private var refreshFailed = false
     @State private var lastHeard: Date?
+    // A delete was asked for and Mediaforce hasn't answered yet.
+    @State private var asking = false
+    static let deletionCheckInterval: Duration = .seconds(1)
 
     var body: some View {
         PageFrame(title: Words.spaceSaved, subtitle: Words.savedSoFar(facts.spaceSaved.bytes)) {
@@ -21,10 +24,8 @@ struct SpaceSavedPage: View {
             }
             SpaceSavedBar(library: facts.library, savedBytes: facts.spaceSaved.bytes, backupBytes: cleanup?.totalSizeBytes ?? 0)
             if let cleanup {
-                if cleanup.fileCount > 0 {
-                    DeleteBackups(count: cleanup.fileCount, bytes: cleanup.totalSizeBytes, model: model)
-                } else {
-                    Text(Words.noBackupsWaiting).foregroundStyle(.secondary)
+                DeleteBackups(status: BackupsStatus(cleanup: cleanup, asking: asking), model: model) {
+                    Task { await deleteBackups() }
                 }
             }
             if let shows {
@@ -37,6 +38,27 @@ struct SpaceSavedPage: View {
             }
         }
         .task { await watch() }
+        .task(id: deleting) { await followDeletion() }
+    }
+
+    private var deleting: Bool {
+        cleanup.map { BackupsStatus(cleanup: $0, asking: asking).deleting } ?? asking
+    }
+
+    /// Asks Mediaforce to delete, then shows what it did; the page reads the deletion's progress meanwhile.
+    private func deleteBackups() async {
+        asking = true
+        if let after = await model.deleteBackups() { cleanup = after }
+        asking = false
+        if let completed = try? await model.client.completed() { shows = SpaceSavedFacts.shows(completed.folders) }
+    }
+
+    private func followDeletion() async {
+        guard deleting else { return }
+        while !Task.isCancelled {
+            if let found = try? await model.client.cleanupFolder() { cleanup = found }
+            try? await Task.sleep(for: Self.deletionCheckInterval)
+        }
     }
 
     private func watch() async {
@@ -293,42 +315,91 @@ struct StorageKey: View {
     }
 }
 
+/// What the backups line shows: the deletion running, the backups waiting, and how the last deletion ended.
+struct BackupsStatus {
+    let cleanup: CleanupFolder
+    let asking: Bool
+
+    var deleting: Bool { asking || cleanup.deletion?.state == .running }
+    var canDelete: Bool { !deleting && cleanup.fileCount > 0 }
+    // The Delete button stays in place while deleting, unpressable, so the row doesn't jump.
+    var showsDelete: Bool { deleting || cleanup.fileCount > 0 }
+
+    var progress: Double? {
+        guard deleting, let deletion = cleanup.deletion, let total = deletion.totalCount, total > 0 else { return nil }
+        return Double(deletion.deletedCount) / Double(total)
+    }
+
+    var line: String {
+        if deleting { return Words.deletingBackups(cleanup.deletion) }
+        if cleanup.fileCount > 0 { return Words.deleteBackupsLine(cleanup.fileCount, cleanup.totalSizeBytes) }
+        if let deletion = cleanup.deletion, deletion.state == .finished { return Words.backupsDeleted(deletion) }
+        return Words.noBackupsWaiting
+    }
+
+    /// How the last deletion ended, when the line above doesn't already say it.
+    var outcome: (text: String, failed: Bool)? {
+        guard !deleting, let deletion = cleanup.deletion else { return nil }
+        switch deletion.state {
+        case .failed: return (Words.backupsNotDeleted(deletion), true)
+        case .finished where cleanup.fileCount > 0: return (Words.backupsDeleted(deletion), false)
+        default: return nil
+        }
+    }
+}
+
 /// The one place original backups are deleted. Mediaforce reads the Cleanup folder again and asks first.
 struct DeleteBackups: View {
-    let count: Int
-    let bytes: Int64
+    let status: BackupsStatus
     let model: MainWindowModel
+    let delete: () -> Void
     @State private var folder: CleanupFolder?
     @State private var confirming = false
 
     var body: some View {
-        HStack(spacing: 12) {
-            Text(Words.deleteBackupsLine(count, bytes))
-            Spacer()
-            Button(Words.deleteBackups) {
-                Task {
-                    do {
-                        let found = try await model.client.cleanupFolder()
-                        if found.fileCount > 0 {
-                            folder = found
-                            confirming = true
-                        } else {
-                            model.notice = .emptyCleanupFolder
-                        }
-                    } catch {
-                        model.notice = .unanswered
-                    }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                if status.deleting {
+                    ProgressView().controlSize(.small)
+                }
+                Text(status.line)
+                    .monospacedDigit()
+                    .foregroundStyle(status.showsDelete ? .primary : .secondary)
+                Spacer()
+                if status.showsDelete {
+                    Button(Words.deleteBackups) { Task { await askFirst() } }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!status.canDelete)
+                        .help(Words.deleteBackupsHelp)
                 }
             }
-            .buttonStyle(.borderedProminent)
-            .help(Words.deleteBackupsHelp)
+            if let progress = status.progress {
+                ProgressView(value: progress).frame(maxWidth: 420)
+            }
+            if let outcome = status.outcome {
+                Label(outcome.text, systemImage: outcome.failed ? "exclamationmark.triangle.fill" : "checkmark.circle")
+                    .foregroundStyle(outcome.failed ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))
+                    .textSelection(.enabled)
+            }
         }
         .confirmationDialog(Words.deleteBackupsQuestion, isPresented: $confirming, presenting: folder) { _ in
-            Button(Words.deleteAllBackups, role: .destructive) {
-                Task { await model.deleteCleanupFolder() }
-            }
+            Button(Words.deleteAllBackups, role: .destructive, action: delete)
         } message: { folder in
             Text(Words.deleteBackupsDetail(folder))
+        }
+    }
+
+    private func askFirst() async {
+        do {
+            let found = try await model.client.cleanupFolder()
+            if found.fileCount > 0 {
+                folder = found
+                confirming = true
+            } else {
+                model.notice = .emptyCleanupFolder
+            }
+        } catch {
+            model.notice = .unanswered
         }
     }
 }

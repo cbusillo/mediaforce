@@ -578,6 +578,23 @@ extension Words {
         "Delete \(Words.count(count, "original backup")) to get back \(size(bytes))."
     }
 
+    static func deletingBackups(_ deletion: BackupDeletion?) -> String {
+        guard let deletion, let total = deletion.totalCount else { return "Deleting original backups…" }
+        return "Deleting \(count(total, "original backup"))… \(deletion.deletedCount) of \(total), \(size(deletion.freedBytes)) back so far"
+    }
+
+    static func backupsDeleted(_ deletion: BackupDeletion) -> String {
+        let kept = deletion.keptCount > 0 ? " Kept \(count(deletion.keptCount, "original")) that files still being finished need." : ""
+        return "Deleted \(count(deletion.deletedCount, "original backup")), \(size(deletion.freedBytes)) back.\(kept)"
+    }
+
+    static func backupsNotDeleted(_ deletion: BackupDeletion) -> String {
+        let reason = deletion.failureReason ?? "Mediaforce didn't say why"
+        guard let file = deletion.failedFile else { return "Couldn't delete the original backups: \(reason)." }
+        let sofar = deletion.totalCount.map { " \(deletion.deletedCount) of \($0) were deleted, \(size(deletion.freedBytes)) back; the rest are still there." } ?? ""
+        return "Couldn't delete \(file): \(reason). Mediaforce stopped there.\(sofar)"
+    }
+
     static func deleteBackupsDetail(_ folder: CleanupFolder) -> String {
         "\(count(folder.fileCount, "file")), \(size(folder.totalSizeBytes)). Mediaforce keeps any original a file still being finished needs. The replaced files stay in your library. This cannot be undone."
     }

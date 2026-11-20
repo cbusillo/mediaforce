@@ -1,3 +1,4 @@
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -44,11 +45,51 @@ def archive_cleanup_summary(config: MediaforceConfig, *, transcode_root: str | N
     }
 
 
+class BackupDeletion:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._facts: dict[str, Any] | None = None
+
+    def facts(self) -> dict[str, Any] | None:
+        with self._lock:
+            return None if self._facts is None else dict(self._facts)
+
+    def begin(self) -> None:
+        with self._lock:
+            self._facts = {"state": "running", "total_count": None, "total_bytes": None, "deleted_count": 0,
+                           "freed_bytes": 0, "kept_count": 0, "failed_file": None, "failure_reason": None}
+
+    def counted(self, total_count: int, total_bytes: int, kept_count: int) -> None:
+        self._update(total_count=total_count, total_bytes=total_bytes, kept_count=kept_count)
+
+    def removed(self, size_bytes: int) -> None:
+        with self._lock:
+            assert self._facts is not None
+            self._facts["deleted_count"] += 1
+            self._facts["freed_bytes"] += size_bytes
+
+    def failed(self, error: BaseException, *, file: str | None = None) -> None:
+        with self._lock:
+            if self._facts is None or self._facts["state"] != "running":
+                return
+            reason = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
+            self._facts.update(state="failed", failed_file=file, failure_reason=reason or type(error).__name__)
+
+    def finished(self) -> None:
+        self._update(state="finished")
+
+    def _update(self, **changes: Any) -> None:
+        with self._lock:
+            assert self._facts is not None
+            self._facts.update(changes)
+
+
 def clear_archive_cleanup_action(
         config: MediaforceConfig,
         *,
         transcode_root: str | None = None,
         on_removed: Callable[[Path], None] | None = None,
+        progress: BackupDeletion | None = None,
 ) -> dict[str, Any]:
     with archive_activity(config.paths.db_path, cleanup=True) as available:
         if not available:
@@ -58,14 +99,24 @@ def clear_archive_cleanup_action(
         if hold := update_hold_reason(config.paths.db_path.parent):
             return {"ok": False, "message": hold, "removed_count": 0, "removed_size_bytes": 0,
                     "archive_cleanup": archive_cleanup_summary(config, transcode_root=transcode_root)}
-        return _clear_archive_cleanup_action(config, transcode_root=transcode_root, on_removed=on_removed)
+        progress = progress or BackupDeletion()
+        progress.begin()
+        try:
+            result = _clear_archive_cleanup_action(
+                config, transcode_root=transcode_root, on_removed=on_removed, progress=progress)
+        except BaseException as error:
+            progress.failed(error)
+            raise
+        progress.finished()
+        return result
 
 
 def _clear_archive_cleanup_action(
         config: MediaforceConfig,
         *,
-        transcode_root: str | None = None,
-        on_removed: Callable[[Path], None] | None = None,
+        transcode_root: str | None,
+        on_removed: Callable[[Path], None] | None,
+        progress: BackupDeletion,
 ) -> dict[str, Any]:
     if config.paths.db_path.is_file():
         with open_db(config.paths.db_path) as connection:
@@ -73,6 +124,7 @@ def _clear_archive_cleanup_action(
     archive_root = _archive_root_for_cleanup(config, transcode_root=transcode_root)
     summary = archive_cleanup_summary(config, transcode_root=transcode_root)
     if archive_root is None:
+        progress.counted(0, 0, 0)
         return {
             "ok": True,
             "message": "No original backups are waiting in the Cleanup folder.",
@@ -81,6 +133,7 @@ def _clear_archive_cleanup_action(
             "archive_cleanup": summary,
         }
     if not archive_root.exists() or summary["file_count"] <= 0:
+        progress.counted(0, 0, 0)
         return {
             "ok": True,
             "message": "No original backups are waiting in the Cleanup folder.",
@@ -88,24 +141,24 @@ def _clear_archive_cleanup_action(
         }
 
     protected = recovery_archive_paths(config, archive_root)
-    preserved_count = 0
+    files = [path for path in archive_root.rglob("*") if path.is_file()]
+    deletable = [(path, _size_bytes(path)) for path in files if not archive_path_needs_recovery(path, protected)]
+    preserved_count = len(files) - len(deletable)
+    progress.counted(len(deletable), sum(size for _path, size in deletable), preserved_count)
     removed_count = 0
     removed_size_bytes = 0
-    for path in archive_root.rglob("*"):
-        if not path.is_file():
-            continue
-        if archive_path_needs_recovery(path, protected):
-            preserved_count += 1
-            continue
+    for path, size_bytes in deletable:
         try:
-            removed_size_bytes += path.stat().st_size
-        except FileNotFoundError:
-            pass
-        with open_db(config.paths.db_path) as connection:
-            operations = prepare_archive_removal(connection, path)
-            safe_unlink(path)
-            commit_archive_removal(connection, operations)
+            with open_db(config.paths.db_path) as connection:
+                operations = prepare_archive_removal(connection, path)
+                safe_unlink(path)
+                commit_archive_removal(connection, operations)
+        except BaseException as error:
+            progress.failed(error, file=str(path.relative_to(archive_root)))
+            raise
         removed_count += 1
+        removed_size_bytes += size_bytes
+        progress.removed(size_bytes)
         if on_removed is not None:
             on_removed(path)
 
@@ -128,6 +181,13 @@ def _clear_archive_cleanup_action(
         "removed_size_bytes": removed_size_bytes,
         "archive_cleanup": archive_cleanup_summary(config, transcode_root=transcode_root),
     }
+
+
+def _size_bytes(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except FileNotFoundError:
+        return 0
 
 
 def _archive_root_for_cleanup(config: MediaforceConfig, *, transcode_root: str | None = None) -> Path | None:
