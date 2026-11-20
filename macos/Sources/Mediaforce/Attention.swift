@@ -17,6 +17,7 @@ struct AttentionMemory: Codable, Equatable, Sendable {
 
 struct Attention: Equatable, Sendable {
     static let mostSeasonsNamedSeparately = 3
+    static let genreSoundID = "reality-and-talk-sound"
     static let backupsNoticeID = "backups"
 
     let notices: [AttentionNotice]
@@ -116,7 +117,13 @@ struct Attention: Equatable, Sendable {
                                    body: preview.problem ?? preview.waiting ?? "Review the exact file list and confirm it in Mediaforce.",
                                    opens: .needsYou, notifies: !waitingOnly)
         }
-        return kinds + samples + seasons + computers + originals
+        var notices = kinds + samples + seasons + computers + originals
+        if facts.work.needsGenreSoundDecision {
+            notices.append(AttentionNotice(id: genreSoundID, title: Words.genreSoundQuestion,
+                                           body: "Use stereo sound for these shows, including new ones. Shows where you chose the sound keep your choice.",
+                                           opens: .needsYou))
+        }
+        return notices
     }
 
     private static func kindNoticeStage(_ kind: MainWindowFacts.PendingKind) -> String {

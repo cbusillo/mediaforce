@@ -16,6 +16,7 @@ struct ItemPage: View {
     @State private var refreshFailed = false
     @State private var notice: ActionNotice?
     @State private var confirming: WorkAction?
+    @State private var motionDecision: ItemFacts?
     @State private var working = false
 
     var body: some View {
@@ -35,10 +36,23 @@ struct ItemPage: View {
                 isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
                 presenting: confirming
             ) { action in
-                Button(Words.workButton(action)) { Task { await run(action, facts) } }
+                Button(Words.workButton(action)) { Task { await run(action) } }
                 Button(Words.cancel, role: .cancel) {}
             } message: { action in
                 Text(Words.workDetail(action))
+            }
+            .confirmationDialog(
+                Words.motionQuestion,
+                isPresented: Binding(get: { motionDecision != nil }, set: { if !$0 { motionDecision = nil } }),
+                presenting: motionDecision
+            ) { files in
+                if files.motionFiles.contains(where: \.needsMotionChoice) {
+                    Button(Words.compressAsIs) { Task { await decideMotion(files, compress: true) } }
+                }
+                Button(Words.keepTheOriginal) { Task { await decideMotion(files, compress: false) } }
+                Button(Words.cancel, role: .cancel) {}
+            } message: { files in
+                Text(files.motionQuestion)
             }
     }
 
@@ -67,6 +81,9 @@ struct ItemPage: View {
                                     }
                                     // A file that is published, put back or loses its backup plays again from the start.
                                     .id("\(file.id) \(file.stage) \(file.bytes) \(file.originalBackup)")
+                                    if file.keptReason != nil && file.canCompressAsIs == true {
+                                        Button(Words.compressAsIs) { Task { await act(.compressAsIs, file) } }
+                                    }
                                 }
                                 if !facts.waiting.isEmpty {
                                     WaitingFiles(files: facts.waiting) { file, action in
@@ -109,21 +126,21 @@ struct ItemPage: View {
         switch action {
         case .approve, .makeAgain, .makeSample, .chooseSize, .tryAnotherSize, .openSample: openSample(prefix)
         case .replaceOriginals: confirming = .replaceOriginals
-        case .decideMotion: confirming = .keepMotionOriginals
-        case .startCompressing: Task { await run(.startCompressing, facts) }
-        case .checkFiles: Task { await run(.checkFiles, facts) }
-        case .retryUnfinished: Task { await run(.retryUnfinished, facts) }
+        case .startCompressing: Task { await run(.startCompressing) }
+        case .checkFiles: Task { await run(.checkFiles) }
+        case .retryUnfinished: Task { await run(.retryUnfinished) }
+        case .decideMotion: motionDecision = facts
         case .reviewFiles:
             selected = facts.waiting.first?.id
             scroll.scrollTo(SampleFacts.Action.reviewFiles, anchor: .top)
         }
     }
 
-    private func run(_ action: WorkAction, _ facts: ItemFacts?) async {
+    private func run(_ action: WorkAction) async {
         working = true
         defer { working = false }
         do {
-            let result = try await send(action, facts)
+            let result = try await send(action)
             if !result.ok {
                 notice = ActionNotice(title: Words.workRefused(action), message: result.message ?? ActionNotice.sampleRefused.message)
             }
@@ -133,7 +150,7 @@ struct ItemPage: View {
         await refresh()
     }
 
-    private func send(_ action: WorkAction, _ facts: ItemFacts?) async throws -> ItemActionResult {
+    private func send(_ action: WorkAction) async throws -> ItemActionResult {
         let client = model.client
         switch action {
         case .startCompressing:
@@ -144,8 +161,6 @@ struct ItemPage: View {
         case .checkFiles: return try await client.checkFiles(prefix)
         case .replaceOriginals: return try await client.replaceOriginals(prefix)
         case .retryUnfinished: return try await client.retryUnfinished(prefix)
-        case .keepMotionOriginals:
-            return try await client.keepMotionOriginals(prefix, facts?.files.filter { $0.heldReason == "motion_pattern" }.map(\.libraryItemId) ?? [])
         }
     }
 
@@ -172,6 +187,16 @@ struct ItemPage: View {
         if facts?.kind == "tv_series" {
             show = (try? await model.client.tvShows())?.shows.first { $0.showPrefix == prefix } ?? show
         }
+    }
+
+    private func decideMotion(_ facts: ItemFacts, compress: Bool) async {
+        do {
+            let result = try await model.client.answerMotion(facts, compress: compress)
+            if !result.ok { notice = ActionNotice(title: Words.motionQuestion, message: result.message ?? ActionNotice.unanswered.message) }
+        } catch {
+            notice = .unanswered
+        }
+        await refresh()
     }
 
     private func act(_ action: ItemAction, _ file: ItemFacts.File) async {
@@ -201,12 +226,12 @@ struct ItemPage: View {
 }
 
 enum ItemAction {
-    case makeAgain, keepThisCopy, putOriginalBack, allowLarger, keepOriginal, releaseHold
+    case makeAgain, keepThisCopy, putOriginalBack, allowLarger, keepOriginal, releaseHold, compressAsIs
 }
 
 /// A step on the whole season or title, as its page state offers it.
 enum WorkAction: Identifiable {
-    case startCompressing, checkFiles, replaceOriginals, retryUnfinished, keepMotionOriginals
+    case startCompressing, checkFiles, replaceOriginals, retryUnfinished
     var id: Self { self }
 }
 

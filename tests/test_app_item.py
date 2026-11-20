@@ -64,7 +64,7 @@ def test_a_season_lists_each_episode_with_its_sizes_and_backup(config: Mediaforc
         replaced = _replaced(connection, tmp_path, 1, size=100, original_size=700)
         connection.commit()
 
-    facts = item_payload(config, SEASON, sound=lambda _connection, _prefix: None)
+    facts = item_payload(config, SEASON, sound=lambda _prefix: None)
 
     assert facts is not None
     assert (facts["show"], facts["season"], facts["show_prefix"]) == ("Show", 1, "tv/Show")
@@ -89,7 +89,7 @@ def test_a_failed_copy_that_could_not_be_made_again_says_why(config: MediaforceC
         ))
         connection.commit()
 
-    facts = item_payload(config, SEASON, sound=lambda _connection, _prefix: None)
+    facts = item_payload(config, SEASON, sound=lambda _prefix: None)
 
     assert facts is not None
     [file] = facts["files"]
@@ -113,7 +113,7 @@ def test_a_passed_copy_with_stopped_publishing_waits_without_holding_other_files
         ))
         connection.commit()
 
-    facts = item_payload(config, SEASON, sound=lambda _connection, _prefix: None)
+    facts = item_payload(config, SEASON, sound=lambda _prefix: None)
 
     assert facts is not None
     stopped, published, untouched = facts["files"]
@@ -139,7 +139,7 @@ def test_a_deleted_backup_leaves_nothing_to_compare(config: MediaforceConfig, tm
         ))
         connection.commit()
 
-    facts = item_payload(config, SEASON, sound=lambda _connection, _prefix: None)
+    facts = item_payload(config, SEASON, sound=lambda _prefix: None)
 
     assert facts is not None
     assert facts["files"][0]["original_backup"] is False
@@ -149,7 +149,7 @@ def test_a_folder_with_no_files_is_not_found(config: MediaforceConfig) -> None:
     with open_db(config.paths.db_path):
         pass
 
-    assert item_payload(config, SEASON, sound=lambda _connection, _prefix: None) is None
+    assert item_payload(config, SEASON, sound=lambda _prefix: None) is None
 
 
 def test_the_player_reads_each_side_from_where_it_is(config: MediaforceConfig, tmp_path: Path) -> None:
@@ -191,7 +191,7 @@ def test_a_size_held_file_plays_its_held_copy_against_the_file_as_it_is(config: 
 
     compressed = player_source(config, held, "compressed")
     original = player_source(config, held, "original")
-    facts = item_payload(config, SEASON, sound=lambda _connection, _prefix: None)
+    facts = item_payload(config, SEASON, sound=lambda _prefix: None)
 
     assert compressed is not None and compressed.read_bytes() == b"H" * 40
     assert original is not None and original.read_bytes() == b"N" * 900
@@ -206,7 +206,7 @@ def test_a_held_copy_that_is_gone_is_refused_and_said(config: MediaforceConfig, 
         connection.commit()
     held_copy.unlink()
 
-    facts = item_payload(config, SEASON, sound=lambda _connection, _prefix: None)
+    facts = item_payload(config, SEASON, sound=lambda _prefix: None)
 
     assert player_source(config, held, "compressed") is None
     assert facts is not None
@@ -231,7 +231,7 @@ def test_a_whole_show_lists_every_season_in_order(config: MediaforceConfig, tmp_
         first = _episode(connection, tmp_path, 3, size=10)
         connection.commit()
 
-    facts = item_payload(config, "tv/Show", sound=lambda _connection, _prefix: None)
+    facts = item_payload(config, "tv/Show", sound=lambda _prefix: None)
 
     assert facts is not None
     assert (facts["kind"], facts["show"], facts["show_prefix"], facts["season"]) == ("tv_series", "Show", "tv/Show", None)

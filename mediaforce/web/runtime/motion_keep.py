@@ -71,7 +71,7 @@ def keep_motion_held_originals(
     return {
         "ok": True,
         "kept_count": count,
-        "message": f"Kept {_count(count, noun)} original. You can undo this here.",
+        "message": f"Kept {_count(count, noun)} original.",
     }
 
 
@@ -96,14 +96,7 @@ def undo_motion_keep(
             )
             if not kept_ids:
                 raise _Refused(f"These {noun}s are not kept original anymore. Refresh the page to see where they are.")
-            connection.execute(
-                delete(motion_keep_decisions).where(motion_keep_decisions.c.library_item_id.in_(sorted(kept_ids)))
-            )
-            for item_id in sorted(kept_ids):
-                row = rows[item_id]
-                _record_event(
-                    connection, row, KEEP_UNDONE_EVENT, now_iso, {"prefix": prefix, "rel_path": row["rel_path"]},
-                )
+            clear_motion_keep(connection, prefix, [rows[item_id] for item_id in sorted(kept_ids)], now_iso)
     except _Refused as refused:
         return refused.payload()
     count = len(kept_ids)
@@ -113,6 +106,12 @@ def undo_motion_keep(
         "undone_count": count,
         "message": f"{_count(count, noun).capitalize()} {held} motion pattern again.",
     }
+
+
+def clear_motion_keep(connection: DBClient, prefix: str, rows: Collection[Mapping[str, Any]], now_iso: str) -> None:
+    connection.execute(delete(motion_keep_decisions).where(motion_keep_decisions.c.library_item_id.in_([row["id"] for row in rows])))
+    for row in rows:
+        _record_event(connection, row, KEEP_UNDONE_EVENT, now_iso, {"prefix": prefix, "rel_path": row["rel_path"]})
 
 
 def _files_to_keep(

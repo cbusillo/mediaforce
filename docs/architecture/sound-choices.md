@@ -15,15 +15,14 @@ the owner heard no difference in a blind A/B.
 
 ## Where a choice is set
 
-- **Per show:** the Sound control in the TV library's show inspector, or on the
-  season page before the first sample. Both call
+- **Per show:** the Sound control on a show or season page. It calls
   `POST /api/folders/{prefix}/audio-preset`, which applies the choice to the
   show (the first two path parts). `GET` on the same route reads it.
-- **Library default:** Settings › TV library › Sound for shows (`audio_preset`
+- **Library default:** Previously saved TV library sound (`audio_preset`
   in the TV library policy). Empty means Standard, the configured audio
   policy, and adds nothing to any policy.
 
-A show choice outranks the library default. An override that names a preset
+A show choice outranks the Reality and Talk choice, which outranks the saved library default. An override that names a preset
 owns every preset key, so choosing Film for a show also removes a downmix the
 library default would add.
 
@@ -68,23 +67,11 @@ family. Production encodes, review clips and the sound check all use it.
 
 Only the owner sets a sound choice. `preset` and `downmix_to_stereo` are
 owner-only keys: the quality-risk compiler rejects any proposal that changes
-them (`OWNER_ONLY_AUDIO_KEYS`). Names, era or genre never apply a choice; see
-`quality-risk-contract.md`.
+them (`OWNER_ONLY_AUDIO_KEYS`). See `quality-risk-contract.md`.
 
-## Genre suggestions
+## Reality and talk shows
 
-TMDB genres are kept in `series_metadata.tmdb_genres_json` during the metadata
-sync. Rows saved before genres were kept refresh once at the next sync instead
-of waiting out the refresh interval.
-
-When a show has no sound choice of its own and its library has no default,
-and TMDB lists it as Reality or Talk, the show's Sound control offers
-Speech-heavy with the reason ("TMDB lists this show as Reality."):
-
-- **Use Speech-heavy** makes the same explicit choice as the Sound control.
-- **Keep as is** records the dismissal under
-  `audio_preset_suggestions_dismissed` in runtime settings. It writes no
-  policy, so it never unbinds an approval.
-
-A suggestion is never applied without that one confirmation, and building it
-never changes a policy.
+Needs you asks once whether to use Speech-heavy for reality and talk shows.
+Either answer is saved in runtime settings. Yes uses the current TMDB genres
+from the metadata sync, including shows added after the answer. No keeps the
+existing sound choices. Choosing a sound on a show still takes precedence.

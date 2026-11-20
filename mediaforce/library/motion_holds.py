@@ -9,12 +9,13 @@ leave it alone until the owner undoes the choice or the source changes.
 """
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
 
+from mediaforce.core.type_defs import object_dict
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_item_evidence_state, library_items, motion_keep_decisions
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, cadence_awaits_as_is_decision, cadence_policy_snapshot
@@ -23,8 +24,8 @@ from mediaforce.library.candidate_selection import CandidateDecision, MotionHold
 from mediaforce.library.evidence_state import EVIDENCE_STATE_ANALYSIS_REQUIRED, \
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, project_library_item_evidence_state, \
     sync_library_item_evidence_state
-from mediaforce.library.item_presence import library_item_is_missing
-from mediaforce.library.motion_keep_state import kept_original_item_ids
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT, library_item_is_missing
+from mediaforce.library.motion_keep_state import kept_original_item_ids, library_item_source_sql
 
 @dataclass(frozen=True, slots=True)
 class CadenceSafetyPartition:
@@ -126,7 +127,7 @@ def cadence_safety_partition(
 def queue_motion_holds(connection: DBClient, decisions: Sequence[CandidateDecision]) -> MotionHolds:
     return reuse_library_calculation(
         connection, "motion_holds",
-        (select(library_items.c.id, library_items.c.missing_since, library_items.c.fingerprint,
+        (select(library_items.c.id, library_items.c.status, library_items.c.missing_since, library_items.c.fingerprint,
                 library_items.c.content_version_fingerprint, library_items.c.cadence_summary_json),
          select(library_item_evidence_state).where(library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND),
          select(motion_keep_decisions)),
@@ -141,25 +142,41 @@ def _queue_motion_holds(connection: DBClient, decisions: Sequence[CandidateDecis
         library_item_ids=[decision.item_id for decision in decisions if decision.workflow_lane == "encode"],
         synchronize=False,
     )
-    as_is: set[int] = set()
-    if partition.blocked_item_ids:
-        rows = connection.execute(
-            select(library_items.c.id, library_items.c.cadence_summary_json).where(
-                library_items.c.id.in_(sorted(partition.blocked_item_ids)),
-            )
-        ).fetchall()
-        as_is = {
-            int(item_id)
-            for item_id, summary_json in rows
-            if cadence_awaits_as_is_decision(cadence_summary_payload(summary_json))
-        }
     return MotionHolds(
         held=partition.blocked_item_ids,
         check_needed=partition.check_needed_item_ids,
         unchecked=partition.evidence_required_item_ids - partition.check_needed_item_ids,
-        as_is=frozenset(as_is),
+        as_is=frozenset(compressible_motion_files(connection, sorted(partition.blocked_item_ids))),
         kept=partition.kept_item_ids,
     )
+
+
+def compressible_motion_files(connection: DBClient, item_ids: Sequence[int]) -> dict[int, Mapping[str, Any]]:
+    if not item_ids:
+        return {}
+    previous = {row["library_item_id"]: object_dict(row) for row in connection.execute(
+        select(library_item_evidence_state).where(
+            library_item_evidence_state.c.library_item_id.in_(item_ids),
+            library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+        )
+    ).mappings()}
+    rows = connection.execute(
+        select(library_items, motion_keep_decisions.c.reason_code)
+        .outerjoin(motion_keep_decisions, (motion_keep_decisions.c.library_item_id == library_items.c.id)
+                   & (motion_keep_decisions.c.source_fingerprint == library_item_source_sql()))
+        .where(library_items.c.id.in_(item_ids), LIBRARY_ITEM_PRESENT, library_items.c.status != "promoted")
+    ).mappings()
+    eligible = {}
+    for record in rows:
+        row = object_dict(record)
+        if row["reason_code"] not in (None, "unclear", "partly_interlaced", "mixed") or not row["fingerprint"]:
+            continue
+        if not cadence_awaits_as_is_decision(cadence_summary_payload(row["cadence_summary_json"])):
+            continue
+        evidence = project_library_item_evidence_state(row, CADENCE_EVIDENCE_KIND, previous_state=previous.get(row["id"]))
+        if evidence.state == EVIDENCE_STATE_CURRENT:
+            eligible[int(row["id"])] = row
+    return eligible
 
 
 def cadence_summary_payload(summary_json: Any) -> dict[str, Any]:

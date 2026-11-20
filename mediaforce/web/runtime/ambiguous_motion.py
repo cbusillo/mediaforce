@@ -22,12 +22,14 @@ from sqlalchemy import select, update
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import item_events, library_items, production_holds
-from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, accept_cadence_as_is, cadence_awaits_as_is_decision, \
-    cadence_measurement_complete, reclassify_cadence_summary
+from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, accept_cadence_as_is, \
+    cadence_hold_reason
 from mediaforce.library.evidence_state import sync_library_item_evidence_state
 from mediaforce.encoding.encode_queue import list_encode_runs_for_prefix
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
+from mediaforce.library.motion_holds import cadence_summary_payload, compressible_motion_files
 from mediaforce.library.motion_keep_state import kept_original_item_ids
+from mediaforce.web.runtime.motion_keep import clear_motion_keep
 from mediaforce.library.media_scopes import path_matches_scope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.web.runtime.left_out_files import LeftOutFile
@@ -75,29 +77,21 @@ def ambiguous_motion_files(
         )
         .order_by(library_items.c.rel_path)
     ).mappings().fetchall()
-    eligible: list[Mapping[str, Any]] = []
-    partly_interlaced: list[Mapping[str, Any]] = []
-    # A file the owner kept original is settled; encoding it as-is is not offered or applied.
     kept = kept_original_item_ids(connection, rows, forget_lapsed=False)
-    for row in rows:
-        if int(row["id"]) in kept:
-            continue
-        summary = _summary(row)
-        if cadence_awaits_as_is_decision(summary):
-            eligible.append(row)
-            continue
-        decision = object_dict(reclassify_cadence_summary(summary).get("decision"))
-        if decision.get("classification") != "unknown" or decision.get("status") == "resolved":
-            continue
-        if cadence_measurement_complete(object_dict(summary.get("analysis"))):
-            partly_interlaced.append(row)
-    return AmbiguousMotionFiles(tuple(eligible), tuple(partly_interlaced))
+    unsettled = [object_dict(row) for row in rows if int(row["id"]) not in kept]
+    eligible_ids = compressible_motion_files(connection, [int(row["id"]) for row in unsettled])
+    return AmbiguousMotionFiles(
+        tuple(row for row in unsettled if int(row["id"]) in eligible_ids),
+        tuple(row for row in unsettled if cadence_hold_reason(cadence_summary_payload(row["cadence_summary_json"])) == "partly_interlaced"),
+    )
 
 
 def accept_ambiguous_motion_action(
         config: MediaforceConfig,
         prefix: str,
         *,
+        library_item_ids: list[int] | None = None,
+        reconsider_kept: bool = False,
         now_iso: str,
         current_approval: Callable[[str], str | None],
 ) -> dict[str, Any]:
@@ -105,15 +99,28 @@ def accept_ambiguous_motion_action(
 
     ``current_approval`` names the production approval a queue scope has now, or None when it has none.
     """
+    if reconsider_kept and (library_item_ids is None or len(library_item_ids) != 1):
+        raise HTTPException(status_code=400, detail="Choose one kept file.")
     with open_db(config.paths.db_path) as connection:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         scope = resolve_media_scope(connection, prefix, library_types=config.library_type_map)
-        if scope.kind != "tv_series":
-            raise HTTPException(status_code=400, detail="Decide ambiguous motion once for a whole show.")
-        files = ambiguous_motion_files(connection, prefix, library_types=config.library_type_map)
+        if library_item_ids is None:
+            if scope.kind != "tv_series":
+                raise HTTPException(status_code=400, detail="Decide ambiguous motion once for a whole show.")
+            files = ambiguous_motion_files(connection, prefix, library_types=config.library_type_map)
+        else:
+            eligible = tuple(row for row in compressible_motion_files(connection, library_item_ids).values()
+                             if scope.includes(str(row["rel_path"])) and (row["reason_code"] is not None) == reconsider_kept)
+            if not eligible:
+                return {"ok": False, "message": "These files can’t be compressed safely as they are. Check their current motion on the item page."}
+            files = AmbiguousMotionFiles(eligible, ())
+            if reconsider_kept:
+                clear_motion_keep(connection, prefix, eligible, now_iso)
+            if scope.domain == "tv":
+                prefix = "/".join(scope.prefix.split("/")[:2])
         for row in files.eligible:
             accepted = accept_cadence_as_is(
-                _summary(row),
+                cadence_summary_payload(row["cadence_summary_json"]),
                 source_fingerprint=str(row["fingerprint"] or ""),
                 accepted_at=now_iso,
             )
@@ -265,10 +272,3 @@ def _count_phrase(count: int, total: int) -> str:
     if count == total:
         return "It joins" if count == 1 else "They join"
     return f"{count} {'joins' if count == 1 else 'join'}"
-
-
-def _summary(row: Mapping[str, Any]) -> dict[str, Any]:
-    try:
-        return object_dict(json.loads(str(row.get("cadence_summary_json") or "{}")))
-    except json.JSONDecodeError:
-        return {}

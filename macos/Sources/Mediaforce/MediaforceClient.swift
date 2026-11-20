@@ -195,6 +195,12 @@ struct MediaforceClient: Sendable {
         try await saveSettings("api/app/settings/compression", save, as: CompressionSettingsSaveResult.self)
     }
 
+    func decideGenreSound(_ enabled: Bool) async throws -> Bool {
+        let body = try JSONSerialization.data(withJSONObject: ["enabled": enabled])
+        let data = try await post("api/app/sound/reality-and-talk", body: body)
+        return try JSONDecoder.mediaforce.decode(ItemActionResult.self, from: data).ok
+    }
+
     func libraryTypePreview(key: String, type: String) async throws -> LibraryTypePreview {
         let body = try JSONSerialization.data(withJSONObject: ["key": key, "library_type": type])
         let data = try await post("api/settings/library-type-preview", body: body)
