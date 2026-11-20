@@ -14,7 +14,7 @@ from mediaforce.tuning.size_goals import DECIMAL_MEGABYTE_BYTES, measured_follow
 from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime import folder_actions
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_sample, make_sample, sample_facts, \
-    kind_sample_candidates, prepare_waiting_samples, samples_to_remake, start_compressing, with_first_sample_question, SampleStartWait
+    kind_sample_candidates, prepare_waiting_samples, samples_to_remake, start_compressing, with_first_sample_question, SampleStartWait, SamplePreparations
 
 PREFIX = "tv/Lucifer/Season 2"
 
@@ -236,6 +236,35 @@ def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_di
     ]:
         refused = asyncio.run(endpoint(None, refusal, "compress")(PREFIX))
         assert json.loads(refused.body) == {"ok": True, "compressing": False, "reason": reason}
+
+
+def test_a_second_request_during_preparation_leaves_the_first_request_in_charge() -> None:
+    preparing = SamplePreparations()
+
+    def prepare() -> dict[str, Any]:
+        assert PREFIX in preparing
+        assert not preparing.run(PREFIX, lambda: pytest.fail("started the same sample twice"))["ok"]
+        assert preparing.run("other season", lambda: {"ok": True})["ok"]
+        raise ValueError("preparation stopped")
+
+    with pytest.raises(ValueError, match="preparation stopped"):
+        preparing.run(PREFIX, prepare)
+    assert PREFIX not in preparing
+    assert preparing.run(PREFIX, lambda: {"ok": True})["ok"]
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_make_sample_keeps_the_reason_preparation_stopped(blocked: bool) -> None:
+    reason = "The sample computer is outside its work window."
+
+    def tune(*_args: Any) -> dict[str, Any]:
+        if blocked:
+            raise HTTPException(400, reason)
+        return {"ok": False, "message": reason}
+
+    result = make_sample(_folder(), _status("needs_help", "make_sample"), None, ai_tune=tune, retry_saved=tune)
+    assert result["ok"] is False
+    assert result.get("message") == reason
 
 
 def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() -> None:
@@ -516,6 +545,27 @@ def test_first_kind_sample_candidates_keep_ranked_fallbacks() -> None:
                                                   "cartoon": ["tv/Cartoon/Season 1", "tv/Other Cartoon/Season 1"]}
     cards[0] = {"prefix": PREFIX, **_status("making_test", "make_sample")}
     assert kind_sample_candidates(kinds, cards)["live_action"] == ["tv/Other Live/Season 1"]
+
+
+def test_sweep_leaves_a_kind_with_a_preparing_sample_alone_and_starts_the_next_kind() -> None:
+    preparing = SamplePreparations()
+    other_season = "tv/Other/Season 1"
+    cartoon = "tv/Cartoon/Season 1"
+    started: list[str] = []
+    cards = [{"prefix": prefix, **_status("needs_test", "make_sample")} for prefix in (PREFIX, other_season, cartoon)]
+    kinds = [{"kind": "live_action", "shows": [{"sample_season": PREFIX}, {"sample_season": other_season}]},
+             {"kind": "cartoon", "shows": [{"sample_season": cartoon}]}]
+
+    def make(folder: Mapping[str, Any], _status_payload: Mapping[str, Any]) -> dict[str, Any]:
+        prefix = str(folder["prefix"])
+        return preparing.run(prefix, lambda: started.append(prefix) or {"ok": True})
+
+    def sweep() -> dict[str, Any]:
+        return prepare_waiting_samples(cards, kinds, load_payloads=lambda p: ({"prefix": p}, _status("needs_test")),
+                                       failed_in_a_row=lambda _prefix: 0, make=make)
+
+    assert not preparing.run(PREFIX, sweep)
+    assert started == [cartoon]
 
 
 @pytest.mark.parametrize("changed", [False, True])

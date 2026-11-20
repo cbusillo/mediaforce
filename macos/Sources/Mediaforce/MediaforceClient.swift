@@ -34,6 +34,7 @@ struct CleanupResult: Decodable, Sendable {
 
 struct MediaforceClient: Sendable {
     static let factsTimeout: TimeInterval = 30
+    static let samplePreparationTimeout: TimeInterval = 300
     static let computerActionTimeout: TimeInterval = 600
     // Deleting answers when the last backup is gone; the page follows the deletion's progress meanwhile.
     static let deleteBackupsTimeout: TimeInterval = 3600
@@ -99,7 +100,7 @@ struct MediaforceClient: Sendable {
     func makeSample(_ prefix: String, size: String?, balance: String?, keepFullHeight: Bool? = nil) async throws -> SampleActionResult {
         try await sampleAction(prefix, "make", body: [
             "size": size ?? NSNull(), "balance": balance ?? NSNull(), "keep_full_height": keepFullHeight ?? NSNull(),
-        ])
+        ], timeout: Self.samplePreparationTimeout)
     }
 
     func compressSeason(_ prefix: String) async throws -> SampleActionResult {
@@ -230,8 +231,9 @@ struct MediaforceClient: Sendable {
         baseURL.appending(path: "api/app/samples").appending(path: prefix)
     }
 
-    private func sampleAction(_ prefix: String, _ action: String, body: [String: Any]) async throws -> SampleActionResult {
+    private func sampleAction(_ prefix: String, _ action: String, body: [String: Any], timeout: TimeInterval? = nil) async throws -> SampleActionResult {
         var request = URLRequest(url: samplePath(prefix).appending(path: action))
+        if let timeout { request.timeoutInterval = timeout }
         request.httpMethod = "POST"
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

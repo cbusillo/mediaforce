@@ -22,6 +22,7 @@ final class MainWindowModel {
     // What went wrong at the last failed check, for the window's Details; nil once Mediaforce answers again.
     private(set) var problem: ServerProblem?
     var notice: ActionNotice?
+    private(set) var preparingSamples: Set<String> = []
     // A persistent request, so the window and menu bar can each respond without consuming it.
     var placeRequest: PlaceRequest?
     var onFacts: ((MainWindowFacts) -> Void)?
@@ -41,6 +42,21 @@ final class MainWindowModel {
     init(client: MediaforceClient) {
         self.client = client
         posters = PosterStore(client: client)
+    }
+
+    func makeSample(_ prefix: String, size: String? = nil, balance: String? = nil, keepFullHeight: Bool? = nil) async -> SampleActionResult? {
+        guard preparingSamples.insert(prefix).inserted else { return nil }
+        defer { preparingSamples.remove(prefix) }
+        do {
+            let result = try await client.makeSample(prefix, size: size, balance: balance, keepFullHeight: keepFullHeight)
+            if result.ok || result.code == "choose_size" || result.code == "choose_balance" { return result }
+            notice = ActionNotice(title: Words.sampleDidNotStart, message: result.message ?? ActionNotice.sampleRefused.message)
+        } catch let error as URLError where error.code == .timedOut {
+            notice = .sampleStartTimedOut
+        } catch {
+            notice = .unanswered
+        }
+        return nil
     }
 
     func refresh() async {

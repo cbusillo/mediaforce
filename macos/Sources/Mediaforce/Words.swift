@@ -490,6 +490,8 @@ extension Words {
     }
 
     static let approveSample = "Approve and start compressing"
+    static let preparingSample = "Preparing the sample…"
+    static let sampleDidNotStart = "The sample didn't start"
     static let makeSampleAgain = "Make sample again"
     static let makeSample = "Make sample"
     static let sampleBalance = "Next sample"
@@ -642,6 +644,7 @@ extension Words {
 
     static func sampleHeadline(_ facts: SampleFacts) -> String {
         switch (facts.state, facts.action) {
+        case ("preparing_sample", _): preparingSample
         case ("making_test", _): "Making the sample now."
         case ("sample_waiting", _): "The sample waits for a free computer."
         case ("ready_to_compare", _): facts.approvalKind.map {
@@ -716,6 +719,11 @@ extension ActionNotice {
     static func kindNotExtended(_ code: String) -> ActionNotice {
         ActionNotice(title: "Sample approved for this title only", message: Words.kindRefusal(code))
     }
+
+    static let sampleStartTimedOut = ActionNotice(
+        title: "The sample request is taking longer than expected",
+        message: "Mediaforce may still start the sample. Check its progress before trying again."
+    )
 
     static let sampleRefused = ActionNotice(
         title: "Mediaforce didn't do that",

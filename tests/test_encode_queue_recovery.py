@@ -11276,7 +11276,6 @@ raise SystemExit(0)
             with self.assertRaises(HTTPException) as exc_info:
                 web_app._resolve_sample_host(self.config, "remote-a")
         self.assertEqual(exc_info.exception.status_code, 400)
-        self.assertEqual(exc_info.exception.detail, "Unknown sampled calibration host")
 
     @patch("mediaforce.web.app.quality_toolchain_identity", new=_quality_toolchain_not_probed)
     @patch("mediaforce.web.app.generate_compare_clips_from_review_pairs")

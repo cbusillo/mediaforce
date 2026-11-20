@@ -1,5 +1,6 @@
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any
 from pathlib import Path
 
@@ -28,6 +29,29 @@ SAMPLE_REMAKE_LIMIT = 3
 # A sample the owner stopped, or whose size goal can't be reached, waits on the owner rather than being made again.
 _NOT_REMADE_FAILURES = SIZE_GOAL_FAILURES | {"stopped"}
 _FIRST_SAMPLE_QUESTIONS = frozenset({"choose_size", "choose_balance", "sample_blocked"})
+
+
+class SamplePreparations:
+    already_preparing = "already_preparing"
+
+    def __init__(self) -> None:
+        self._active: set[str] = set()
+        self._lock = Lock()
+
+    def __contains__(self, prefix: str) -> bool:
+        with self._lock:
+            return prefix in self._active
+
+    def run(self, prefix: str, prepare: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        with self._lock:
+            if prefix in self._active:
+                return {"ok": False, "code": self.already_preparing, "message": "Mediaforce is already preparing a sample for this season."}
+            self._active.add(prefix)
+        try:
+            return prepare()
+        finally:
+            with self._lock:
+                self._active.remove(prefix)
 
 
 def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[str, Any]:
@@ -171,9 +195,14 @@ def make_sample(
                 return {"ok": False, "code": request}
             note, operator_intent = request
             result = ai_tune(prefix, note, "", operator_intent, "")
-    except HTTPException:
+    except HTTPException as exc:
+        if 400 <= exc.status_code < 500 and isinstance(exc.detail, str):
+            return {**REFUSED, "message": exc.detail}
         return REFUSED
-    return {"ok": True, "code": None} if result.get("ok") else REFUSED
+    if result.get("ok"):
+        return {"ok": True, "code": None}
+    message = result.get("message")
+    return {**REFUSED, "message": message} if isinstance(message, str) and message else REFUSED
 
 
 def kind_sample_candidates(kinds: Iterable[Mapping[str, Any]], cards: Iterable[Mapping[str, Any]]) -> dict[str, list[str]]:
@@ -216,7 +245,7 @@ def prepare_waiting_samples(
             if payloads is None or object_dict(payloads[1].get("page_state")).get("key") not in {"needs_test", "waiting_for_kind"}:
                 continue
             result = make(*payloads)
-            if result.get("ok"):
+            if result.get("ok") or result.get("code") == SamplePreparations.already_preparing:
                 started = True
                 break
             if wait is None:

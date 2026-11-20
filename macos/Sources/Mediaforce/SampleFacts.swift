@@ -63,9 +63,9 @@ struct SampleFacts: Decodable, Sendable {
     }
 
     static let seasonPageActions: Set<Action> = [.checkFiles, .replaceOriginals, .retryUnfinished, .decideMotion, .reviewFiles]
-    static let inProgressStates: Set<String> = ["making_test", "sample_waiting", "making_season"]
+    static let inProgressStates = sampleMakingStates.union(["making_season"])
     // A sample being made, or waiting for a computer, already has its page to follow it on.
-    static let sampleMakingStates: Set<String> = ["making_test", "sample_waiting"]
+    static let sampleMakingStates: Set<String> = ["preparing_sample", "making_test", "sample_waiting"]
 
     var isInProgress: Bool { state.map(Self.inProgressStates.contains) ?? false }
 
@@ -141,6 +141,7 @@ struct SampleActionResult: Decodable, Sendable {
     let ok: Bool
     let code: String?
     let compressing: Bool?
+    var message: String? = nil
     let kindCode: String?
     let reason: String?
 
