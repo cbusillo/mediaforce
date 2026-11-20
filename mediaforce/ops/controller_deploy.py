@@ -604,6 +604,14 @@ def prepare_update(update: AppUpdate, build: str) -> None:
         if intent.get("phase") == "draining" or _finishing_soon(update) or _waited_too_long(update, intent):
             _save_intent(update, {**intent, "phase": "draining", "waiting": running})
         return
+    with sqlite3.connect(update.config.paths.db_path.resolve().as_uri() + "?mode=rw", uri=True) as database:
+        database.execute("BEGIN IMMEDIATE")
+        if existing is None:
+            _save_intent(update, {**intent, "phase": "draining", "waiting": []})
+    if _running_work(update.base_url, update.config.paths.db_path):
+        if existing is None:
+            back_out_update(update)
+        return
     stage = update.support / "deployments" / f"update-{intent['from']}-to-{build}-{_utc_now():%Y%m%dT%H%M%SZ}"
     work = _api(update.base_url, "/api/release/work")["counts"]
     intent.update(phase="saving", stage=str(stage), pending_encode=work["pending_encode"], waiting=[])
@@ -793,7 +801,7 @@ def _running_work(base_url: str, database: Path) -> list[str]:
     found = (
         (dashboard["encode_queue"]["running_count"], "files are compressing"),
         (calibration["sample"]["running_count"] + calibration["full"]["running_count"], "samples are running"),
-        (counts["unfinished_scan_rows"], "library checks are running"),
+        (max(counts["unfinished_scan_rows"], int((dashboard.get("scan_job") or {}).get("status") == "running")), "library checks are running"),
         (counts["active_evidence"], "files are being measured"),
         (_publishing(database), "files are being published"),
     )

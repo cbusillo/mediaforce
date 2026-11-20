@@ -1014,6 +1014,9 @@ def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRu
             )
             while running_by_lane[lane] < capacity:
                 started_at = deps.now_iso()
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                if update_hold_reason(config.paths.db_path.parent):
+                    return
                 payload = claim_next_queued_calibration_job(
                     connection,
                     lane=lane,
@@ -1022,9 +1025,9 @@ def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRu
                     excluded_prefixes=tuple(sorted(active_prefixes)),
                     excluded_job_ids=not_startable,
                 )
+                connection.commit()
                 if payload is None:
                     break
-                connection.commit()
                 try:
                     dispatch_calibration_job(config, payload, deps)
                 except Exception as exc:

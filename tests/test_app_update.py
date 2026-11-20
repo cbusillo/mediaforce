@@ -187,6 +187,32 @@ def test_publication_holding_its_lock_keeps_the_old_server_running(update: Updat
     assert _phase(app_update) == "prepared"
 
 
+def test_encode_claimed_before_hold_is_not_interrupted(update: Update) -> None:
+    app_update, server = update
+    save = deploy._save_intent
+
+    def claim_before_hold(transaction: deploy.AppUpdate, intent: dict[str, Any]) -> None:
+        server.running["encode"] = 1
+        save(transaction, intent)
+
+    with patch.object(deploy, "_save_intent", side_effect=claim_before_hold):
+        deploy.prepare_update(app_update, "2")
+    assert server.launchctl == [] and _phase(app_update) is None
+
+
+def test_update_waits_for_scan_after_its_database_row_finishes(update: Update) -> None:
+    app_update, server = update
+    def scan_refreshing_metadata(base: str, route: str) -> dict[str, Any]:
+        response = server.api(base, route)
+        if route.startswith("/api/dashboard?"):
+            response["scan_job"] = {"status": "running"}
+        return response
+
+    with patch.object(deploy, "_api", side_effect=scan_refreshing_metadata):
+        deploy.prepare_update(app_update, "2")
+    assert server.launchctl == []
+
+
 def test_quiet_server_saves_complete_old_pair_before_sparkle_may_install(update: Update) -> None:
     app_update, server = update
     deploy.prepare_update(app_update, "2")
