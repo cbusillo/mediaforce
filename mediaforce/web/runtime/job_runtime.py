@@ -48,6 +48,7 @@ SUCCESSFUL_SCAN_RUN_STATUS = "completed"
 DEFAULT_SCAN_INTERRUPTED_ERROR = "Background scan was interrupted by a web process restart."
 _SCAN_SCHEDULE_LOCK = threading.Lock()
 _SCAN_JOB_STATE_LOCK = threading.Lock()
+_RUNNING_SCAN_PASSES: dict[threading.Thread, Path] = {}
 _SCAN_WINDOW_POLL_SECONDS = 1.0
 _LOGGER = logging.getLogger(__name__)
 
@@ -736,6 +737,11 @@ def _wait_for_scan_window(
         config = refreshed
 
 
+def running_scan_pass_count(database: Path) -> int:
+    with _SCAN_JOB_STATE_LOCK:
+        return sum(path == database for path in _RUNNING_SCAN_PASSES.values())
+
+
 def run_scan_job(
         *, config_path: Any, prefix: str | None, job_id: str,
         process_controller: ManagedProcessController, deps: JobRuntimeDeps,
@@ -762,8 +768,15 @@ def run_scan_job(
             return
         if current_config is None:
             return
-        current_id = _run_scan_job_pass(config=current_config, prefix=prefix, job_id=current_id,
-                                       process_controller=process_controller, deps=deps)
+        thread = threading.current_thread()
+        with _SCAN_JOB_STATE_LOCK:
+            _RUNNING_SCAN_PASSES[thread] = current_config.paths.db_path
+        try:
+            current_id = _run_scan_job_pass(config=current_config, prefix=prefix, job_id=current_id,
+                                            process_controller=process_controller, deps=deps)
+        finally:
+            with _SCAN_JOB_STATE_LOCK:
+                del _RUNNING_SCAN_PASSES[thread]
 
 
 def _run_scan_job_pass(

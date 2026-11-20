@@ -10,7 +10,7 @@ from mediaforce.core.db import DBClient, open_readonly_db
 from mediaforce.core.db_tables import calibration_jobs, encode_jobs, library_item_evidence_state, scan_runs
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, count_pending_encode_work
 from mediaforce.tuning.calibration_jobs import EXECUTION_ACTIVE_JOB_STATUSES
-from mediaforce.web.runtime.job_runtime import TERMINAL_SCAN_JOB_STATUSES
+from mediaforce.web.runtime.job_runtime import TERMINAL_SCAN_JOB_STATUSES, running_scan_pass_count
 
 
 class ReleaseWorkCounts(TypedDict):
@@ -24,6 +24,7 @@ class ReleaseWorkCounts(TypedDict):
 class ReleaseWorkSnapshot(TypedDict):
     observed_at: str
     counts: ReleaseWorkCounts
+    running_scan_passes: NotRequired[int]
     server: NotRequired[dict[str, str | None]]
 
 
@@ -31,7 +32,9 @@ def release_work_payload(db_path: Path) -> ReleaseWorkSnapshot:
     with open_readonly_db(db_path) as connection:
         # SQLite's legacy SELECT behavior needs an explicit read transaction.
         connection.exec_driver_sql("BEGIN")
-        return release_work_snapshot(connection)
+        snapshot = release_work_snapshot(connection)
+        snapshot["running_scan_passes"] = running_scan_pass_count(db_path)
+        return snapshot
 
 
 def release_work_snapshot(connection: DBClient) -> ReleaseWorkSnapshot:

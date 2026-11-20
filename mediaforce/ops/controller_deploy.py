@@ -797,12 +797,14 @@ def _end_intent(support: Path) -> None:
 
 
 def _running_work(base_url: str, database: Path, dashboard: dict) -> list[str]:
-    counts = _api(base_url, "/api/release/work")["counts"]
+    work = _api(base_url, "/api/release/work")
+    counts = work["counts"]
+    live_scans = work.get("running_scan_passes", int((dashboard.get("scan_job") or {}).get("status") == "running"))
     calibration = dashboard["calibration_queue"]
     found = (
         (dashboard["encode_queue"]["running_count"], "files are compressing"),
         (calibration["sample"]["running_count"] + calibration["full"]["running_count"], "samples are running"),
-        (max(counts["unfinished_scan_rows"], int((dashboard.get("scan_job") or {}).get("status") == "running")), "library checks are running"),
+        (max(counts["unfinished_scan_rows"], live_scans), "library checks are running"),
         (counts["active_evidence"], "files are being measured"),
         (_publishing(database), "files are being published"),
     )
