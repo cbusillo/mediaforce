@@ -98,7 +98,7 @@ struct NeedsYouPage: View {
             }
         case .makeSample(let prefix):
             act(item.id) { _ in
-                if let result = await model.makeSample(prefix), !result.ok { open(.sample(prefix)) }
+                if await model.makeSample(prefix)?.ok != true { open(.sample(prefix)) }
                 return nil
             }
         }

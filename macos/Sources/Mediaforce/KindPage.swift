@@ -86,7 +86,7 @@ struct KindPage: View {
     private func makeSample(_ show: KindsFacts.Show) {
         asking = true
         Task {
-            if let result = await model.makeSample(show.sampleSeason), !result.ok {
+            if await model.makeSample(show.sampleSeason)?.ok != true {
                 openSample(show.sampleSeason)
             }
             await model.refreshKinds()

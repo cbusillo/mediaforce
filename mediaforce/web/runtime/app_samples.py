@@ -32,6 +32,8 @@ _FIRST_SAMPLE_QUESTIONS = frozenset({"choose_size", "choose_balance", "sample_bl
 
 
 class SamplePreparations:
+    already_preparing = "already_preparing"
+
     def __init__(self) -> None:
         self._active: set[str] = set()
         self._lock = Lock()
@@ -43,7 +45,7 @@ class SamplePreparations:
     def run(self, prefix: str, prepare: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         with self._lock:
             if prefix in self._active:
-                return {**REFUSED, "message": "Mediaforce is already preparing a sample for this season."}
+                return {"ok": False, "code": self.already_preparing, "message": "Mediaforce is already preparing a sample for this season."}
             self._active.add(prefix)
         try:
             return prepare()
@@ -241,7 +243,7 @@ def prepare_waiting_samples(
             if payloads is None or object_dict(payloads[1].get("page_state")).get("key") not in {"needs_test", "waiting_for_kind"}:
                 continue
             result = make(*payloads)
-            if result.get("ok"):
+            if result.get("ok") or result.get("code") == SamplePreparations.already_preparing:
                 started = True
                 break
             if wait is None:

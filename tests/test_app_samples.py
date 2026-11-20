@@ -547,6 +547,27 @@ def test_first_kind_sample_candidates_keep_ranked_fallbacks() -> None:
     assert kind_sample_candidates(kinds, cards)["live_action"] == ["tv/Other Live/Season 1"]
 
 
+def test_sweep_leaves_a_kind_with_a_preparing_sample_alone_and_starts_the_next_kind() -> None:
+    preparing = SamplePreparations()
+    other_season = "tv/Other/Season 1"
+    cartoon = "tv/Cartoon/Season 1"
+    started: list[str] = []
+    cards = [{"prefix": prefix, **_status("needs_test", "make_sample")} for prefix in (PREFIX, other_season, cartoon)]
+    kinds = [{"kind": "live_action", "shows": [{"sample_season": PREFIX}, {"sample_season": other_season}]},
+             {"kind": "cartoon", "shows": [{"sample_season": cartoon}]}]
+
+    def make(folder: Mapping[str, Any], _status_payload: Mapping[str, Any]) -> dict[str, Any]:
+        prefix = str(folder["prefix"])
+        return preparing.run(prefix, lambda: started.append(prefix) or {"ok": True})
+
+    def sweep() -> dict[str, Any]:
+        return prepare_waiting_samples(cards, kinds, load_payloads=lambda p: ({"prefix": p}, _status("needs_test")),
+                                       failed_in_a_row=lambda _prefix: 0, make=make)
+
+    assert not preparing.run(PREFIX, sweep)
+    assert started == [cartoon]
+
+
 @pytest.mark.parametrize("changed", [False, True])
 def test_sample_sweep_falls_back_stops_after_success_and_keeps_other_kinds_moving(changed: bool) -> None:
     prefixes = ["tv/A/Season 1", "tv/B/Season 1", "tv/C/Season 1", "tv/Cartoon/Season 1"]
