@@ -121,6 +121,29 @@ final class UpdatesTests: XCTestCase {
         XCTAssertEqual(answers, [stuck, "Mediaforce 0.5.3 will install between files."])
     }
 
+    func testPreparedDownloadFailureRestoresServiceAndReportsOnce() async {
+        let updates = updates(FakeUpdater())
+        var steps: [[String]] = []
+        let restored = expectation(description: "cancel the prepared update")
+        updates.runStep = { arguments in
+            steps.append(arguments)
+            if arguments == ["cancel"] {
+                restored.fulfill()
+                return ServerUpdateStep.Answer()
+            }
+            return Self.prepared
+        }
+        XCTAssertThrowsError(try updates.admit(build: "3002", version: "0.5.3"))
+        updates.finishCheck(error: UpdateWait(Words.updateWaitingForQuietTime))
+        await updates.preparing?.value
+        let failure = URLError(.networkConnectionLost)
+        updates.finishCheck(error: failure)
+        await fulfillment(of: [restored], timeout: 2)
+        updates.finishCheck(error: failure)
+        XCTAssertEqual(steps, [["prepare", "--build", "3002"], ["cancel"]])
+        XCTAssertEqual(notices, [Words.updateCheckFailed(failure.localizedDescription)])
+    }
+
     func testTheHourlyCheckStaysQuiet() {
         let updater = FakeUpdater()
         let updates = updates(updater)

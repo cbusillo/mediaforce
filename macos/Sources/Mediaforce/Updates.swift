@@ -35,6 +35,7 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
     private var checker: UpdateChecker?
     private var state = ServerUpdateStep.Answer()
     private(set) var preparing: Task<Void, Never>?
+    private var cancelling = false
     private var asked = false
     /// Why the waiting update has kept failing to get ready, once that has lasted an hour.
     private var stuck: String?
@@ -80,6 +81,7 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
     /// What a found build is told: go ahead only once the server prepared it, otherwise wait and let the server prepare.
     func admit(build: String, version: String) throws {
         found = nil
+        guard !cancelling else { throw UpdateWait(Words.updateWaitingForQuietTime) }
         if state.failedBuilds.contains(build) {
             found = Words.updateFailedBefore(build: version)
             throw UpdateWait(Words.updateFailedBefore(build: version))
@@ -93,6 +95,7 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
     /// The end of a check: only a check someone asked for gets an answer.
     func finishCheck(error: Error?) {
         defer { (asked, found) = (false, nil) }
+        if let error { cancelPreparedUpdate(error: error) }
         guard asked, let answer = Self.answer(found: found, error: error) else { return }
         showAnswer(answer)
     }
@@ -125,10 +128,24 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
         return true
     }
 
-    // The feed no longer offers the prepared build: the unchanged old server resumes.
-    nonisolated func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
-        Task { @MainActor in
-            if self.state.intent?.phase == "prepared" { self.state = await ServerUpdateStep.run(["cancel"]) }
+    nonisolated func updater(_ updater: SPUUpdater, didAbortWithError error: any Error) {
+        MainActor.assumeIsolated { cancelPreparedUpdate(error: error) }
+    }
+
+    nonisolated func userDidCancelDownload(_ updater: SPUUpdater) {
+        MainActor.assumeIsolated { cancelPreparedUpdate(error: URLError(.cancelled)) }
+    }
+
+    private func cancelPreparedUpdate(error: Error) {
+        guard state.intent?.phase == "prepared", !cancelling, found == nil, !(error is UpdateWait) else { return }
+        cancelling = true
+        let answer = Self.answer(found: nil, error: error)
+        let report = asked || answer == Words.upToDate ? nil : answer
+        Task {
+            defer { cancelling = false }
+            state = await runStep(["cancel"])
+            if let problem = state.error { notify(Words.updateNeedsYou(problem)) }
+            else if let report { notify(report) }
         }
     }
 
