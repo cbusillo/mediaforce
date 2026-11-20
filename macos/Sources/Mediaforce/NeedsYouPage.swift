@@ -266,13 +266,15 @@ extension NeedsYouItem {
         } else {
             switch pending.sampleStatus {
             case "choose_size":
-                ask = NeedsYouAsk(line: Words.firstSampleSizeAsk(season.map(Words.lastFolder)),
+                let reason = pending.sampleSeason == nil ? Words.firstSampleSizeAsk(season.map(Words.lastFolder)) : Words.sampleSizeAsk(nil)
+                ask = NeedsYouAsk(line: reason,
                                   answers: [NeedsYouAnswer(title: Words.chooseSize, action: .open(opens))])
             case "choose_balance":
                 ask = NeedsYouAsk(line: Words.firstSampleDetailAsk, answers: [NeedsYouAnswer(title: Words.chooseDetail, action: .open(opens))])
-            case "pending_review", "completed":
+            case "pending_review", "completed", "choose_another_show":
+                let look = pending.sampleStatus == "choose_another_show" ? nil : pending.sampleSeason.map { NeedsYouAnswer(title: Words.watchIt, action: .open(.sample($0))) }
                 ask = NeedsYouAsk(line: Words.sampleCannotDecideGroup(showName),
-                                  look: pending.sampleSeason.map { NeedsYouAnswer(title: Words.watchIt, action: .open(.sample($0))) },
+                                  look: look,
                                   answers: [NeedsYouAnswer(title: Words.chooseAnotherShow, action: .open(.kind(pending.kind)))])
             default:
                 ask = NeedsYouAsk(line: Words.firstSampleStopped, answers: [NeedsYouAnswer(title: Words.openSample, action: .open(opens))])

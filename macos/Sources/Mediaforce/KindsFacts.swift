@@ -24,12 +24,13 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         var sampleStatus: String? = nil
         var id: String { kind }
 
-        var sampleShow: String? { sampleSeason?.split(separator: "/").prefix(2).joined(separator: "/") }
+        var reviewSeason: String? { sampleStatus == "choose_another_show" ? nil : sampleSeason }
+        var sampleShow: String? { reviewSeason?.split(separator: "/").prefix(2).joined(separator: "/") }
         var showsSampleFirst: Bool { oneTime || settings.isEmpty || sampleSetting != nil }
 
         var sampleButtonTitle: String? {
             if let approval { return approval.sampleMoments?.isEmpty == false ? Words.watchApprovedSample : nil }
-            guard sampleSeason != nil else { return nil }
+            guard reviewSeason != nil else { return nil }
             if Words.sampleNeedsRemaking(sampleStatus) { return Words.makeSample }
             if sampleStatus == "choose_size" { return Words.chooseSize }
             if ["pending_review", "completed"].contains(sampleStatus) { return Words.watchSample }
@@ -37,12 +38,12 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         }
 
         var offersSample: Bool {
-            sampleSeason == nil || (sampleReady == false && ["pending_review", "completed"].contains(sampleStatus ?? ""))
+            reviewSeason == nil || (sampleReady == false && ["pending_review", "completed"].contains(sampleStatus ?? ""))
         }
 
         var sampleSetting: Setting? {
-            guard let sampleSeason else { return nil }
-            return settings.first { sampleSeason == $0.fromPrefix || sampleSeason.hasPrefix("\($0.fromPrefix)/") }
+            guard let reviewSeason else { return nil }
+            return settings.first { reviewSeason == $0.fromPrefix || reviewSeason.hasPrefix("\($0.fromPrefix)/") }
         }
 
         /// The setting the page plays first: the decided one, else the first with an episode to watch.

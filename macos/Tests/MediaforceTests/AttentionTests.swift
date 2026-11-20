@@ -147,6 +147,10 @@ final class AttentionTests: XCTestCase {
         XCTAssertEqual(after.badgeCount, 1)
         XCTAssertEqual(after.notices.map(\.opens), [.sample("tv/Psych/Season 3")])
         XCTAssertTrue(Attention.review(choice, remembered: after.memory).notices.isEmpty)
+        let retry = try facts(kinds: [("cartoon", "tv/Psych/Season 3")], kindStatus: "choose_size", kindReady: false)
+        let sizeNotice = try XCTUnwrap(Attention.waitingItems(retry).first)
+        XCTAssertEqual(sizeNotice.opens, .sample("tv/Psych/Season 3"))
+        XCTAssertEqual(sizeNotice.body, Words.sampleSizeAsk(nil))
         let unsuitable = try facts(waitingSamples: [("tv/Psych/Season 3", "ready_to_compare", "review_sample")],
                                    kinds: [("live_action", "tv/Psych/Season 3")], kindStatus: "pending_review", kindReady: false)
         XCTAssertEqual(Attention.waitingItems(unsuitable).count, 2)

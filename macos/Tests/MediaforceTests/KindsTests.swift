@@ -63,6 +63,10 @@ final class KindsTests: XCTestCase {
         XCTAssertEqual(unrelated.sampleButtonTitle, Words.watchSample)
         unrelated.sampleStatus = "missing_clips"
         XCTAssertEqual(unrelated.sampleButtonTitle, Words.makeSample)
+        unrelated.sampleStatus = "choose_another_show"
+        XCTAssertNil(unrelated.sampleButtonTitle)
+        XCTAssertNil(unrelated.reviewSeason)
+        XCTAssertTrue(unrelated.offersSample)
         unrelated.sampleStatus = "completed"
         unrelated.sampleReady = true
         XCTAssertFalse(unrelated.offersSample)

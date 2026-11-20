@@ -652,7 +652,8 @@ def kinds_payload(
                     config, payload, season, calibration, kind_of=lambda _config, prefix: kinds_by_season.get(prefix),
                 ) == entry["kind"]
             else:
-                entry["sample_status"] = "missing_clips"
+                approval = effective_production_approval(config, season, contents.load_calibration)
+                entry["sample_status"] = "choose_another_show" if approval is not None and approval.current else "missing_clips"
         elif entry["sample_status"] in SAMPLE_FAILED_STATUSES and sample_failure(contents.samples[entry["kind"]]) in SIZE_GOAL_FAILURES:
             entry["sample_status"] = "choose_size"
         entry["needs_you"] = entry["needs_you"] or (approvals[entry["kind"]] is None and entry["sample_ready"])

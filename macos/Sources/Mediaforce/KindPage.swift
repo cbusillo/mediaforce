@@ -22,9 +22,9 @@ struct KindPage: View {
         let showSample: (() -> Void)? = chosen != nil || (kind.approval == nil && !kind.showsSampleFirst) ? { selectSample() } : nil
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                if kind.shows.isEmpty && kind.settings.isEmpty && kind.approval == nil && kind.sampleSeason == nil {
+                if kind.shows.isEmpty && kind.settings.isEmpty && kind.approval == nil && kind.reviewSeason == nil {
                     Text(Words.kindEmpty(kind.kind)).foregroundStyle(.secondary)
-                } else if offering, let season = kind.sampleSeason {
+                } else if offering, let season = kind.reviewSeason {
                     SampleWork(prefix: season, model: model, facts: $sample, namesSeason: true, openItem: openItem)
                         .id(season)
                 } else if offering, let biggest = kind.shows.first {
@@ -81,7 +81,7 @@ struct KindPage: View {
     }
 
     private func selectSample() {
-        guard kind.approval == nil, let season = kind.sampleSeason else {
+        guard kind.approval == nil, let season = kind.reviewSeason else {
             chosen = nil
             return
         }
@@ -228,8 +228,8 @@ struct KindShows: View {
                                     .buttonStyle(QuietLinkStyle())
                                     .font(.caption)
                                     .help(Words.makeSampleOf(show.name))
-                                    .opacity(show.sampleSeason == kind.sampleSeason || (kind.sampleSeason == nil && show == kind.shows.first) ? 0 : 1)
-                                    .disabled(show.sampleSeason == kind.sampleSeason || (kind.sampleSeason == nil && show == kind.shows.first))
+                                    .opacity(show.sampleSeason == kind.reviewSeason || (kind.reviewSeason == nil && show == kind.shows.first) ? 0 : 1)
+                                    .disabled(show.sampleSeason == kind.reviewSeason || (kind.reviewSeason == nil && show == kind.shows.first))
                             }
                         }
                     }

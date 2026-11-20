@@ -1492,6 +1492,13 @@ def test_finished_seasons_newer_sample_stays_with_its_kind_and_reaches_attention
     assert darker["sample_season"] == APPROVED_SEASON
     assert darker["needs_you"] == (not kind_approved)
     assert darker["sample_ready"] == (not kind_approved and sample_status in {"pending_review", "completed"})
+    if not kind_approved and sample_status == "completed":
+        folders[APPROVED_SEASON]["review_pairs"] = []
+        with open_db(config.paths.db_path) as connection:
+            purged = next(row for row in kinds_payload(connection, config, load_calibration_state=load)["kinds"] if row["kind"] == LIVE_ACTION)
+        assert purged["sample_status"] == "choose_another_show"
+        assert not purged["sample_ready"] and purged["settings"]
+
 
 
 @pytest.mark.parametrize("missing", [False, True])
