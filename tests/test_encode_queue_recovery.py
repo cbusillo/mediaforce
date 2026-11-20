@@ -14048,7 +14048,7 @@ raise SystemExit(0)
             return repaired_probe
 
         def fake_remux(_staged_path: Path, repaired_path: Path) -> None:
-            repaired_path.write_text("remuxed")
+            repaired_path.write_text("remuxed", encoding="utf-8")
 
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_library_item(connection, source_path, status="encoded")
@@ -14230,7 +14230,7 @@ raise SystemExit(0)
             return unreadable_staged_probe
 
         def fake_remux(_staged_path: Path, repaired_path: Path) -> None:
-            repaired_path.write_text("remuxed")
+            repaired_path.write_text("remuxed", encoding="utf-8")
 
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_library_item(connection, source_path, status="encoded")
@@ -15095,7 +15095,7 @@ raise SystemExit(0)
 
         def run_encode_side_effect(*, temp_output: Path, **_: object) -> subprocess.CompletedProcess[str]:
             temp_output.parent.mkdir(parents=True, exist_ok=True)
-            temp_output.write_text("encoded")
+            temp_output.write_text("encoded", encoding="utf-8")
             return subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr="")
 
         with open_db(self.config.paths.db_path) as connection:
@@ -15222,7 +15222,7 @@ raise SystemExit(0)
 
         def run_encode_side_effect(*, temp_output: Path, **_: object) -> subprocess.CompletedProcess[str]:
             temp_output.parent.mkdir(parents=True, exist_ok=True)
-            temp_output.write_text("partial")
+            temp_output.write_text("partial", encoding="utf-8")
             return subprocess.CompletedProcess(args=["ffmpeg"], returncode=1, stdout="bad stdout", stderr="bad stderr")
 
         with open_db(self.config.paths.db_path) as connection:
@@ -15281,7 +15281,7 @@ raise SystemExit(0)
 
         def run_encode_side_effect(*, temp_output: Path, **_: object) -> subprocess.CompletedProcess[str]:
             temp_output.parent.mkdir(parents=True, exist_ok=True)
-            temp_output.write_text("partial")
+            temp_output.write_text("partial", encoding="utf-8")
             return subprocess.CompletedProcess(args=["ffmpeg"], returncode=1, stdout="bad stdout", stderr="bad stderr")
 
         with open_db(self.config.paths.db_path) as connection:
@@ -15492,7 +15492,7 @@ raise SystemExit(0)
 
         def run_encode_side_effect(*, temp_output: Path, **_: object) -> subprocess.CompletedProcess[str]:
             temp_output.parent.mkdir(parents=True, exist_ok=True)
-            temp_output.write_text("encoded")
+            temp_output.write_text("encoded", encoding="utf-8")
             return subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr="")
 
         with open_db(self.config.paths.db_path) as connection:
@@ -15695,7 +15695,7 @@ raise SystemExit(0)
 
         def run_encode_side_effect(*, temp_output: Path, **_: object) -> subprocess.CompletedProcess[str]:
             temp_output.parent.mkdir(parents=True, exist_ok=True)
-            temp_output.write_text("encoded")
+            temp_output.write_text("encoded", encoding="utf-8")
             return subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr="")
 
         with open_db(self.config.paths.db_path) as connection:
@@ -15778,7 +15778,7 @@ raise SystemExit(0)
 
         def run_encode_side_effect(*, temp_output: Path, **_: object) -> subprocess.CompletedProcess[str]:
             temp_output.parent.mkdir(parents=True, exist_ok=True)
-            temp_output.write_text("encoded")
+            temp_output.write_text("encoded", encoding="utf-8")
             return subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr="")
 
         with open_db(self.config.paths.db_path) as connection:
@@ -24414,7 +24414,7 @@ raise SystemExit(0)
         self.assertTrue(result["ok"])
         self.assertTrue(result["policy_holds_overridden"])
         parent_job = next(job for job in saved_jobs if job["job_kind"] == "folder")
-        queued_manifest = json.loads(Path(parent_job["manifest_path"]).read_text())
+        queued_manifest = json.loads(Path(parent_job["manifest_path"]).read_text(encoding="utf-8"))
         self.assertEqual(
             [item["library_item_id"] for item in queued_manifest["items"]],
             [exact_id],
@@ -24526,7 +24526,7 @@ raise SystemExit(0)
         self.assertTrue(result["policy_holds_overridden"])
         self.assertEqual(result["older_season_override"]["latest_season_number"], 3)
         parent_job = next(job for job in saved_jobs if job["job_kind"] == "folder")
-        queued_manifest = json.loads(Path(parent_job["manifest_path"]).read_text())
+        queued_manifest = json.loads(Path(parent_job["manifest_path"]).read_text(encoding="utf-8"))
         self.assertEqual(
             {
                 item["selection_provenance"]["season_prefix"]
@@ -24793,7 +24793,7 @@ raise SystemExit(0)
     @staticmethod
     def _queued_manifest_item_ids(saved_jobs: list[dict[str, Any]]) -> list[int]:
         parent_job = next(job for job in saved_jobs if job["job_kind"] == "folder")
-        queued_manifest = json.loads(Path(parent_job["manifest_path"]).read_text())
+        queued_manifest = json.loads(Path(parent_job["manifest_path"]).read_text(encoding="utf-8"))
         return sorted(int(item["library_item_id"]) for item in queued_manifest["items"])
 
     def test_queue_folder_leaves_out_cadence_problems_and_queues_the_rest(self) -> None:
@@ -25215,7 +25215,7 @@ raise SystemExit(0)
             [(item_ids["tv/show/Season 1/One.mkv"], "nearer_approval")],
         )
         self.assertIn("Season 1 has its own approved settings", result["left_out"][0]["reason"])
-        manifest = json.loads(Path(saved_jobs[0]["manifest_path"]).read_text())
+        manifest = json.loads(Path(saved_jobs[0]["manifest_path"]).read_text(encoding="utf-8"))
         for item in manifest["items"]:
             approval = effective_production_approval(
                 self.config, str(item["rel_path"]), lambda _config, prefix: approvals.get(prefix),
@@ -25292,7 +25292,7 @@ raise SystemExit(0)
             sorted(result["queued_library_item_ids"]), sorted([item_ids["One.mkv"], item_ids["Three.mkv"]]),
         )
         self.assertEqual(result["left_out"], [])
-        manifest = json.loads(Path(queued.saved_jobs[0]["manifest_path"]).read_text())
+        manifest = json.loads(Path(queued.saved_jobs[0]["manifest_path"]).read_text(encoding="utf-8"))
         self.assertEqual(
             manifest["selection"]["production_approval_contract"], production_approval_contract(approvals["tv/show"]),
         )
@@ -26281,7 +26281,7 @@ raise SystemExit(0)
         self.assertEqual(self._queued_manifest_item_ids(joined_jobs), [item_ids["Episode 2.mkv"]])
         joined_manifest = json.loads(Path(
             next(job for job in joined_jobs if job["job_kind"] == "folder")["manifest_path"]
-        ).read_text())
+        ).read_text(encoding="utf-8"))
         self.assertTrue(joined_manifest["items"][0]["cadence_decision"]["owner_accepted_as_is"])
         self.assertEqual(set(self._hold_rows()), {item_ids["Episode 3.mkv"]})
 
@@ -26345,9 +26345,9 @@ raise SystemExit(0)
             run = load_latest_encode_job(connection, "tv/show")
         assert run is not None
         manifest_path = Path(str(run["manifest_path"]))
-        manifest = json.loads(manifest_path.read_text())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["selection"].pop("queue_mode")
-        manifest_path.write_text(json.dumps(manifest))
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
         ambiguous_motion_runtime.accept_ambiguous_motion_action(
             queue_config, "tv/show", now_iso=web_app._now_iso(), current_approval=lambda _prefix: "approval",
@@ -26386,13 +26386,13 @@ raise SystemExit(0)
                     connection.execute(delete(encode_jobs))
                 assert run is not None
                 manifest_path = Path(str(run["manifest_path"]))
-                manifest = json.loads(manifest_path.read_text())
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 manifest["selection"]["lifecycle_override"] = {
                     "mode": "older_seasons", "included_season_prefixes": [season],
                 }
                 # A run queued before its mode was recorded shows older seasons only through this selection.
                 manifest["selection"].pop("queue_mode", None)
-                manifest_path.write_text(json.dumps(manifest))
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
                 with open_db(self.config.paths.db_path) as connection:
                     save_encode_job(connection, run)
 
@@ -26522,7 +26522,7 @@ raise SystemExit(0)
         self.assertEqual(result["older_season_override"]["cadence_evidence_required_candidate_count"], 1)
         parent_job = next(job for job in saved_jobs if job["job_kind"] == "folder")
         self.assertEqual(parent_job["item_count"], 1)
-        queued_manifest = json.loads(Path(parent_job["manifest_path"]).read_text())
+        queued_manifest = json.loads(Path(parent_job["manifest_path"]).read_text(encoding="utf-8"))
         self.assertEqual(queued_manifest["selection"]["item_count"], 1)
         self.assertEqual(
             [item["library_item_id"] for item in queued_manifest["items"]],
@@ -28182,7 +28182,7 @@ raise SystemExit(0)
         self.assertTrue(result["ok"])
         self.assertFalse(partial_a.exists())
         manifest_path = Path(str(result["job"]["manifest_path"]))
-        manifest = json.loads(manifest_path.read_text())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(len(manifest["items"]), 2)
         with open_db(self.config.paths.db_path) as connection:
             item_a_row = self._library_item_value(connection, item_a, library_items.c.status)
@@ -28272,7 +28272,7 @@ raise SystemExit(0)
         self.assertTrue(result["ok"])
         self.assertFalse(partial_a.exists())
         manifest_path = Path(str(result["job"]["manifest_path"]))
-        manifest = json.loads(manifest_path.read_text())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(len(manifest["items"]), 2)
         with open_db(self.config.paths.db_path) as connection:
             item_a_row = self._library_item_value(connection, item_a, library_items.c.status)
@@ -28871,7 +28871,7 @@ raise SystemExit(0)
             for job in connection.execute(select(encode_jobs.c.job_id).where(encode_jobs.c.job_kind == "shard")).scalars():
                 part = load_encode_job(connection, str(job))
                 assert part is not None
-                manifest_items = json.loads(Path(part["manifest_path"]).read_text())["items"]
+                manifest_items = json.loads(Path(part["manifest_path"]).read_text(encoding="utf-8"))["items"]
                 if [manifest_items[index]["library_item_id"] for index in part["manifest_indexes"]] == [item_id]:
                     return part
         raise AssertionError(f"No queue part for item {item_id}")

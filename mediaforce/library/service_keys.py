@@ -51,7 +51,7 @@ class KeychainKeyStore:
             result = subprocess.run(
                 [SECURITY_TOOL, "find-generic-password", "-s", self._keychain_service, "-a", service, "-w"],
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
                 timeout=SECURITY_TIMEOUT_SECONDS,
                 check=False,
             )
@@ -76,7 +76,7 @@ class KeychainKeyStore:
                 [SECURITY_TOOL, "-q", "-i"],
                 input=command,
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
                 timeout=SECURITY_TIMEOUT_SECONDS,
                 check=False,
             )

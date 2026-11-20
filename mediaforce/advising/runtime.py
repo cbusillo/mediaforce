@@ -57,7 +57,7 @@ def run_codex_process(
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        encoding="utf-8",
         cwd=cwd,
         start_new_session=True,
     )

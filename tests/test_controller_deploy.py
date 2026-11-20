@@ -40,7 +40,7 @@ def _app(path: Path, *, build: str, code: bytes) -> Path:
 def _config(path: Path, support: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f'[state]\ndb_path = "{support}/library.sqlite3"\nrun_manifest_dir = "{support}/runs"\n'
-                    f'web_state_dir = "{support}/web"\n[media]\nsource_roots = {{}}\n')
+                    f'web_state_dir = "{support}/web"\n[media]\nsource_roots = {{}}\n', encoding="utf-8")
     return path
 
 

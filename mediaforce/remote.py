@@ -409,6 +409,7 @@ def _run_subprocess_text(
         command,
         capture_output=capture_output,
         text=text,
+        encoding="utf-8" if text else None,
         timeout=timeout,
         input=input_text,
         env=env,

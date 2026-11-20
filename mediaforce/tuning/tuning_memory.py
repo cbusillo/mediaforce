@@ -519,7 +519,7 @@ def _render_visual_approval_markdown(
 
 def _artifact_excerpt(path: Path, *, max_lines: int = 12) -> str:
     try:
-        lines = path.read_text().splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return ""
     return "\n".join(lines[:max_lines])

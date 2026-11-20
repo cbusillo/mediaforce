@@ -559,7 +559,7 @@ def _run_bounded_media_command(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            encoding="utf-8",
             start_new_session=True,
         )
     except OSError as exc:
@@ -967,7 +967,7 @@ def _empty_analysis(
 @lru_cache(maxsize=None)
 def _ffmpeg_version(ffmpeg_name: str) -> str:
     try:
-        result = subprocess.run([ffmpeg_name, "-version"], capture_output=True, text=True, timeout=10)
+        result = subprocess.run([ffmpeg_name, "-version"], capture_output=True, encoding="utf-8", timeout=10)
     except (OSError, subprocess.SubprocessError):
         return "unknown"
     return result.stdout.splitlines()[0].strip() if result.stdout else "unknown"

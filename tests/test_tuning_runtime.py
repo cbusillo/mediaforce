@@ -3,6 +3,7 @@ import multiprocessing
 import json
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -112,7 +113,7 @@ def _runtime_settings_writer(path_text: str, ready_path_text: str, mode: str) ->
     def _apply(runtime_settings: dict[str, object]) -> dict[str, object]:
         if mode == "folder":
             runtime_settings["folder_policy_overrides"] = [{"path_prefix": "tv/House/Season 2"}]
-            ready_path.write_text("ready\n")
+            ready_path.write_text("ready\n", encoding="utf-8")
             time.sleep(0.5)
         else:
             runtime_settings["remote_hosts"] = [{"label": "m4-studio"}]
@@ -6528,7 +6529,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 {"codec_name": "eac3", "channels": 6, "language": "eng", "default": 1, "index": 2},
             ],
         }
-        Path(sample_item["source_path"]).write_text("source")
+        (self.root / "source.mkv").write_text("source", encoding="utf-8")
         source_clip = self.config.paths.review_dir / "run-123" / "item-00" / "source-01.mp4"
         preview_clip = self.config.paths.review_dir / "run-123" / "item-00" / "encoded-01.mp4"
         compare_clip = self.config.paths.review_dir / "run-123" / "item-00" / "compare-01.mkv"
@@ -6542,7 +6543,7 @@ class TuningRuntimeTests(unittest.TestCase):
             if isinstance(output_path, Path):
                 output_path.write_text("artifact")
             else:
-                Path(output_path).write_text("artifact")
+                Path(output_path).write_text("artifact", encoding="utf-8")
 
         with patch("mediaforce.web.runtime.folder_tuning_runtime.render_review_timeline_strip", side_effect=create_artifact), patch(
             "mediaforce.web.runtime.folder_tuning_runtime.render_review_contact_sheet", side_effect=create_artifact
@@ -6699,6 +6700,30 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(context[0]["approved_policy"], {})
         self.assertEqual(context[0]["sample_result"], {})
         self.assertEqual(context[0]["run_verdict"], {})
+
+    def test_learning_artifact_excerpt_reads_non_ascii_text_under_an_ascii_locale(self) -> None:
+        reader = (
+            "import json, locale, sys\n"
+            "from pathlib import Path\n"
+            "from mediaforce.tuning.tuning_memory import _artifact_excerpt\n"
+            "print(json.dumps([locale.getpreferredencoding(False), _artifact_excerpt(Path(sys.argv[1]))]))\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact = Path(tmp) / "futurama.md"
+            artifact.write_text("# Futurama — Season 6\nGrain kept on Bender’s close-ups\n", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, "-X", "utf8=0", "-c", reader, str(artifact)],
+                capture_output=True,
+                encoding="utf-8",
+                env={"LC_ALL": "C", "PYTHONCOERCECLOCALE": "0"},
+                cwd=Path(__file__).resolve().parents[1],
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        preferred, excerpt = json.loads(result.stdout)
+        self.assertNotIn("utf", preferred.lower())
+        self.assertEqual(excerpt, "# Futurama — Season 6\nGrain kept on Bender’s close-ups")
 
     def test_retrieve_learning_context_keeps_sibling_approval_non_authoritative(self) -> None:
         approved_sample_item = {

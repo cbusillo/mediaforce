@@ -435,12 +435,12 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         self.assertTrue(error[:4000].endswith(" smb://rem"))
 
         with tempfile.TemporaryDirectory() as temp:
-            Path(temp, "mount.err").write_text(error)
+            Path(temp, "mount.err").write_text(error, encoding="utf-8")
             subprocess.run(
                 ["/bin/sh", "-c", f'stderr_path="$1/mount.err"; result_dir="$1"; {save_error}', "sh", temp],
                 check=True,
             )
-            saved = Path(temp, "error").read_text()
+            saved = Path(temp, "error").read_text(encoding="utf-8")
 
         self.assertNotIn("remote", saved)
         self.assertTrue(saved.endswith(" smb://NAS"))
@@ -453,8 +453,8 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         self.assertIn("job_running", report_helper)
 
         with tempfile.TemporaryDirectory() as temp:
-            Path(temp, "status").write_text("1\n")
-            Path(temp, "error").write_text("Finder got an error: smb://NAS.local/media could not be found. (-35)\n")
+            Path(temp, "status").write_text("1\n", encoding="utf-8")
+            Path(temp, "error").write_text("Finder got an error: smb://NAS.local/media could not be found. (-35)\n", encoding="utf-8")
             # The runner already removed its folder, so the live error file is gone.
             output = subprocess.run(
                 [

@@ -256,7 +256,7 @@ def _legacy_queue_mode(manifest: Mapping[str, Any], *, older_seasons: bool) -> s
 
 def _manifest(job: Mapping[str, Any]) -> dict[str, Any]:
     try:
-        return object_dict(json.loads(Path(str(job.get("manifest_path") or "")).read_text()))
+        return object_dict(json.loads(Path(str(job.get("manifest_path") or "")).read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError):
         return {}
 

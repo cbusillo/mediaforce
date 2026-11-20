@@ -176,7 +176,7 @@ def _probe_controller_volume(
                 str(mount_point), *access_specs,
             ],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired:
@@ -265,7 +265,7 @@ def mount_controller_smb_no_ui(
         result = run_subprocess(
             ["/usr/bin/osascript", "-l", "JavaScript", "-e", NO_UI_SMB_MOUNT_JXA, planned[0].url],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
             timeout=mount_timeout_seconds,
         )
     except subprocess.TimeoutExpired:

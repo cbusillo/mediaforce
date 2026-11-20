@@ -735,7 +735,7 @@ def _manifest_files(path: Path) -> tuple[EncodeRunFile, ...]:
 @lru_cache(maxsize=256)
 def _read_manifest_files(path: str, _mtime_ns: int, _size: int) -> tuple[EncodeRunFile, ...]:
     try:
-        payload = object_dict(json.loads(Path(path).read_text()))
+        payload = object_dict(json.loads(Path(path).read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError):
         return ()
     files: list[EncodeRunFile] = []

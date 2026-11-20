@@ -54,7 +54,7 @@ def _studio(root: Path) -> dict[str, Any]:
 
 
 def _store_computers(runtime_settings_path: Path, root: Path) -> dict[str, Any]:
-    stored = json.loads(runtime_settings_path.read_text())
+    stored = json.loads(runtime_settings_path.read_text(encoding="utf-8"))
     stored["remote_hosts"] = [
         _studio(root),
         {"host": "mini.local", "label": "Mini", "start_timeout_seconds": 180, "media_access": "mounted",

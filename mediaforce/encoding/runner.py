@@ -406,7 +406,7 @@ def run_tracked_process(
     # A remote script that watches its connection treats end-of-input as "the controller is gone",
     # so its stdin has to be a pipe this process keeps open until the command ends.
     process = subprocess.Popen(cmd, stdin=subprocess.PIPE if hold_stdin_open else None,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", bufsize=1,
                                start_new_session=True)
     if process_controller is not None:
         process_controller.attach(process, terminate_process_group=True)

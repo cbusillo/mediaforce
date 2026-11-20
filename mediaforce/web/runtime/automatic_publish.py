@@ -249,7 +249,7 @@ def _publish_file(
         )
         try:
             active_manifest = object_dict(
-                json.loads(Path(str(job["manifest_path"])).read_text())
+                json.loads(Path(str(job["manifest_path"])).read_text(encoding="utf-8"))
             )
             active_items = object_list(active_manifest.get("items"))
             indexes = object_list(job.get("manifest_indexes")) or list(
@@ -283,7 +283,7 @@ def _publish_file(
                 "This file is still being made. It will be checked when it finishes.",
             )
             return
-    manifest = object_dict(json.loads(Path(str(stage["manifest_path"])).read_text()))
+    manifest = object_dict(json.loads(Path(str(stage["manifest_path"])).read_text(encoding="utf-8")))
     item = object_dict(object_list(manifest.get("items"))[int(stage["item_index"])])
     if int(item.get("library_item_id") or 0) != item_id or str(
         item.get("source_path")

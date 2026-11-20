@@ -226,7 +226,7 @@ def save_calibration_state(calibration_file: Path, payload: dict[str, Any], *, c
         raise ValueError("A kind of content's approval is never saved as a folder's own.")
     stored_payload = dict(payload)
     stored_payload["draft_hash"] = calibration_draft_hash(stored_payload)
-    calibration_file.write_text(json.dumps(stored_payload, indent=2) + "\n")
+    calibration_file.write_text(json.dumps(stored_payload, indent=2) + "\n", encoding="utf-8")
 
 
 def review_pairs(
@@ -328,7 +328,7 @@ def load_pending_proposal(proposal_file: Path) -> dict[str, Any] | None:
     if not proposal_file.exists():
         return None
     try:
-        payload = json.loads(proposal_file.read_text())
+        payload = json.loads(proposal_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     normalized_payload = object_dict(payload)
@@ -336,7 +336,7 @@ def load_pending_proposal(proposal_file: Path) -> dict[str, Any] | None:
 
 
 def save_pending_proposal(proposal_file: Path, payload: dict[str, Any]) -> None:
-    proposal_file.write_text(json.dumps(payload, indent=2) + "\n")
+    proposal_file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def clear_pending_proposal(proposal_file: Path) -> None:
@@ -403,8 +403,8 @@ def pending_proposal_public_view(
 def load_scan_job_state(scan_job_file: Path) -> dict[str, Any] | None:
     if not scan_job_file.exists():
         return None
-    return json.loads(scan_job_file.read_text())
+    return json.loads(scan_job_file.read_text(encoding="utf-8"))
 
 
 def save_scan_job_state(scan_job_file: Path, payload: dict[str, Any]) -> None:
-    scan_job_file.write_text(json.dumps(payload, indent=2) + "\n")
+    scan_job_file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

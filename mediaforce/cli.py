@@ -850,7 +850,7 @@ def _write_manifest(
 
 
 def _load_manifest(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _create_campaign_manifest(

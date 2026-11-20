@@ -429,7 +429,7 @@ def _read_advice_state(path: Path, *, strict: bool) -> ActionPayload | None:
     if not path.exists():
         return None
     try:
-        payload = json.loads(path.read_text())
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         if strict:
             raise

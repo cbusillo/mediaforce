@@ -650,7 +650,7 @@ def _ffmpeg_version(ffmpeg_name: str) -> str:
             [ffmpeg_name, "-version"],
             check=False,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):

@@ -494,7 +494,7 @@ def _path_value(payload: dict[str, Any], path: str) -> Any:
 def _load_telemetry(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def _telemetry_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
