@@ -4,18 +4,35 @@ import Foundation
 struct CleanupFolder: Decodable, Sendable {
     let fileCount: Int
     let totalSizeBytes: Int64
+    // The latest deletion since Mediaforce started, as the server is doing it; nil when there has been none.
+    var deletion: BackupDeletion?
+}
+
+/// One deletion of the original backups. Counts are known once Mediaforce has read the Cleanup folder; a failure
+/// stops it at the file that couldn't be deleted.
+struct BackupDeletion: Decodable, Sendable, Equatable {
+    enum State: String, Decodable, Sendable {
+        case running, finished, failed
+    }
+
+    let state: State
+    let totalCount: Int?
+    let deletedCount: Int
+    let freedBytes: Int64
+    let keptCount: Int
+    let failedFile: String?
+    let failureReason: String?
 }
 
 struct CleanupResult: Decodable, Sendable {
     let ok: Bool
-    let removedCount: Int
-    let removedSizeBytes: Int64
-    let preservedCount: Int?
 }
 
 struct MediaforceClient: Sendable {
     static let factsTimeout: TimeInterval = 30
     static let computerActionTimeout: TimeInterval = 600
+    // Deleting answers when the last backup is gone; the page follows the deletion's progress meanwhile.
+    static let deleteBackupsTimeout: TimeInterval = 3600
 
     let baseURL: URL
     var session: URLSession = .shared
@@ -124,7 +141,7 @@ struct MediaforceClient: Sendable {
     }
 
     func deleteCleanupFolder() async throws -> CleanupResult {
-        let data = try await post("api/archive-cleanup/clear", body: Data("{}".utf8))
+        let data = try await post("api/archive-cleanup/clear", body: Data("{}".utf8), timeout: Self.deleteBackupsTimeout)
         return try JSONDecoder.mediaforce.decode(CleanupResult.self, from: data)
     }
 

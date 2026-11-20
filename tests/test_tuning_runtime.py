@@ -45,6 +45,7 @@ from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_policy_hash
 from mediaforce.core.process_control import ProcessCancelledError
 from mediaforce.core.type_defs import object_dict
+from mediaforce.encoding.staging import safe_unlink
 from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND, REMOTE_QUALITY_TIMEOUT_FAILURE_KIND, \
     REMOTE_QUALITY_TIMEOUT_SECONDS, RemoteQualityTimeoutError
 from mediaforce.execution import resolve_stream_budget_ledger
@@ -63,7 +64,7 @@ from mediaforce.tuning.calibration_jobs import list_queue_summary, load_job, \
 from mediaforce.tuning.compression_intent import CompressionIntentV1
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from mediaforce.web.app import _build_multimodal_review_pack, _build_seed_policy_payload, _maybe_seed_baseline_policy, _build_tuning_runtime_toolbelt, _folder_display_policy, _request_triggers_periodic_cleanup, _run_periodic_cleanup, _multimodal_review_pack_public_view, _operator_requested_experiment, _planned_audio_review_context, _review_pack_dir, _upsert_override
-from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary, clear_archive_cleanup_action
+from mediaforce.web.runtime.archive_cleanup import BackupDeletion, archive_cleanup_summary, clear_archive_cleanup_action
 from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, calibration_completion_status, \
     run_calibration_job
 from mediaforce.web.runtime.completed_runtime import completed_page_payload, record_deleted_original_backups
@@ -1501,6 +1502,61 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(archive_root.exists())
         self.assertEqual(result["archive_cleanup"]["file_count"], 0)
 
+    def _archived_backups(self, *names: str) -> list[Path]:
+        paths = [self.config.archive_root / "tv/show" / name for name in names]
+        for index, path in enumerate(paths, start=1):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x" * index)
+        return paths
+
+    def test_deleting_backups_reports_progress_while_running_and_when_done(self) -> None:
+        self._archived_backups("episode-1.mkv", "episode-2.mkv", "episode-3.mkv")
+        progress = BackupDeletion()
+        seen_while_deleting: list[dict[str, Any]] = []
+
+        def watched_unlink(path: Path) -> None:
+            facts = progress.facts()
+            assert facts is not None
+            seen_while_deleting.append(facts)
+            safe_unlink(path)
+
+        with patch("mediaforce.web.runtime.archive_cleanup.safe_unlink", side_effect=watched_unlink):
+            clear_archive_cleanup_action(self.config, progress=progress)
+
+        self.assertEqual(
+            [(facts["state"], facts["total_count"], facts["total_bytes"], facts["deleted_count"]) for facts in seen_while_deleting],
+            [("running", 3, 6, 0), ("running", 3, 6, 1), ("running", 3, 6, 2)],
+        )
+        freed_so_far = [facts["freed_bytes"] for facts in seen_while_deleting]
+        self.assertEqual(freed_so_far[0], 0)
+        self.assertEqual(freed_so_far, sorted(set(freed_so_far)))
+        finished = progress.facts()
+        assert finished is not None
+        self.assertEqual((finished["state"], finished["deleted_count"], finished["freed_bytes"]), ("finished", 3, 6))
+
+    def test_a_failed_deletion_names_its_file_and_reason_and_stops_there(self) -> None:
+        backups = self._archived_backups("episode-1.mkv", "episode-2.mkv", "episode-3.mkv")
+        progress = BackupDeletion()
+        attempted: list[Path] = []
+
+        def refuse_second(path: Path) -> None:
+            attempted.append(path)
+            if len(attempted) == 2:
+                raise PermissionError(13, "Permission denied", str(path))
+            safe_unlink(path)
+
+        with patch("mediaforce.web.runtime.archive_cleanup.safe_unlink", side_effect=refuse_second):
+            with self.assertRaises(PermissionError):
+                clear_archive_cleanup_action(self.config, progress=progress)
+
+        failed = progress.facts()
+        assert failed is not None
+        self.assertEqual(
+            (failed["state"], failed["failed_file"], failed["failure_reason"], failed["deleted_count"], failed["total_count"]),
+            ("failed", str(attempted[1].relative_to(self.config.archive_root)), "Permission denied", 1, 3),
+        )
+        self.assertEqual([path.exists() for path in backups].count(True), 2)
+
     def test_clear_archive_cleanup_action_tolerates_missing_archive_root(self) -> None:
         config = MediaforceConfig(
             raw={
@@ -1941,8 +1997,10 @@ class TuningRuntimeTests(unittest.TestCase):
                 *,
                 transcode_root: str | None = None,
                 on_removed: object = None,
+                progress: object = None,
         ) -> dict[str, object]:
             self.assertTrue(callable(on_removed))
+            self.assertIsInstance(progress, BackupDeletion)
             captured.append(transcode_root)
             return {"ok": True, "transcode_root": transcode_root}
 
@@ -2022,9 +2080,64 @@ class TuningRuntimeTests(unittest.TestCase):
                 "file_count": 3,
                 "total_size_bytes": 42,
                 "has_cleanup": True,
+                "deletion": None,
             },
         )
         self.assertEqual(captured, ["/Volumes/media/transcode-alt"])
+
+    def test_the_cleanup_folder_reports_a_deletion_while_the_delete_request_is_still_running(self) -> None:
+        from mediaforce.web import app as web_app
+
+        halfway = threading.Event()
+        release = threading.Event()
+
+        def slow_clear_archive_cleanup_action(
+                _config: MediaforceConfig,
+                *,
+                progress: BackupDeletion,
+                **_unused: object,
+        ) -> dict[str, object]:
+            progress.begin()
+            progress.counted(2, 300, 0)
+            progress.removed(100)
+            halfway.set()
+            release.wait(timeout=10)
+            progress.removed(200)
+            progress.finished()
+            return {"ok": True}
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+            "mediaforce.web.app._start_encode_queue_worker"
+        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]), patch(
+            "mediaforce.web.app.clear_archive_cleanup_action",
+            side_effect=slow_clear_archive_cleanup_action,
+        ):
+            app = web_app.create_app(self.root / "config.toml")
+            routes = {route.path: route for route in app.routes if isinstance(route, APIRoute)}
+
+            class _FakeRequest:
+                @staticmethod
+                async def json() -> dict[str, str]:
+                    return {}
+
+            async def delete_and_look() -> tuple[dict[str, Any], dict[str, Any]]:
+                deleting = asyncio.create_task(routes["/api/archive-cleanup/clear"].endpoint(_FakeRequest()))
+                self.assertTrue(await asyncio.wait_for(asyncio.to_thread(halfway.wait, 10), timeout=5))
+                while_running = json.loads(routes["/api/archive-cleanup"].endpoint(None).body)["deletion"]
+                release.set()
+                await deleting
+                once_done = json.loads(routes["/api/archive-cleanup"].endpoint(None).body)["deletion"]
+                return while_running, once_done
+
+            try:
+                during, after = asyncio.run(delete_and_look())
+            finally:
+                release.set()
+
+        self.assertEqual((during["state"], during["deleted_count"], during["total_count"], during["freed_bytes"]), ("running", 1, 2, 100))
+        self.assertEqual((after["state"], after["deleted_count"], after["freed_bytes"]), ("finished", 2, 300))
 
     def test_run_periodic_cleanup_starts_background_thread_without_blocking(self) -> None:
         started = threading.Event()

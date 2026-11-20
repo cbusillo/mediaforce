@@ -161,8 +161,26 @@ final class MediaforceClientActionTests: XCTestCase {
         XCTAssertEqual(Self.requests.map(\.httpMethod), ["POST", "POST", "POST"])
         XCTAssertEqual(Set(Self.requests.compactMap(\.url)).count, 3)
         XCTAssertEqual(Self.requests[2].value(forHTTPHeaderField: "Content-Type"), "application/json")
-        XCTAssertEqual(deleted.removedCount, 3)
-        XCTAssertEqual(ActionNotice.deleted(deleted).title, "Deleted 3 original backups")
+        XCTAssertTrue(deleted.ok)
+    }
+
+    @MainActor
+    func testADeleteThatFailedPartwayIsShownOnThePageNotAsUnanswered() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubServer.self]
+        StubServer.respond = { request in
+            let status = request.url?.path == "/api/archive-cleanup/clear" ? 500 : 200
+            return HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+        }
+        StubServer.body = Data(#"""
+        {"file_count": 2, "total_size_bytes": 20, "deletion": {"state": "failed", "total_count": 3, "deleted_count": 1,
+         "freed_bytes": 10, "kept_count": 0, "failed_file": "tv/Show/Episode 2.mkv", "failure_reason": "Permission denied"}}
+        """#.utf8)
+        let model = MainWindowModel(client: MediaforceClient(baseURL: ServerConnection.localServer, session: URLSession(configuration: configuration)))
+        let after = await model.deleteBackups()
+        StubServer.body = Data("{}".utf8)
+        XCTAssertEqual(after?.deletion?.failedFile, "tv/Show/Episode 2.mkv")
+        XCTAssertNil(model.notice)
     }
 
     @MainActor
@@ -174,7 +192,7 @@ final class MediaforceClientActionTests: XCTestCase {
         }
         StubServer.body = Data(#"{"ok": false, "removed_count": 0, "removed_size_bytes": 0}"#.utf8)
         let model = MainWindowModel(client: MediaforceClient(baseURL: ServerConnection.localServer, session: URLSession(configuration: configuration)))
-        await model.deleteCleanupFolder()
+        _ = await model.deleteBackups()
         StubServer.body = Data("{}".utf8)
         XCTAssertEqual(model.notice?.title, ActionNotice.publishing.title)
     }

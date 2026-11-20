@@ -124,14 +124,20 @@ final class MainWindowModel {
         await refresh()
     }
 
-    func deleteCleanupFolder() async {
+    /// Deletes the original backups and returns the Cleanup folder as Mediaforce reads it afterward. A deletion that
+    /// failed partway says so on Space saved, so only a missing answer that shows no failure needs a notice.
+    func deleteBackups() async -> CleanupFolder? {
+        var answered = true
         do {
             let result = try await client.deleteCleanupFolder()
-            notice = result.ok ? .deleted(result) : .publishing
+            if !result.ok { notice = .publishing }
         } catch {
-            notice = .unanswered
+            answered = false
         }
+        let after = try? await client.cleanupFolder()
+        if !answered, after?.deletion?.state != .failed { notice = .unanswered }
         await refresh()
+        return after
     }
 }
 
@@ -161,16 +167,6 @@ struct ActionNotice: Identifiable, Equatable {
         title: "Nothing to delete",
         message: "The Cleanup folder is empty."
     )
-
-    static func deleted(_ result: CleanupResult) -> ActionNotice {
-        let kept = (result.preservedCount ?? 0) > 0
-            ? " Kept \(Words.count(result.preservedCount ?? 0, "original")) that files still being finished need."
-            : ""
-        return ActionNotice(
-            title: "Deleted \(Words.count(result.removedCount, "original backup"))",
-            message: "\(Words.size(result.removedSizeBytes)) freed.\(kept)"
-        )
-    }
 
     static func == (lhs: ActionNotice, rhs: ActionNotice) -> Bool { lhs.id == rhs.id }
 }

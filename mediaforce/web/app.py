@@ -138,6 +138,7 @@ from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, SampleStartW
     prepare_waiting_samples, samples_to_remake, start_compressing, with_first_sample_question
 from mediaforce.web.runtime.app_window import app_window_payload, movies_payload, other_media_payload, tv_shows_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
+from mediaforce.web.runtime.archive_cleanup import BackupDeletion
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
 from mediaforce.web.runtime.folder_state import state_slug
 from mediaforce.web.runtime.kind_approvals import KindAwareLoader, SeasonKinds, approve_kind_action, \
@@ -561,6 +562,7 @@ def create_app(
     config = load_config(config_path or DEFAULT_CONFIG_PATH)
     advisor_routing = advisor_routing_from_config(config)
     cleanup_lock = threading.Lock()
+    backup_deletion = BackupDeletion()
     shutdown_event = threading.Event()
     evidence_runner = BoundedEvidenceRunner(
         config.paths.config_path,
@@ -1272,10 +1274,10 @@ def create_app(
     register_settings_routes(
         app,
         library_type_preview_action=_library_type_preview_action,
-        archive_cleanup_payload=lambda transcode_root=None: archive_cleanup_summary(
-            config,
-            transcode_root=transcode_root,
-        ),
+        archive_cleanup_payload=lambda transcode_root=None: {
+            **archive_cleanup_summary(config, transcode_root=transcode_root),
+            "deletion": backup_deletion.facts(),
+        },
         clear_archive_cleanup_action=lambda transcode_root=None: _clear_archive_cleanup_action(transcode_root),
     )
     register_library_settings_routes(
@@ -1676,6 +1678,7 @@ def create_app(
                 config,
                 transcode_root=transcode_root,
                 on_removed=removed_paths.append,
+                progress=backup_deletion,
             )
         finally:
             _record_deleted_original_backups(removed_paths)
