@@ -69,7 +69,6 @@ class LoginItemTests(unittest.TestCase):
 
     def test_download_instructions_start_the_freshly_installed_service(self) -> None:
         readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
-        instructions = readme.split("### Download", 1)[1].split("### ", 1)[0]
         calls: list[str] = []
 
         def launchctl(arguments: list[str]) -> subprocess.CompletedProcess[str]:
@@ -79,7 +78,7 @@ class LoginItemTests(unittest.TestCase):
         with patch("mediaforce.ops.login_item._require_supported_platform"), patch(
             "mediaforce.ops.login_item._run_command", side_effect=launchctl
         ):
-            for line in instructions.replace("\\\n", " ").splitlines():
+            for line in readme.replace("\\\n", " ").splitlines():
                 command = shlex.split(line) if line.lstrip().startswith("/Applications/") else []
                 if command and Path(command[0]).name == self.program.name:
                     action = command[command.index("service") + 1]

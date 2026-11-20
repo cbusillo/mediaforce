@@ -250,11 +250,14 @@ def test_failed_idle_recheck_releases_only_the_temporary_hold(update: Update) ->
     assert _phase(app_update) is None and server.launchctl == []
 
 
-def test_update_waits_for_scan_after_its_database_row_finishes(update: Update) -> None:
+@pytest.mark.parametrize("worker_counts", [True, False], ids=["scan-worker", "earlier-server"])
+def test_update_waits_for_scan_after_its_database_row_finishes(update: Update, worker_counts: bool) -> None:
     app_update, server = update
     def scan_refreshing_metadata(base: str, route: str) -> dict[str, Any]:
         response = server.api(base, route)
-        if route.startswith("/api/dashboard?"):
+        if worker_counts and route == "/api/release/work":
+            response["running_scan_passes"] = 1
+        if not worker_counts and route.startswith("/api/dashboard?"):
             response["scan_job"] = {"status": "running"}
         return response
 

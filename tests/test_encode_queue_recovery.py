@@ -37,6 +37,7 @@ from sqlalchemy import exc as sqlalchemy_exc
 from mediaforce import execution, quality, remote, review, state_cleanup
 from mediaforce.core import binaries, config as config_runtime
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
+from mediaforce.ops import controller_deploy
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.encoding.streams import opus_audio_filter
 from mediaforce.library.background_work import set_background_work_paused
@@ -19429,6 +19430,17 @@ raise SystemExit(0)
         with patch("mediaforce.web.runtime.job_runtime.load_config", return_value=self.config), patch(
             "mediaforce.web.runtime.job_runtime.dispatch_calibration_job"
         ) as dispatch:
+            support = self.config.paths.db_path.parent
+            now = deps.now_iso
+
+            def hold_before_claim() -> str:
+                controller_deploy._write_intent(support, {"phase": "draining", "to": "2"})
+                return now()
+
+            with patch.object(deps, "now_iso", side_effect=hold_before_claim):
+                job_runtime.process_calibration_queue_once(config_path=self.config.paths.config_path, deps=deps)
+            dispatch.assert_not_called()
+            controller_deploy._end_intent(support)
             job_runtime.process_calibration_queue_once(config_path=self.config.paths.config_path, deps=deps)
 
         dispatch.assert_called_once()
@@ -20317,6 +20329,10 @@ raise SystemExit(0)
             self.assertEqual(queued["attempt_count"], 0)
             connection.commit()
             with patch.object(encode_runtime, "load_next_runnable_encode_job", return_value=selected):
+                support = self.config.paths.db_path.parent
+                controller_deploy._write_intent(support, {"phase": "draining", "to": "2"})
+                self.assertIsNone(encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps))
+                controller_deploy._end_intent(support)
                 claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
             assert claimed is not None
             self.assertEqual(claimed["attempt_count"], 1)
