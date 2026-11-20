@@ -33,6 +33,7 @@ from mediaforce.web.runtime.episode_progress import load_season_episode_progress
 from mediaforce.web.runtime.app_samples import approve_sample, kind_sample_candidates, sample_moments
 from mediaforce.web.runtime.folder_actions import queue_folder_encode_action
 from mediaforce.web.runtime.folder_state import save_calibration_state
+from mediaforce.web.runtime.app_window import app_window_payload, library_file_sample_cards
 from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash, review_gate
 from mediaforce.web.runtime.kind_approvals import APPROVABLE_KINDS, APPROVAL_NOT_CURRENT_CODE, KIND_IS_ONE_TIME_CODE, \
@@ -536,7 +537,7 @@ def test_the_kinds_facts_say_what_each_kind_covers_and_how_it_is_decided(tmp_pat
     # Only folder approvals are counted, so the page never works out a season's kind just to skip it.
     assert asked == []
     kinds = {kind["kind"]: kind for kind in facts["kinds"]}
-    assert kinds[LIVE_ACTION]["shows"] == [{"prefix": "tv/Drama", "seasons": 1, "waiting_bytes": 1000,
+    assert kinds[LIVE_ACTION]["shows"] == [{"prefix": "tv/Drama", "media_type": "tv", "seasons": 1, "waiting_bytes": 1000,
                                        "sample_season": APPROVED_SEASON}]
     assert kinds[LIVE_ACTION]["sample_season"] is None
     assert kinds[LIVE_ACTION]["settings"] == []
@@ -1269,7 +1270,6 @@ def test_undecided_kind_preserves_an_older_sample_with_a_saved_parent_sample(tmp
 
 @pytest.mark.parametrize("measured_kind", [LIVE_ACTION, "cartoon"])
 def test_measurement_releases_old_samples_to_the_kind_or_its_own_decision(tmp_path: Path, measured_kind: str) -> None:
-    from mediaforce.web.runtime.app_window import app_window_payload
 
     config = _config(tmp_path)
     saved = _review_ready()
@@ -1753,3 +1753,33 @@ def test_the_same_path_finds_its_season_by_the_library_type_it_is_read_with() ->
     episode = "media/Show/Season 1/e01.mkv"
     assert [look_group({"media": "tv"}, episode), look_group({"media": "movie"}, episode)] == ["media/Show/Season 1", None]
     assert [look_group({"media": "movie"}, episode), look_group({"media": "tv"}, episode)] == [None, "media/Show/Season 1"]
+
+
+@pytest.mark.parametrize(("root", "kind"), [("Cinema", "movie"), ("Headset", "other")])
+def test_library_lists_an_approved_non_tv_sample_until_its_file_is_finished(tmp_path: Path, root: str, kind: str) -> None:
+    config = _config(tmp_path)
+    config.raw["media"]["libraries"].append({"key": root, "path": str(tmp_path / root), "type": kind, "availability": "production"})
+    path = f"{root}/River/Scenes/Coast.mkv"
+    _waiting_episode(config, path, 5000)
+    _finished_sample(config, path)
+    approval = _approved(config)
+    approval["sample_item"]["rel_path"] = path
+    sources = PageStateSources(_loader({path: approval}, {}), lambda _config, _prefix: None)
+    with open_db(config.paths.db_path) as connection:
+        def window() -> dict[str, Any]:
+            return app_window_payload(connection, library_types=config.library_type_map, season_cards=[], computers=[],
+                                      controller_storage={}, storage_admits_work=True, observed_at=datetime.now(UTC),
+                                      file_sample_cards=lambda paths: library_file_sample_cards(connection, config, sources, paths))
+
+        listed = window()["samples"]["approved_not_started"]
+        assert [(entry["prefix"], entry["show"], entry.get("season")) for entry in listed] == [(path, "Coast", None)]
+        sources = PageStateSources(_loader({path: _review_ready()}, {}), lambda _config, _prefix: None)
+        pending = window()
+        assert [entry["prefix"] for entry in pending["samples"]["waiting_on_you"]] == [path]
+        assert pending["biggest_not_started"][0]["waiting_sample_prefix"] == path
+
+        connection.execute(calibration_jobs.update().where(calibration_jobs.c.prefix == path).values(status="running"))
+        assert not window()["biggest_not_started"]
+
+        connection.execute(library_items.update().where(library_items.c.rel_path == path).values(status="promoted"))
+        assert not window()["samples"]["waiting_on_you"]

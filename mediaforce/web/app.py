@@ -125,7 +125,7 @@ from mediaforce.library.metadata_sync import cached_poster, metadata_configurati
 from mediaforce.reviewing.clips import review_file_from_url
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, SamplePreparations, SampleStartWait, approve_sample, make_sample, sample_facts, \
     prepare_waiting_samples, samples_to_remake, start_compressing, with_first_sample_question
-from mediaforce.web.runtime.app_window import app_window_payload, movies_payload, other_media_payload, tv_shows_payload
+from mediaforce.web.runtime.app_window import app_window_payload, library_file_sample_cards, movies_payload, other_media_payload, tv_shows_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
 from mediaforce.web.runtime.archive_cleanup import BackupDeletion
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
@@ -1217,6 +1217,7 @@ def create_app(
                 connection,
                 library_types=config.library_type_map,
                 season_cards=cards,
+                file_sample_cards=lambda paths: library_file_sample_cards(connection, config, _page_state_sources(), paths),
                 remaking_samples=samples_to_remake(cards, lambda prefix: sample_failures_in_a_row(connection, prefix, limit=SAMPLE_REMAKE_LIMIT)),
                 computers=_host_runtime_rows(connection, config, collect_statuses=_cached_host_statuses),
                 controller_storage=controller_storage_recovery_snapshot(config),

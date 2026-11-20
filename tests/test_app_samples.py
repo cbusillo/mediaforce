@@ -659,3 +659,9 @@ def test_a_first_sample_that_could_not_be_attempted_stays_quiet_across_sweeps() 
     second = prepare_waiting_samples(cards, kinds, load_payloads=lambda _prefix: None, failed_in_a_row=lambda _prefix: 0, make=make, previous=first)
     assert not attempted
     assert first["live_action"].reason == second["live_action"].reason == "retry_backoff"
+
+
+def test_nested_movie_sample_uses_its_file_title_inside_a_season_named_folder() -> None:
+    prefix = "Cinema/River/Season 2/Coast.mkv"
+    facts = sample_facts(_folder(prefix=prefix, media_scope={"domain": "movie", "title": "Coast"}), {})
+    assert (facts["show"], facts["season"], facts["prefix"]) == ("Coast", None, prefix)

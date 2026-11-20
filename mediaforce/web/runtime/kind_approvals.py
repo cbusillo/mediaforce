@@ -610,7 +610,8 @@ def kinds_payload(
             season = str(row["season"])
             seasons[row["kind"]].setdefault("/".join(season.split("/")[:2]), []).append((int(row["waiting_bytes"]), season))
     # A show's sample is made on its biggest waiting season of the kind, the one that saves the most.
-    shows = {kind: {show: {"seasons": len(found), "waiting_bytes": sum(size for size, _ in found),
+    library_types = config.library_type_map
+    shows = {kind: {show: {"media_type": library_types.get(show.partition("/")[0]), "seasons": len(found), "waiting_bytes": sum(size for size, _ in found),
                            "sample_season": min(found, key=lambda entry: (-entry[0], entry[1]))[1]}
                     for show, found in by_show.items()}
              for kind, by_show in seasons.items()}

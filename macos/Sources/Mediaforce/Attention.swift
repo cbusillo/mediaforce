@@ -27,7 +27,7 @@ struct Attention: Equatable, Sendable {
     static func review(_ facts: MainWindowFacts, remembered: AttentionMemory?) -> Attention {
         let waiting = waitingNotices(facts)
         let memory = AttentionMemory(
-            lastFinishedAt: ([remembered?.lastFinishedAt ?? ""] + facts.recentlyFinishedSeasons.compactMap(\.finishedAt)).max() ?? "",
+            lastFinishedAt: ([remembered?.lastFinishedAt ?? ""] + facts.finishedLately.compactMap(\.finishedAt)).max() ?? "",
             waiting: Set(waiting.map(\.id)),
             backupCount: facts.originalBackups.count
         )
@@ -56,7 +56,7 @@ struct Attention: Equatable, Sendable {
     }
 
     private static func finishedNotices(_ facts: MainWindowFacts, since remembered: AttentionMemory) -> [AttentionNotice] {
-        let newlyFinished = facts.recentlyFinishedSeasons.filter { ($0.finishedAt ?? "") > remembered.lastFinishedAt }
+        let newlyFinished = facts.finishedLately.filter { ($0.finishedAt ?? "") > remembered.lastFinishedAt }
         guard newlyFinished.count > mostSeasonsNamedSeparately else {
             return newlyFinished.map { season in
                 AttentionNotice(
@@ -67,10 +67,11 @@ struct Attention: Equatable, Sendable {
                 )
             }
         }
-        let mayHaveMore = newlyFinished.count == facts.recentlyFinishedSeasons.count
+        let noun = newlyFinished.allSatisfy { MediaKind(libraryType: $0.mediaType) == .tv } ? "seasons" : "items"
+        let mayHaveMore = newlyFinished.count == facts.finishedLately.count
         return [AttentionNotice(
             id: "finished:\(newlyFinished.count)",
-            title: mayHaveMore ? "At least \(newlyFinished.count) seasons finished" : "\(newlyFinished.count) seasons finished",
+            title: mayHaveMore ? "At least \(newlyFinished.count) \(noun) finished" : "\(newlyFinished.count) \(noun) finished",
             body: "See Finished lately in Mediaforce for what was saved.",
             opens: .library
         )]
@@ -149,17 +150,17 @@ struct Attention: Equatable, Sendable {
 
     private static func kindWaitingReason(_ kind: MainWindowFacts.PendingKind) -> String {
         if kind.settingsAvailable == true {
-            return "Use the settings you approved for another show. No new sample is needed."
+            return "Use settings from another title. No new sample is needed."
         }
         if kind.sampleReady ?? true {
             let name = kind.sampleSeason?.split(separator: "/").dropFirst().joined(separator: " • ") ?? "The sample"
             return kind.oneTime == true
                 ? "\(name) is ready to watch."
-                : "Watch the sample and choose how these shows should look."
+                : "Watch the sample and choose how this group should look."
         }
         switch kind.sampleStatus {
         case "pending_review", "completed":
-            return "This sample can't decide the whole group. Choose another show's sample."
+            return "This sample can't decide the whole group. Choose a sample from another title."
         case "choose_size":
             return "Choose a size for the first sample."
         case "choose_balance":
@@ -177,7 +178,7 @@ struct Attention: Equatable, Sendable {
             return AttentionNotice(
                 id: "sample:\(sample.prefix):ready",
                 title: "\(name) sample is ready",
-                body: "Watch the sample and approve it, and Mediaforce will compress the rest of the season.",
+                body: "Watch the sample and decide whether to start compressing.",
                 opens: .sample(sample.prefix)
             )
         }

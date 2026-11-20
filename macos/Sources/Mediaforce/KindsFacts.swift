@@ -54,7 +54,8 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         var id: String { prefix }
         var name: String { String(prefix.split(separator: "/").last ?? "") }
         // A movie title is listed beside the shows its look covers.
-        var isMovie: Bool { MediaKind(rawValue: String(prefix.split(separator: "/").first ?? "")) == .movies }
+        var mediaType: String? = nil
+        var isMovie: Bool { mediaType.map { $0 == "movie" } ?? prefix.hasPrefix("movies/") }
     }
 
     struct Setting: Decodable, Sendable, Identifiable, Equatable {

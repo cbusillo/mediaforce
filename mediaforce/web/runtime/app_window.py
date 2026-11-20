@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -9,8 +9,9 @@ from typing import Any
 
 from sqlalchemy import select
 
-from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import encode_jobs, item_events, library_items, motion_keep_decisions, staged_artifacts
+from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.db import DBClient, DBRow
+from mediaforce.core.db_tables import calibration_jobs, encode_jobs, item_events, library_items, motion_keep_decisions, staged_artifacts
 from mediaforce.encoding.duration_estimate import (
     estimate_encode_job_duration, estimate_fits_before_schedule_close, load_encode_duration_samples,
 )
@@ -21,16 +22,18 @@ from mediaforce.library.candidate_selection import SEASON_PATTERN
 from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.evidence_queue import original_check_wait_reasons, paused_check_folders
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
+from mediaforce.library.media_scopes import media_scope_from_prefix
+from mediaforce.library.workflow_state import build_folder_workflow_states_for_scopes
 from mediaforce.library.motion_keep_state import library_item_source_sql
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
 from mediaforce.web.runtime.encode_runtime import _encode_job_estimate_items, _encode_job_library_key, _host_allows_library
 from mediaforce.web.runtime.host_runtime import running_encode_counts_by_host
 from mediaforce.web.runtime.host_status import is_awaiting_first_check
-from mediaforce.web.runtime.page_state import SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES
+from mediaforce.web.runtime.page_state import PageStateSources, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES, card_page_states
 
 SCHEMA_VERSION = 1
 RECENT_SEASON_LIMIT = 12
-BIGGEST_SHOW_LIMIT = 10
+BIGGEST_TITLE_LIMIT = 10
 EVENT_LIMIT = 12
 PROMOTED = "promoted"
 EVENT_KINDS = (
@@ -65,6 +68,20 @@ class _Item:
         self.show_prefix = "/".join(self.parts[:2]) if self.kind == "tv" and len(self.parts) >= 3 else None
         self.season_prefix = "/".join(self.parts[:3]) if self.kind == "tv" and len(self.parts) >= 4 else None
 
+    @property
+    def title_prefix(self) -> str | None:
+        if self.kind == "tv":
+            return self.show_prefix
+        if len(self.parts) < 2:
+            return None
+        return "/".join(self.parts[:2]) if self.kind == "movie" else self.rel_path
+
+    @property
+    def title(self) -> str:
+        if self.kind == "tv" or (self.kind == "movie" and len(self.parts) > 2):
+            return self.parts[1]
+        return PurePosixPath(self.rel_path).stem
+
 
 @dataclass(slots=True)
 class _Promotion:
@@ -91,6 +108,7 @@ def app_window_payload(
         observed_at: datetime,
         kinds: Iterable[Mapping[str, Any]] = (),
         remaking_samples: Collection[str] = (),
+        file_sample_cards: Callable[[Iterable[str]], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     items = _present_items(connection, library_types)
     promotions = _promotions(connection)
@@ -108,13 +126,18 @@ def app_window_payload(
             kind["sample_status"] = "retry_backoff"
     pending_kinds = [kind for kind in pending_kinds if _kind_asks_the_director(kind)]
     kind_samples = {kind["sample_season"] for kind in pending_kinds
-                    if kind.get("sample_ready", True) or kind.get("sample_status") in {"failed", "stopped", "needs_attention"}}
-    samples = _samples(cards)
+                    if kind["sample_season"] and (kind.get("sample_ready", True) or kind.get("sample_status") in {"failed", "stopped", "needs_attention"})}
+    sample_cards = list(cards)
+    if file_sample_cards is not None:
+        sample_cards.extend(file_sample_cards(item.rel_path for item in items if item.kind != "tv"
+                                              and not item.promoted and item.item_id not in kept))
+    samples = _samples(sample_cards)
+    underway = kind_samples | set(remaking_samples) | {card["prefix"] for card in sample_cards if (card.get("page_state") or {}).get("key") in {"making_test", "sample_waiting"}}
     waiting_samples = {sample["prefix"] for sample in samples["waiting_on_you"]}
     samples["waiting_on_you"] = [sample for sample in samples["waiting_on_you"]
                                  if sample["prefix"] not in kind_samples and sample["prefix"] not in remaking_samples]
     finished = _finished_seasons(items, promotions, seasons, kept)
-    events = _events(connection)
+    events = _events(connection, library_types)
     computers = list(computers)
     short_windows = _computers_whose_window_fits_no_waiting_file(connection, computers, now=observed_at)
     computer_states = [_computer(row, window_too_short=row.get("key") in short_windows) for row in computers]
@@ -122,7 +145,7 @@ def app_window_payload(
         "schema_version": SCHEMA_VERSION,
         "observed_at": observed_at.isoformat(timespec="seconds"),
         "work": {
-            **_work(connection, controller_storage, storage_admits_work, computer_states),
+            **_work(connection, controller_storage, storage_admits_work, computer_states, library_types, {item.rel_path for item in items if item.kind != "tv"}),
             "kinds_needing_you": pending_kinds,
             "seasons_needing_you": [
                 _tv_season(season_identity(str(card["prefix"])), card) for card in cards
@@ -133,7 +156,8 @@ def app_window_payload(
         "library": _library_totals(items),
         "space_saved": _space_saved(items, promotions, finished),
         "recently_finished_seasons": finished[:RECENT_SEASON_LIMIT],
-        "biggest_not_started": _biggest_not_started(connection, items, promotions, samples),
+        "recently_finished": _recently_finished(items, finished, promotions, kept),
+        "biggest_not_started": _biggest_not_started(connection, items, promotions, kept, samples, underway),
         "samples": samples,
         "computers": computer_states,
         "events": events,
@@ -227,6 +251,11 @@ def season_identity(prefix: str) -> dict[str, Any]:
         "season_folder": parts[2] if len(parts) >= 3 else None,
         "season": int(match.group(1)) if match else None,
     }
+
+
+def file_identity(prefix: str, title: str, media_type: str) -> dict[str, Any]:
+    return {"prefix": prefix, "show": title, "show_prefix": "/".join(prefix.split("/")[:2]) if media_type == "movie" else prefix,
+            "media_type": media_type, "season": None, "season_folder": None}
 
 
 def _tv_show_prefixes(items: Iterable[_Item]) -> set[str]:
@@ -483,37 +512,98 @@ def _space_saved(items: list[_Item], promotions: Mapping[int, _Promotion], finis
     }
 
 
-def _shows_with_encode_jobs(connection: DBClient) -> set[str]:
-    prefixes = connection.execute(select(encode_jobs.c.prefix).distinct()).scalars()
-    return {"/".join(PurePosixPath(str(prefix)).parts[:2]) for prefix in prefixes if prefix}
+def _recently_finished(
+        items: list[_Item], seasons: list[dict[str, Any]], promotions: Mapping[int, _Promotion], kept: Mapping[int, Any],
+) -> list[dict[str, Any]]:
+    finished = seasons[:RECENT_SEASON_LIMIT]
+    for item in items:
+        if item.kind == "tv" or not item.title_prefix:
+            continue
+        promotion = promotions.get(item.item_id) if item.promoted else None
+        decision = kept.get(item.item_id)
+        if not promotion and not decision:
+            continue
+        file_title = PurePosixPath(item.rel_path).stem
+        finished.append({
+            **file_identity(item.rel_path, item.title if item.title == file_title else f"{item.title} · {file_title}", item.kind),
+            "episode_count": 0,
+            "kept_original_count": int(not promotion),
+            "bytes_saved": promotion.bytes_saved if promotion else 0,
+            "finished_at": promotion.promoted_at if promotion else kept[item.item_id]["kept_at"],
+        })
+    return sorted(finished, key=lambda row: row["finished_at"] or "", reverse=True)[:RECENT_SEASON_LIMIT]
 
 
 def _biggest_not_started(
         connection: DBClient,
         items: list[_Item],
         promotions: Mapping[int, _Promotion],
+        kept: Mapping[int, Any],
         samples: Mapping[str, list[dict[str, Any]]],
+        underway: set[str],
 ) -> list[dict[str, Any]]:
-    started = _shows_with_encode_jobs(connection) | {
-        item.show_prefix for item in items if item.show_prefix and (item.promoted or item.item_id in promotions)
-    }
-    started |= {sample["show_prefix"] for sample in samples["approved_not_started"]}
-    waiting_by_show = {sample["show_prefix"]: sample["prefix"] for sample in reversed(samples["waiting_on_you"])}
-    shows: dict[str, list[_Item]] = defaultdict(list)
+    jobs = {str(prefix) for prefix in connection.execute(select(encode_jobs.c.prefix).distinct()).scalars() if prefix}
+    started_scopes = jobs | underway | {sample["prefix"] for sample in samples["approved_not_started"]}
+    started_titles = {"/".join(PurePosixPath(prefix).parts[:2]) for prefix in started_scopes}
+    started: set[str] = set()
+    waiting = {sample["show_prefix"]: sample["prefix"] for sample in reversed(samples["waiting_on_you"])}
+    titles: dict[str, list[_Item]] = defaultdict(list)
     for item in items:
-        if item.show_prefix and item.show_prefix not in started:
-            shows[item.show_prefix].append(item)
-    ranked = sorted(shows.items(), key=lambda show: sum(item.size_bytes for item in show[1]), reverse=True)
-    return [
-        {
-            "show_prefix": show_prefix,
-            "show": PurePosixPath(show_prefix).parts[1],
-            "bytes": sum(item.size_bytes for item in show_items),
-            "episode_count": len(show_items),
-            "season_count": len({item.season_prefix for item in show_items if item.season_prefix}),
-            "waiting_sample_prefix": waiting_by_show.get(show_prefix),
+        prefix = item.title_prefix
+        if not prefix:
+            continue
+        if (item.promoted or item.item_id in promotions or item.item_id in kept
+                or prefix in started_titles or prefix in started_scopes or item.parts[0] in started_scopes):
+            started.add(prefix)
+        elif item.kind not in {"tv", "movie"}:
+            for parent in PurePosixPath(prefix).parents:
+                if parent.as_posix() in started_scopes:
+                    started.add(prefix)
+                    break
+                if parent.as_posix() in waiting:
+                    waiting.setdefault(prefix, waiting[parent.as_posix()])
+        titles[prefix].append(item)
+    rows = []
+    for prefix, members in titles.items():
+        if prefix in started:
+            continue
+        first = members[0]
+        row = {
+            "show_prefix": prefix,
+            "show": first.title,
+            "media_type": first.kind,
+            "episode_count": len(members) if first.kind == "tv" else 0,
+            "season_count": len({item.season_prefix for item in members if item.season_prefix}),
+            "bytes": sum(item.size_bytes for item in members),
+            "waiting_sample_prefix": waiting.get(prefix),
         }
-        for show_prefix, show_items in ranked[:BIGGEST_SHOW_LIMIT]
+        rows.append(row)
+    return sorted(rows, key=lambda entry: (-entry["bytes"], entry["show_prefix"]))[:BIGGEST_TITLE_LIMIT]
+
+
+def library_file_sample_cards(
+        connection: DBClient, config: MediaforceConfig, sources: PageStateSources, unfinished_paths: Iterable[str],
+) -> list[dict[str, Any]]:
+    types = config.library_type_map
+    sampled = connection.execute(select(calibration_jobs.c.prefix).where(calibration_jobs.c.lane == "sample").distinct()).scalars()
+    sampled_prefixes = {prefix for prefix in sampled if types.get(prefix.partition("/")[0]) in {"movie", "other"}}
+    if not sampled_prefixes:
+        return []
+    exact: set[str] = set()
+    folders: set[str] = set()
+    for path in unfinished_paths:
+        if path in sampled_prefixes:
+            exact.add(path)
+        folders.update(parent.as_posix() for parent in PurePosixPath(path).parents if parent.as_posix() in sampled_prefixes)
+    scopes = [media_scope_from_prefix(prefix, match="exact_item" if prefix in exact else "descendants", library_types=types)
+              for prefix in sorted(exact ^ folders)]
+    if not scopes:
+        return []
+    workflows = build_folder_workflow_states_for_scopes(connection, scopes)
+    states = card_page_states(connection, config, [(scope.prefix, workflows[scope.prefix].to_payload(), None) for scope in scopes], sources)
+    return [
+        {**file_identity(scope.prefix, scope.title, scope.domain), "page_state": states[scope.prefix]}
+        for scope in scopes
     ]
 
 
@@ -523,7 +613,8 @@ def _samples(cards: list[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
         state = card.get("page_state") or {}
         key = state.get("key")
         entry = {
-            **season_identity(str(card["prefix"])),
+            **({name: card[name] for name in ("prefix", "show", "show_prefix")} if "show_prefix" in card
+               else season_identity(str(card["prefix"]))),
             "state": key,
             "action": state.get("primary_action"),
             "failure": state.get("failure"),
@@ -539,11 +630,19 @@ def _samples(cards: list[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     return {"waiting_on_you": waiting, "approved_not_started": approved}
 
 
+def _work_identity(prefix: str, library_types: Mapping[str, str], files: set[str]) -> dict[str, Any]:
+    if library_types.get(prefix.partition("/")[0]) == "tv":
+        return season_identity(prefix)
+    scope = media_scope_from_prefix(prefix, match="exact_item" if prefix in files else "descendants", library_types=library_types)
+    return file_identity(prefix, scope.title, scope.domain)
+
+
 def _work(
         connection: DBClient,
         controller_storage: Mapping[str, Any],
         storage_admits_work: bool,
         computers: list[dict[str, Any]],
+        library_types: Mapping[str, str], files: set[str],
 ) -> dict[str, Any]:
     paused = bool(load_queue_state(connection).get("is_paused")) or background_work_is_paused(connection)
     waiting_count = count_pending_encode_work(connection)
@@ -564,10 +663,10 @@ def _work(
     return {
         "state": state,
         "paused_by_owner": paused,
-        "paused_check_seasons": [season_identity(folder) for folder in paused_check_folders(connection)],
+        "paused_check_seasons": [_work_identity(folder, library_types, files) for folder in paused_check_folders(connection)],
         "stop_reasons": stop_reasons,
         "running_count": running_count,
-        "running_seasons": _running_seasons(connection),
+        "running_seasons": _running_seasons(connection, library_types, files),
         "waiting_count": waiting_count,
         "original_check_wait_reasons": original_check_wait_reasons(connection),
         "storage": [
@@ -577,7 +676,7 @@ def _work(
     }
 
 
-def _running_seasons(connection: DBClient) -> list[dict[str, Any]]:
+def _running_seasons(connection: DBClient, library_types: Mapping[str, str], files: set[str]) -> list[dict[str, Any]]:
     """The seasons or titles being compressed now, oldest job first, each named once."""
     prefixes = connection.execute(
         select(encode_jobs.c.prefix)
@@ -585,7 +684,7 @@ def _running_seasons(connection: DBClient) -> list[dict[str, Any]]:
         .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
         .order_by(encode_jobs.c.created_at.asc())
     ).scalars().all()
-    return [season_identity(prefix) for prefix in dict.fromkeys(str(prefix) for prefix in prefixes)]
+    return [_work_identity(prefix, library_types, files) for prefix in dict.fromkeys(str(prefix) for prefix in prefixes)]
 
 
 def _computers_whose_window_fits_no_waiting_file(
@@ -679,12 +778,13 @@ def _unavailable_computer_state(row: Mapping[str, Any]) -> str:
     return "not_ready"
 
 
-def _events(connection: DBClient) -> list[dict[str, Any]]:
+def _events(connection: DBClient, library_types: Mapping[str, str]) -> list[dict[str, Any]]:
     rows = connection.execute(
         select(
             item_events.c.id,
             item_events.c.event_type,
             item_events.c.created_at,
+            library_items.c.media_root,
             library_items.c.rel_path,
             staged_artifacts.c.bytes_saved,
         )
@@ -697,13 +797,14 @@ def _events(connection: DBClient) -> list[dict[str, Any]]:
         .order_by(item_events.c.created_at.desc(), item_events.c.id.desc())
         .limit(EVENT_LIMIT)
     ).mappings()
-    return [_event(row) for row in rows]
+    return [_event(row, library_types.get(str(row["media_root"]), "other")) for row in rows]
 
 
-def _event(row: Mapping[str, Any]) -> dict[str, Any]:
+def _event(row: DBRow, media_type: str) -> dict[str, Any]:
     parts = PurePosixPath(str(row["rel_path"])).parts
-    season_prefix = "/".join(parts[:3]) if len(parts) >= 4 else None
+    season_prefix = "/".join(parts[:3]) if media_type == "tv" and len(parts) >= 4 else None
     return {
+        "media_type": media_type,
         "id": int(row["id"]),
         "kind": row["event_type"],
         "at": row["created_at"],

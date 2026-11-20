@@ -11,7 +11,7 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict, objec
 from mediaforce.tuning.compression_intent import compression_intent_from_payload, compression_intent_options
 from mediaforce.tuning.size_goals import DECIMAL_MEGABYTE_BYTES, measured_followup_request, sample_goal_request, \
     with_compression_intent, operator_intent_from_policy
-from mediaforce.web.runtime.app_window import season_identity
+from mediaforce.web.runtime.app_window import file_identity, season_identity
 from mediaforce.web.runtime.folder_actions import APPROVED_SAMPLE_NOTES, ApprovalNeedsConfirmation, QueueNeedsChoice, \
     ReviewedDraftChanged
 from mediaforce.web.runtime.page_state import SIZE_GOAL_FAILURES
@@ -66,8 +66,10 @@ def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[s
         retry_balance = operator_intent_from_policy(object_dict(retry_policy.get("video"))).compression_intent
         selected = {option["key"] for option in compression_intent_options(retry_balance) if option["selected"]}
         effective_balance = next((option for option in balances if option["key"] in selected), None)
+    prefix = str(folder["prefix"])
+    scope = object_dict(folder.get("media_scope"))
     return {
-        **season_identity(str(folder["prefix"])),
+        **(file_identity(prefix, str(scope["title"]), str(scope["domain"])) if scope.get("domain") in {"movie", "other"} else season_identity(prefix)),
         "state": page_state.get("key"),
         "wait_detail": page_state.get("wait_detail"),
         "action": page_state.get("primary_action"),
