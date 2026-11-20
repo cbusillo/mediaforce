@@ -1,4 +1,5 @@
 import plistlib
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -65,6 +66,27 @@ class LoginItemTests(unittest.TestCase):
         self.assertEqual(second, "unchanged")
         self.assertEqual(self.paths.plist.stat().st_mtime_ns, first_mtime)
         self.assertTrue(self.paths.log_dir.is_dir())
+
+    def test_download_instructions_start_the_freshly_installed_service(self) -> None:
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+        instructions = readme.split("### Download", 1)[1].split("### ", 1)[0]
+        calls: list[str] = []
+
+        def launchctl(command: list[str]) -> subprocess.CompletedProcess[str]:
+            calls.append(command[1])
+            return subprocess.CompletedProcess(command, 113 if command[1] == "print" else 0, "", "")
+
+        with patch("mediaforce.ops.login_item._require_supported_platform"), patch(
+            "mediaforce.ops.login_item._run_command", side_effect=launchctl
+        ):
+            for line in instructions.replace("\\\n", " ").splitlines():
+                command = shlex.split(line) if line.lstrip().startswith("/Applications/") else []
+                if command and Path(command[0]).name == self.program.name:
+                    action = command[command.index("service") + 1]
+                    result = run_login_item_command(action, project_root=self.project_root, home=self.home, config_path=self.config)
+                    self.assertEqual(result, 0)
+        self.assertTrue(self.paths.plist.exists())
+        self.assertIn("kickstart", calls)
 
     def test_enable_orders_launchctl_operations(self) -> None:
         calls: list[list[str]] = []
