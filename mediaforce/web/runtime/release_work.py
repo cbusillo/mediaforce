@@ -9,7 +9,6 @@ from sqlalchemy import func, select
 from mediaforce.core.db import DBClient, open_readonly_db
 from mediaforce.core.db_tables import calibration_jobs, encode_jobs, library_item_evidence_state, scan_runs
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, count_pending_encode_work
-from mediaforce.library.evidence_queue import EVIDENCE_WORK_ACTIVE_STATUSES
 from mediaforce.tuning.calibration_jobs import EXECUTION_ACTIVE_JOB_STATUSES
 from mediaforce.web.runtime.job_runtime import TERMINAL_SCAN_JOB_STATUSES
 
@@ -59,7 +58,7 @@ def release_work_snapshot(connection: DBClient) -> ReleaseWorkSnapshot:
         ).scalar_one()),
         "active_evidence": int(connection.execute(
             select(func.count()).select_from(library_item_evidence_state)
-            .where(library_item_evidence_state.c.work_status.in_(EVIDENCE_WORK_ACTIVE_STATUSES))
+            .where(library_item_evidence_state.c.work_status == "running")
         ).scalar_one()),
     }
     return {

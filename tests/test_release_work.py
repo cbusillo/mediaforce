@@ -58,8 +58,8 @@ def test_running_catalog_scan_is_counted(tmp_path: Path) -> None:
         assert release_work_snapshot(connection)["counts"]["unfinished_scan_rows"] == 1
 
 
-@pytest.mark.parametrize("status", ["queued", "running", "retry_wait", "waiting_source", "waiting_host"])
-def test_deferred_evidence_is_counted(tmp_path: Path, status: str) -> None:
+@pytest.mark.parametrize("status", ["running", "queued", "retry_wait", "waiting_source", "waiting_host", "waiting_window"])
+def test_only_executing_evidence_blocks_release(tmp_path: Path, status: str) -> None:
     with open_db(tmp_path / "library.sqlite3") as connection:
         result = connection.execute(library_items.insert().values(
             source_path="/fixture/file.mkv", rel_path="show/file.mkv", media_root="/fixture",
@@ -72,7 +72,7 @@ def test_deferred_evidence_is_counted(tmp_path: Path, status: str) -> None:
             library_item_id=result.inserted_primary_key[0], evidence_kind="cadence", state="missing",
             policy_hash="fixture", work_status=status, updated_at="2026-10-09T00:00:00Z",
         ))
-        assert release_work_snapshot(connection)["counts"]["active_evidence"] == 1
+        assert release_work_snapshot(connection)["counts"]["active_evidence"] == int(status == "running")
 
 
 def test_finished_and_attention_only_jobs_have_no_counted_work(tmp_path: Path) -> None:
