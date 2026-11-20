@@ -253,6 +253,11 @@ def season_identity(prefix: str) -> dict[str, Any]:
     }
 
 
+def file_identity(prefix: str, title: str, media_type: str) -> dict[str, Any]:
+    return {"prefix": prefix, "show": title, "show_prefix": "/".join(prefix.split("/")[:2]) if media_type == "movie" else prefix,
+            "media_type": media_type, "season": None, "season_folder": None}
+
+
 def _tv_show_prefixes(items: Iterable[_Item]) -> set[str]:
     """The shows the sidebar counts and the TV shows page lists, so the two always agree."""
     return {item.show_prefix for item in items if item.show_prefix}
@@ -520,10 +525,7 @@ def _recently_finished(
             continue
         file_title = PurePosixPath(item.rel_path).stem
         finished.append({
-            "prefix": item.rel_path,
-            "show_prefix": item.title_prefix,
-            "show": item.title if item.title == file_title else f"{item.title} · {file_title}",
-            "media_type": item.kind,
+            **file_identity(item.rel_path, item.title if item.title == file_title else f"{item.title} · {file_title}", item.kind),
             "episode_count": 0,
             "kept_original_count": int(not promotion),
             "bytes_saved": promotion.bytes_saved if promotion else 0,
@@ -600,8 +602,7 @@ def library_file_sample_cards(
     workflows = build_folder_workflow_states_for_scopes(connection, scopes)
     states = card_page_states(connection, config, [(scope.prefix, workflows[scope.prefix].to_payload(), None) for scope in scopes], sources)
     return [
-        {"prefix": scope.prefix, "show_prefix": "/".join(scope.prefix.split("/")[:2]) if scope.domain == "movie" else scope.prefix,
-         "show": scope.title, "page_state": states[scope.prefix]}
+        {**file_identity(scope.prefix, scope.title, scope.domain), "page_state": states[scope.prefix]}
         for scope in scopes
     ]
 
@@ -632,9 +633,8 @@ def _samples(cards: list[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
 def _work_identity(prefix: str, library_types: Mapping[str, str], files: set[str]) -> dict[str, Any]:
     if library_types.get(prefix.partition("/")[0]) == "tv":
         return season_identity(prefix)
-    path = PurePosixPath(prefix)
-    return {"prefix": prefix, "show_prefix": "/".join(path.parts[:2]), "show": path.stem if prefix in files else path.name,
-            "season": None, "season_folder": None}
+    scope = media_scope_from_prefix(prefix, match="exact_item" if prefix in files else "descendants", library_types=library_types)
+    return file_identity(prefix, scope.title, scope.domain)
 
 
 def _work(

@@ -19,7 +19,7 @@ final class RenderTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(rendered["needs-you"]).isEmpty)
     }
 
-    func testAFinishedMovieOpensTheSameFileFromTheShelfAndNotification() throws {
+    func testAFinishedMovieNotificationOpensItsFile() throws {
         let facts = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(RenderFixtureServer.busierDay.utf8))
         let movie = try XCTUnwrap(facts.finishedLately.first { $0.mediaType == "movie" })
         let notices = Attention.review(facts, remembered: AttentionMemory()).notices
