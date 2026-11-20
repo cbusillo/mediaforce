@@ -284,20 +284,21 @@ and size, and `deletion`: what the latest deletion since the server started is
 doing, or null when there has been none. It has `state` (`running`,
 `finished` or `failed`), `total_count` and `total_bytes` (null until the
 folder has been read), `deleted_count`, `freed_bytes`, `kept_count` (originals
-kept because unpublished files still need them), and for a failure
-`failed_file`, relative to the Cleanup folder, and `failure_reason`. The
-counts move as each backup is deleted; a failure stops the deletion at that
-file, as it always has.
+kept because unpublished files still need them), and `skipped_files`. Each
+skipped entry gives the file relative to the Cleanup folder and the reason
+it could not be deleted. Cleanup continues with the other confirmed files.
+If the operation itself stops, `failed_file` and `failure_reason` describe
+the failure.
 
 Delete asks first, then `POST /api/archive-cleanup/clear` runs the deletion
 off the server's request loop and answers when it ends. Meanwhile the page
 reads `/api/archive-cleanup` every second, says "Deleting 34 original
 backups… 12 of 34, 51 GB back so far" with a progress bar, and keeps Delete
 unpressable; another window or a restarted app sees the same running state.
-When it ends the line says what came back, or which file couldn't be deleted
-and why, and the bar, the shows to compare and the main window's facts are
-read again. A refusal because files are being published is a notice that
-nothing was deleted.
+When it ends, the page shows how many backups were deleted, the space freed
+and each skipped file with its reason. Delete is available again if backups
+remain. The bar, the shows to compare and the main window's facts refresh.
+A refusal because files are being published is a notice that nothing was deleted.
 
 ## Settings
 
