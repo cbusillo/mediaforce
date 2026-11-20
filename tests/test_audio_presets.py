@@ -332,10 +332,17 @@ def test_library_setting_accepts_only_known_sound_choices() -> None:
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_one_sound_decision_follows_current_genres_and_preserves_hand_picked_sound(tmp_path: Path, enabled: bool) -> None:
-    config = _config(tmp_path, overrides=[
+    data = tmp_path / "data"
+    data.mkdir()
+    catalog = tmp_path / "catalog"
+    catalog.symlink_to(data, target_is_directory=True)
+    config = _config(catalog, overrides=[
         {"path_prefix": "tv/Interview", "audio": audio_preset_values(KEEP_SURROUND, BASE_AUDIO)[0]},
         {"path_prefix": f"{SHOW}/Season 1", "audio": BASE_AUDIO},
     ])
+    config.raw[SPEECH_GENRE_SETTING] = enabled
+    assert config.resolve_policy("tv/Before first scan")["audio"] == BASE_AUDIO
+    config.raw.pop(SPEECH_GENRE_SETTING)
     with open_db(config.paths.db_path) as connection:
         for prefix, genre in [(SHOW, "Reality"), ("tv/Interview", "Talk"), ("tv/News", "News")]:
             connection.execute(series_metadata.insert().values(series_prefix=prefix, tmdb_genres_json=json.dumps([genre]), updated_at="now"))

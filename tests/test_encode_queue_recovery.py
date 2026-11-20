@@ -25849,7 +25849,10 @@ raise SystemExit(0)
 
     def test_compress_as_is_only_accepts_the_selected_eligible_file(self) -> None:
         show = self._motion_show({"Season 1/A.mkv": "as_is", "Season 1/B.mkv": "as_is", "Season 1/C.mkv": "partly",
-                                  "Season 1/D.mkv": "held"})
+                                  "Season 1/D.mkv": "held", "Season 1/E.mkv": "as_is"})
+        with open_db(show.config.paths.db_path) as connection:
+            connection.execute(update(library_items).where(library_items.c.id == show.item_ids["Season 1/E.mkv"])
+                               .values(fingerprint="", content_version_fingerprint="known-original"))
         season = "tv/show/Season 1"
         self.assertTrue(self._keep_original(show, season, "Season 1/B.mkv", "Season 1/C.mkv")["ok"])
 
@@ -25869,7 +25872,7 @@ raise SystemExit(0)
         self.assertEqual(self._kept_rows(), {show.item_ids["Season 1/C.mkv"]})
         lifecycle = self._motion_page(show, season).lifecycle
         self.assertEqual(lifecycle["eligible_candidate_count"], 2)
-        self.assertEqual(lifecycle["motion_held_candidate_count"], 1)
+        self.assertEqual(lifecycle["motion_as_is_candidate_count"], 0)
 
     def test_a_kept_episode_is_not_offered_or_accepted_as_is_on_the_show_page(self) -> None:
         show = self._motion_show({"Season 1/Unclear.mkv": "as_is", "Season 1/Other.mkv": "as_is"})

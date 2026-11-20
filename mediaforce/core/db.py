@@ -151,6 +151,8 @@ def read_catalog_value[T](path: Path, query: Select[tuple[T]]) -> T | None:
         catalog, thread, connection = reader
         if catalog == path and thread == get_ident() and not connection.closed:
             return connection.execute(query).scalar_one_or_none()
+    if not path.exists():
+        return None
     with open_readonly_db(path) as connection:
         return connection.execute(query).scalar_one_or_none()
 
@@ -174,7 +176,7 @@ def open_db(
         reserved_lease_identity,
     )
     try:
-        with _reading_catalog(resolved_path, connection):
+        with _reading_catalog(db_path, connection):
             yield connection
     except BaseException:
         try:
@@ -248,7 +250,7 @@ def open_readonly_db(db_path: Path) -> Iterator[Connection]:
         connection.exec_driver_sql("PRAGMA query_only=ON")
         if identity_guard is not None:
             identity_guard()
-        with _reading_catalog(resolved_path, connection):
+        with _reading_catalog(db_path, connection):
             yield connection
         if identity_guard is not None:
             identity_guard()

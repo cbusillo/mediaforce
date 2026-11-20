@@ -46,7 +46,9 @@ struct ItemPage: View {
                 isPresented: Binding(get: { motionDecision != nil }, set: { if !$0 { motionDecision = nil } }),
                 presenting: motionDecision
             ) { files in
-                Button(Words.compressAsIs) { Task { await decideMotion(files, compress: true) } }
+                if files.motionFiles.contains(where: \.needsMotionChoice) {
+                    Button(Words.compressAsIs) { Task { await decideMotion(files, compress: true) } }
+                }
                 Button(Words.keepTheOriginal) { Task { await decideMotion(files, compress: false) } }
                 Button(Words.cancel, role: .cancel) {}
             } message: { files in

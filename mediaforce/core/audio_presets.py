@@ -10,9 +10,9 @@ from sqlalchemy import select
 
 from mediaforce.core.db import read_catalog_value
 from mediaforce.core.db_tables import series_metadata
-
 from mediaforce.core.type_defs import object_list
 
+SPEECH_GENRE_SETTING = "speech_heavy_for_reality_and_talk"
 KEEP_SURROUND = "keep_surround"
 SPEECH_STEREO = "speech_stereo"
 # Keys a preset writes. Choosing another preset rewrites or removes all of them.
@@ -43,8 +43,6 @@ AUDIO_PRESETS: dict[str, AudioPreset] = {
     ),
 }
 
-
-SPEECH_GENRE_SETTING = "speech_heavy_for_reality_and_talk"
 
 
 def is_reality_or_talk(db_path: Path, show_prefix: str) -> bool:

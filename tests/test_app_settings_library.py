@@ -128,10 +128,16 @@ def _facts_body(app: FastAPI) -> dict[str, Any]:
 @pytest.mark.parametrize("enabled", [True, False])
 def test_genre_sound_remembers_the_first_answer(library_app: tuple[FastAPI, Path], enabled: bool) -> None:
     app, _path = library_app
-    assert app.state.config.needs_genre_sound_decision
+    def needs_answer() -> bool:
+        with patch.object(web_app, "_host_runtime_rows", return_value=[]):
+            window = _endpoint(app, "GET", "/api/app/main-window")()
+        return json.loads(window.body)["work"]["needs_genre_sound_decision"]
+
+    assert needs_answer()
     decide = _endpoint(app, "POST", "/api/app/sound/reality-and-talk")
     assert asyncio.run(decide(_json_request({"enabled": enabled}))).status_code == 200
     assert asyncio.run(decide(_json_request({"enabled": not enabled}))).status_code == 409
+    assert not needs_answer()
     reopened = load_config(app.state.config.paths.config_path)
     assert reopened.genre_sound_decision is enabled
     assert not reopened.needs_genre_sound_decision

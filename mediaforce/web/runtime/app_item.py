@@ -19,11 +19,10 @@ from mediaforce.core.type_defs import int_value
 from mediaforce.library.candidate_selection import encode_candidate_decisions, scope_lifecycle_payload_from_decisions, \
     workflow_eligibility
 from mediaforce.library.media_scopes import MediaScope, resolve_media_scope
-from mediaforce.library.motion_holds import queue_motion_holds
+from mediaforce.library.motion_holds import compressible_motion_files, queue_motion_holds
 from mediaforce.library.motion_keep_state import library_item_source_sql
 from mediaforce.library.staged_validation import staged_validation_outcome
 from mediaforce.library.workflow_state import build_folder_workflow_state
-from mediaforce.web.runtime.ambiguous_motion import compressible_motion_files
 from mediaforce.web.runtime.app_window import season_identity
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
 from mediaforce.web.runtime.episode_progress import load_season_episode_progress
@@ -83,7 +82,7 @@ def item_payload(
                 .where(library_items.c.id.in_(ids), motion_keep_decisions.c.source_fingerprint == library_item_source_sql())
             )
         }
-        motion_choices = compressible_motion_files(connection, [item.item_id for item in items if item.motion_held or item.item_id in kept])
+        motion_choices = motion_holds.as_is | compressible_motion_files(connection, list(kept)).keys()
         removed = confirmed_originals_removed_item_ids(connection)
         lifecycle = scope_lifecycle_payload_from_decisions(scope.prefix, decisions, motion_holds)
         sound_facts = sound(scope.prefix) if scope.domain == "tv" else None
