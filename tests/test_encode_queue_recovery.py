@@ -8627,8 +8627,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 .where(library_items.c.id == legacy_promoted_id)
                 .values(
                     size_bytes=2 * 1024 * 1024 * 1024,
-                    rel_path=f"movies/library/{legacy_promoted.name}",
-                    parent_dir="movies/library",
+                    rel_path=f"tv/Other Show/Season 1/{legacy_promoted.name}",
+                    parent_dir="tv/Other Show/Season 1",
                     video_codec=None,
                 )
             )
@@ -8639,17 +8639,19 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 .where(staged_artifacts.c.library_item_id == legacy_promoted_id)
                 .values(
                     promoted_at=web_app._now_iso(),
-                    source_rel_path=f"movies/library/{legacy_promoted.name}",
+                    source_rel_path=f"tv/Other Show/Season 1/{legacy_promoted.name}",
                     source_size_bytes=2 * 1024 * 1024 * 1024,
                     bytes_saved=int(1.5 * 1024 * 1024 * 1024),
                 )
             )
 
-            cards = web_app._list_library_detail_cards(self.config, connection)
+            fallback_bytes = 425_000_000
+            with patch.object(web_app, "_estimate_savings_bytes", return_value=fallback_bytes):
+                cards = web_app._list_library_detail_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 3"]
         self.assertEqual(len(matching_cards), 1)
-        self.assertEqual(matching_cards[0].estimated_savings_bytes, int(0.4 * 1024 * 1024 * 1024))
+        self.assertEqual(matching_cards[0].estimated_savings_bytes, fallback_bytes)
 
     def test_folder_cards_ignore_unlabeled_promotions_in_folder_history_ratio(self) -> None:
         pending = self._create_source_file("episode-pending.mkv")
