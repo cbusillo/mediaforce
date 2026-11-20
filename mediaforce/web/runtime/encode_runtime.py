@@ -4448,6 +4448,10 @@ def claim_next_runnable_encode_job(
     connection.commit()
     try:
         with _locked_encode_dispatch(connection), _locked_manifest_cleanup(Path(str(next_job["manifest_path"]))):
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            if update_hold_reason(config.paths.db_path.parent):
+                connection.rollback()
+                return None
             update_result = connection.execute(
                 claim
                 .where(encode_jobs.c.job_id == next_job["job_id"])

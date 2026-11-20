@@ -26,6 +26,7 @@ from mediaforce.web.runtime import job_runtime as job_runtime_module
 from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_db, latest_scan_completed_at, \
     load_scan_status, maybe_schedule_scan, repair_stale_scan_runs, run_scan_job, save_scan_job_state, scan_is_stale
 from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner
+from mediaforce.web.runtime.release_work import release_work_payload
 from test_controller_work_window import configure_controller_night, controller_clock
 
 
@@ -139,14 +140,22 @@ class OperatorWorkTests(unittest.TestCase):
                 clock.now.return_value = datetime(2026, 10, 29, 9, tzinfo=UTC)
                 return ScanStats(scan_id=kwargs["scan_id"])
 
+            finishing = []
+
+            def observe_cleanup(*_args: object, **_kwargs: object) -> None:
+                if request.job["status"] == "completed":
+                    finishing.append(release_work_payload(self.config.paths.db_path)["running_scan_passes"])
+
             with patch("mediaforce.web.runtime.job_runtime.load_config", return_value=self.config), patch("mediaforce.web.runtime.job_runtime.scan_library", side_effect=scan
-            ), patch("mediaforce.web.runtime.job_runtime.purge_transient_artifacts"), patch("mediaforce.web.runtime.job_runtime.sync_external_metadata", return_value=SimpleNamespace(to_payload=lambda: {})
+            ), patch("mediaforce.web.runtime.job_runtime.purge_transient_artifacts", side_effect=observe_cleanup), patch("mediaforce.web.runtime.job_runtime.sync_external_metadata", return_value=SimpleNamespace(to_payload=lambda: {})
             ):
                 run_scan_job(config_path=self.config.paths.config_path, prefix=None, job_id=request.job["job_id"],
                              process_controller=ManagedProcessController(), deps=request.deps)
             self.assertEqual(request.job["status"], "completed")
             request.deps.save_catalog_signature.assert_called_once()
             request.deps.reset_folder_card_cache.assert_called_once()
+            self.assertEqual(finishing, [1])
+            self.assertEqual(release_work_payload(self.config.paths.db_path)["running_scan_passes"], 0)
 
     def test_active_scan_obeys_new_closed_settings_before_starting_another_file(self) -> None:
         from mediaforce.library.scanner import _failed_probe_summary

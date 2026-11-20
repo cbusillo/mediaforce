@@ -86,7 +86,7 @@ in, and it updates itself between files from then on.
 
    ```bash
    /Applications/Mediaforce.app/Contents/MacOS/mediaforce-server \
-     --config ~/Library/Application\ Support/mediaforce/config.toml service install
+     --config ~/Library/Application\ Support/mediaforce/config.toml service enable
    ```
 
 4. Open Mediaforce and finish setup in Settings.

@@ -18,7 +18,7 @@ from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.candidate_selection import encode_candidate_decisions, project_candidates, \
     scope_lifecycle_payload_from_decisions, workflow_eligibility
 from mediaforce.library.motion_holds import queue_motion_holds
-from mediaforce.web.runtime.job_runtime import calibration_job_public_payload, calibration_scope_relation
+from mediaforce.web.runtime.job_runtime import calibration_job_progress_payload, calibration_job_public_payload, calibration_scope_relation
 
 
 def dashboard_summary_payload(
@@ -52,6 +52,9 @@ def dashboard_summary_payload(
                 ).scalar_one()
             ) == 0
         calibration_queue = list_queue_summary(connection)
+        for lane in ("sample", "full"):
+            for job in calibration_queue[lane]["running"]:
+                job["progress"] = calibration_job_progress_payload(connection, job)
         review_ready = _review_ready_samples(
             connection,
             config,

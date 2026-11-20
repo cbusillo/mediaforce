@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 import hashlib
 from pathlib import Path
 import plistlib
+import subprocess
 from unittest.mock import patch
 from xml.etree import ElementTree
 
@@ -73,7 +74,21 @@ def test_build_is_one_above_the_live_feed_and_never_reuses_a_hand_numbered_one(
         previous = build_feed(release).decode().replace("<sparkle:version>7<", f"<sparkle:version>{live[0]}<").replace(
             "<sparkle:shortVersionString>0.2.0<", f"<sparkle:shortVersionString>{live[1]}<")
 
-    assert next_build("0.2.0", previous) == expected
+    with patch.object(subprocess, "check_output", return_value=""):
+        assert next_build("0.2.0", previous) == expected
+
+
+@pytest.mark.parametrize("previous", [None, "<rss><channel/></rss>"])
+def test_missing_build_history_refuses_existing_releases(previous: str | None) -> None:
+    with patch.object(subprocess, "check_output", return_value="v0.1.0"), pytest.raises(ValueError, match="v0.1.0"):
+        next_build("0.2.0", previous)
+
+
+def test_served_feed_must_offer_candidate_build(release: tuple[Path, Path]) -> None:
+    feed = build_feed(release).decode()
+    release_app.require_served_build(feed, 7)
+    with pytest.raises(ValueError, match="8"):
+        release_app.require_served_build(feed, 8)
 
 
 @pytest.mark.parametrize("live_version", ["0.2.0", "0.10.0", "1.0.0"])
