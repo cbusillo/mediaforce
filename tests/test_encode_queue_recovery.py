@@ -6912,7 +6912,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     )
                 )
 
-            cards = web_app._preview_folder_cards(self.config, connection)
+            cards = web_app._list_library_detail_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 1"]
         self.assertEqual(len(matching_cards), 1)
@@ -7116,7 +7116,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 )
             )
 
-            cards = web_app._preview_folder_cards(self.config, connection)
+            cards = web_app._list_library_detail_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 5"]
         self.assertEqual(len(matching_cards), 1)
@@ -7329,7 +7329,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 )
 
             with patch.object(web_app, "_estimate_savings_bytes", autospec=True, return_value=0):
-                cards = web_app._preview_folder_cards(self.config, connection)
+                cards = web_app._list_library_detail_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 6"]
         self.assertEqual(len(matching_cards), 1)
@@ -7379,7 +7379,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     )
                 )
 
-            cards = web_app._preview_folder_cards(self.config, connection)
+            cards = web_app._list_library_detail_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 1"]
         self.assertEqual(len(matching_cards), 1)
@@ -8561,7 +8561,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 (
                     codec_promoted_id,
                     codec_promoted.name,
-                    f"movies/library/{codec_promoted.name}",
+                    f"tv/Other Show/Season 1/{codec_promoted.name}",
                     "h264",
                     1024 * 1024 * 1024,
                 ),
@@ -8598,7 +8598,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     .values(**update_values)
                 )
 
-            cards = web_app._preview_folder_cards(self.config, connection)
+            cards = web_app._list_library_detail_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 2"]
         self.assertEqual(len(matching_cards), 1)
@@ -8645,7 +8645,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 )
             )
 
-            cards = web_app._preview_folder_cards(self.config, connection)
+            cards = web_app._list_library_detail_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 3"]
         self.assertEqual(len(matching_cards), 1)
@@ -8700,7 +8700,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     .values(**update_values)
                 )
 
-            cards = web_app._preview_folder_cards(self.config, connection)
+            cards = web_app._list_library_detail_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 4"]
         self.assertEqual(len(matching_cards), 1)
@@ -8728,8 +8728,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 .where(library_items.c.id == promoted_id)
                 .values(
                     size_bytes=2 * 1024 * 1024 * 1024,
-                    rel_path=f"movies/library/{promoted.name}",
-                    parent_dir="movies/library",
+                    rel_path=f"tv/Other Show/Season 1/{promoted.name}",
+                    parent_dir="tv/Other Show/Season 1",
                     video_codec="h264",
                 )
             )
@@ -8740,14 +8740,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 .where(staged_artifacts.c.library_item_id == promoted_id)
                 .values(
                     promoted_at=web_app._now_iso(),
-                    source_rel_path=f"movies/library/{promoted.name}",
+                    source_rel_path=f"tv/Other Show/Season 1/{promoted.name}",
                     source_video_codec="h264",
                     source_size_bytes=2 * 1024 * 1024 * 1024,
                     bytes_saved=1024 * 1024 * 1024,
                 )
             )
 
-            cards = web_app._preview_folder_cards(self.config, connection)
+            cards = web_app._list_library_detail_cards(self.config, connection)
 
         matching_cards = [card for card in cards if card.prefix == "tv/show/Season 2"]
         self.assertEqual(len(matching_cards), 1)
