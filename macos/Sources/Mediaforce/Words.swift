@@ -1758,6 +1758,11 @@ extension Words {
     static let originalBackups = "Original backups"
     static let backupsAsk = "Delete them to free the space?"
     static let firstSampleDetailAsk = "Choose how much detail its first sample keeps."
+    static func sampleNeedsRemaking(_ status: String?) -> Bool {
+        ["missing_clips", "failed", "stopped", "needs_attention"].contains(status)
+    }
+
+    static let remakeSampleAsk = "Make a new sample to watch."
     static let firstSampleStopped = "Its first sample stopped."
     static let sampleStopped = "Its sample stopped."
     static let spaceCovered = "The space this covers"

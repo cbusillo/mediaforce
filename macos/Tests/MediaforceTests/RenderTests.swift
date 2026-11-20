@@ -211,12 +211,21 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
         case "/api/app/settings/metadata": SettingsTests.metadataFacts
         case "/api/app/settings/metadata/connections": SettingsTests.metadataConnections
         case "/api/app/settings/compression": SettingsTests.compressionFacts
+        case "/api/app/samples/tv/Lucifer/Season 2": Self.missingClips
         case let path where path.hasPrefix("/api/app/samples/"): SampleTests.facts()
         case let path where path.hasPrefix("/api/app/items/"):
             item(String(path.dropFirst("/api/app/items/".count)))
         default: nil
         }
     }
+
+    static let missingClips: String = {
+        var sample = try! JSONSerialization.jsonObject(with: Data(SampleTests.facts(state: "needs_help", action: "make_sample").utf8)) as! [String: Any]
+        sample["moments"] = []
+        sample["failure"] = "missing_clips"
+        sample["coverage_summary"] = "Tested 1 of 16 episodes. The sample covers every known season, video format and resolution in this group."
+        return String(decoding: try! JSONSerialization.data(withJSONObject: sample), as: UTF8.self)
+    }()
 
     // The shared sample facts on a busier day, using only reasons the app already has.
     static let busierDay: String = {

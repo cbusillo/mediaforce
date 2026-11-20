@@ -27,6 +27,15 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         var sampleShow: String? { sampleSeason?.split(separator: "/").prefix(2).joined(separator: "/") }
         var showsSampleFirst: Bool { oneTime || settings.isEmpty || sampleSetting != nil }
 
+        var sampleButtonTitle: String? {
+            if let approval { return approval.sampleMoments?.isEmpty == false ? Words.watchApprovedSample : nil }
+            guard sampleSeason != nil else { return nil }
+            if Words.sampleNeedsRemaking(sampleStatus) { return Words.makeSample }
+            if sampleStatus == "choose_size" { return Words.chooseSize }
+            if ["pending_review", "completed"].contains(sampleStatus) { return Words.watchSample }
+            return Words.openSample
+        }
+
         var offersSample: Bool {
             sampleSeason == nil || (sampleReady == false && ["pending_review", "completed"].contains(sampleStatus ?? ""))
         }

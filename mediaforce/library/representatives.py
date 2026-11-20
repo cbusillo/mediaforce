@@ -16,7 +16,7 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.evidence import build_evidence_envelope, stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import mapping_dict, object_dict, object_list
 from mediaforce.library.candidate_selection import SEASON_PATTERN, encode_candidate_decisions, season_identity
-from mediaforce.library.media_scopes import MediaScope, resolve_media_scope, scope_rel_path_filter
+from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix, resolve_media_scope, scope_rel_path_filter
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 from mediaforce.library.planner import build_manifest_item
 from mediaforce.library.source_evidence import load_source_evidence, load_source_evidence_context
@@ -156,6 +156,7 @@ def load_representative_selection(
     return select_representatives(
         items,
         prefix=scope.prefix,
+        domain=scope.domain,
         policy=config.resolve_policy(scope.prefix),
         population=population,
     )
@@ -285,6 +286,7 @@ def select_representatives(
         items: Sequence[Mapping[str, Any]],
         *,
         prefix: str = "",
+        domain: str | None = None,
         policy: Mapping[str, Any] | None = None,
         tool_version: str = REPRESENTATIVE_SELECTION_TOOL_VERSION,
         fingerprint_dimensions: Iterable[str] | None = None,
@@ -379,7 +381,7 @@ def select_representatives(
     coverage["selected_item_count"] = len(selected)
     coverage["untested_groups"] = untested_groups
     confidence = _confidence_payload(coverage)
-    coverage_summary = _coverage_summary(untested_groups, measured_count=len(measured), total_count=len(candidates))
+    domain = domain or media_scope_from_prefix(prefix, match="descendants").domain
     rationale = [
         _selection_rationale(
             candidate,
@@ -470,7 +472,7 @@ def select_representatives(
         "unmeasured_source_ids": unmeasured_source_ids,
         "population": population.to_payload(),
         "coverage": coverage,
-        "coverage_summary": coverage_summary,
+        "coverage_summary": sample_coverage_summary(coverage, is_tv=domain == "tv"),
         "outliers": outliers,
         "confidence": confidence,
         "evidence": evidence,
@@ -804,15 +806,19 @@ def _group_sort_key(kind: str, value: str) -> tuple[int, str]:
     return (int(value), "") if kind == "season" else (0, value)
 
 
-def _coverage_summary(
-        untested_groups: Sequence[Mapping[str, Any]],
-        *,
-        measured_count: int,
-        total_count: int,
-) -> str:
-    tested = f"Tested {measured_count} of {total_count} {'file' if total_count == 1 else 'files'}."
+def sample_coverage_summary(coverage: Mapping[str, Any], *, is_tv: bool) -> str | None:
+    measured_count = coverage.get("measured_item_count")
+    total_count = coverage.get("candidate_item_count")
+    untested_groups = coverage.get("untested_groups")
+    if not isinstance(measured_count, int) or not isinstance(total_count, int) or not isinstance(untested_groups, list):
+        return None
+    noun = "episode" if is_tv else "file"
+    tested = f"Tested {measured_count} of {total_count} {noun}{'' if total_count == 1 else 's'}."
+    if measured_count == total_count:
+        return tested
     if not untested_groups:
-        return f"{tested} No season, video format, or resolution here is untested."
+        features = "season, video format and resolution" if is_tv else "video format and resolution"
+        return f"{tested} The sample covers every known {features} in this group."
     labels = [str(group["label"]) for group in untested_groups]
     shown = labels[:_SUMMARY_GROUP_LIMIT]
     if len(labels) > len(shown):

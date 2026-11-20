@@ -249,16 +249,20 @@ extension NeedsYouItem {
         let ask: NeedsYouAsk
         if pending.settingsAvailable == true {
             if let kind, let setting = kind.firstSetting {
-                ask = NeedsYouAsk(line: Words.useSettingsAsk(setting), look: NeedsYouAnswer(title: Words.watchFirst, action: .open(.kind(kind.kind))),
+                let watchable = kind.showsSampleFirst ? kind.sampleButtonTitle == Words.watchSample : setting.libraryItemId != nil
+                ask = NeedsYouAsk(line: Words.useSettingsAsk(setting), look: watchable ? NeedsYouAnswer(title: Words.watchFirst, action: .open(.kind(kind.kind))) : nil,
                                   answers: [NeedsYouAnswer(title: Words.useForShows(kind),
                                                            action: .useSettings(kind: kind.kind, from: setting.fromPrefix))])
             } else {
                 ask = NeedsYouAsk(line: Words.useSettingsAsk(nil), answers: [NeedsYouAnswer(title: Words.chooseSettings, action: .open(.kind(pending.kind)))])
             }
-        } else if pending.sampleReady ?? true {
+        } else if pending.sampleReady == true {
             let line = pending.oneTime == true ? Words.sampleReadyAsk(season: season.map(Words.lastFolder))
                 : Words.sampleReadyAsk(show: showName, season: season.map(Words.lastFolder))
             ask = NeedsYouAsk(line: line, answers: [NeedsYouAnswer(title: Words.watchSample, action: .open(opens))])
+        } else if Words.sampleNeedsRemaking(pending.sampleStatus), let season {
+            ask = NeedsYouAsk(line: Words.remakeSampleAsk,
+                              answers: [NeedsYouAnswer(title: Words.makeSample, action: .makeSample(prefix: season))])
         } else {
             switch pending.sampleStatus {
             case "choose_size":
@@ -293,7 +297,7 @@ extension NeedsYouItem {
                         answers: [NeedsYouAnswer(title: Words.chooseSize, action: .open(place))])
         } else {
             NeedsYouAsk(line: Words.sampleFailure(sample.failure) ?? Words.sampleStopped,
-                        answers: [NeedsYouAnswer(title: Words.makeSampleAgain, action: .makeSample(prefix: sample.prefix))])
+                        answers: [NeedsYouAnswer(title: Words.makeSample, action: .makeSample(prefix: sample.prefix))])
         }
         return NeedsYouItem(id: notice.id, title: sample.show, context: sample.season.map { "Season \($0)" },
                             bytes: facts?.seasonBytes, picture: .posters([sample.showPrefix]), asks: [ask], opens: place)

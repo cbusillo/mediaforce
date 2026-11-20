@@ -235,7 +235,7 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
     if lane == "blocked" and not awaits_review:
         return PageState("needs_help", "attention", recovery_kind="files", primary_action="review_files")
     if sample_status in SAMPLE_FAILED_STATUSES and not _settled_by_approval(sample_job, calibration):
-        failure = _sample_failure(sample_job)
+        failure = sample_failure(sample_job)
         return PageState(
             "needs_help",
             "attention",
@@ -579,7 +579,7 @@ def _staged_files_block_finish(staged_integrity: Mapping[str, Any] | None) -> bo
     return bool(summary.get("database_truncated")) or int(summary.get("blocker_count") or 0) > 0
 
 
-def _sample_failure(job: Mapping[str, Any]) -> FailureKind:
+def sample_failure(job: Mapping[str, Any]) -> FailureKind:
     target_failure = sample_target_size_failure(dict(job))
     if target_failure is not None:
         return _SAMPLE_TARGET_FAILURES[target_failure]

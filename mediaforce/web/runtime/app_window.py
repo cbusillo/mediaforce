@@ -108,7 +108,7 @@ def app_window_payload(
             kind["sample_status"] = "retry_backoff"
     pending_kinds = [kind for kind in pending_kinds if _kind_asks_the_director(kind)]
     kind_samples = {kind["sample_season"] for kind in pending_kinds
-                    if kind.get("sample_ready", True) or kind.get("sample_status") in {"failed", "stopped", "needs_attention"}}
+                    if kind.get("sample_ready", True) or kind.get("sample_status") in {"failed", "stopped", "needs_attention", "missing_clips", "choose_size"}}
     samples = _samples(cards)
     waiting_samples = {sample["prefix"] for sample in samples["waiting_on_you"]}
     samples["waiting_on_you"] = [sample for sample in samples["waiting_on_you"]
