@@ -1,6 +1,7 @@
 """Staged installation of a release on the controller, and the app's own update. Invoke only in an authorized release window."""
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import json
@@ -16,6 +17,7 @@ from urllib.request import Request, urlopen
 
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import open_db, open_readonly_db
+from mediaforce.core.db_migrations import SQLITE_BUSY_TIMEOUT_MS
 from mediaforce.core.utils import timestamp
 from mediaforce.encoding.delivery_lock import archive_activity, delivery_lock
 from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, load_queue_state, save_queue_state
@@ -408,12 +410,12 @@ def _require_fresh_stage(stage: Path, support: Path) -> None:
 
 
 def _require_running_server(job: ReleaseInstall) -> None:
-    dashboard = _api(job.base_url, "/api/dashboard?preview_limit=0")
-    require_paused_idle_dashboard(dashboard)
-    if running := _running_work(job.base_url, job.config.paths.db_path, dashboard):
-        raise RuntimeError(f"work is still running: {', '.join(running)}")
+    work = _observe_work(job.base_url, job.config.paths.db_path)
+    require_paused_idle_dashboard(work.dashboard)
+    if work.running:
+        raise RuntimeError(f"work is still running: {', '.join(work.running)}")
     database = str(job.config.paths.db_path.resolve())
-    running = (_api(job.base_url, "/api/release/work").get("server") or {}).get("database")
+    running = (work.release.get("server") or {}).get("database")
     if running != database:
         raise RuntimeError(f"the running server uses {running}, not the saved config's database {database}")
 
@@ -600,23 +602,28 @@ def prepare_update(update: AppUpdate, build: str) -> None:
     if intent.get("phase") == "prepared":
         _save_intent(update, intent)
         return
-    dashboard = _api(update.base_url, "/api/dashboard?preview_limit=0")
-    running = _running_work(update.base_url, update.config.paths.db_path, dashboard)
-    if running:
-        if intent.get("phase") == "draining" or _waited_too_long(update, intent) or _finishing_soon(update, dashboard):
-            _save_intent(update, {**intent, "phase": "draining", "waiting": running})
+    database_path = update.config.paths.db_path
+    work = _observe_work(update.base_url, database_path)
+    if work.running:
+        if intent.get("phase") == "draining" or _waited_too_long(update, intent) or _finishing_soon(update, work.dashboard):
+            _save_intent(update, {**intent, "phase": "draining", "waiting": work.running})
         return
-    with sqlite3.connect(update.config.paths.db_path.resolve().as_uri() + "?mode=rw", uri=True) as database:
+    uri = database_path.resolve().as_uri() + "?mode=rw"
+    with closing(sqlite3.connect(uri, uri=True, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)) as database, database:
         database.execute("BEGIN IMMEDIATE")
         if existing is None:
-            _save_intent(update, {**intent, "phase": "draining", "waiting": []})
-    if _running_work(update.base_url, update.config.paths.db_path, _api(update.base_url, "/api/dashboard?preview_limit=0")):
-        if existing is None:
+            _write_intent(update.support, {**intent, "phase": "draining", "waiting": []})
+    pending_encode = None
+    try:
+        work = _observe_work(update.base_url, database_path)
+        if work.running:
+            return
+        pending_encode = work.release["counts"]["pending_encode"]
+    finally:
+        if pending_encode is None and existing is None:
             back_out_update(update)
-        return
     stage = update.support / "deployments" / f"update-{intent['from']}-to-{build}-{_utc_now():%Y%m%dT%H%M%SZ}"
-    work = _api(update.base_url, "/api/release/work")["counts"]
-    intent.update(phase="saving", stage=str(stage), pending_encode=work["pending_encode"], waiting=[])
+    intent.update(phase="saving", stage=str(stage), pending_encode=pending_encode, waiting=[])
     _save_intent(update, intent)
     try:
         saved = update.paths.plist.read_bytes()
@@ -796,7 +803,15 @@ def _end_intent(support: Path) -> None:
     (support / "runtime" / UPDATE_INTENT_NAME).unlink()
 
 
-def _running_work(base_url: str, database: Path, dashboard: dict) -> list[str]:
+@dataclass(frozen=True, slots=True)
+class ControllerWork:
+    dashboard: dict
+    release: dict
+    running: list[str]
+
+
+def _observe_work(base_url: str, database: Path) -> ControllerWork:
+    dashboard = _api(base_url, "/api/dashboard?preview_limit=0")
     work = _api(base_url, "/api/release/work")
     counts = work["counts"]
     live_scans = work.get("running_scan_passes", int((dashboard.get("scan_job") or {}).get("status") == "running"))
@@ -808,7 +823,7 @@ def _running_work(base_url: str, database: Path, dashboard: dict) -> list[str]:
         (counts["active_evidence"], "files are being measured"),
         (_publishing(database), "files are being published"),
     )
-    return [f"{count} {words}" for count, words in found if count]
+    return ControllerWork(dashboard, work, [f"{count} {words}" for count, words in found if count])
 
 
 def _finishing_soon(update: AppUpdate, dashboard: dict) -> bool:

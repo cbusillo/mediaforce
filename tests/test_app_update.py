@@ -220,15 +220,34 @@ def test_publication_holding_its_lock_keeps_the_old_server_running(update: Updat
 
 def test_encode_claimed_before_hold_is_not_interrupted(update: Update) -> None:
     app_update, server = update
-    save = deploy._save_intent
+    server.running["encode"] = 1
+    deploy.prepare_update(app_update, "2")
+    waiting = app_update.file(deploy.UPDATE_WAITING_NAME)
+    waited_since = waiting.read_bytes()
+    server.running["encode"] = 0
+    save = deploy._write_intent
 
-    def claim_before_hold(transaction: deploy.AppUpdate, intent: dict[str, Any]) -> None:
+    def claim_before_hold(support: Path, intent: dict[str, Any]) -> None:
         server.running["encode"] = 1
-        save(transaction, intent)
+        save(support, intent)
 
-    with patch.object(deploy, "_save_intent", side_effect=claim_before_hold):
+    with patch.object(deploy, "_write_intent", side_effect=claim_before_hold):
         deploy.prepare_update(app_update, "2")
     assert server.launchctl == [] and _phase(app_update) is None
+    assert waiting.read_bytes() == waited_since
+
+
+def test_failed_idle_recheck_releases_only_the_temporary_hold(update: Update) -> None:
+    app_update, server = update
+
+    def unavailable_under_hold(base: str, route: str) -> dict[str, Any]:
+        if _phase(app_update) == "draining":
+            raise TimeoutError("cannot verify idle")
+        return server.api(base, route)
+
+    with patch.object(deploy, "_api", side_effect=unavailable_under_hold), pytest.raises(TimeoutError):
+        deploy.prepare_update(app_update, "2")
+    assert _phase(app_update) is None and server.launchctl == []
 
 
 def test_update_waits_for_scan_after_its_database_row_finishes(update: Update) -> None:
