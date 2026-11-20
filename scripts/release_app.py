@@ -40,7 +40,7 @@ ElementTree.register_namespace("sparkle", SPARKLE)
 
 def release_identity(pyproject: Path = ROOT / "pyproject.toml") -> dict[str, str]:
     """The one committed source for a release: package version, feed and public update key."""
-    data = tomllib.loads(pyproject.read_text())
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     release = data["tool"]["mediaforce"]["release"]
     version = data["project"]["version"]
     version_order(version)
@@ -130,7 +130,7 @@ def fetch(location: str, folder: Path) -> Path:
 def require_listed_digest(archive: Path, sums: Path) -> str:
     with archive.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    listed = [line.split(maxsplit=1) for line in sums.read_text().splitlines() if line.strip()]
+    listed = [line.split(maxsplit=1) for line in sums.read_text(encoding="utf-8").splitlines() if line.strip()]
     if [digest, archive.name] not in [[value, name.removeprefix("*")] for value, name in listed]:
         raise ValueError(f"{archive.name} does not match its SHA256SUMS")
     return digest
@@ -164,7 +164,7 @@ def notarized_app(archive: Path, folder: Path) -> Path:
     _verify_signed_bundle(app)
     subprocess.run(["/usr/bin/xcrun", "stapler", "validate", str(app)], check=True, capture_output=True)
     assessment = subprocess.run(["/usr/sbin/spctl", "--assess", "--type", "execute", "--verbose=4", str(app)],
-                                capture_output=True, text=True)
+                                capture_output=True, encoding="utf-8")
     if assessment.returncode or "source=Notarized Developer ID" not in assessment.stdout + assessment.stderr:
         raise ValueError(f"Gatekeeper does not accept {app} as notarized: {assessment.stderr.strip()}")
     return app

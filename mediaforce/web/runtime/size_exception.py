@@ -153,7 +153,7 @@ def _decide(
 
 def _manifest_item(manifest_path: Path, index: int) -> dict[str, Any]:
     try:
-        manifest = json.loads(manifest_path.read_text())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     items = object_list(object_dict(manifest).get("items"))

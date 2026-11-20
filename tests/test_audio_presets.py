@@ -72,7 +72,7 @@ def _config(tmp_path: Path, *, overrides: list[dict[str, Any]] | None = None, li
 
 
 def _saved_overrides(path: Path) -> list[dict[str, Any]]:
-    return json.loads(path.read_text())[FOLDER_POLICY_OVERRIDES_KEY]
+    return json.loads(path.read_text(encoding="utf-8"))[FOLDER_POLICY_OVERRIDES_KEY]
 
 
 def _item(policy: dict[str, Any], *, codec: str = "eac3", channels: int = 6) -> dict[str, Any]:

@@ -2530,7 +2530,7 @@ def _movie_requeue_policy_left_out(
     if not str(manifest_path):
         return {}
     try:
-        manifest = object_dict(json.loads(manifest_path.read_text()))
+        manifest = object_dict(json.loads(manifest_path.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError):
         return {}
     items = [object_dict(item) for item in object_list(manifest.get("items"))]

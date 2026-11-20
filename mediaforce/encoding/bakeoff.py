@@ -73,7 +73,7 @@ def build_bakeoff_plan(
 
 def write_bakeoff_plan(plan: dict[str, Any], output_path: Path) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(plan, indent=2) + "\n")
+    output_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
     return output_path
 
 

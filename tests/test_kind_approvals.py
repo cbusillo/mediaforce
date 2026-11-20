@@ -1007,7 +1007,7 @@ def test_a_newer_completion_cannot_hide_other_retained_writer_custody(
     with open_db(config.paths.db_path) as connection:
         job = load_encode_job(connection, children[item_id])
         assert job is not None
-        items = json.loads(Path(job["manifest_path"]).read_text())["items"]
+        items = json.loads(Path(job["manifest_path"]).read_text(encoding="utf-8"))["items"]
         receipt = _remote_cleanup_receipt(config, job, items)
         connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == children[item_id]).values(
             progress_json=json.dumps({"remote_cleanup_verified": receipt}),

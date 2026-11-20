@@ -27,7 +27,7 @@ def refresh_metric_support() -> dict[str, bool]:
             [binary, "-hide_banner", "-filters"],
             check=True,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
             timeout=10,
         )
     except (OSError, subprocess.SubprocessError):

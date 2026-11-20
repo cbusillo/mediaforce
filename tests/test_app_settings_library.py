@@ -382,7 +382,7 @@ def test_save_after_a_kept_plex_root_changed_elsewhere_is_refused(library_app: t
 
 
 def _set_movies_definition_only_path(runtime_settings_path: Path) -> None:
-    stored = json.loads(runtime_settings_path.read_text())
+    stored = json.loads(runtime_settings_path.read_text(encoding="utf-8"))
     stored["metadata"]["plex"]["library_roots"] = {}
     runtime_settings_path.write_text(json.dumps(stored), encoding="utf-8")
 

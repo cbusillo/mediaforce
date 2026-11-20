@@ -341,7 +341,7 @@ def _prune_run_manifests(config: MediaforceConfig, cutoff: float) -> None:
 
 def _run_manifest_has_source_traits(path: Path) -> bool:
     try:
-        manifest = json.loads(path.read_text())
+        manifest = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return True
     if not isinstance(manifest, dict) or not isinstance(manifest.get("items"), list):
@@ -445,7 +445,7 @@ def _local_process_commands() -> list[str]:
     result = subprocess.run(
         ["ps", "-axo", "command="],
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         timeout=3,
     )
     if result.returncode != 0:

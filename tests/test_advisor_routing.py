@@ -498,7 +498,7 @@ class AdvisorRoutingTests(unittest.TestCase):
 
     @staticmethod
     def _telemetry(path: Path) -> list[dict[str, Any]]:
-        return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 if __name__ == "__main__":

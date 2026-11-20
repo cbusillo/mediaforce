@@ -177,7 +177,7 @@ def _find_local_tool(name: str, *, fallback_paths: list[str]) -> str | None:
 
 def _command_output(command: list[str]) -> str:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        result = subprocess.run(command, capture_output=True, encoding="utf-8", timeout=5)
     except (OSError, subprocess.SubprocessError):
         return ""
     return result.stdout if result.returncode == 0 else ""
@@ -185,7 +185,7 @@ def _command_output(command: list[str]) -> str:
 
 def _command_succeeds(command: list[str]) -> bool:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        result = subprocess.run(command, capture_output=True, encoding="utf-8", timeout=5)
     except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 0

@@ -68,7 +68,7 @@ class LegacyFinalSizeRecoveryTests(unittest.TestCase):
     def test_show_run_uses_the_missed_file_duration(self) -> None:
         job = self._legacy_job()
         path = Path(str(job["manifest_path"]))
-        path.write_text(json.dumps({"items": [{"duration_seconds": 2700}, {"duration_seconds": 438.058}]}))
+        path.write_text(json.dumps({"items": [{"duration_seconds": 2700}, {"duration_seconds": 438.058}]}), encoding="utf-8")
         job["progress"]["failure_analysis"]["manifest_index"] = 1
         self.assertIsNone(folder_actions._final_size_requeue_contract_blocker(job, self._contract(value_mb=275)))
         self.assertIsNotNone(folder_actions._final_size_requeue_contract_blocker(job, self._contract(value_mb=300)))
@@ -77,14 +77,14 @@ class LegacyFinalSizeRecoveryTests(unittest.TestCase):
         job = self._legacy_job()
         Path(str(job["manifest_path"])).write_text(json.dumps({"items": [
             {"duration_seconds": 2700}, {"duration_seconds": 438.058}
-        ]}))
+        ]}), encoding="utf-8")
         self.assertIsNotNone(folder_actions._final_size_requeue_contract_blocker(job, self._contract(value_mb=275)))
 
     def test_show_run_checks_each_missed_file(self) -> None:
         job = self._legacy_job()
         Path(str(job["manifest_path"])).write_text(json.dumps({"items": [
             {"duration_seconds": 2700}, {"duration_seconds": 438.058}
-        ]}))
+        ]}), encoding="utf-8")
         job["progress"]["failure_analysis"]["item_analyses"] = [
             {"kind": "final_size_target_miss", "manifest_index": 0,
              "target_size_verification": {"target_size_bytes": 275_000_000}},
@@ -98,7 +98,7 @@ class LegacyFinalSizeRecoveryTests(unittest.TestCase):
         job = self._legacy_job()
         Path(str(job["manifest_path"])).write_text(json.dumps({"items": [
             {"duration_seconds": 2700}, {"duration_seconds": 438.058}
-        ]}))
+        ]}), encoding="utf-8")
         job["progress"]["failure_analysis"]["item_analyses"] = [
             {"kind": "quality_policy_failure", "manifest_index": 0},
             {"kind": "final_size_target_miss", "manifest_index": 1,

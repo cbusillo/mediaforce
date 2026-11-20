@@ -346,7 +346,7 @@ def pull_output(
     """Copy the encoded output from the scratch directory to the controller's staging path."""
     local_path.parent.mkdir(parents=True, exist_ok=True)
     script = f"stat -c %s {shlex.quote(str(job.output_path))} 2>/dev/null || stat -f %z {shlex.quote(str(job.output_path))}"
-    size_result = subprocess.run(["ssh", *ssh_options, ssh_target, script], capture_output=True, text=True,
+    size_result = subprocess.run(["ssh", *ssh_options, ssh_target, script], capture_output=True, encoding="utf-8",
                                  timeout=REMOTE_CONTROL_TIMEOUT_SECONDS)
     expected_size = (size_result.stdout or "").strip()
     if size_result.returncode != 0 or not expected_size.isdigit():

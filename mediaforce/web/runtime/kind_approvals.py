@@ -115,7 +115,7 @@ def approve_kind(
 def _save_kind_approval(config: MediaforceConfig, kind: str, payload: Mapping[str, Any]) -> None:
     path = kind_approval_file(config, kind)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False, suffix=".tmp") as handle:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False, suffix=".tmp") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
     os.replace(handle.name, path)
 
@@ -340,7 +340,7 @@ def record_kind_attempt(config: MediaforceConfig, chosen: KindSeason, result: Ma
     attempts[chosen.season] = {"approval": chosen.approval, "files": list(chosen.files), "ok": bool(result.get("ok")), "at": at}
     path = _attempts_file(config)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False, suffix=".tmp") as handle:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False, suffix=".tmp") as handle:
         json.dump(attempts, handle, indent=2, sort_keys=True)
     os.replace(handle.name, path)
 

@@ -213,7 +213,7 @@ def _model(computer: Mapping[str, Any]) -> str | None:
 @functools.cache
 def this_mac_model() -> str | None:
     try:
-        result = subprocess.run([SYSTEM_PROFILER, "SPHardwareDataType"], capture_output=True, text=True, timeout=10, check=False)
+        result = subprocess.run([SYSTEM_PROFILER, "SPHardwareDataType"], capture_output=True, encoding="utf-8", timeout=10, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return None
     for line in result.stdout.splitlines():

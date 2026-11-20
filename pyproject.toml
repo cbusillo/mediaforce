@@ -52,7 +52,9 @@ public-key = "rzpS2jLP0qsgpgYtvdu/lLrpv6ljcfy5zYhkkJAK5dg="
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["ANN001", "ANN002", "ANN003", "ANN202"]
+preview = true
+explicit-preview-rules = true
+select = ["ANN001", "ANN002", "ANN003", "ANN202", "PLW1514"]
 
 [dependency-groups]
 dev = [

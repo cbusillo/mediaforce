@@ -51,7 +51,7 @@ def append_advisor_telemetry(path: Path | None, record: dict[str, Any], *, max_r
         existing = path.read_text().splitlines() if path.exists() else []
         lines = [*existing[-max(0, max_records - 1):], serialized]
         with tempfile.NamedTemporaryFile(
-                prefix=f".{path.name}.",
+                encoding="utf-8", prefix=f".{path.name}.",
                 suffix=".tmp",
                 dir=path.parent,
                 delete=False,

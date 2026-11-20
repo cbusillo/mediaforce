@@ -203,7 +203,7 @@ def test_server_crash_cleans_orphan_before_next_start(dev: DevFixture, stubborn:
     dev.assert_empty()
     assert 'empty; leader reaped' in (dev.state / 'backend.log').read_text()
     # The port being free alone is not enough: the orphan must have exited too.
-    for candidate in Path(dev.env['TEST_REGISTRY']).read_text().splitlines():
+    for candidate in Path(dev.env['TEST_REGISTRY']).read_text(encoding='utf-8').splitlines():
         try:
             assert os.getpgid(int(candidate)) != pid
         except ProcessLookupError:
@@ -294,7 +294,7 @@ def test_concurrent_starts_share_one_owner(dev: DevFixture) -> None:
     dev.assert_empty()
 
     def fixture_processes_gone() -> bool:
-        for pid in Path(dev.env['TEST_REGISTRY']).read_text().splitlines():
+        for pid in Path(dev.env['TEST_REGISTRY']).read_text(encoding='utf-8').splitlines():
             try:
                 os.getpgid(int(pid))
             except ProcessLookupError:
@@ -344,7 +344,7 @@ def test_observation_failure_retains_owner_until_cleanup_can_finish(dev: DevFixt
     try:
         wait_until(lambda: dev.status()['state'] == 'running')
         owner = dev.status()
-        failure.write_text('malformed' if malformed else '')
+        failure.write_text('malformed' if malformed else '', encoding='utf-8')
         stopping = subprocess.Popen(['bash', str(dev.root / 'scripts/mediaforce-dev.sh'), 'stop', 'backend'],
                                     env=dev.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         wait_until(lambda: failure.with_suffix('.observed').exists())
@@ -409,7 +409,7 @@ def test_persistent_inventory_failure_escalates_without_releasing_custody(
         owner = dev.status()
         assert not receipt_closed(worker_receipt)
         if inventory != 'missing':
-            failure.write_text('malformed' if inventory == 'malformed' else '')
+            failure.write_text('malformed' if inventory == 'malformed' else '', encoding='utf-8')
         if trigger == 'stop':
             stopping = subprocess.Popen(
                 ['bash', str(dev.root / 'scripts/mediaforce-dev.sh'), 'stop', 'backend'],
@@ -462,7 +462,7 @@ def test_persistent_inventory_failure_logs_once_until_recovery(
         initial = logfile.read_bytes()
         time.sleep(dev_processes.POLL_SECONDS * 12)
         assert logfile.read_bytes() == initial, 'an unchanged observation failure floods the component log'
-        failure.write_text('malformed')
+        failure.write_text('malformed', encoding='utf-8')
         wait_until(lambda: logfile.read_bytes() != initial)
         changed = logfile.read_bytes()
         assert changed.count(b'cleanup pending') == 2
@@ -509,7 +509,7 @@ def test_worker_fork_during_stop_is_cleaned_with_its_group(dev: DevFixture) -> N
     assert dev.run('start').returncode == 0
     group = dev.status()['pid']
     assert dev.run('stop').returncode == 0
-    pids = Path(dev.env['TEST_REGISTRY']).read_text().splitlines()
+    pids = Path(dev.env['TEST_REGISTRY']).read_text(encoding='utf-8').splitlines()
     assert len(pids) == 3, 'the original worker did not fork at the stop boundary'
     for pid in pids:
         try:

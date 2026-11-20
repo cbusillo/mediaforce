@@ -65,7 +65,8 @@ database, settings and other writable state outside the app. A private `.env`
 beside that database supplies optional environment defaults. An existing
 credential source can instead be read in place with `--credentials /absolute/path`;
 packaging and service installation never copy it. Shell environment values
-continue to take precedence.
+continue to take precedence. The launcher starts Python in UTF-8 mode, so text
+reads UTF-8 even under launchd, which sets no locale.
 
 For an isolated installation with no existing service, the same executable
 accepts the existing `service install|enable|restart|disable|uninstall|status|logs`
