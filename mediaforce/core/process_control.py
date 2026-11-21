@@ -12,6 +12,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import BinaryIO
 
+from mediaforce.core.binaries import low_priority_command
+
 
 class ProcessCancelledError(RuntimeError):
     unproven_remote_run: Exception | None = None
@@ -78,12 +80,14 @@ def _is_media_tool_command(cmd: list[str], env: Mapping[str, str] | None) -> boo
     return False
 
 
-def _command_environment(cmd: list[str], env: Mapping[str, str] | None) -> Mapping[str, str] | None:
+def prepare_local_command(
+        cmd: list[str], env: Mapping[str, str] | None = None,
+) -> tuple[list[str], Mapping[str, str] | None]:
     if not _is_media_tool_command(cmd, env):
-        return env
+        return cmd, env
     resolved_env = dict(os.environ if env is None else env)
     resolved_env.pop("DYLD_LIBRARY_PATH", None)
-    return resolved_env
+    return low_priority_command(cmd), resolved_env
 
 
 def _process_deadline_helper_state(info: os.stat_result) -> tuple[int, ...]:
@@ -795,7 +799,7 @@ def run_command(
     A silent run raises ``ProcessOutputStalledError``. Watching output needs the managed runner,
     so a call without a controller gets one of its own.
     """
-    resolved_env = _command_environment(cmd, env)
+    cmd, resolved_env = prepare_local_command(cmd, env)
     if idle_timeout is not None:
         if not capture_output:
             raise ValueError("An idle timeout needs captured output to watch.")
@@ -845,7 +849,7 @@ def run_trusted_local_orchestrator_command(
         )
     controller = process_controller or ManagedProcessController()
     return _run_managed_command(
-        cmd,
+        low_priority_command(cmd),
         process_controller=controller,
         capture_output=capture_output,
         text=text,

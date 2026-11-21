@@ -69,6 +69,7 @@ class RemoteMediaCommands:
                 self.host,
                 command,
                 math.ceil(timeout_seconds) + REMOTE_CONNECT_ALLOWANCE_SECONDS,
+                media_work=True,
                 process_controller=process_controller,
                 **({"control_path": self.connection.control_path} if self.connection is not None else {}),
             )

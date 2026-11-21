@@ -7,8 +7,9 @@ import time
 from pathlib import Path
 from typing import Any, Callable, cast
 
+from mediaforce.core.binaries import remote_low_priority_shell
 from mediaforce.core.process_control import ManagedProcessController, ProcessDeadlineEnforcementError, \
-    ScheduleWindowClosedError
+    ScheduleWindowClosedError, prepare_local_command
 from mediaforce.core.schedule_deadline import guard_command_for_schedule_deadline, \
     guard_shell_script_for_schedule_deadline, process_result_reached_schedule_deadline, \
     managed_schedule_close_deadline
@@ -187,7 +188,7 @@ def run_encode_command(
             [
                 remote_shell_path_export_line(),
                 f"rm -f {shlex.quote(str(staged.output_path))}",
-                shlex.join(staged_cmd),
+                remote_low_priority_shell(staged_cmd),
             ]
         )
         if deadline is not None:
@@ -235,7 +236,7 @@ def run_encode_command(
         remote_script_parts.append(f"rm -f {shlex.quote(str(staging_path))}")
     remote_script_parts.extend(
         [
-            shlex.join(remote_ffmpeg_cmd),
+            remote_low_priority_shell(remote_ffmpeg_cmd),
             f"mv -f {shlex.quote(str(temp_output))} {shlex.quote(str(staging_path))}",
         ]
     )
@@ -290,7 +291,7 @@ def run_streamed_remote_encode_command(
         output_path=temp_output,
         executable_path=str(host_payload.get("ffmpeg_path") or "") or None,
     )
-    remote_script = shlex.join(remote_ffmpeg_cmd)
+    remote_script = remote_low_priority_shell(remote_ffmpeg_cmd)
     if deadline is not None:
         remote_script = guard_shell_script_for_schedule_deadline(remote_script, deadline)
     ssh_cmd = [
@@ -405,7 +406,8 @@ def run_tracked_process(
     process_controller.throw_if_cancelled() if process_controller is not None else None
     # A remote script that watches its connection treats end-of-input as "the controller is gone",
     # so its stdin has to be a pipe this process keeps open until the command ends.
-    process = subprocess.Popen(cmd, stdin=subprocess.PIPE if hold_stdin_open else None,
+    cmd, env = prepare_local_command(cmd)
+    process = subprocess.Popen(cmd, env=env, stdin=subprocess.PIPE if hold_stdin_open else None,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", bufsize=1,
                                start_new_session=True)
     if process_controller is not None:

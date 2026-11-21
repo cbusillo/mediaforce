@@ -214,6 +214,10 @@ window for one job. A computer held out after repeated failures shows
 
 ### Computers and shared storage
 
+Mediaforce runs encodes, samples and video quality measurements at low CPU priority on the
+computer doing the work. Linux workers also use idle disk priority and need `ionice` from
+util-linux. Macs use `nice -n 19` so other applications can take precedence.
+
 A blank remote Mac needs Remote Login first; Set up computer then installs
 this Mac's SSH key with the account password once, creates remote paths, and
 installs `ffmpeg-full` and `ab-av1` with Homebrew. Sample computers must have

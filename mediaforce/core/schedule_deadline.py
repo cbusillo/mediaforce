@@ -4,6 +4,8 @@ import subprocess
 from datetime import UTC, datetime
 from typing import Any, Mapping
 
+from mediaforce.core.binaries import low_priority_command
+
 
 SCHEDULE_CLOSE_DEADLINE_KEY = "schedule_close_deadline_at"
 SCHEDULE_DEADLINE_EXIT_CODE = 124
@@ -49,7 +51,7 @@ def guard_command_for_schedule_deadline(
     deadline = managed_schedule_close_deadline(host, process_controller)
     if deadline is None:
         return command
-    return ["sh", "-c", guard_shell_script_for_schedule_deadline(shlex.join(command), deadline)]
+    return ["sh", "-c", guard_shell_script_for_schedule_deadline(shlex.join(low_priority_command(command)), deadline)]
 
 
 def managed_schedule_close_deadline(

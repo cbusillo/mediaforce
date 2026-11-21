@@ -11,7 +11,7 @@ import signal
 import subprocess
 from typing import TYPE_CHECKING, Any, Mapping
 
-from mediaforce.core.binaries import ffmpeg_binary
+from mediaforce.core.binaries import ffmpeg_binary, low_priority_command
 from mediaforce.core.evidence import build_evidence_envelope, evidence_staleness, stable_policy_hash
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
@@ -556,7 +556,7 @@ def _run_bounded_media_command(
         )
     try:
         process = subprocess.Popen(
-            command,
+            low_priority_command(command),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             encoding="utf-8",

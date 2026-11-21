@@ -83,7 +83,7 @@ class CadenceTests(unittest.TestCase):
             ],
         }
         with patch("mediaforce.library.probe.ffprobe_binary", return_value="ffprobe"), patch(
-            "mediaforce.library.probe.subprocess.run",
+            "mediaforce.library.probe.run_command",
             return_value=Mock(stdout=json.dumps(payload)),
         ) as run_probe:
             summary = probe_evidence(Path("/tmp/progressive.mkv"), CADENCE_EVIDENCE_KIND)

@@ -106,6 +106,7 @@ class FakeEncodeComputers:
             timeout: int,
             input_text: str | None = None,
             process_controller: ManagedProcessController | None = None,
+            **_kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
         _ = input_text
         self.calls.append(
@@ -230,7 +231,7 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
             returncode = 0
 
             def __init__(self, command: list[str], **_kwargs: object) -> None:
-                local_commands.append(command)
+                local_commands.append(command[command.index("ffmpeg"):])
 
             @staticmethod
             def communicate(timeout: float | None = None) -> tuple[str, str]:
@@ -243,6 +244,7 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
                 _timeout: int,
                 input_text: str | None = None,
                 process_controller: ManagedProcessController | None = None,
+                **_kwargs: object,
         ) -> subprocess.CompletedProcess[str]:
             _ = input_text, process_controller
             if command == ["ffmpeg", "-version"]:
