@@ -7,7 +7,10 @@ from unittest.mock import Mock, patch
 import pytest
 
 from mediaforce import execution
+from mediaforce.core import process_control
 from mediaforce.core.process_control import run_command
+from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, guard_command_for_schedule_deadline
+from mediaforce.hosts.status_helpers import _host_capability_issues
 from mediaforce.hosts.transport import run_remote_command
 
 
@@ -78,3 +81,29 @@ def test_streamed_encode_runs_the_remote_encoder_at_idle_disk_priority(tmp_path:
         )
     assert result.returncode == 0
     assert output.read_bytes() == b"-n 19/-c 3\nfixture video"
+
+
+def test_linux_worker_cannot_claim_media_work_without_idle_disk_priority() -> None:
+    tools = {"ffmpeg": True, "ffmpeg_libsvtav1": True, "ab_av1": True, "ffmpeg_xpsnr": True}
+    host: dict[str, object] = {"capabilities": ["encode_queue"]}
+    for available in (False, True):
+        issues = _host_capability_issues(
+            host, tools={**tools, "low_priority": available}, platform_name="linux", repo_path=None, repo_path_exists=True,
+        )
+        assert bool(issues) is (not available)
+
+
+def test_trusted_quality_tool_is_deprioritized_after_its_identity_check() -> None:
+    command = ["/fixture/ab-av1", "sample-encode"]
+    with patch("sys.platform", "darwin"), patch.object(process_control, "_run_managed_command") as launch:
+        process_control.run_trusted_local_orchestrator_command(command)
+    assert launch.call_args.args[0] == ["/usr/bin/nice", "-n", "19", *command]
+
+
+def test_schedule_watchdog_starts_the_low_priority_media_command() -> None:
+    command = ["ffmpeg", "-i", "two words.mkv"]
+    with patch("sys.platform", "darwin"), patch(
+        "mediaforce.core.schedule_deadline.guard_shell_script_for_schedule_deadline",
+    ) as guard:
+        guard_command_for_schedule_deadline(command, {SCHEDULE_CLOSE_DEADLINE_KEY: "2030-01-01T00:00:00Z"}, process_controller=Mock())
+    assert shlex.split(guard.call_args.args[0]) == ["/usr/bin/nice", "-n", "19", *command]

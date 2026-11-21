@@ -289,6 +289,24 @@ class RemoteKeepAwakeTests(unittest.TestCase):
         [ssh_cmd] = commands
         return ssh_cmd[-1]
 
+    def test_staged_and_mounted_encoders_receive_the_workers_priority(self) -> None:
+        tools = self.root / "bin"
+        for name, script in {
+            "uname": "echo Darwin",
+            "nice": 'export PRIORITY="$1 $2"; shift 2; exec "$@"',
+            "ffmpeg": 'echo "$PRIORITY"; exit 7',
+        }.items():
+            path = tools / name
+            path.write_text(f"#!/bin/sh\n{script}\n")
+            path.chmod(0o700)
+        scratch = PurePosixPath(str(self.root / "scratch"))
+        staged = StagedJob(scratch, scratch / "input.mkv", scratch / "output.mkv")
+        for host in ({"key": "mac"}, {"key": "mac", STAGED_JOB_KEY: staged.to_payload()}):
+            shell = self._start(_shell_script(self._encode_ssh_argument(host)))
+            stdout, _stderr = shell.communicate(timeout=10)
+            self.assertEqual(shell.returncode, 7)
+            self.assertEqual(stdout.strip(), b"-n 19")
+
     def test_a_dropped_link_ends_a_mounted_encode_and_releases_the_computer(self) -> None:
         self.env["FAKE_ENCODE_SECONDS"] = "60"
         argument = self._encode_ssh_argument({"key": "mac", "mode": "ssh"}, progress_callback=lambda _snapshot: None)

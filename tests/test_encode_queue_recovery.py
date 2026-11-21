@@ -14528,13 +14528,14 @@ raise SystemExit(0)
                 return 0
 
         snapshots: list[dict[str, object]] = []
-        with patch("mediaforce.execution.subprocess.Popen", return_value=FakeTextProcess()):
+        with patch("sys.platform", "darwin"), patch("mediaforce.execution.subprocess.Popen", return_value=FakeTextProcess()) as launch:
             result = execution._run_tracked_process(
                 ["ffmpeg", "-i", "input.mkv", "output.mkv"],
                 process_controller=None,
                 progress_callback=lambda snapshot: snapshots.append(snapshot),
             )
 
+        self.assertEqual(launch.call_args.args[0], ["/usr/bin/nice", "-n", "19", "ffmpeg", "-i", "input.mkv", "output.mkv"])
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "stdout line\n")
         self.assertEqual(result.stderr, "out_time_ms=45000000\nprogress=continue\n")

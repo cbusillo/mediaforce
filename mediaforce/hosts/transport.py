@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from mediaforce.core.binaries import remote_low_priority_shell
+from mediaforce.core.binaries import is_media_tool_command, remote_low_priority_shell
 from mediaforce.core.process_control import ManagedProcessController, ScheduleWindowClosedError, run_command
 from mediaforce.core.schedule_deadline import guard_shell_script_for_schedule_deadline, \
     managed_schedule_close_deadline, process_result_reached_schedule_deadline
@@ -240,10 +240,11 @@ def run_remote_command(
     normalized_host["host"] = ssh_host
     remote_command = [Path(str(command[0])).name, *[str(arg) for arg in command[1:]]]
     encoder = host.get("ffmpeg_path")
-    media_tools = {"ffmpeg", "ffprobe", "ab-av1"}
-    if isinstance(encoder, str):
-        media_tools.add(Path(encoder).name)
-    payload = remote_low_priority_shell(remote_command) if media_work or remote_command[0] in media_tools else shlex.join(remote_command)
+    uses_host_encoder = isinstance(encoder, str) and Path(encoder).name == remote_command[0]
+    if media_work or uses_host_encoder or is_media_tool_command(command):
+        payload = remote_low_priority_shell(remote_command)
+    else:
+        payload = shlex.join(remote_command)
     script = f"{remote_shell_path_export_line()}\n{payload}"
     deadline = managed_schedule_close_deadline(host, process_controller)
     if deadline is not None:
