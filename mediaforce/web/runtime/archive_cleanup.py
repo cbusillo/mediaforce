@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.media_storage import STORAGE_WAIT_REASON, probe_media_path, storage_access_issue
+from mediaforce.core.media_storage import probe_media_path, storage_problem
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import library_items, staged_artifacts
 from mediaforce.encoding.delivery_lock import archive_activity
@@ -26,7 +26,7 @@ def archive_cleanup_summary(config: MediaforceConfig, *, transcode_root: str | N
             total_size_bytes += size
     except OSError as error:
         return {"archive_root": str(archive_root), "file_count": 0, "total_size_bytes": 0,
-                "has_cleanup": False, "waiting_reason": storage_access_issue(error) or STORAGE_WAIT_REASON}
+                "has_cleanup": False, "waiting_reason": storage_problem(error).reason}
     return {"archive_root": str(archive_root or ""), "file_count": file_count,
             "total_size_bytes": total_size_bytes, "has_cleanup": file_count > 0}
 
@@ -142,7 +142,7 @@ def _clear_archive_cleanup_action(
     try:
         files = list(_archive_files(archive_root))
     except OSError as error:
-        return {"ok": False, "message": storage_access_issue(error) or STORAGE_WAIT_REASON, "removed_count": 0, "removed_size_bytes": 0}
+        return {"ok": False, "message": storage_problem(error).reason, "removed_count": 0, "removed_size_bytes": 0}
     if archive_root is None or not files:
         progress.counted(0, 0, 0)
         return {

@@ -11,7 +11,7 @@ from mediaforce.core.process_control import ProcessCancelledError
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint, timestamp
 from mediaforce.encoding.delivery_lock import archive_activity, delivery_lock
-from mediaforce.encoding.put_back import PutBackRefused, PutBackRestoreError, put_original_back
+from mediaforce.encoding.put_back import PutBackRefused, PutBackRestoreError, put_back_storage_problem, put_original_back
 from mediaforce.encoding.streams import _record_event
 from mediaforce.library.media_scopes import path_matches_scope, resolve_media_scope
 from mediaforce.library.probe import probe_media
@@ -60,6 +60,6 @@ def put_original_back_action(config: MediaforceConfig, prefix: str, library_item
             "message": "Putting the original back failed partway, and Mediaforce could not return the files. "
                        "Look in the library and the original backups folder before trying again.",
         }
-    except OSError:
-        return {"ok": False, "code": "storage_unavailable", "message": "Storage is unavailable. Try putting the original back when it returns."}
+    except OSError as error:
+        return {"ok": False, "code": "storage_unavailable", "message": put_back_storage_problem(error)}
     return {"ok": True, "rel_path": str(rel_path), "original_path": str(original)}

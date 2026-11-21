@@ -12,7 +12,7 @@ from typing import Any, cast
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from mediaforce.core.media_storage import STORAGE_WAIT_REASON, probe_media_path
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow, open_db
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, motion_keep_decisions, \
@@ -99,8 +99,8 @@ def decide_size_held_file(
             return {"ok": False, "message": NOT_HELD_MESSAGE}
         intent = remake_intent(row)
         copy_probe = requested_copy_probe(row)
-        if copy_probe.unavailable:
-            return {"ok": False, "message": STORAGE_WAIT_REASON}
+        if problem := copy_probe.problem:
+            return {"ok": False, "message": problem.reason}
         if intent and not copy_probe.is_file:
             return {"ok": False, "message": "This file is waiting to be made again. Retry Make again with its saved settings."}
         name = Path(str(row["rel_path"])).name
@@ -429,9 +429,10 @@ def staged_remake_details(
             "The compressed copy points at the original. Check this file’s paths before making it again.",
         ))
     # Work still running here clears by itself; every other blocker needs someone to act.
+    problems = [problem for problem in dict.fromkeys((original_probe.problem, requested_copy.problem)) if problem is not None]
+    blocked.extend(("storage_access", problem.reason) for problem in problems if problem.needs_action)
     lasting_blockers = len(blocked)
-    if original_probe.unavailable or requested_copy.unavailable:
-        blocked.append(("storage_unavailable", STORAGE_WAIT_REASON))
+    blocked.extend(("storage_unavailable", problem.reason) for problem in problems if not problem.needs_action)
     sample = load_latest_job(connection, run_prefix)
     if sample and sample.get("status") in EXECUTION_ACTIVE_JOB_STATUSES:
         blocked.append(("sampling", "Mediaforce is still sampling here. Make this file again once that sample finishes."))

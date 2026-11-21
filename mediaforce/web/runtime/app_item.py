@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from mediaforce.core.media_storage import STORAGE_WAIT_REASON, probe_media_path
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import open_readonly_db
 from mediaforce.core.db_tables import library_items, motion_keep_decisions, staged_artifacts
@@ -236,5 +236,6 @@ def _held_copy_facts(config: MediaforceConfig, stage: Mapping[Any, Any]) -> dict
     size = stage.get("staging_size_bytes")
     path = _scoped_held_copy(config, stage)
     probe = probe_media_path(path) if path is not None else None
+    problem = probe.problem if probe is not None else None
     return {"bytes": None if size is None else int_value(size), "present": probe is not None and probe.is_file,
-            **({"waiting_reason": STORAGE_WAIT_REASON} if probe is not None and probe.unavailable else {})}
+            **({"waiting_reason": problem.reason} if problem else {})}

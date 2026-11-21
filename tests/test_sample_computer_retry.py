@@ -264,6 +264,18 @@ class SampleComputerRetryTests(unittest.TestCase):
         self.assertEqual(job["status"], "queued")
         self.assertIn("storage", job["progress"]["waiting_reason"].lower())
 
+    def test_a_persistently_unreadable_sample_file_eventually_asks_for_help(self) -> None:
+        self._save_job(status="running")
+        error = OSError(errno.EIO, "Input/output error", str(self.root / "episode.mkv"))
+        for _attempt in range(SAMPLE_COMPUTER_RETRY_LIMIT):
+            self._run(self._deps(search=_search_fails(error)))
+            self.assertEqual(self._job()["status"], "queued")
+        self._run(self._deps(search=_search_fails(error)))
+        job = self._job()
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("read", job["error"].lower())
+        self.assertNotIn("waiting_for_computer", job["progress"])
+
     def test_a_link_dropped_mid_sample_waits_for_its_computer_and_tries_again(self) -> None:
         self._save_job(status="running")
 

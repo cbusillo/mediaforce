@@ -11,7 +11,7 @@ from typing import Any, cast, Literal, Protocol, TypeAlias
 from fastapi import HTTPException
 from sqlalchemy import delete, func, or_, select, update
 
-from mediaforce.core.media_storage import STORAGE_WAIT_REASON, probe_media_path
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.config import MediaforceConfig, load_config, with_folder_policy_override
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, staged_artifacts
@@ -1739,7 +1739,7 @@ def _held_files_copy(held: list[HeldFile], *, verb: str) -> str:
         if not group:
             continue
         shown = group if limit is None else group[:limit]
-        listed = "; ".join(f"{Path(held_file.rel_path).name}: {held_file.reason}" for held_file in shown)
+        listed = "; ".join(f"{Path(held_file.rel_path).name}: {held_file.reason.rstrip('.')}" for held_file in shown)
         more = f"; and {len(group) - len(shown)} more" if len(group) > len(shown) else ""
         lead = one if len(group) == 1 else many.format(count=len(group))
         copy += f" {lead} ({listed}{more})."
@@ -1757,8 +1757,8 @@ def _hold_unreachable_staged_items(items: list[FolderItem]) -> tuple[list[Folder
             continue
         rel_path = str(item.get("rel_path") or item.get("source_path") or "")
         host = str(item.get("staging_host_label") or item.get("staging_host_key") or "").strip()
-        if probe.unavailable:
-            held.append(HeldFile(rel_path, STORAGE_WAIT_REASON.rstrip("."), waiting=True))
+        if problem := probe.problem:
+            held.append(HeldFile(rel_path, problem.reason, waiting=not problem.needs_action))
         elif host:
             held.append(HeldFile(rel_path, f"Its finished file is on {host}, which cannot be reached now", waiting=True))
         else:
@@ -1778,10 +1778,7 @@ def _hold_conflicting_destinations(
     for entry in object_list(conflict.get("conflicts")):
         entry = object_dict(entry)
         waiting = entry.get("kind") == "storage_unavailable"
-        reason = {
-            "duplicate_destination": "Another file in this folder would land in the same place",
-            "storage_unavailable": STORAGE_WAIT_REASON,
-        }.get(str(entry.get("kind")), "A different file is already at its place in the library")
+        reason = str(entry["detail"])
         for rel_path in object_list(entry.get("rel_paths")):
             holds.setdefault(str(rel_path), HeldFile(str(rel_path), reason, waiting=waiting))
     clear = [item for item in items if str(item.get("rel_path") or item.get("source_path")) not in holds]
@@ -2033,6 +2030,7 @@ def _promotion_conflict_response(
         if len(rel_paths) > 1:
             conflicts.append({
                 "kind": "duplicate_destination",
+                "detail": "Another file in this folder would land in the same place",
                 "destination_path": str(destination_path),
                 "rel_paths": rel_paths,
             })
@@ -2042,9 +2040,11 @@ def _promotion_conflict_response(
             if item_destination == source_path:
                 continue
             probe = probe_media_path(item_destination)
-            if probe.unavailable or probe.info is not None:
+            problem = probe.problem
+            if problem or probe.info is not None:
                 conflicts.append({
-                    "kind": "storage_unavailable" if probe.unavailable else "destination_exists",
+                    "kind": problem.code if problem else "destination_exists",
+                    "detail": problem.reason if problem else "A different file is already at its place in the library",
                     "destination_path": str(item_destination),
                     "rel_paths": [rel_path],
                 })

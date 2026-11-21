@@ -13,12 +13,22 @@ def stalled_media_read(error: BaseException) -> bool:
     }
 
 
-def storage_access_issue(error: OSError | None) -> str | None:
+@dataclass(frozen=True, slots=True)
+class StorageProblem:
+    reason: str
+    needs_action: bool
+
+    @property
+    def code(self) -> str:
+        return "storage_access" if self.needs_action else "storage_unavailable"
+
+
+def storage_problem(error: OSError, *, retry_reason: str = STORAGE_WAIT_REASON) -> StorageProblem:
     if isinstance(error, PermissionError):
-        return "Mediaforce needs permission to access the media folder."
-    if error is not None and error.errno == errno.ELOOP:
-        return "A link in the media folder points back to itself. Check the folder path."
-    return None
+        return StorageProblem("Mediaforce needs permission to access the media folder.", True)
+    if error.errno == errno.ELOOP:
+        return StorageProblem("A link in the media folder points back to itself. Check the folder path.", True)
+    return StorageProblem(retry_reason, False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +39,10 @@ class MediaPathProbe:
     @property
     def unavailable(self) -> bool:
         return self.error is not None
+
+    @property
+    def problem(self) -> StorageProblem | None:
+        return storage_problem(self.error) if self.error is not None else None
 
     def checked_info(self) -> os.stat_result | None:
         if self.error is not None:

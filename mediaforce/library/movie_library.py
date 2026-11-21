@@ -9,7 +9,7 @@ from typing import Any
 
 from sqlalchemy import or_, outerjoin, select
 
-from mediaforce.core.media_storage import STORAGE_WAIT_REASON, probe_media_path
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, plex_item_metadata, staged_artifacts
@@ -419,12 +419,13 @@ def movie_promotion_conflicts(
             if destination == source_path:
                 continue
             probe = probe_media_path(destination)
-            if probe.unavailable or probe.info is not None:
+            problem = probe.problem
+            if problem or probe.info is not None:
                 conflicts.append({
-                    "kind": "storage_unavailable" if probe.unavailable else "destination_exists",
+                    "kind": problem.code if problem else "destination_exists",
                     "destination_path": str(destination),
                     "member_prefixes": [str(row["rel_path"])],
-                    "detail": STORAGE_WAIT_REASON if probe.unavailable else "The promotion destination already exists in the movie library.",
+                    "detail": problem.reason if problem else "The promotion destination already exists in the movie library.",
                 })
     return conflicts
 

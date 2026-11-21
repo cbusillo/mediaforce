@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Callable
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.media_storage import MediaPathProbe, STORAGE_WAIT_REASON, probe_media_path, storage_access_issue
+from mediaforce.core.media_storage import MediaPathProbe, probe_media_path
 from mediaforce.core.type_defs import object_dict
 from mediaforce.hosts.config import _host_capabilities, _host_priority, _parse_utc_offset_minutes, \
     host_media_access_for_host, host_targets_current_machine, stream_host_has_remote_source_roots
@@ -433,8 +433,8 @@ def _current_machine_host_status(
     storage_issues = []
     for path in status_paths:
         probe = probe_media_path(path)
-        if probe.unavailable:
-            storage_issues.append(storage_access_issue(probe.error) or STORAGE_WAIT_REASON)
+        if problem := probe.problem:
+            storage_issues.append(problem)
         path_access[str(path)] = _local_path_access(path, probe, check_write=str(path) == staging_path)
     tools = local_tool_status_snapshot()
     ffmpeg_bin = _find_local_tool("ffmpeg", fallback_paths=["/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"])
@@ -468,12 +468,13 @@ def _current_machine_host_status(
         require_paths=require_paths,
     )
     if storage_issues:
-        access_required = any(reason != STORAGE_WAIT_REASON for reason in storage_issues)
+        access_required = any(issue.needs_action for issue in storage_issues)
         status.check_failure = "controller_media_access" if access_required else "controller_storage_unavailable"
+        reasons = list(dict.fromkeys(issue.reason for issue in storage_issues))
+        status.issues.extend(reasons)
         if capability_issues or missing_mounts:
-            storage_issues.append(status.message)
-        status.message = " ".join(dict.fromkeys(storage_issues))
-        status.issues.extend(reason for reason in dict.fromkeys(storage_issues) if reason not in status.issues)
+            reasons.append(status.message)
+        status.message = " ".join(reasons)
     return status
 
 

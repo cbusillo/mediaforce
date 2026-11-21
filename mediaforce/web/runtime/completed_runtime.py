@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.media_storage import STORAGE_WAIT_REASON, probe_media_path
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
 from mediaforce.library.media_scopes import media_scope_from_prefix
@@ -173,8 +173,8 @@ def list_completed_folders(
             folder.outside_archive_root_count += 1
             continue
         probe = probe_media_path(archived_path)
-        if probe.unavailable:
-            folder.cleanup_detail = STORAGE_WAIT_REASON
+        if problem := probe.problem:
+            folder.cleanup_detail = problem.reason
             folder.cleanup_state = "blocked"
             continue
         if not probe.is_file or probe.info is None:
@@ -208,8 +208,8 @@ def list_completed_folders(
             if folder is None:
                 continue
             probe = probe_media_path(backup)
-            if probe.unavailable:
-                folder.cleanup_state, folder.cleanup_detail = "blocked", STORAGE_WAIT_REASON
+            if problem := probe.problem:
+                folder.cleanup_state, folder.cleanup_detail = "blocked", problem.reason
             elif probe.is_file and probe.info is not None:
                 folder.archived_backup_count += 1
                 folder.archived_backup_size_bytes += probe.info.st_size
