@@ -126,7 +126,7 @@ def app_window_payload(
             kind["sample_status"] = "retry_backoff"
     pending_kinds = [kind for kind in pending_kinds if _kind_asks_the_director(kind)]
     kind_samples = {kind["sample_season"] for kind in pending_kinds
-                    if kind["sample_season"] and (kind.get("sample_ready", True) or kind.get("sample_status") in {"failed", "stopped", "needs_attention"})}
+                    if kind["sample_season"] and (kind.get("sample_ready", True) or kind.get("sample_status") in {"failed", "stopped", "needs_attention", "missing_clips", "choose_size"})}
     sample_cards = list(cards)
     if file_sample_cards is not None:
         sample_cards.extend(file_sample_cards(item.rel_path for item in items if item.kind != "tv"

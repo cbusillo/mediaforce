@@ -381,7 +381,11 @@ class RepresentativeSelectionTests(unittest.TestCase):
         selection = select_representatives([self._item(index) for index in range(1, 6)], prefix="tv/Example/Season 1")
 
         self.assertEqual(selection.payload["coverage"]["untested_groups"], [])
-        self.assertNotIn("Not yet tested", selection.payload["coverage_summary"])
+        self.assertIn("1 of 5 episodes", selection.payload["coverage_summary"])
+        self.assertIn("season", selection.payload["coverage_summary"])
+        self.assertNotIn("untested", selection.payload["coverage_summary"])
+        movies = select_representatives([self._item(1)], prefix="movies/Example")
+        self.assertEqual(movies.payload["coverage_summary"], "Tested 1 of 1 file.")
         self.assertEqual(selection.payload["confidence"]["level"], "high")
 
     def test_selection_without_population_check_says_so(self) -> None:

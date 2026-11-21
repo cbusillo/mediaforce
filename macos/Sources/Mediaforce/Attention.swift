@@ -131,9 +131,9 @@ struct Attention: Equatable, Sendable {
         let stage: String
         if kind.settingsAvailable == true {
             stage = "settings"
-        } else if kind.sampleReady ?? true {
+        } else if kind.sampleReady == true {
             stage = kind.sampleSeason ?? "ready"
-        } else if ["pending_review", "completed", "choose_size", "choose_balance", "sample_blocked"].contains(kind.sampleStatus ?? "") {
+        } else if ["pending_review", "completed", "choose_another_show", "choose_size", "choose_balance", "sample_blocked"].contains(kind.sampleStatus ?? "") {
             stage = "choice:\(kind.sampleSeason ?? kind.sampleStartPrefix ?? "")"
         } else {
             stage = "attention:\(kind.sampleSeason ?? "")"
@@ -142,6 +142,10 @@ struct Attention: Equatable, Sendable {
     }
 
     private static func kindPlace(_ kind: MainWindowFacts.PendingKind) -> Place {
+        if kind.settingsAvailable != true, let season = kind.sampleSeason,
+           Words.sampleNeedsRemaking(kind.sampleStatus) || kind.sampleStatus == "choose_size" {
+            return .sample(season)
+        }
         if let prefix = kind.sampleStartPrefix, ["choose_size", "choose_balance", "sample_blocked"].contains(kind.sampleStatus ?? "") {
             return .sample(prefix)
         }
@@ -152,17 +156,18 @@ struct Attention: Equatable, Sendable {
         if kind.settingsAvailable == true {
             return "Use settings from another title. No new sample is needed."
         }
-        if kind.sampleReady ?? true {
+        if kind.sampleReady == true {
             let name = kind.sampleSeason?.split(separator: "/").dropFirst().joined(separator: " • ") ?? "The sample"
             return kind.oneTime == true
                 ? "\(name) is ready to watch."
                 : "Watch the sample and choose how this group should look."
         }
+        if Words.sampleNeedsRemaking(kind.sampleStatus) { return Words.remakeSampleAsk }
         switch kind.sampleStatus {
-        case "pending_review", "completed":
+        case "pending_review", "completed", "choose_another_show":
             return "This sample can't decide the whole group. Choose a sample from another title."
         case "choose_size":
-            return "Choose a size for the first sample."
+            return kind.sampleSeason == nil ? "Choose a size for the first sample." : Words.sampleSizeAsk(nil)
         case "choose_balance":
             return "Choose how much detail the first sample keeps."
         case "sample_blocked":

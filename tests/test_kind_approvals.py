@@ -1489,7 +1489,7 @@ def test_finished_seasons_newer_sample_stays_with_its_kind_and_reaches_attention
         tmp_path: Path, sample_status: str, kind_approved: bool,
 ) -> None:
     config = _config(tmp_path)
-    folders = {APPROVED_SEASON: _approved_on(config, f"{APPROVED_SEASON}/e00.mkv"), SEASON: _review_ready()}
+    folders = {APPROVED_SEASON: _review_ready(**_approved_on(config, f"{APPROVED_SEASON}/e00.mkv")), SEASON: _review_ready()}
     load = _loader(folders, {APPROVED_SEASON: LIVE_ACTION, SEASON: LIVE_ACTION})
     _finished_sample(config, SEASON, "2026-10-28T00:00:00+00:00")
     _finished_sample(config, APPROVED_SEASON, "2026-10-29T00:00:00+00:00")
@@ -1504,6 +1504,18 @@ def test_finished_seasons_newer_sample_stays_with_its_kind_and_reaches_attention
     assert darker["sample_season"] == APPROVED_SEASON
     assert darker["needs_you"] == (not kind_approved)
     assert darker["sample_ready"] == (not kind_approved and sample_status in {"pending_review", "completed"})
+    if not kind_approved and sample_status == "failed":
+        folders[APPROVED_SEASON]["accepted_at"] = "2026-10-30T00:00:00+00:00"
+        with open_db(config.paths.db_path) as connection:
+            settled = next(row for row in kinds_payload(connection, config, load_calibration_state=load)["kinds"] if row["kind"] == LIVE_ACTION)
+        assert settled["sample_ready"] and settled["sample_status"] == "completed"
+    if not kind_approved and sample_status == "completed":
+        folders[APPROVED_SEASON]["review_pairs"] = []
+        with open_db(config.paths.db_path) as connection:
+            purged = next(row for row in kinds_payload(connection, config, load_calibration_state=load)["kinds"] if row["kind"] == LIVE_ACTION)
+        assert purged["sample_status"] == "choose_another_show"
+        assert not purged["sample_ready"] and purged["settings"]
+
 
 
 @pytest.mark.parametrize("missing", [False, True])
@@ -1591,7 +1603,7 @@ def test_activity_names_next_approved_season_while_production_waits_for_current_
 @pytest.mark.parametrize("sample_status", [None, "running", "pending_review", "failed"])
 def test_unapproved_kind_is_visible_before_and_after_its_sample(tmp_path: Path, sample_status: str | None) -> None:
     config = _config(tmp_path)
-    folders = {SEASON: _approved_on(config, f"{SEASON}/e00.mkv")}
+    folders = {SEASON: _review_ready(**_approved_on(config, f"{SEASON}/e00.mkv"))}
     for key in list(folders[SEASON]):
         if key.startswith("accepted_"):
             folders[SEASON].pop(key)
@@ -1640,7 +1652,7 @@ def test_measuring_outside_the_pipeline_names_the_reason_and_next_action(
 def test_one_time_kind_moves_on_from_an_approved_show_sample(tmp_path: Path, approval_scope: str) -> None:
     kind = "cartoon"
     config = _config(tmp_path)
-    calibration = _approved_on(config, f"{APPROVED_SEASON}/e00.mkv")
+    calibration = _review_ready(**_approved_on(config, f"{APPROVED_SEASON}/e00.mkv"))
     folders = {APPROVED_SEASON: {key: value for key, value in calibration.items() if not key.startswith("accepted_")}}
     load = _loader(folders, {APPROVED_SEASON: kind, SEASON: kind})
     _finished_sample(config, APPROVED_SEASON)
@@ -1650,6 +1662,9 @@ def test_one_time_kind_moves_on_from_an_approved_show_sample(tmp_path: Path, app
         connection.commit()
         before = next(row for row in kinds_payload(connection, config, load_calibration_state=load)["kinds"] if row["kind"] == kind)
         assert before["sample_ready"] and before["sample_season"] == APPROVED_SEASON
+        folders[APPROVED_SEASON]["review_pairs"] = []
+        missing = next(row for row in kinds_payload(connection, config, load_calibration_state=load)["kinds"] if row["kind"] == kind)
+        assert not missing["sample_ready"] and missing["sample_status"] == "missing_clips"
         folders[approval_scope] = calibration
         connection.execute(calibration_jobs.update().values(status="completed"))
         connection.commit()

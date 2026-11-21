@@ -58,7 +58,7 @@ seasons, video formats, and resolutions no measured file shares, and
 any such group is untested. This adds information only; per-file quality checks
 and approval scope are unchanged.
 
-The season review decision shows the `coverage_summary` stored with the sample
+The season review decision describes the coverage recorded with the sample
 under review (`calibration.sample_item.representative_selection`), not the
 folder's current selection. Once production starts, the current selection
 describes only the files still left and may test a different file. Samples

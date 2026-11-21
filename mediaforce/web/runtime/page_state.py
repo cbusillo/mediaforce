@@ -198,8 +198,8 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
     lane = str(workflow.get("primary_lane") or "none")
     encode_job = object_dict(facts.encode_job)
     sample_job = object_dict(facts.sample_job)
-    sample_status = str(sample_job.get("status") or "")
     calibration = object_dict(facts.calibration) if facts.calibration is not None else None
+    sample_status = sample_review_status(sample_job, calibration)
     wait = facts.sample_wait if not facts.approval_review_blocked else None
     follows_kind = wait.kind if wait is not None else None
     if wait and sample_status not in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES:
@@ -234,8 +234,8 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
         )
     if lane == "blocked" and not awaits_review:
         return PageState("needs_help", "attention", recovery_kind="files", primary_action="review_files")
-    if sample_status in SAMPLE_FAILED_STATUSES and not _settled_by_approval(sample_job, calibration):
-        failure = _sample_failure(sample_job)
+    if sample_status in SAMPLE_FAILED_STATUSES:
+        failure = sample_failure(sample_job)
         return PageState(
             "needs_help",
             "attention",
@@ -491,11 +491,13 @@ def _sample_answers_stop(sample_job: Mapping[str, Any], encode_job: Mapping[str,
     return sample_at is not None and stopped_at is not None and sample_at > stopped_at
 
 
-def _settled_by_approval(sample_job: Mapping[str, Any], calibration: Mapping[str, Any] | None) -> bool:
-    """An approval saved after a sample stopped answers it, as queueing already treats it."""
+def sample_review_status(sample_job: Mapping[str, Any], calibration: Mapping[str, Any] | None) -> str:
+    status = str(sample_job.get("status") or "")
+    if status not in SAMPLE_FAILED_STATUSES:
+        return status
     accepted_at = _timestamp(object_dict(calibration).get("accepted_at"))
     failed_at = _sample_time(sample_job)
-    return accepted_at is not None and failed_at is not None and failed_at < accepted_at
+    return "completed" if accepted_at is not None and failed_at is not None and failed_at < accepted_at else status
 
 
 def _review_availability(
@@ -579,7 +581,7 @@ def _staged_files_block_finish(staged_integrity: Mapping[str, Any] | None) -> bo
     return bool(summary.get("database_truncated")) or int(summary.get("blocker_count") or 0) > 0
 
 
-def _sample_failure(job: Mapping[str, Any]) -> FailureKind:
+def sample_failure(job: Mapping[str, Any]) -> FailureKind:
     target_failure = sample_target_size_failure(dict(job))
     if target_failure is not None:
         return _SAMPLE_TARGET_FAILURES[target_failure]

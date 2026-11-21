@@ -178,6 +178,7 @@ comes down to the tallest picture in Settings. Seasons missing original
 measurements wait for measuring first. When a sample re-encodes the audio,
 the sound is scored too.
 
+Needs you, the kind page and notifications offer to make a sample again when its clips are gone or the sample failed. A sample with a size decision still asks for that choice.
 Make sample shows “Preparing the sample…” while Mediaforce chooses settings and queues the job.
 If preparation stops, the app shows the reason. If the server takes too long to answer,
 the sample page can still show preparation. A second request for the same season reports that preparation is already underway.

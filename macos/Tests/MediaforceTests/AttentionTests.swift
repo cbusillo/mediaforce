@@ -124,6 +124,21 @@ final class AttentionTests: XCTestCase {
         XCTAssertNotEqual(Attention.waitingItems(cartoons).first?.body, after.notices.first?.body)
     }
 
+    @MainActor
+    func testAnUnwatchableKindSampleOffersToMakeTheRightSeason() throws {
+        let season = "tv/Futurama/Season 6"
+        for status in ["missing_clips", "failed"] {
+            let waiting = try facts(kinds: [("cartoon", season)], kindStatus: status, kindReady: false, oneTime: true)
+            let notice = try XCTUnwrap(Attention.waitingItems(waiting).first)
+            XCTAssertEqual(notice.opens, .sample(season))
+            XCTAssertTrue(notice.body.localizedCaseInsensitiveContains("make"))
+            let answer = try XCTUnwrap(NeedsYouItem.items(waiting, kinds: nil).first?.asks.first?.answers.first)
+            XCTAssertEqual(answer.title, Words.makeSample)
+            guard case .makeSample(let prefix) = answer.action else { return XCTFail("Expected to make the sample") }
+            XCTAssertEqual(prefix, season)
+        }
+    }
+
     func testAFirstSampleChoiceIsBadgedAndOpensTheSeasonThatNeedsIt() throws {
         let retrying = try facts(kinds: [("live_action", nil)], kindStatus: "retry_backoff", kindReady: false)
         let choice = try facts(kinds: [("live_action", nil)], kindStatus: "choose_size", kindReady: false,
@@ -132,6 +147,10 @@ final class AttentionTests: XCTestCase {
         XCTAssertEqual(after.badgeCount, 1)
         XCTAssertEqual(after.notices.map(\.opens), [.sample("tv/Psych/Season 3")])
         XCTAssertTrue(Attention.review(choice, remembered: after.memory).notices.isEmpty)
+        let retry = try facts(kinds: [("cartoon", "tv/Psych/Season 3")], kindStatus: "choose_size", kindReady: false)
+        let sizeNotice = try XCTUnwrap(Attention.waitingItems(retry).first)
+        XCTAssertEqual(sizeNotice.opens, .sample("tv/Psych/Season 3"))
+        XCTAssertEqual(sizeNotice.body, Words.sampleSizeAsk(nil))
         let unsuitable = try facts(waitingSamples: [("tv/Psych/Season 3", "ready_to_compare", "review_sample")],
                                    kinds: [("live_action", "tv/Psych/Season 3")], kindStatus: "pending_review", kindReady: false)
         XCTAssertEqual(Attention.waitingItems(unsuitable).count, 2)

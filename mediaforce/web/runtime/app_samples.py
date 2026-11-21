@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
+from mediaforce.library.representatives import sample_coverage_summary
 from mediaforce.reviewing.clips import review_file_from_url
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.tuning.compression_intent import compression_intent_from_payload, compression_intent_options
@@ -59,6 +60,7 @@ def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[s
     page_state = object_dict(status.get("page_state"))
     lifecycle = object_dict(folder.get("lifecycle"))
     sample_item = object_dict(calibration.get("sample_item")) or object_dict(folder.get("sample_item"))
+    selection = object_dict(object_dict(calibration.get("sample_item")).get("representative_selection"))
     balances = _balance_choices(folder)
     effective_balance = _effective_balance(balances)
     if page_state.get("primary_action") == "retry_sample":
@@ -75,9 +77,9 @@ def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[s
         "action": page_state.get("primary_action"),
         "failure": page_state.get("failure"),
         "moments": sample_moments(calibration),
-        "coverage_summary": object_dict(
-            object_dict(calibration.get("sample_item")).get("representative_selection")
-        ).get("coverage_summary"),
+        "coverage_summary": sample_coverage_summary(
+            object_dict(selection.get("coverage")), is_tv=object_dict(folder.get("media_scope")).get("domain") == "tv",
+        ) or selection.get("coverage_summary"),
         "episode_bytes": int_value(sample_item.get("source_size_bytes")),
         "estimated_episode_bytes": int_value(
             object_dict(calibration.get("sample_result")).get("predicted_total_size_bytes")

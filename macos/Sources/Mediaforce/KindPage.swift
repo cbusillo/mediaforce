@@ -18,19 +18,20 @@ struct KindPage: View {
     var body: some View {
         let setting = kind.settings.first { $0.show == chosen } ?? kind.firstSetting
         let offering = kind.approval == nil && chosen == nil && kind.showsSampleFirst
-        let offer: ((KindsFacts.Show) -> Void)? = offering && kind.offersSample && !asking ? { makeSample($0) } : nil
+        let offer: ((KindsFacts.Show) -> Void)? = offering && kind.offersSample && !asking ? { makeSample($0.sampleSeason) } : nil
+        let showSample: (() -> Void)? = chosen != nil || (kind.approval == nil && !kind.showsSampleFirst) ? { selectSample() } : nil
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                if kind.shows.isEmpty && kind.settings.isEmpty && kind.approval == nil && kind.sampleSeason == nil {
+                if kind.shows.isEmpty && kind.settings.isEmpty && kind.approval == nil && kind.reviewSeason == nil {
                     Text(Words.kindEmpty(kind.kind)).foregroundStyle(.secondary)
-                } else if offering, let season = kind.sampleSeason {
+                } else if offering, let season = kind.reviewSeason {
                     SampleWork(prefix: season, model: model, facts: $sample, namesSeason: true, openItem: openItem)
                         .id(season)
                 } else if offering, let biggest = kind.shows.first {
                     if asking {
                         ProgressView(Words.preparingSample).controlSize(.small)
                     }
-                    Button(Words.makeSampleOf(biggest.name)) { makeSample(biggest) }
+                    Button(Words.makeSampleOf(biggest.name)) { makeSample(biggest.sampleSeason) }
                         .buttonStyle(.borderedProminent)
                         .disabled(asking)
                 } else if kind.approval != nil, chosen == nil {
@@ -52,10 +53,8 @@ struct KindPage: View {
                 }
                 if !offering || kind.sampleSetting != nil {
                     KindDecision(kind: kind, setting: setting, model: model, openItem: openItem,
-                                 showSample: (chosen != nil || (kind.approval == nil && !kind.showsSampleFirst)) && (kind.approval?.sampleMoments?.isEmpty == false || kind.sampleSeason != nil) ? {
-                                     if kind.approval == nil, !kind.showsSampleFirst, let season = kind.sampleSeason { openSample(season) }
-                                     else { chosen = nil }
-                                 } : nil)
+                                 showSample: showSample)
+                        .disabled(asking)
                 }
                 KindShows(kind: kind, playing: offering ? kind.sampleShow : (kind.approval != nil && chosen == nil ? nil : setting?.show), leftOut: leftOut, posters: model.posters,
                           choose: { chosen = $0 }, open: openItem, openLeftOut: openLeftOut,
@@ -81,13 +80,23 @@ struct KindPage: View {
         .onDisappear { players.pause() }
     }
 
+    private func selectSample() {
+        guard kind.approval == nil, let season = kind.reviewSeason else {
+            chosen = nil
+            return
+        }
+        if Words.sampleNeedsRemaking(kind.sampleStatus) { makeSample(season) }
+        else if kind.showsSampleFirst { chosen = nil }
+        else { openSample(season) }
+    }
+
     /// Asks for the show's sample at its own size goal. A refusal opens the season's sample page, which says what the
     /// sample needs first.
-    private func makeSample(_ show: KindsFacts.Show) {
+    private func makeSample(_ prefix: String) {
         asking = true
         Task {
-            if await model.makeSample(show.sampleSeason)?.ok != true {
-                openSample(show.sampleSeason)
+            if await model.makeSample(prefix)?.ok != true {
+                openSample(prefix)
             }
             await model.refreshKinds()
             asking = false
@@ -138,8 +147,8 @@ struct KindDecision: View {
                         .buttonStyle(.borderedProminent)
                 }
             }
-            if let showSample {
-                Button(kind.approval == nil ? Words.watchSample : Words.watchApprovedSample, action: showSample)
+            if let showSample, let title = kind.sampleButtonTitle {
+                Button(title, action: showSample)
             }
         }
         .disabled(working)
@@ -219,8 +228,8 @@ struct KindShows: View {
                                     .buttonStyle(QuietLinkStyle())
                                     .font(.caption)
                                     .help(Words.makeSampleOf(show.name))
-                                    .opacity(show.sampleSeason == kind.sampleSeason || (kind.sampleSeason == nil && show == kind.shows.first) ? 0 : 1)
-                                    .disabled(show.sampleSeason == kind.sampleSeason || (kind.sampleSeason == nil && show == kind.shows.first))
+                                    .opacity(show.sampleSeason == kind.reviewSeason || (kind.reviewSeason == nil && show == kind.shows.first) ? 0 : 1)
+                                    .disabled(show.sampleSeason == kind.reviewSeason || (kind.reviewSeason == nil && show == kind.shows.first))
                             }
                         }
                     }
