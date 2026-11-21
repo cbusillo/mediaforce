@@ -120,10 +120,10 @@ def test_work_payload_reads_committed_work_without_writing(tmp_path: Path) -> No
     assert database.read_bytes() == before
 
 
-async def get_work_over_http(app: FastAPI, messages: list[Message]) -> None:
+async def request_over_http(app: FastAPI, messages: list[Message], *, method: str = "GET", path: str = "/api/release/work") -> None:
     scope: Scope = {
-        "type": "http", "http_version": "1.1", "method": "GET", "scheme": "http",
-        "path": "/api/release/work", "raw_path": b"/api/release/work", "query_string": b"",
+        "type": "http", "http_version": "1.1", "method": method, "scheme": "http",
+        "path": path, "raw_path": path.encode(), "query_string": b"",
         "root_path": "", "headers": [], "server": ("fixture", 80), "client": ("fixture", 1),
     }
 
@@ -148,7 +148,7 @@ def test_real_app_registers_readonly_http_evidence_and_fails_without_database(tm
     with open_db(config.paths.db_path) as connection:
         add_encode(connection, "busy", "queued")
     messages: list[Message] = []
-    asyncio.run(get_work_over_http(app, messages))
+    asyncio.run(request_over_http(app, messages))
     assert messages[0]["status"] == 200
     assert (b"cache-control", b"no-store") in messages[0]["headers"]
     body = json.loads(b"".join(message.get("body", b"") for message in messages))
@@ -156,10 +156,19 @@ def test_real_app_registers_readonly_http_evidence_and_fails_without_database(tm
     assert body["counts"]["pending_encode"] == 1
     assert "idle" not in body
     assert "database_idle" not in body
+    from mediaforce.ops.controller_deploy import _write_intent
+    from mediaforce.web.routes.queues import SIZE_DECISION_PATH
+
+    _write_intent(config.paths.db_path.parent, {"phase": "starting", "to": "next"})
+    for path in (SIZE_DECISION_PATH, "/api/encode-queue/pause"):
+        held: list[Message] = []
+        asyncio.run(request_over_http(app, held, method="POST", path=path))
+        assert held[0]["status"] == 503
+        assert json.loads(b"".join(message.get("body", b"") for message in held))["ok"] is False
     config.paths.db_path.unlink()
     failed: list[Message] = []
     with pytest.raises(FileNotFoundError):
-        asyncio.run(get_work_over_http(app, failed))
+        asyncio.run(request_over_http(app, failed))
     assert failed[0]["status"] == 500
     assert not config.paths.db_path.exists()
 

@@ -32,10 +32,10 @@ def read_update_intent(support_dir: Path) -> dict | None:
     return value if isinstance(value, dict) else {"phase": "unreadable"}
 
 
-def update_hold_reason(support_dir: Path) -> str | None:
+def update_hold_reason(support_dir: Path, *, allow_during_drain: bool = False) -> str | None:
     """Why new work and cleanup wait: an update holds them until it finishes, across quit, replacement and reboot."""
     intent = read_update_intent(support_dir)
-    if intent is None:
+    if intent is None or allow_during_drain and intent.get("phase") == "draining":
         return None
     return f"Mediaforce is updating to build {intent.get('to', 'unknown')}. New work waits until it finishes."
 

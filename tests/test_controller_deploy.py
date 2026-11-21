@@ -631,12 +631,13 @@ def test_rollback_refuses_a_missing_saved_app_before_touching_anything(controlle
     with sqlite3.connect(mac.support / "library.sqlite3") as kept:
         assert kept.execute("select name from sqlite_master where name = 'release_migration'").fetchall()
     mac.outcome = "healthy"
-    with pytest.raises(controller_deploy.UpdateRefused, match="repaired copy"):
-        controller_deploy.install_release(mac.release, mac.support / "deployments/forward", mac.home, evidence={},
-                                          install=mac.install, startup_timeout=0, stopped=True)
-    mac.disable(mac.previous_paths)
-    controller_deploy.install_release(mac.release, mac.support / "deployments/verified", mac.home, evidence={},
+    controller_deploy.install_release(mac.release, mac.support / "deployments/forward", mac.home, evidence={},
                                       install=mac.install, startup_timeout=0, stopped=True)
+    repaired = runtime_install.retained_deploy_stage(mac.support)
+    assert repaired is not None and controller_deploy.usable_saved_app(repaired)
+    assert login_item.bundle_build(repaired / controller_deploy.MAC_APP_NAME) == login_item.bundle_build(mac.install)
+    with sqlite3.connect(repaired / "before.sqlite") as saved:
+        assert saved.execute("select * from release_migration").fetchall() == []
     assert mac.running == "release" and runtime_install.read_update_intent(mac.support) is None
 
 
@@ -779,4 +780,6 @@ def test_missing_installed_app_preserves_last_protected_rollback(controller: Con
             patch.object(release_app, "relaunch_installed_app", return_value="not running"):
         result = release_app.install(args)
     assert runtime_install.retained_deploy_stage(mac.support) == earlier
-    assert result["rollback"]["stage"] == str(earlier) and mac.running == "release"
+    rollback = result["rollback"]
+    assert isinstance(rollback, dict) and rollback["stage"] == str(earlier)
+    assert mac.running == "release"

@@ -497,3 +497,51 @@ def test_prepare_recovers_after_a_failed_pointer_write(update: Update) -> None:
         deploy.prepare_update(change, "2")
     deploy.prepare_update(change, "2")
     assert _phase(change) == "prepared"
+
+
+def test_download_keeps_its_backup_across_quit_until_sparkle_aborts_or_installs(update: Update) -> None:
+    change, server = update
+    deploy.prepare_update(change, "2")
+    deploy._write_intent(change.support, {**_intent(change), "phase": "downloading"})
+    calls = list(server.launchctl)
+    with pytest.raises(deploy.UpdateRefused):
+        deploy.back_out_update(change)
+    assert calls == server.launchctl and _phase(change) == "downloading"
+    with pytest.raises(deploy.UpdateRefused):
+        deploy.back_out_update(change, aborted_build="2")
+    deploy._write_intent(change.support, {**_intent(change), "phase": "prepared"})
+    deploy.back_out_update(change, aborted_build="2")
+    assert _phase(change) is None
+    deploy.prepare_update(change, "2")
+    deploy._write_intent(change.support, {**_intent(change), "phase": "downloading"})
+    _install(change, build="2")
+    assert deploy.reconcile_update(change) == "updated"
+
+
+def test_a_repeatable_http_server_error_quarantines_the_candidate(update: Update) -> None:
+    from email.message import Message
+    from urllib.error import HTTPError
+
+    change, server = update
+    deploy.prepare_update(change, "2")
+    _install(change, build="2")
+
+    def broken(base: str, route: str) -> dict[str, Any]:
+        if route == "/api/release/work":
+            raise HTTPError(base + route, 500, "fixture failure", Message(), None)
+        return server.api(base, route)
+
+    with patch.object(deploy, "_api", side_effect=broken):
+        assert deploy.reconcile_update(change) == "rolled back"
+    assert "2" in deploy._failed(change)
+
+
+def test_unbound_legacy_preparation_finishes_against_its_unchanged_database(update: Update) -> None:
+    change, _ = update
+    deploy.prepare_update(change, "2")
+    intent = _intent(change)
+    del intent["database"]
+    (Path(intent["stage"]) / "config.toml").unlink()
+    deploy._write_intent(change.support, intent)
+    _install(change, build="2")
+    assert deploy.reconcile_update(change) == "updated"

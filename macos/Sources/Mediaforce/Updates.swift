@@ -36,7 +36,6 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
     private var checker: UpdateChecker?
     private var state = ServerUpdateStep.Answer()
     private(set) var preparing: Task<Void, Never>?
-    private var installLock: FileHandle?
     private var cancelling = false
     private var asked = false
     /// Why the waiting update has kept failing to get ready, once that has lasted an hour.
@@ -66,7 +65,7 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
         self.controller = controller
         use(controller.updater)
         // Quit or restarted after preparing: the server is stopped, so fetch the prepared build now, not on schedule.
-        if state.intent?.phase == "prepared" { checker?.checkForUpdatesInBackground() }
+        if state.intent?.awaitsSparkle == true { checker?.checkForUpdatesInBackground() }
     }
 
     func use(_ checker: UpdateChecker) {
@@ -90,10 +89,9 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
             found = Words.updateFailedBefore(build: version)
             throw UpdateWait(Words.updateFailedBefore(build: version))
         }
-        if let intent = state.intent, intent.to == build, intent.phase == "prepared",
-           let runtime = state.runtime,
-           let lock = Self.lockPreparedUpdate(build: build, runtime: URL(filePath: runtime), app: Bundle.main.bundleURL) {
-            installLock = lock
+        if let intent = state.intent, intent.awaitsSparkle, let runtime = state.runtime,
+           Self.setDownloadPhase("downloading", build: build, expected: intent, runtime: URL(filePath: runtime)) {
+            state.intent = .init(phase: "downloading", to: build, stage: intent.stage)
             return
         }
         if preparing == nil { prepare(build, version: version) }
@@ -101,13 +99,24 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
         throw UpdateWait(Words.updateWaitingForQuietTime)
     }
 
-    static func lockPreparedUpdate(build: String, runtime: URL, app: URL) -> FileHandle? {
-        guard let lock = try? FileHandle(forUpdating: runtime.appending(path: "deploy.lock")),
-              flock(lock.fileDescriptor, LOCK_EX | LOCK_NB) == 0,
-              let data = try? Data(contentsOf: runtime.appending(path: "update-intent.json")),
-              let intent = try? JSONDecoder().decode(ServerUpdateStep.Intent.self, from: data),
-              intent.phase == "prepared", intent.to == build, intent.app == app.path else { return nil }
-        return lock
+    private static func setDownloadPhase(_ phase: String, build: String, expected: ServerUpdateStep.Intent, runtime: URL) -> Bool {
+        guard let lock = try? FileHandle(forUpdating: runtime.appending(path: "deploy.lock")) else { return false }
+        defer { try? lock.close() }
+        guard flock(lock.fileDescriptor, LOCK_EX | LOCK_NB) == 0 else { return false }
+        let record = runtime.appending(path: "update-intent.json")
+        do {
+            let data = try Data(contentsOf: record)
+            let intent = try JSONDecoder().decode(ServerUpdateStep.Intent.self, from: data)
+            guard intent.phase == expected.phase, intent.stage == expected.stage, intent.to == expected.to,
+                  intent.app == Bundle.main.bundleURL.path,
+                  var fields = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+            fields["phase"] = phase
+            fields["to"] = build
+            try JSONSerialization.data(withJSONObject: fields).write(to: record, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// The end of a check: only a check someone asked for gets an answer.
@@ -138,16 +147,10 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
 
     // The prepared build is downloaded: install it now and relaunch; the server is already stopped and saved.
     nonisolated func updater(_ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem, immediateInstallationBlock: @escaping () -> Void) -> Bool {
-        let admitted = MainActor.assumeIsolated {
-            if installLock == nil, let runtime = state.runtime {
-                installLock = Self.lockPreparedUpdate(build: item.versionString, runtime: URL(filePath: runtime), app: Bundle.main.bundleURL)
-            }
-            guard installLock != nil else { return false }
-            // An answer still on screen must not hold the app open; it has nothing left to say.
+        MainActor.assumeIsolated {
             if let window = NSApp.modalWindow, window.identifier == Self.answerWindow { NSApp.abortModal() }
-            return true
         }
-        if admitted { immediateInstallationBlock() }
+        immediateInstallationBlock()
         return true
     }
 
@@ -160,14 +163,20 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
     }
 
     private func cancelPreparedUpdate(error: Error) {
-        installLock = nil
-        guard state.intent?.phase == "prepared", !cancelling, found == nil, !(error is UpdateWait) else { return }
+        guard let intent = state.intent, intent.awaitsSparkle, !cancelling, found == nil, !(error is UpdateWait) else { return }
+        if intent.phase == "downloading" {
+            guard let runtime = state.runtime,
+                  Self.setDownloadPhase("prepared", build: intent.to, expected: intent, runtime: URL(filePath: runtime)) else {
+                notify(Words.updateNeedsYou("Open Mediaforce again to finish the update."))
+                return
+            }
+        }
         cancelling = true
         let answer = Self.answer(found: nil, error: error)
         let report = asked || answer == Words.upToDate ? nil : answer
         Task {
             defer { cancelling = false }
-            state = await runStep(["cancel"])
+            state = await runStep(["cancel", "--build", intent.to])
             if let problem = state.error { notify(Words.updateNeedsYou(problem)) }
             else if let report { notify(report) }
         }
@@ -269,6 +278,8 @@ enum ServerUpdateStep {
         let phase: String
         let to: String
         var app: String?
+        var stage: String?
+        var awaitsSparkle: Bool { phase == "prepared" || phase == "downloading" }
     }
 
     struct Answer: Decodable {

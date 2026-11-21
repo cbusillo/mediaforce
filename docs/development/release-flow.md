@@ -73,10 +73,9 @@ given after confirming the release is not older.
    reason such as an unmounted share (#1340).
 7. A usable app and database pair becomes the protected rollback. If the
    installed app was already missing or damaged, the previous protected stage
-   stays in place. Without a usable prior stage, the verified app stays held:
-   stop its service and repeat the stopped repair into a fresh stage to save
-   that repaired app and its matching database. The result names the retained
-   stage and its contents.
+   stays in place. Without a usable prior stage, the installer saves the
+   repaired app, launch item and matching database in a separate stage while
+   work is held. The result names the retained stage and its contents.
    Removing the update record releases work. An online install resumes the
    encode queue alone. A stopped install preserves each queue's prior state.
 8. A Mediaforce app still running from the installed path, found by its
@@ -112,7 +111,9 @@ forward:
   removes the record once it answers. When the saved launch item runs the clone
   runtime, it rolls back without the app and says so. When it runs a bundled app
   whose saved copy is missing or damaged, it refuses before changing anything;
-  repair forward instead.
+  repair forward instead. Older stages without a recorded database path
+  prove the destination by comparing a fresh SQLite backup before replacement. If the
+  destination cannot be verified, use the stopped forward repair.
 
 A release that fails validation after starting is added to
 `runtime/failed-update-builds.json`, so the app never installs it again
@@ -144,7 +145,8 @@ running work records require reconciliation; this mode never clears them.
 The stopped installer saves a rollback copy with encoding paused. It leaves
 the source database at its original schema until the candidate starts. The
 update record holds new work while the candidate is checked, including
-automatically approved seasons and answers to file size questions. A stopped
+automatically approved seasons. The app asks you to try changes again once
+validation finishes. During the earlier drain it can still take changes. A stopped
 repair preserves the saved encoding, background and measurement pauses.
 
 ### Rollback and cleanup ownership
@@ -237,7 +239,8 @@ leftover draft, fix the cause and dispatch again: the version stays and the
 build is numbered again from the unchanged feed. Once the
 draft is verified, rerun failed jobs on the same run. A publication retry
 uses the same archive digest and feed artifact. A Pages retry needs only the
-`feed` job. Before retrying an older run, check that no newer release has shipped.
+`feed` job. The feed artifact is retained for 30 days. Both jobs check for
+a newer public release before proceeding.
 Removing a feed item does not downgrade an installed app; a bad release is
 replaced by a newer build.
 

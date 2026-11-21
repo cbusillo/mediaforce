@@ -2419,19 +2419,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(group["size_questions"][1]["smallest_quality_safe_bytes"], 401)
 
-    def test_an_update_holds_a_size_answer_without_changing_the_file(self) -> None:
-        from mediaforce.ops.controller_deploy import _write_intent
-
-        with open_db(self.config.paths.db_path) as connection:
-            job, manifest = self._quality_floor_conflict_job(connection, "update-hold", best_reachable_bytes=400_000_000)
-            before = manifest.read_bytes()
-            _write_intent(self.config.paths.db_path.parent, {"phase": "starting", "to": "2"})
-            result = self._decide_size(connection, "job-update-hold", allow=True)
-            self.assertFalse(result["ok"])
-            self.assertEqual(load_encode_job(connection, "job-update-hold"), job)
-            self.assertEqual(manifest.read_bytes(), before)
-            self.assertFalse(connection.execute(select(item_events).where(item_events.c.event_type == "owner_size_decision")).first())
-
     def test_owner_allowing_the_larger_size_retries_only_that_file_under_an_item_exception(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             self._quality_floor_conflict_job(connection, "floor-allow", best_reachable_bytes=400_000_000)

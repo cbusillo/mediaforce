@@ -127,7 +127,7 @@ final class UpdatesTests: XCTestCase {
         let restored = expectation(description: "cancel the prepared update")
         updates.runStep = { arguments in
             steps.append(arguments)
-            if arguments == ["cancel"] {
+            if arguments == ["cancel", "--build", "3002"] {
                 restored.fulfill()
                 return ServerUpdateStep.Answer()
             }
@@ -140,7 +140,7 @@ final class UpdatesTests: XCTestCase {
         updates.finishCheck(error: failure)
         await fulfillment(of: [restored], timeout: 2)
         updates.finishCheck(error: failure)
-        XCTAssertEqual(steps, [["prepare", "--build", "3002"], ["cancel"]])
+        XCTAssertEqual(steps, [["prepare", "--build", "3002"], ["cancel", "--build", "3002"]])
         XCTAssertEqual(notices, [Words.updateCheckFailed(failure.localizedDescription)])
     }
 
@@ -167,10 +167,23 @@ final class UpdatesTests: XCTestCase {
         updates.runStep = { _ in .init(runtime: runtime.path, intent: Self.prepared.intent) }
         XCTAssertThrowsError(try updates.admit(build: "3002", version: "0.5.3"))
         await updates.preparing?.value
-        XCTAssertNotNil(Updates.lockPreparedUpdate(build: "3002", runtime: runtime, app: Bundle.main.bundleURL))
+        let prepared = try Data(contentsOf: intent)
         try FileManager.default.removeItem(at: intent)
         XCTAssertThrowsError(try updates.admit(build: "3002", version: "0.5.3"))
         await updates.preparing?.value
+        try prepared.write(to: intent)
+        XCTAssertNoThrow(try updates.admit(build: "3002", version: "0.5.3"))
+        let claimed = try JSONDecoder().decode(ServerUpdateStep.Intent.self, from: Data(contentsOf: intent))
+        XCTAssertEqual(claimed.phase, "downloading")
+        let aborted = expectation(description: "the failed download returns the saved service")
+        updates.runStep = { _ in
+            let restored = try? JSONDecoder().decode(ServerUpdateStep.Intent.self, from: Data(contentsOf: intent))
+            XCTAssertEqual(restored?.phase, "prepared")
+            aborted.fulfill()
+            return .init()
+        }
+        updates.finishCheck(error: URLError(.networkConnectionLost))
+        await fulfillment(of: [aborted], timeout: 2)
     }
 
     func testTheHourlyCheckStaysQuiet() {
