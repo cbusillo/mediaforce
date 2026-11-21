@@ -688,3 +688,11 @@ def test_work_headline_names_a_running_vr_file_under_a_season_named_folder(conne
     [running] = _payload(connection)["work"]["running_seasons"]
 
     assert (running["show"], running["season"], running["show_prefix"]) == ("Coast", None, running["prefix"])
+
+
+def test_storage_wait_preserves_a_separate_computer_recovery_action(connection: DBClient) -> None:
+    row = _computer("worker", available=False, check_failure="controller_storage_unavailable",
+                    recovery={"status": "action_required", "reason": "The share needs its password."})
+    [computer] = _payload(connection, computers=[row])["computers"]
+    assert computer["state"] == "recovery_required"
+    assert computer["attention_reason"] == row["recovery"]["reason"]

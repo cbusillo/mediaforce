@@ -26,7 +26,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.sql.elements import ColumnElement
 from fastapi import HTTPException
 
-from mediaforce.core.media_storage import probe_media_path
+from mediaforce.core.media_storage import probe_media_path, stalled_media_read
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.runtime.scratch_reservations import calibration_scratch_reservations
 from mediaforce.ops.runtime_install import update_hold_reason
@@ -2215,8 +2215,10 @@ def encode_job_outputs_completed(connection: DBClient, job: dict[str, Any]) -> b
         if (
                 execution_mode_for_host(host) != "ssh"
                 or host_media_access_for_host(host) == "stream"
-        ) and probe_media_path(staging_path).info is None:
-            return False
+        ):
+            probe = probe_media_path(staging_path)
+            if probe.info is None and not probe.unavailable:
+                return False
     return True
 
 
@@ -3253,13 +3255,15 @@ def _controller_staging_access_issue(
         return None
     nearest_existing = staging_root
     try:
-        while not nearest_existing.exists():
+        probe = probe_media_path(nearest_existing)
+        while not probe.exists_or_raise():
             parent = nearest_existing.parent
             if parent == nearest_existing:
                 break
             nearest_existing = parent
+            probe = probe_media_path(nearest_existing)
         accessible = (
-            nearest_existing.is_dir()
+            probe.is_dir
             and os.access(nearest_existing, os.W_OK | os.X_OK)
         )
     except OSError:
@@ -5689,7 +5693,7 @@ def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
         return "ssh_transport"
     if is_vmaf_model_load_failure(message):
         return "host_configuration"
-    if is_storage_io_failure(message):
+    if stalled_media_read(exc) or is_storage_io_failure(message):
         return "storage_io"
     if is_database_busy_failure(message):
         return "controller_database_busy"

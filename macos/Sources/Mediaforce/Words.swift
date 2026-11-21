@@ -91,6 +91,7 @@ enum Words {
         case "cooling_down": "Resting after repeated failures"
         case "not_encoding": "Makes samples only"
         case "controller_storage_unavailable": "Waiting for shared storage"
+        case "controller_media_access": "Check access to the media folder"
         case "storage_unreachable": "Can't reach shared storage"
         case "password_needed": "Needs its password once"
         case "away": "Away. Picks up work when it returns"
@@ -787,7 +788,7 @@ extension Words {
     }
 
     static func tvSeasonState(_ season: TVShowsFacts.Season) -> String {
-        if let detail = season.waitDetail { return detail }
+        if ["waiting_for_measurement", "sample_waiting"].contains(season.state), let detail = season.waitDetail { return detail }
         if season.needsYou, !["ready_to_compare", "needs_help"].contains(season.state), season.action != "decide_motion" {
             return "\(seasonState(season.state, season.action)). Some files need you."
         }

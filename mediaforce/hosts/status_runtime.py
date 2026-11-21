@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Callable
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.media_storage import STORAGE_WAIT_REASON, probe_media_path
+from mediaforce.core.media_storage import MediaPathProbe, STORAGE_WAIT_REASON, probe_media_path, storage_access_issue
 from mediaforce.core.type_defs import object_dict
 from mediaforce.hosts.config import _host_capabilities, _host_priority, _parse_utc_offset_minutes, \
     host_media_access_for_host, host_targets_current_machine, stream_host_has_remote_source_roots
@@ -429,10 +429,13 @@ def _current_machine_host_status(
     source_path_map = explicit_source_roots if media_access == "stream" else merged_source_roots
     source_paths = [str(path) for path in source_path_map.values()]
     staging_path = str(config.staging_root_for_host(host)) if require_paths and media_access != "stream" else None
-    path_access = {
-        str(path): _local_path_access(path, check_write=str(path) == staging_path)
-        for path in status_paths
-    }
+    path_access = {}
+    storage_issues = []
+    for path in status_paths:
+        probe = probe_media_path(path)
+        if probe.unavailable:
+            storage_issues.append(storage_access_issue(probe.error) or STORAGE_WAIT_REASON)
+        path_access[str(path)] = _local_path_access(path, probe, check_write=str(path) == staging_path)
     tools = local_tool_status_snapshot()
     ffmpeg_bin = _find_local_tool("ffmpeg", fallback_paths=["/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"])
     capability_issues = _host_capability_issues(
@@ -464,17 +467,19 @@ def _current_machine_host_status(
         setup_supported=_host_setup_supported(platform_name),
         require_paths=require_paths,
     )
-    if any(access["unavailable"] for access in path_access.values()):
-        status.message = STORAGE_WAIT_REASON
-        status.check_failure = "controller_storage_unavailable"
+    if storage_issues:
+        access_required = any(reason != STORAGE_WAIT_REASON for reason in storage_issues)
+        status.check_failure = "controller_media_access" if access_required else "controller_storage_unavailable"
+        if capability_issues or missing_mounts:
+            storage_issues.append(status.message)
+        status.message = " ".join(dict.fromkeys(storage_issues))
+        status.issues.extend(reason for reason in dict.fromkeys(storage_issues) if reason not in status.issues)
     return status
 
 
-def _local_path_access(path: Path, *, check_write: bool) -> dict[str, bool]:
-    probe = probe_media_path(path)
+def _local_path_access(path: Path, probe: MediaPathProbe, *, check_write: bool) -> dict[str, bool]:
     return {
         "exists": probe.info is not None,
-        "unavailable": probe.unavailable,
         "read": probe.is_file or (probe.is_dir and _local_check_passed([_LOCAL_LIST_COMMAND, "-f", "--", str(path)])),
         "write": check_write and probe.is_dir and _local_check_passed(
             [_LOCAL_SHELL, "-c", _LOCAL_WRITE_CHECK_SCRIPT, "mediaforce-write-check", str(path)]

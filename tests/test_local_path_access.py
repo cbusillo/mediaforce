@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.hosts import status_runtime
 
 
@@ -20,7 +21,7 @@ def test_directory_whose_listing_never_returns_is_unreadable(monkeypatch: pytest
     monkeypatch.setattr(status_runtime, "_LOCAL_CHECK_TIMEOUT_SECONDS", 0.2)
     started = time.monotonic()
 
-    assert status_runtime._local_path_access(tmp_path, check_write=False)["read"] is False
+    assert status_runtime._local_path_access(tmp_path, probe_media_path(tmp_path), check_write=False)["read"] is False
     assert time.monotonic() - started < 10
 
 
@@ -29,18 +30,18 @@ def test_directory_whose_write_never_returns_is_unwritable(monkeypatch: pytest.M
     monkeypatch.setattr(status_runtime, "_LOCAL_CHECK_TIMEOUT_SECONDS", 0.2)
     started = time.monotonic()
 
-    assert status_runtime._local_path_access(tmp_path, check_write=True)["write"] is False
+    assert status_runtime._local_path_access(tmp_path, probe_media_path(tmp_path), check_write=True)["write"] is False
     assert time.monotonic() - started < 10
 
 
 def test_directory_passes_both_checks_and_leaves_nothing_behind(tmp_path: Path) -> None:
-    assert status_runtime._local_path_access(tmp_path, check_write=False)["read"] is True
-    assert status_runtime._local_path_access(tmp_path, check_write=True)["write"] is True
+    assert status_runtime._local_path_access(tmp_path, probe_media_path(tmp_path), check_write=False)["read"] is True
+    assert status_runtime._local_path_access(tmp_path, probe_media_path(tmp_path), check_write=True)["write"] is True
     assert list(tmp_path.iterdir()) == []
 
 
 def test_missing_path_passes_neither_check(tmp_path: Path) -> None:
     missing = tmp_path / "missing"
 
-    assert status_runtime._local_path_access(missing, check_write=False)["read"] is False
-    assert status_runtime._local_path_access(missing, check_write=True)["write"] is False
+    assert status_runtime._local_path_access(missing, probe_media_path(missing), check_write=False)["read"] is False
+    assert status_runtime._local_path_access(missing, probe_media_path(missing), check_write=True)["write"] is False

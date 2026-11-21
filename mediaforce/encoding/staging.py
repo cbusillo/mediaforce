@@ -719,10 +719,9 @@ def promote_one_item(
     staged_size_bytes = int_value(stage_row.get("staging_size_bytes"))
     if staged_size_bytes <= 0:
         probe = probe_media_path(Path(str(stage_row["staging_path"])))
-        if probe.error is not None:
-            raise probe.error
-        if probe.is_file and probe.info is not None:
-            staged_size_bytes = probe.info.st_size
+        info = probe.checked_info()
+        if info is not None and probe.is_file:
+            staged_size_bytes = info.st_size
     size_prediction = staged_size_prediction(object_dict(validation), staged_size_bytes)
     if not force and size_prediction is not None and size_prediction["held"]:
         raise PromotionWaiting(

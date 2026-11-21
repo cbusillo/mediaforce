@@ -727,7 +727,7 @@ def _computer(row: Mapping[str, Any], *, window_too_short: bool = False) -> dict
         "state": state,
         "needs_you": (
             state in {"password_needed", "identity_changed", "new_name", "remote_login_off", "unreachable_long",
-                      "recovery_required", "python_missing", "no_address"}
+                      "recovery_required", "python_missing", "no_address", "controller_media_access"}
             or attention_reason is not None
         ),
         "attention_reason": attention_reason,
@@ -767,7 +767,7 @@ def _unavailable_computer_state(row: Mapping[str, Any]) -> str:
     recovery = row.get("recovery") or {}
     if recovery.get("absence_state"):
         return str(recovery["absence_state"])
-    if row.get("check_failure"):
+    if row.get("check_failure") and row["check_failure"] != "controller_storage_unavailable":
         return str(row["check_failure"])
     if recovery.get("status") == "action_required":
         return "recovery_required"
@@ -775,7 +775,7 @@ def _unavailable_computer_state(row: Mapping[str, Any]) -> str:
         return "reconnecting"
     if row.get("missing_mounts") or row.get("controller_storage_issue"):
         return "storage_unreachable"
-    return "not_ready"
+    return str(row.get("check_failure") or "not_ready")
 
 
 def _events(connection: DBClient, library_types: Mapping[str, str]) -> list[dict[str, Any]]:

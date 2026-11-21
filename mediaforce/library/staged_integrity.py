@@ -12,7 +12,7 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow
 from mediaforce.core.db_tables import library_items, staged_artifacts
-from mediaforce.core.media_storage import STORAGE_WAIT_REASON, probe_media_path
+from mediaforce.core.media_storage import STORAGE_WAIT_REASON, probe_media_path, storage_access_issue
 from mediaforce.core.type_defs import object_dict
 from mediaforce.library.media_scopes import (
     MediaScope,
@@ -300,7 +300,8 @@ def _classify_row(row: DBRow, staging_roots: tuple[_StagingRoot, ...]) -> Staged
     if stat_result is None:
         root_probe = probe_media_path(root.path)
         if probe.unavailable or root_probe.unavailable:
-            return _record("remote_only_or_unreachable", item_id, rel_path, staging_path, STORAGE_WAIT_REASON)
+            reason = storage_access_issue(probe.error or root_probe.error) or STORAGE_WAIT_REASON
+            return _record("remote_only_or_unreachable", item_id, rel_path, staging_path, reason)
         if root.remote or _row_has_remote_origin(row) or (str(row["encode_host_key"] or "").strip() and not root_probe.is_dir):
             return _record(
                 "remote_only_or_unreachable",

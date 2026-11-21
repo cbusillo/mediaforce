@@ -1,6 +1,7 @@
 import json
 import subprocess
 import threading
+from contextlib import ExitStack
 from dataclasses import replace
 from collections.abc import Iterator
 from pathlib import Path
@@ -922,6 +923,24 @@ def test_malformed_sibling_job_does_not_hold_a_finished_file(config: MediaforceC
         connection.commit()
     _run(config)
     assert _status(config, ready_id) == "promoted"
+
+
+def test_storage_loss_after_validation_keeps_its_reason_and_waits_to_publish(config: MediaforceConfig) -> None:
+    item_id, item, staged = _stage(config, "tv/Show/Season 1/check.mkv")
+    validate = delivery.validate_one_item
+    with ExitStack() as stack:
+        def validate_then_lose_storage(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            result = validate(*args, **kwargs)
+            stack.enter_context(storage_outage(staged))
+            return result
+
+        stack.enter_context(patch.object(delivery, "validate_one_item", validate_then_lose_storage))
+        _run(config)
+    with open_db(config.paths.db_path) as connection:
+        record = staged_integrity_report(connection, config, item["rel_path"], discover=False).records[0]
+    assert "storage" in (record.publish_wait_reason or "").lower()
+    assert _status(config, item_id) == "validated"
+    assert staged.is_file()
 
 
 def test_wait_reason_is_public_without_duplicate_details(config: MediaforceConfig) -> None:

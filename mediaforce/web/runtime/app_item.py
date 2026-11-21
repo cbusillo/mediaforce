@@ -216,7 +216,6 @@ def _waits_on_held_copy(stage: Mapping[Any, Any]) -> bool:
 
 
 def _scoped_held_copy(config: MediaforceConfig, stage: Mapping[Any, Any]) -> Path | None:
-    """The held copy itself, only while it is still there inside a configured staging root."""
     staging_path = str(stage.get("staging_path") or "")
     if not staging_path:
         return None

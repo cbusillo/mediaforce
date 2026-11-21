@@ -1758,7 +1758,7 @@ def _hold_unreachable_staged_items(items: list[FolderItem]) -> tuple[list[Folder
         rel_path = str(item.get("rel_path") or item.get("source_path") or "")
         host = str(item.get("staging_host_label") or item.get("staging_host_key") or "").strip()
         if probe.unavailable:
-            held.append(HeldFile(rel_path, STORAGE_WAIT_REASON, waiting=True))
+            held.append(HeldFile(rel_path, STORAGE_WAIT_REASON.rstrip("."), waiting=True))
         elif host:
             held.append(HeldFile(rel_path, f"Its finished file is on {host}, which cannot be reached now", waiting=True))
         else:

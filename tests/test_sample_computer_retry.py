@@ -1,5 +1,6 @@
 """A sample that loses its computer tries again by itself, and asks the owner only when it must."""
 
+import errno
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -241,6 +242,27 @@ class SampleComputerRetryTests(unittest.TestCase):
         self.assertIn("storage", job["progress"]["waiting_reason"].lower())
         self.assertEqual(self._queue_pass(now=NOW), [])
         self.assertEqual(self._queue_pass(now=FIRST_RETRY_AT.isoformat()), [JOB_ID])
+
+    def test_a_folder_that_refuses_access_tells_the_owner_what_to_fix(self) -> None:
+        self._save_job(status="running")
+        with storage_outage(self.config.staging_root, error=errno.EACCES):
+            status = status_runtime._current_machine_host_status(
+                self.config, HOST, ssh_host="localhost", label=COMPUTER, repo_path=None,
+                local_tool_status_snapshot=lambda: {},
+            )
+        with patch.object(host_runtime, "fresh_host_status_for_key", return_value=status):
+            self._run(self._deps(host_ready=lambda host: host_runtime.ensure_sample_host_ready(self.config, host)))
+        job = self._job()
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("permission", job["error"].lower())
+
+    def test_a_media_read_timeout_during_sample_encoding_waits_for_storage(self) -> None:
+        self._save_job(status="running")
+        path = self.root / "episode.mkv"
+        self._run(self._deps(search=_search_fails(TimeoutError(errno.ETIMEDOUT, "Operation timed out", str(path)))))
+        job = self._job()
+        self.assertEqual(job["status"], "queued")
+        self.assertIn("storage", job["progress"]["waiting_reason"].lower())
 
     def test_a_link_dropped_mid_sample_waits_for_its_computer_and_tries_again(self) -> None:
         self._save_job(status="running")

@@ -18,7 +18,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import staged_artifacts
-from mediaforce.core.media_storage import STORAGE_WAIT_REASON, probe_media_path
+from mediaforce.core.media_storage import STORAGE_WAIT_REASON, probe_media_path, stalled_media_read, storage_access_issue
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.helpers import resolve_item_source_path
@@ -27,7 +27,7 @@ from mediaforce.encoding.quality import RemoteQualityTimeoutError, SampleEncodeR
 from mediaforce.encoding.video_filters import build_video_filter, planned_output_dimensions
 from mediaforce.encoding.staged_host import STAGED_JOB_KEY, host_scratch_root, staged_job, staged_job_for_host
 from mediaforce.hosts.config import host_media_access_for_host, host_targets_current_machine, ssh_target_for_host
-from mediaforce.hosts.types import HostReadinessError
+from mediaforce.hosts.types import HostReadinessError, is_storage_io_failure
 from mediaforce.hosts.transport import EncodeConnectionLostError, ssh_host_unreachable
 from mediaforce.remote import execution_mode_for_host, run_remote_command, ssh_client_options
 from mediaforce.reviewing.artifact_identity import reviewed_artifact_fingerprint
@@ -671,7 +671,7 @@ def run_calibration_job(
             },
         )
     except Exception as exc:
-        storage_unavailable = isinstance(exc, HostReadinessError) and exc.failure_kind == "controller_storage_unavailable"
+        storage_unavailable = _sample_storage_unavailable(exc, job)
         if storage_unavailable or _lost_sample_computer(exc, host_data):
             terminal_status = _retry_sample(
                 exc,
@@ -732,6 +732,19 @@ def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
         seen.add(id(current))
         yield current
         current = current.__cause__ or current.__context__
+
+
+def _sample_storage_unavailable(exc: BaseException, job: Mapping[str, Any]) -> bool:
+    source = str(object_dict(job.get("sample_item")).get("source_path") or "")
+    for error in _exception_chain(exc):
+        if isinstance(error, HostReadinessError):
+            return error.failure_kind == "controller_storage_unavailable"
+        message = str(error)
+        if stalled_media_read(error) or is_storage_io_failure(message):
+            return True
+        if source and source in message and "operation timed out" in message.lower():
+            return True
+    return False
 
 
 def _lost_sample_computer(exc: BaseException, host: Mapping[str, Any]) -> bool:
@@ -953,6 +966,12 @@ def _run_sampled_calibration_on_host(
     else:
         controller_source_path = source_path_override
         quality_source_path = source_path_override
+    source_probe = None if remote_review else probe_media_path(controller_source_path)
+    if source_probe is not None and source_probe.unavailable:
+        access_issue = storage_access_issue(source_probe.error)
+        raise HostReadinessError(access_issue or STORAGE_WAIT_REASON,
+                                 failure_kind="controller_media_access" if access_issue else "controller_storage_unavailable")
+    can_analyze_source = source_probe is not None and source_probe.info is not None
     staged = staged_job_for_host(quality_host)
     if staged is not None:
         quality_source_path = Path(str(staged.source_path))
@@ -1130,10 +1149,6 @@ def _run_sampled_calibration_on_host(
     review_moments = []
     if progress_callback is not None:
         progress_callback("selecting_review_moments")
-    source_probe = None if remote_review else probe_media_path(controller_source_path)
-    if source_probe is not None and source_probe.unavailable:
-        raise HostReadinessError(STORAGE_WAIT_REASON, failure_kind="controller_storage_unavailable")
-    can_analyze_source = source_probe is not None and source_probe.info is not None
     if deps.recommend_review_moments is not None:
         review_moments = deps.recommend_review_moments(
             controller_source_path,

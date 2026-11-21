@@ -227,7 +227,7 @@ without dialogs, using passwords already in the login Keychain. Only Set up
 computer opens Finder's connection; each computer keeps at most one Finder
 request per share. Work waits until fresh checks verify the mount path, share
 and access. If a connected share stops answering, Computers shows the storage wait.
-A sample retries automatically, and a finished copy waits for inspection before publishing. See
+A sample retries automatically, and Mediaforce checks each finished copy before publishing it. See
 [controller storage recovery](macos-login-item.md#controller-storage-recovery).
 
 ### Library lifecycle

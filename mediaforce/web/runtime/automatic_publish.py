@@ -372,17 +372,11 @@ def _publish_file(
             )
             return
     # Validation may repair a container. Check the resulting evidence before installing it.
-    report = staged_integrity_report(connection, config, rel_path, discover=False)
-    if not any(
-        record.item_id == item_id and record.disposition == "promotable"
-        for record in report.records
-    ):
-        _record_wait(
-            connection,
-            item_id,
-            "waiting",
-            "The checked file changed. Check it again before replacing it.",
-        )
+    report = staged_integrity_report(connection, config, rel_path, discover=False, include_publish_reason=False)
+    checked = next((entry for entry in report.records if entry.item_id == item_id), None)
+    if checked is None or checked.disposition != "promotable":
+        reason = checked.detail if checked is not None else "The checked file changed. Check it again before replacing it."
+        _record_wait(connection, item_id, "waiting", reason)
         return
     connection.commit()
     if stop_event is not None and stop_event.is_set():

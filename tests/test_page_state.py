@@ -848,3 +848,9 @@ def test_queued_sample_shows_the_reason_its_work_is_waiting() -> None:
     job = _sample("queued", finished_at=None, progress={"waiting_reason": reason})
     state = decide_page_state(PageStateFacts(SEASON, None, sample_job=job))
     assert state.wait_detail == reason
+
+
+def test_expired_storage_retry_does_not_keep_a_stale_reason_on_the_sample() -> None:
+    progress = {"waiting_reason": "Waiting for storage.", "retry_not_before": "2000-01-01T00:00:00Z"}
+    job = _sample("queued", finished_at=None, progress=progress)
+    assert decide_page_state(PageStateFacts(SEASON, None, sample_job=job)).wait_detail is None
