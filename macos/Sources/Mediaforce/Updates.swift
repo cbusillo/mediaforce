@@ -22,6 +22,7 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
     var showAnswer: @MainActor (String) -> Void = Updates.alert
     /// Tells the Director in a notification; a test reads it instead.
     var notify: @MainActor (String) -> Void = Updates.post
+    var relaunch: @MainActor () -> Void = Updates.relaunchRestoredApp
     /// The server's update steps, the wait between tries and the time; a test stands in for each.
     var runStep: @MainActor ([String]) async -> ServerUpdateStep.Answer = ServerUpdateStep.run
     var sleep: @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
@@ -35,6 +36,7 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
     private var checker: UpdateChecker?
     private var state = ServerUpdateStep.Answer()
     private(set) var preparing: Task<Void, Never>?
+    private var installLock: FileHandle?
     private var cancelling = false
     private var asked = false
     /// Why the waiting update has kept failing to get ready, once that has lasted an hour.
@@ -49,14 +51,16 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
 
     func start() async {
         // Recovery runs on every launch, even in a build that no longer names a feed.
-        state = await ServerUpdateStep.run(["reconcile"])
+        state = await runStep(["reconcile"])
         switch state.outcome {
         case "updated": notify(Words.updated)
-        case "rolled back": return relaunchRestoredApp()
+        case "rolled back":
+            notify(Words.updateRolledBack)
+            return relaunch()
         default: if let problem = state.error, state.intent != nil { notify(Words.updateNeedsYou(problem)) }
         }
         if let intent = state.intent, intent.phase == "draining" { prepare(intent.to) }
-        if state.intent?.phase == "prepared", !Self.isConfigured { state = await ServerUpdateStep.run(["cancel"]) }
+        if state.intent?.phase == "prepared", !Self.isConfigured { state = await runStep(["cancel"]) }
         guard Self.isConfigured, controller == nil else { return }
         let controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
         self.controller = controller
@@ -86,10 +90,24 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
             found = Words.updateFailedBefore(build: version)
             throw UpdateWait(Words.updateFailedBefore(build: version))
         }
-        if let intent = state.intent, intent.to == build, intent.phase == "prepared" { return }
+        if let intent = state.intent, intent.to == build, intent.phase == "prepared",
+           let runtime = state.runtime,
+           let lock = Self.lockPreparedUpdate(build: build, runtime: URL(filePath: runtime), app: Bundle.main.bundleURL) {
+            installLock = lock
+            return
+        }
         if preparing == nil { prepare(build, version: version) }
         found = stuck ?? Words.updateWillInstall(version: version)
         throw UpdateWait(Words.updateWaitingForQuietTime)
+    }
+
+    static func lockPreparedUpdate(build: String, runtime: URL, app: URL) -> FileHandle? {
+        guard let lock = try? FileHandle(forUpdating: runtime.appending(path: "deploy.lock")),
+              flock(lock.fileDescriptor, LOCK_EX | LOCK_NB) == 0,
+              let data = try? Data(contentsOf: runtime.appending(path: "update-intent.json")),
+              let intent = try? JSONDecoder().decode(ServerUpdateStep.Intent.self, from: data),
+              intent.phase == "prepared", intent.to == build, intent.app == app.path else { return nil }
+        return lock
     }
 
     /// The end of a check: only a check someone asked for gets an answer.
@@ -120,11 +138,16 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
 
     // The prepared build is downloaded: install it now and relaunch; the server is already stopped and saved.
     nonisolated func updater(_ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem, immediateInstallationBlock: @escaping () -> Void) -> Bool {
-        MainActor.assumeIsolated {
+        let admitted = MainActor.assumeIsolated {
+            if installLock == nil, let runtime = state.runtime {
+                installLock = Self.lockPreparedUpdate(build: item.versionString, runtime: URL(filePath: runtime), app: Bundle.main.bundleURL)
+            }
+            guard installLock != nil else { return false }
             // An answer still on screen must not hold the app open; it has nothing left to say.
             if let window = NSApp.modalWindow, window.identifier == Self.answerWindow { NSApp.abortModal() }
+            return true
         }
-        immediateInstallationBlock()
+        if admitted { immediateInstallationBlock() }
         return true
     }
 
@@ -137,6 +160,7 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
     }
 
     private func cancelPreparedUpdate(error: Error) {
+        installLock = nil
         guard state.intent?.phase == "prepared", !cancelling, found == nil, !(error is UpdateWait) else { return }
         cancelling = true
         let answer = Self.answer(found: nil, error: error)
@@ -181,7 +205,7 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
     }
 
     /// After going back, this process is the failed build; the restored app at the same place takes over.
-    private func relaunchRestoredApp() {
+    private static func relaunchRestoredApp() {
         NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: {
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.createsNewApplicationInstance = true
@@ -244,15 +268,17 @@ enum ServerUpdateStep {
     struct Intent: Decodable {
         let phase: String
         let to: String
+        var app: String?
     }
 
     struct Answer: Decodable {
         var error: String?
         var outcome: String?
+        var runtime: String?
         var intent: Intent?
         var failedBuilds: [String] = []
 
-        enum CodingKeys: String, CodingKey { case error, outcome, intent, failedBuilds = "failed_builds" }
+        enum CodingKeys: String, CodingKey { case error, outcome, runtime, intent, failedBuilds = "failed_builds" }
     }
 
     static func run(_ step: [String]) async -> Answer {

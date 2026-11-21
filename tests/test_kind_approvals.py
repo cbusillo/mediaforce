@@ -467,6 +467,11 @@ def test_seasons_a_kind_covers_are_offered_one_at_a_time_largest_first(tmp_path:
 
     assert _next(config, load) is None
     approve_kind(config, LIVE_ACTION, APPROVED_SEASON, _approved(config), approved_at="2026-10-29T00:00:00+00:00")
+    from mediaforce.ops.controller_deploy import _write_intent, _end_intent
+
+    _write_intent(config.paths.db_path.parent, {"phase": "starting", "to": "2"})
+    assert _next(config, load) is None
+    _end_intent(config.paths.db_path.parent)
     first = _next(config, load)
     assert first is not None and (first.season, first.kind, first.waiting_bytes) == (own, LIVE_ACTION, 50_000)
     record_kind_attempt(config, first, {"ok": True}, at=0.0)

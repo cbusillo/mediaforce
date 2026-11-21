@@ -144,6 +144,35 @@ final class UpdatesTests: XCTestCase {
         XCTAssertEqual(notices, [Words.updateCheckFailed(failure.localizedDescription)])
     }
 
+    func testRollbackTellsTheOwnerBeforeReopeningTheSavedApp() async {
+        let updates = updates(FakeUpdater())
+        updates.runStep = { _ in .init(outcome: "rolled back") }
+        let reopened = expectation(description: "open the saved app")
+        updates.relaunch = {
+            XCTAssertEqual(self.notices, [Words.updateRolledBack])
+            reopened.fulfill()
+        }
+        await updates.start()
+        await fulfillment(of: [reopened], timeout: 2)
+    }
+
+    func testCancelledPreparationCannotAdmitTheCachedBuild() async throws {
+        let runtime = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: runtime) }
+        let intent = runtime.appending(path: "update-intent.json")
+        try Data().write(to: runtime.appending(path: "deploy.lock"))
+        try JSONSerialization.data(withJSONObject: ["phase": "prepared", "to": "3002", "app": Bundle.main.bundleURL.path]).write(to: intent)
+        let updates = updates(FakeUpdater())
+        updates.runStep = { _ in .init(runtime: runtime.path, intent: Self.prepared.intent) }
+        XCTAssertThrowsError(try updates.admit(build: "3002", version: "0.5.3"))
+        await updates.preparing?.value
+        XCTAssertNotNil(Updates.lockPreparedUpdate(build: "3002", runtime: runtime, app: Bundle.main.bundleURL))
+        try FileManager.default.removeItem(at: intent)
+        XCTAssertThrowsError(try updates.admit(build: "3002", version: "0.5.3"))
+        await updates.preparing?.value
+    }
+
     func testTheHourlyCheckStaysQuiet() {
         let updater = FakeUpdater()
         let updates = updates(updater)

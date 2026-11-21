@@ -1197,12 +1197,13 @@ def create_app(
             "controller_storage_admission": controller_storage_admission(config),
         }
 
-    def _release_work_snapshot() -> ReleaseWorkSnapshot:
-        from mediaforce.ops.runtime_install import bundle_build, bundled_app_path
+    from mediaforce.ops.runtime_install import bundle_build, bundled_app_path
+    running_build = bundle_build(bundled_app_path())
 
+    def _release_work_snapshot() -> ReleaseWorkSnapshot:
         snapshot = release_work_payload(config.paths.db_path)
         # An update checks that this answer comes from the exact build and database it started.
-        snapshot["server"] = {"build": bundle_build(bundled_app_path()), "database": str(config.paths.db_path.resolve())}
+        snapshot["server"] = {"build": running_build, "database": str(config.paths.db_path.resolve())}
         return snapshot
 
     register_release_routes(app, work_snapshot=_release_work_snapshot)
@@ -2418,7 +2419,7 @@ def main(argv: list[str] | None = None) -> None:
         from mediaforce.ops.runtime_install import bundle_service, require_own_support
 
         require_own_support(bundle, config.paths.db_path, Path.home())
-        require_update_startup_allowed(config.paths.db_path.parent, bundle)
+        require_update_startup_allowed(config.paths.db_path, bundle)
         port = bundle_service(bundle)[1]
         if args.port is not None and args.port != port:
             raise SystemExit(f"this app's server uses port {port}")

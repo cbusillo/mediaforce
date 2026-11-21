@@ -142,7 +142,8 @@ def test_real_app_registers_readonly_http_evidence_and_fails_without_database(tm
         run_manifest_dir=tmp_path / "runs", web_state_dir=tmp_path / "web", review_dir=tmp_path / "review",
         runtime_settings_path=tmp_path / "settings.json",
     ))
-    with patch.dict(vars(web_app), load_config=lambda _path: config):
+    from mediaforce.ops import runtime_install
+    with patch.dict(vars(web_app), load_config=lambda _path: config), patch.object(runtime_install, "bundle_build", return_value="old"):
         app = web_app.create_app(config.paths.config_path)
     with open_db(config.paths.db_path) as connection:
         add_encode(connection, "busy", "queued")
@@ -151,6 +152,7 @@ def test_real_app_registers_readonly_http_evidence_and_fails_without_database(tm
     assert messages[0]["status"] == 200
     assert (b"cache-control", b"no-store") in messages[0]["headers"]
     body = json.loads(b"".join(message.get("body", b"") for message in messages))
+    assert body["server"]["build"] == "old"
     assert body["counts"]["pending_encode"] == 1
     assert "idle" not in body
     assert "database_idle" not in body

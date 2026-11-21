@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+import argparse
 import contextlib
 from datetime import datetime, timedelta, timezone
-from http.client import RemoteDisconnected
 import json
 import os
 import plistlib
@@ -17,10 +17,12 @@ from unittest.mock import patch
 from urllib.error import URLError
 
 import pytest
+from alembic import command
 from sqlalchemy import Column, MetaData, Table, Text
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db
+from mediaforce.core.db_migrations import _alembic_config, _alembic_script_location
 from mediaforce.encoding.delivery_lock import archive_activity, delivery_lock
 from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
 from mediaforce.ops import controller_deploy, login_item, runtime_install
@@ -67,7 +69,6 @@ class Controller:
         self.plist.write_bytes(self.previous_payload)
         self.running: str | None = None if stopped else "previous"
         self.started: list[str] = []
-        self.resumed = 0
         self.release_held: list[bool] = []
 
     def disable(self, paths: login_item.LoginItemPaths) -> None:
@@ -90,7 +91,7 @@ class Controller:
 
     def _update_admits(self, app: Path) -> bool:
         try:
-            controller_deploy.require_update_startup_allowed(self.support, app)
+            controller_deploy.require_update_startup_allowed(self.support / "library.sqlite3", app)
         except controller_deploy.UpdateRefused:
             return False
         return True
@@ -106,10 +107,7 @@ class Controller:
             self.release_held.append(runtime_install.update_hold_reason(self.support) is not None)
             if self.outcome == "unhealthy":
                 raise URLError("candidate unavailable")
-        if post:
-            self.resumed += 1
-            if self.outcome == "resume-lost":
-                raise RemoteDisconnected("response lost")
+        assert not post, "a repair must preserve independent background and evidence pauses"
         database = str((self.support / "library.sqlite3").resolve())
         build = {"previous": "3" if self.outcome == "running-build-3" else None, "release": "2"}[self.running]
         if self.outcome == "other-database" and self.running == "previous":
@@ -156,7 +154,7 @@ def _install(mac: Controller, **options: bool) -> None:
 
 
 OUTCOMES = ["healthy", "backup-failed", "app-install-failed", "app-folder-locked", "installed-signature-refused", "restore-app-failed",
-            "listener-stuck", "unhealthy", "wrong-build", "resume-lost"]
+            "listener-stuck", "unhealthy", "wrong-build"]
 
 
 @pytest.mark.parametrize("controller", [
@@ -165,7 +163,7 @@ OUTCOMES = ["healthy", "backup-failed", "app-install-failed", "app-folder-locked
 def test_install_keeps_old_code_off_a_database_the_release_may_have_migrated(controller: Controller) -> None:
     mac = controller
     stage = mac.support / "deployments/fixture-stage"
-    release_started = mac.outcome in {"healthy", "resume-lost", "unhealthy", "wrong-build"}
+    release_started = mac.outcome in {"healthy", "unhealthy", "wrong-build"}
     # Only a database no release ever opened, and that a stopped installation has not paused, gets the old service back.
     restored = mac.outcome in {"backup-failed", "app-install-failed", "app-folder-locked", "installed-signature-refused"} \
         and not mac.stopped
@@ -175,20 +173,19 @@ def test_install_keeps_old_code_off_a_database_the_release_may_have_migrated(con
         with pytest.raises((RuntimeError, OSError)):
             _install(mac)
     assert mac.started == (["release"] if release_started else ["previous"] if restored else [])
-    assert mac.running == ("release" if mac.outcome in {"healthy", "resume-lost"} else "previous" if restored else None)
+    assert mac.running == ("release" if mac.outcome == "healthy" else "previous" if restored else None)
     installed = (mac.install / "Contents/MacOS/Mediaforce").read_bytes()
     replaced = release_started or mac.outcome == "restore-app-failed" or (mac.stopped and mac.outcome == "installed-signature-refused")
     assert installed == b"release app" if replaced else installed in {b"legacy app", b"old app"}
     assert (mac.plist.read_bytes() == mac.previous_payload) is not release_started
     assert (stage / "launch-item.before.plist").read_bytes() == mac.previous_payload
     assert (stage / "Mediaforce.app/Contents/MacOS/Mediaforce").read_bytes() in {b"legacy app", b"old app"}
-    assert runtime_install.retained_deploy_stage(mac.support) == (stage if mac.outcome in {"healthy", "resume-lost"} else None)
-    assert mac.resumed == (1 if mac.outcome in {"healthy", "resume-lost"} else 0)
+    assert runtime_install.retained_deploy_stage(mac.support) == (stage if mac.outcome == "healthy" else None)
     # New work and publication stay held while the release is checked, and until a failed one is reconciled.
     assert mac.release_held and all(mac.release_held) if release_started else not mac.release_held
     held = runtime_install.read_update_intent(mac.support)
     # The record exists from the backup on, and stays until the old service is back or the release passed.
-    assert (held is not None) is (mac.outcome not in {"healthy", "resume-lost", "backup-failed", "listener-stuck"} and not restored)
+    assert (held is not None) is (mac.outcome not in {"healthy", "backup-failed", "listener-stuck"} and not restored)
     if mac.outcome in {"listener-stuck", "backup-failed"}:
         assert not (stage / "before.sqlite").exists()
         return
@@ -205,7 +202,6 @@ def test_first_install_carries_the_clone_runtime_config_and_credentials(controll
                          "--credentials", str(mac.legacy_root / ".env")]
     protected = runtime_install.protected_runtime_roots(mac.support)
     assert {mac.legacy_root.resolve(), mac.config.resolve(), (mac.legacy_root / ".env").resolve()} <= set(protected)
-    assert mac.resumed == 1
 
 
 @pytest.mark.parametrize("controller", [("bundled", False, "other-database")], indirect=True)
@@ -635,7 +631,11 @@ def test_rollback_refuses_a_missing_saved_app_before_touching_anything(controlle
     with sqlite3.connect(mac.support / "library.sqlite3") as kept:
         assert kept.execute("select name from sqlite_master where name = 'release_migration'").fetchall()
     mac.outcome = "healthy"
-    controller_deploy.install_release(mac.release, mac.support / "deployments/forward", mac.home, evidence={},
+    with pytest.raises(controller_deploy.UpdateRefused, match="repaired copy"):
+        controller_deploy.install_release(mac.release, mac.support / "deployments/forward", mac.home, evidence={},
+                                          install=mac.install, startup_timeout=0, stopped=True)
+    mac.disable(mac.previous_paths)
+    controller_deploy.install_release(mac.release, mac.support / "deployments/verified", mac.home, evidence={},
                                       install=mac.install, startup_timeout=0, stopped=True)
     assert mac.running == "release" and runtime_install.read_update_intent(mac.support) is None
 
@@ -724,3 +724,59 @@ def test_no_running_app_is_not_opened(tmp_path: Path) -> None:
     apps = RunningApps({42: tmp_path / "Other.app"})
     assert controller_deploy.relaunch_installed_app(tmp_path / "Mediaforce.app", apps.run) == "not running"
     assert apps.asked == [] and apps.opened == []
+
+
+@pytest.mark.parametrize("controller", [("bundled", True, "app-install-failed")], indirect=True)
+def test_stopped_copy_failure_never_opens_the_original_with_candidate_migrations(controller: Controller) -> None:
+    mac = controller
+    database = mac.support / "library.sqlite3"
+    with _alembic_script_location() as location:
+        command.downgrade(_alembic_config(database, location), "-1")
+    with sqlite3.connect(database) as db:
+        previous = db.execute("select version_num from alembic_version").fetchone()
+    with pytest.raises(OSError, match="Applications"):
+        _install(mac)
+    with sqlite3.connect(database) as db:
+        assert db.execute("select version_num from alembic_version").fetchone() == previous
+    mac.outcome = "wrong-build"
+    with pytest.raises(controller_deploy.UpdateRefused):
+        controller_deploy.install_release(mac.release, mac.support / "deployments/retry", mac.home, evidence={},
+                                         install=mac.install, stopped=True)
+    controller_deploy.rollback_update(controller_deploy.AppUpdate(mac.config, mac.install, mac.home))
+    with sqlite3.connect(database) as db:
+        assert db.execute("select version_num from alembic_version").fetchone() == previous
+    assert mac.plist.read_bytes() == mac.previous_payload and mac.running == "previous"
+
+
+@pytest.mark.parametrize("controller", [("bundled", True, "healthy")], indirect=True)
+def test_a_stopped_repair_leaves_independent_pauses_alone(controller: Controller) -> None:
+    mac = controller
+    from mediaforce.library.background_work import load_background_work_state, set_background_work_paused
+    database = mac.support / "library.sqlite3"
+    with open_db(database) as connection:
+        set_background_work_paused(connection, is_paused=True)
+    _install(mac)
+    with open_db(database) as connection:
+        assert not load_queue_state(connection)["is_paused"]
+        assert load_background_work_state(connection)["is_paused"]
+
+
+@pytest.mark.parametrize("controller", [("bundled", True, "healthy")], indirect=True)
+def test_missing_installed_app_preserves_last_protected_rollback(controller: Controller) -> None:
+    mac = controller
+    earlier = mac.support / "deployments/earlier"
+    earlier.mkdir(parents=True)
+    shutil.copytree(mac.install, earlier / mac.install.name)
+    (earlier / "launch-item.before.plist").write_bytes(mac.plist.read_bytes())
+    controller_deploy.backup_database(mac.support / "library.sqlite3", earlier / "before.sqlite")
+    runtime_install.retain_deploy_stage(mac.support, earlier)
+    shutil.rmtree(mac.install)
+    from scripts import release_app
+    release = release_app.VerifiedRelease(mac.release, {"CFBundleVersion": "2"}, {})
+    args = argparse.Namespace(release="fixture", feed="fixture", public_key="fixture", install=mac.install,
+                              stage=mac.support / "deployments/repair", startup_timeout=0, stopped=True, allow_unknown_build=False)
+    with patch.object(release_app, "verify_release", return_value=release), patch.object(Path, "home", return_value=mac.home), \
+            patch.object(release_app, "relaunch_installed_app", return_value="not running"):
+        result = release_app.install(args)
+    assert runtime_install.retained_deploy_stage(mac.support) == earlier
+    assert result["rollback"]["stage"] == str(earlier) and mac.running == "release"

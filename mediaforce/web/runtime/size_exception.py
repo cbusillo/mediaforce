@@ -12,7 +12,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from mediaforce.core.db import DBClient
+from mediaforce.core.db import DBClient, database_file_path
+from mediaforce.ops.runtime_install import update_hold_reason
 from mediaforce.core.db_tables import item_events
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.encoding.encode_queue import load_encode_job, save_encode_job
@@ -65,6 +66,9 @@ def _decide(
         sync_parent: SyncParentFn,
         on_rollback: Callable[[Callable[[], None]], None],
 ) -> dict[str, Any]:
+    database = database_file_path(connection)
+    if database is not None and (hold := update_hold_reason(database.parent)):
+        return {"ok": False, "message": hold}
     child = load_encode_job(connection, str(job_id or "").strip())
     question = size_exception_question(child) if child is not None else None
     if child is None or question is None:
