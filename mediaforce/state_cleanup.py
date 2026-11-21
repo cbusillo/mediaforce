@@ -11,6 +11,7 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import encode_jobs
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.reviewing.clips import review_file_from_url
 from mediaforce.encoding.quality import (
@@ -218,7 +219,7 @@ def _prune_children(
     root_verified: bool = True,
     protected_paths: tuple[Path, ...] = (),
 ) -> None:
-    if not root.exists():
+    if not probe_media_path(root).is_dir:
         return
     try:
         children = list(root.iterdir())
@@ -227,13 +228,14 @@ def _prune_children(
     for child in children:
         if any(paths_overlap(child, protected) for protected in protected_paths):
             continue
-        if _mtime(child) >= cutoff:
+        probe = probe_media_path(child)
+        if probe.info is None or probe.info.st_mtime >= cutoff:
             continue
         if _should_skip_process_owned_path(
             child, active_commands=active_commands, root_verified=root_verified
         ):
             continue
-        if child.is_dir():
+        if probe.is_dir:
             shutil.rmtree(child, ignore_errors=True)
             continue
         try:
@@ -266,16 +268,15 @@ def _prune_matching_directories(
     active_commands: tuple[str, ...] = (),
     root_verified: bool = True,
 ) -> None:
-    if not root.exists():
+    if not probe_media_path(root).is_dir:
         return
     try:
         paths = list(root.glob(pattern))
     except OSError:
         return
     for path in paths:
-        if _mtime(path) >= cutoff:
-            continue
-        if not path.is_dir():
+        probe = probe_media_path(path)
+        if probe.info is None or probe.info.st_mtime >= cutoff or not probe.is_dir:
             continue
         if _should_skip_process_owned_path(
             path, active_commands=active_commands, root_verified=root_verified

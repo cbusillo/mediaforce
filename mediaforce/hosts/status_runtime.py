@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Callable
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.media_storage import MediaPathProbe, probe_media_path
 from mediaforce.core.type_defs import object_dict
 from mediaforce.hosts.config import _host_capabilities, _host_priority, _parse_utc_offset_minutes, \
     host_media_access_for_host, host_targets_current_machine, stream_host_has_remote_source_roots
@@ -420,10 +421,6 @@ def _current_machine_host_status(
         status_paths = [Path(str(path).strip()).expanduser() for path in explicit_source_roots.values() if str(path).strip()]
         require_paths = bool(status_paths)
     platform_name = _local_platform_name()
-    mounted_paths = {
-        str(path): path.exists()
-        for path in status_paths
-    }
     missing_mounts = [
         str(path)
         for path in finder_mount_roots_for_paths(status_paths)
@@ -432,14 +429,13 @@ def _current_machine_host_status(
     source_path_map = explicit_source_roots if media_access == "stream" else merged_source_roots
     source_paths = [str(path) for path in source_path_map.values()]
     staging_path = str(config.staging_root_for_host(host)) if require_paths and media_access != "stream" else None
-    path_access = {
-        str(path): {
-            "exists": path.exists(),
-            "read": _local_path_readable(path),
-            "write": _local_path_writable(path) if staging_path and str(path) == staging_path else False,
-        }
-        for path in status_paths
-    }
+    path_access = {}
+    storage_issues = []
+    for path in status_paths:
+        probe = probe_media_path(path)
+        if problem := probe.problem:
+            storage_issues.append(problem)
+        path_access[str(path)] = _local_path_access(path, probe, check_write=str(path) == staging_path)
     tools = local_tool_status_snapshot()
     ffmpeg_bin = _find_local_tool("ffmpeg", fallback_paths=["/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"])
     capability_issues = _host_capability_issues(
@@ -453,13 +449,13 @@ def _current_machine_host_status(
         staging_path=staging_path,
         supports_remote_stream_quality=supports_remote_stream_quality,
     )
-    return _status_from_paths(
+    status = _status_from_paths(
         key=ssh_host,
         label=label,
         mode="ssh",
         priority=_host_priority(host),
         capabilities=_host_capabilities(host),
-        mounted_paths=mounted_paths,
+        mounted_paths={path: access["exists"] for path, access in path_access.items()},
         repo_path=repo_path,
         ffmpeg_path=ffmpeg_bin,
         platform=platform_name,
@@ -471,18 +467,25 @@ def _current_machine_host_status(
         setup_supported=_host_setup_supported(platform_name),
         require_paths=require_paths,
     )
+    if storage_issues:
+        access_required = any(issue.needs_action for issue in storage_issues)
+        status.check_failure = "controller_media_access" if access_required else "controller_storage_unavailable"
+        reasons = list(dict.fromkeys(issue.reason for issue in storage_issues))
+        status.issues.extend(reasons)
+        if capability_issues or missing_mounts:
+            reasons.append(status.message)
+        status.message = " ".join(reasons)
+    return status
 
 
-def _local_path_readable(path: Path) -> bool:
-    if not path.is_dir():
-        return path.exists() and path.is_file()
-    return _local_check_passed([_LOCAL_LIST_COMMAND, "-f", "--", str(path)])
-
-
-def _local_path_writable(path: Path) -> bool:
-    if not path.is_dir():
-        return False
-    return _local_check_passed([_LOCAL_SHELL, "-c", _LOCAL_WRITE_CHECK_SCRIPT, "mediaforce-write-check", str(path)])
+def _local_path_access(path: Path, probe: MediaPathProbe, *, check_write: bool) -> dict[str, bool]:
+    return {
+        "exists": probe.info is not None,
+        "read": probe.is_file or (probe.is_dir and _local_check_passed([_LOCAL_LIST_COMMAND, "-f", "--", str(path)])),
+        "write": check_write and probe.is_dir and _local_check_passed(
+            [_LOCAL_SHELL, "-c", _LOCAL_WRITE_CHECK_SCRIPT, "mediaforce-write-check", str(path)]
+        ),
+    }
 
 
 def _local_check_passed(command: list[str]) -> bool:

@@ -185,7 +185,7 @@ def _recovery_pass(
             state.update(status="retrying", reason=refreshed.message)
             if refreshed.available:
                 state.update(status="ready", reason=None, first_failure_at=None, failure_count=0)
-    if status.check_failure and not state_error and (
+    if status.check_failure and status.check_failure != "controller_storage_unavailable" and not state_error and (
         state["mount_uncertain"] or previous.get("status") == "action_required"
         or (count >= 2 and status.check_failure in {"check_failed", "unreadable_reply"})
     ):

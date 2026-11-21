@@ -10,6 +10,7 @@ from typing import Any, Callable, Mapping, Protocol
 from sqlalchemy import update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.hosts.config import execution_mode_for_host, host_media_access_for_host
 from mediaforce.hosts.transport import EncodeConnectionLostError, ssh_connection_dropped
@@ -757,9 +758,9 @@ def encode_one_item(
     start_monotonic = time.monotonic()
 
     temp_output = partial_output_path(staging_path)
-    if temp_output.exists():
+    if probe_media_path(temp_output).exists_or_raise():
         safe_unlink(temp_output)
-    if staging_path.exists() and overwrite:
+    if overwrite and probe_media_path(staging_path).exists_or_raise():
         safe_unlink(staging_path)
 
     final_verification: FinalSizeVerification | None = None
@@ -1588,7 +1589,7 @@ def _quality_observation_provenance(
 
 
 def _check_staging_target_available(staging_path: Path, *, overwrite: bool) -> None:
-    if staging_path.exists() and not overwrite:
+    if not overwrite and probe_media_path(staging_path).exists_or_raise():
         raise FileExistsError(f"Staging file already exists: {staging_path}")
 
 

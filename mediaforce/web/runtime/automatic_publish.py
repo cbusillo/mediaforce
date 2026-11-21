@@ -12,6 +12,7 @@ from sqlalchemy import insert, or_, select, update
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, DBRow, open_db
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.core.utils import file_fingerprint, timestamp
 from mediaforce.encoding.encode_queue import load_active_encode_jobs_for_prefix
@@ -149,7 +150,7 @@ def _try_publish_file(
         )
     except FileNotFoundError as exc:
         connection.rollback()
-        reachable_parent = bool(exc.filename and Path(exc.filename).parent.is_dir())
+        reachable_parent = bool(exc.filename and probe_media_path(Path(exc.filename).parent).is_dir)
         reason = (
             "A required file is missing from a reachable folder. Inspect the original and saved work before replacing it."
             if reachable_parent
@@ -329,7 +330,7 @@ def _publish_file(
     ).scalars()
     if any(
         Path(str(other)).with_suffix(destination.suffix) == destination
-        and Path(str(other)).exists()
+        and probe_media_path(Path(str(other))).exists_or_raise()
         for other in other_sources
     ):
         _record_wait(
@@ -371,17 +372,11 @@ def _publish_file(
             )
             return
     # Validation may repair a container. Check the resulting evidence before installing it.
-    report = staged_integrity_report(connection, config, rel_path, discover=False)
-    if not any(
-        record.item_id == item_id and record.disposition == "promotable"
-        for record in report.records
-    ):
-        _record_wait(
-            connection,
-            item_id,
-            "waiting",
-            "The checked file changed. Check it again before replacing it.",
-        )
+    report = staged_integrity_report(connection, config, rel_path, discover=False, include_publish_reason=False)
+    checked = next((entry for entry in report.records if entry.item_id == item_id), None)
+    if checked is None or checked.disposition != "promotable":
+        reason = checked.detail if checked is not None else "The checked file changed. Check it again before replacing it."
+        _record_wait(connection, item_id, "waiting", reason)
         return
     connection.commit()
     if stop_event is not None and stop_event.is_set():

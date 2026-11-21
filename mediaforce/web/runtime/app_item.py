@@ -13,6 +13,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import open_readonly_db
 from mediaforce.core.db_tables import library_items, motion_keep_decisions, staged_artifacts
@@ -196,7 +197,7 @@ def player_source(config: MediaforceConfig, library_item_id: int, side: str) -> 
 def _player_sources(config: MediaforceConfig, library_file: Path, stage: Mapping[Any, Any]) -> dict[str, Path]:
     """Each side that can play now: a held copy against the file as it is, or a replaced file's copy and backup."""
     if _waits_on_held_copy(stage):
-        sides: dict[str, Path | None] = {"compressed": _held_copy(config, stage), "original": library_file}
+        sides: dict[str, Path | None] = {"compressed": _scoped_held_copy(config, stage), "original": library_file}
     elif stage.get("promoted_at") is not None:
         backup = stage.get("archived_source_path")
         sides = {"compressed": library_file, "original": Path(str(backup)) if backup else None}
@@ -204,7 +205,7 @@ def _player_sources(config: MediaforceConfig, library_file: Path, stage: Mapping
         sides = {"original": library_file}
     playable: dict[str, Path] = {}
     for side, path in sides.items():
-        if path is not None and path.is_file():
+        if path is not None and probe_media_path(path).is_file:
             playable[side] = path
     return playable
 
@@ -214,13 +215,12 @@ def _waits_on_held_copy(stage: Mapping[Any, Any]) -> bool:
     return stage.get("promoted_at") is None and staged_validation_outcome(stage.get("validation_json")) == "size_held"
 
 
-def _held_copy(config: MediaforceConfig, stage: Mapping[Any, Any]) -> Path | None:
-    """The held copy itself, only while it is still there inside a configured staging root."""
+def _scoped_held_copy(config: MediaforceConfig, stage: Mapping[Any, Any]) -> Path | None:
     staging_path = str(stage.get("staging_path") or "")
     if not staging_path:
         return None
     path = Path(staging_path)
-    return path if path.is_file() and _inside_staging_root(config, path) else None
+    return path if _inside_staging_root(config, path) else None
 
 
 def _inside_staging_root(config: MediaforceConfig, path: Path) -> bool:
@@ -234,4 +234,8 @@ def _held_copy_facts(config: MediaforceConfig, stage: Mapping[Any, Any]) -> dict
     if not _waits_on_held_copy(stage):
         return None
     size = stage.get("staging_size_bytes")
-    return {"bytes": None if size is None else int_value(size), "present": _held_copy(config, stage) is not None}
+    path = _scoped_held_copy(config, stage)
+    probe = probe_media_path(path) if path is not None else None
+    problem = probe.problem if probe is not None else None
+    return {"bytes": None if size is None else int_value(size), "present": probe is not None and probe.is_file,
+            **({"waiting_reason": problem.reason} if problem else {})}

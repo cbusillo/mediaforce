@@ -28,6 +28,8 @@ from typing import Any, Callable, NoReturn, cast
 from unittest.mock import ANY, Mock, patch
 
 from fastapi import HTTPException
+from storage_outage import storage_outage
+
 from sqlalchemy import delete
 from sqlalchemy import func
 from sqlalchemy import select
@@ -4645,10 +4647,19 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(released, 1)
         self.assertEqual(workflow.state, "ready_to_validate")
 
+    def test_encode_refuses_an_unverified_staging_destination(self) -> None:
+        from mediaforce.encoding.manifest import _check_staging_target_available
+
+        stage = self._staging_path("already-finished.mkv")
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        stage.write_bytes(b"finished")
+        with storage_outage(stage), self.assertRaises(OSError):
+            _check_staging_target_available(stage, overwrite=False)
+
     def test_cleanup_on_a_share_that_stopped_answering_is_deferred_not_crashed(self) -> None:
         staging_path = self._staging_path("episode-dead-mount.mkv")
 
-        with patch.object(Path, "exists", side_effect=TimeoutError(60, "Operation timed out")):
+        with storage_outage(staging_path):
             result = encode_runtime._remove_stale_staging_path(staging_path, host={"key": "local", "mode": "local"})
 
         self.assertEqual(result.outcome, encode_runtime._StagingPathCleanupOutcome.CLEANUP_DEFERRED)
@@ -4656,7 +4667,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
     def test_cleanup_refused_by_permissions_fails_instead_of_waiting_forever(self) -> None:
         staging_path = self._staging_path("episode-no-access.mkv")
 
-        with patch.object(Path, "exists", side_effect=PermissionError(13, "Permission denied")):
+        with storage_outage(staging_path, error=errno.EACCES):
             result = encode_runtime._remove_stale_staging_path(staging_path, host={"key": "local", "mode": "local"})
 
         self.assertEqual(result.outcome, encode_runtime._StagingPathCleanupOutcome.CLEANUP_FAILED)
@@ -11681,7 +11692,8 @@ raise SystemExit(0)
         old_time = datetime.now().timestamp() - (16 * 86400)
         os.utime(temp_dir, (old_time, old_time))
 
-        web_app.purge_transient_artifacts(self.config, force=True)
+        with patch.object(state_cleanup, "_local_process_commands", return_value=[]):
+            web_app.purge_transient_artifacts(self.config, force=True)
 
         self.assertFalse(temp_dir.exists())
 
@@ -11894,7 +11906,8 @@ raise SystemExit(0)
         os.utime(temp_dir, (old_time, old_time))
 
         try:
-            web_app.purge_transient_artifacts(self.config, force=True)
+            with patch.object(state_cleanup, "_local_process_commands", return_value=[]):
+                web_app.purge_transient_artifacts(self.config, force=True)
             self.assertFalse(temp_dir.exists())
         finally:
             shutil.rmtree(legacy_root, ignore_errors=True)
@@ -11907,7 +11920,8 @@ raise SystemExit(0)
         os.utime(temp_dir, (old_time, old_time))
 
         try:
-            web_app.purge_transient_artifacts(self.config, force=True)
+            with patch.object(state_cleanup, "_local_process_commands", return_value=[]):
+                web_app.purge_transient_artifacts(self.config, force=True)
             self.assertFalse(temp_dir.exists())
         finally:
             shutil.rmtree(previous_root, ignore_errors=True)
@@ -21044,12 +21058,13 @@ raise SystemExit(0)
         deps.ensure_encode_host_ready = Mock(return_value=False)
         deps.encode_manifest_items = Mock(return_value=[])
 
-        encode_runtime.run_encode_job(
-            config_path=self.config.paths.config_path,
-            job_id="job-late-cancel",
-            process_controller=CancelAfterEncodeController(),
-            deps=deps,
-        )
+        with storage_outage(staging_path):
+            encode_runtime.run_encode_job(
+                config_path=self.config.paths.config_path,
+                job_id="job-late-cancel",
+                process_controller=CancelAfterEncodeController(),
+                deps=deps,
+            )
 
         with open_db(self.config.paths.db_path) as connection:
             job = load_encode_job(connection, "job-late-cancel")

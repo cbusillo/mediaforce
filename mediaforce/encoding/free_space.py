@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.type_defs import float_value, int_value, object_dict
 from mediaforce.encoding.helpers import resolve_item_source_path, resolve_item_staging_path
@@ -192,7 +193,7 @@ def promotion_reserve_preflight(
                 volume_probe=volume_probe,
                 volume_probe_key=probe_key,
                 capacity_cache=capacity_cache,
-                source_bytes=_path_size_bytes(source_path) if source_path.exists() else None,
+                source_bytes=_path_size_bytes(source_path) if probe_media_path(source_path).exists_or_raise() else None,
                 staged_output_bytes=_path_size_bytes(staging_path),
             )
         )
@@ -309,7 +310,7 @@ def _encode_space_requirements(
         )
         if encode_volume_probe_key != controller_volume_probe_key:
             controller_staging_root = config.staging_root_for_host(host).expanduser()
-            if not controller_staging_root.is_dir():
+            if not probe_media_path(controller_staging_root).is_dir:
                 raise OSError(
                     f"controller-visible staging root is unavailable: {controller_staging_root}"
                 )
@@ -436,7 +437,7 @@ def _encode_staging_path(
 
 def _nearest_existing_path(path: Path) -> Path:
     current = path.expanduser()
-    while not current.exists():
+    while not probe_media_path(current).exists_or_raise():
         parent = current.parent
         if parent == current:
             raise OSError(f"no existing parent for {path}")
