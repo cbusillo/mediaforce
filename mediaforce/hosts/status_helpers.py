@@ -13,6 +13,7 @@ from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQU
     normalize_execution_platform
 from mediaforce.hosts.config import _host_supports_capability, host_media_access_for_host, \
     _parse_utc_offset_minutes, remote_shell_path_export_line, stream_host_has_remote_source_roots
+from mediaforce.hosts.managed_tools import worker_probe_script
 from mediaforce.hosts.mount_runtime import mount_output_field
 from mediaforce.hosts.transport import MACOS_DARK_WAKE_SHELL_TEST
 from mediaforce.hosts.types import VMAF_MODEL_MISSING_ISSUE, VMAF_SELF_TEST_ARGS
@@ -479,6 +480,7 @@ def _remote_status_script(
     quoted_writable_paths = " ".join(shlex.quote(path) for path in (writable_paths or []))
     lines = [
         remote_shell_path_export_line(),
+        worker_probe_script(),
         'BREW_BIN="$(command -v brew || true)"',
         'if [ -z "$BREW_BIN" ] && [ -x /opt/homebrew/bin/brew ]; then BREW_BIN=/opt/homebrew/bin/brew; fi',
         'if [ -z "$BREW_BIN" ] && [ -x /usr/local/bin/brew ]; then BREW_BIN=/usr/local/bin/brew; fi',
@@ -641,13 +643,11 @@ def _ssh_access_must_be_fixed_first(status: HostStatus) -> bool:
         SAMPLE_METRIC_MISSING_ISSUE,
         SAMPLE_AV1_ENCODER_MISSING_ISSUE,
     }
-    if status.repo_path and f"Repo path is missing: {status.repo_path}" in status.issues:
-        remaining_issues = [
-            issue for issue in status.issues if issue != f"Repo path is missing: {status.repo_path}"
-        ]
-    else:
-        remaining_issues = list(status.issues)
-    return any(issue not in prep_fixable_issues for issue in remaining_issues)
+    if status.repo_path:
+        prep_fixable_issues.add(f"Repo path is missing: {status.repo_path}")
+    if status.tool_message:
+        prep_fixable_issues.add(status.tool_message)
+    return any(issue not in prep_fixable_issues for issue in status.issues)
 
 
 __all__ = [

@@ -9,7 +9,7 @@ from mediaforce.core.config import MediaforceConfig, load_runtime_settings, upda
 from mediaforce.hosts.config import host_targets_current_machine
 from mediaforce.hosts.controller_mount import controller_mount_lock
 from mediaforce.remote import (
-    HostStatus, probe_host_status, recover_remote_host_mounts_no_ui,
+    HostStatus, prepare_host_tools, probe_host_status, recover_remote_host_mounts_no_ui,
     remote_mount_recovery_supported,
 )
 from mediaforce.web.runtime.host_status import checked_host_statuses, publish_host_status
@@ -158,6 +158,9 @@ def _recovery_pass(
         return state
     elif state_error:
         state.update(status="action_required", reason=state_error)
+    elif status.can_update_tools:
+        result = prepare_host_tools(config, host, status)
+        state.update(status="retrying", reason=result.message)
     elif remote_mount_recovery_supported(config, host, status) and previous.get("retry_paused") and not requested:
         # Only someone at that computer can fix this; keep asking, and keep checking often so
         # the warning clears soon after Retry connection, Set up computer or a manual connection.

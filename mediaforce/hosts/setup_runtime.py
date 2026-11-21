@@ -7,8 +7,8 @@ from pathlib import Path
 import time
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.hosts.config import _host_supports_capability, _ssh_lookup_host, host_media_access_for_host, \
-    remote_shell_path_export_line, stream_host_has_remote_source_roots
+from mediaforce.hosts.config import _ssh_lookup_host, remote_shell_path_export_line
+from mediaforce.hosts.managed_tools import request_update
 from mediaforce.hosts.transport import keep_awake_while_running
 from mediaforce.hosts.types import HostSetupResult, HostStatus
 
@@ -46,30 +46,6 @@ def reset_remote_host_trust(config: MediaforceConfig, host_key: str) -> HostSetu
     )
 
 
-def _remote_ffmpeg_install_commands(*, sample_calibration: bool) -> list[str]:
-    if sample_calibration:
-        return [
-            'if [ -n "$BREW_BIN" ]; then',
-            '  HOMEBREW_NO_AUTO_UPDATE=1 "$BREW_BIN" install ffmpeg-full >/tmp/mediaforce-brew.log 2>&1 || { cat /tmp/mediaforce-brew.log; exit 21; }',
-            'else',
-            '  echo "ffmpeg-full is required for sampled calibration and Homebrew is unavailable for automatic install." >&2',
-            '  exit 22',
-            'fi',
-        ]
-    return [
-        'FFMPEG_HWACCELS=""',
-        'if [ -n "$FFMPEG_BIN" ]; then FFMPEG_HWACCELS="$("$FFMPEG_BIN" -hide_banner -hwaccels 2>/dev/null || true)"; fi',
-        'if [ -z "$FFMPEG_BIN" ] || ! printf "%s\n" "$FFMPEG_HWACCELS" | grep -qi "videotoolbox"; then',
-        '  if [ -n "$BREW_BIN" ]; then',
-        '    HOMEBREW_NO_AUTO_UPDATE=1 "$BREW_BIN" install ffmpeg >/tmp/mediaforce-brew.log 2>&1 || { cat /tmp/mediaforce-brew.log; exit 21; }',
-        '  else',
-        '    echo "ffmpeg is missing or lacks VideoToolbox decode and Homebrew is unavailable for automatic install." >&2',
-        '    exit 22',
-        '  fi',
-        'fi',
-    ]
-
-
 def _finish_remote_host_prepare(
         config: MediaforceConfig,
         host: dict[str, Any],
@@ -81,62 +57,17 @@ def _finish_remote_host_prepare(
     repo_path = str(host.get("repo_path") or "").strip()
     staging_root = str(config.staging_root_for_host(host))
     archive_root = str(config.archive_root_for_host(host))
-    supports_remote_stream_quality = stream_host_has_remote_source_roots(host)
-    installs_ab_av1 = _host_supports_capability(host, "sample_calibration") or (
-        _host_supports_capability(host, "encode_queue")
-        and (host_media_access_for_host(host) != "stream" or supports_remote_stream_quality)
-    )
-    prep_steps.extend(
-        [
-            "Ensured the transcode and archive directories exist.",
-        ]
-    )
-    remote_commands = [
-        remote_shell_path_export_line(),
-        'BREW_BIN="$(command -v brew || true)"',
-        'if [ -z "$BREW_BIN" ] && [ -x /opt/homebrew/bin/brew ]; then BREW_BIN=/opt/homebrew/bin/brew; fi',
-        'if [ -z "$BREW_BIN" ] && [ -x /usr/local/bin/brew ]; then BREW_BIN=/usr/local/bin/brew; fi',
-        'FFMPEG_BIN="$(command -v ffmpeg || true)"',
-        'AB_AV1_BIN="$(command -v ab-av1 || true)"',
-        'if [ -z "$AB_AV1_BIN" ] && [ -x /opt/homebrew/bin/ab-av1 ]; then AB_AV1_BIN=/opt/homebrew/bin/ab-av1; fi',
-        'if [ -z "$AB_AV1_BIN" ] && [ -x /usr/local/bin/ab-av1 ]; then AB_AV1_BIN=/usr/local/bin/ab-av1; fi',
-        f"mkdir -p {shlex.quote(staging_root)} >/dev/null 2>&1",
-        f"mkdir -p {shlex.quote(archive_root)} >/dev/null 2>&1",
-    ]
+    paths = [staging_root, archive_root]
     if repo_path:
-        remote_commands.append(f"mkdir -p {shlex.quote(repo_path)} >/dev/null 2>&1")
-        prep_steps.append(f"Ensured the repo path exists at {repo_path}.")
-    remote_commands.extend(
-        _remote_ffmpeg_install_commands(sample_calibration=_host_supports_capability(host, "sample_calibration"))
-    )
-    prep_steps.append(
-        "Installed ffmpeg-full with Homebrew for sampled calibration hosts when required."
-        if _host_supports_capability(host, "sample_calibration")
-        else "Installed ffmpeg with Homebrew if it was missing or lacked required VideoToolbox decode support."
-    )
-    if installs_ab_av1:
-        remote_commands.extend(
-            [
-                'if [ -z "$AB_AV1_BIN" ]; then',
-                '  if [ -n "$BREW_BIN" ]; then',
-                '    HOMEBREW_NO_AUTO_UPDATE=1 "$BREW_BIN" install ab-av1 >/tmp/mediaforce-brew.log 2>&1 || { cat /tmp/mediaforce-brew.log; exit 23; }',
-                '  else',
-                '    echo "ab-av1 is missing and Homebrew is unavailable for automatic install." >&2',
-                '    exit 24',
-                '  fi',
-                'fi',
-            ]
-        )
-        prep_steps.append("Installed ab-av1 with Homebrew for encode and sample hosts if it was missing.")
-
+        paths.append(repo_path)
+    command = shlex.join(["mkdir", "-p", *paths])
     try:
         result = run_remote_ssh(
             host,
             "sh",
             "-lc",
-            # Homebrew installs can run for many minutes.
-            keep_awake_while_running("\n".join(remote_commands)),
-            timeout=900,
+            command,
+            timeout=30,
         )
     except Exception as exc:
         return HostSetupResult(ok=False, message="Remote preparation failed", detail=str(exc),
@@ -150,6 +81,7 @@ def _finish_remote_host_prepare(
             performed_steps=prep_steps,
         )
 
+    prep_steps.append("Prepared this computer’s work folders.")
     refreshed = remote_host_status(config, host)
     if refreshed.available:
         return HostSetupResult(
@@ -157,6 +89,8 @@ def _finish_remote_host_prepare(
             message=f"{refreshed.label} is mounted and ready.",
             performed_steps=prep_steps,
         )
+    if refreshed.can_update_tools and not refreshed.missing_paths:
+        return request_update(config, host, refreshed, run_remote_ssh)
     if refreshed.missing_paths:
         return HostSetupResult(
             ok=False,
@@ -178,6 +112,7 @@ def prepare_remote_host_with_password(
         *,
         password: str | None,
         remote_host_status: Callable[[MediaforceConfig, dict[str, object]], HostStatus],
+        prepare_tools: Callable[[MediaforceConfig, dict[str, Any], HostStatus], HostSetupResult],
         needs_initial_ssh_key_install: Callable[[HostStatus], bool],
         install_local_ssh_key: Callable[[dict[str, Any], str], HostSetupResult],
         ssh_access_must_be_fixed_first: Callable[[HostStatus], bool],
@@ -208,6 +143,12 @@ def prepare_remote_host_with_password(
                 message=f"{status.label} is mounted and ready.",
                 performed_steps=prep_steps,
             )
+        if status.can_update_tools:
+            if status.platform == "macos" and (status.missing_paths or (
+                    status.repo_path and f"Repo path is missing: {status.repo_path}" in status.issues
+            )):
+                return finish_remote_host_prepare(config, host, prep_steps)
+            return prepare_tools(config, host, status)
         if not status.setup_supported:
             return HostSetupResult(
                 ok=False,

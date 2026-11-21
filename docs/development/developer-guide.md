@@ -219,9 +219,17 @@ computer doing the work. Linux workers also use idle disk priority and need `ion
 util-linux. Macs use `nice -n 19` so other applications can take precedence.
 
 A blank remote Mac needs Remote Login first; Set up computer then installs
-this Mac's SSH key with the account password once, creates remote paths, and
-installs `ffmpeg-full` and `ab-av1` with Homebrew. Sample computers must have
-`libvmaf` or `xpsnr` and `libsvtav1`. The controller is not a computer by
+this Mac's SSH key with the account password once and creates its work folders.
+Readiness runs FFmpeg, ffprobe and ab-av1 and identifies the SVT-AV1, Opus and
+libvmaf libraries FFmpeg loaded. The controller's installed Homebrew receipts
+identify the sources for each release. An idle remote computer prepares changed
+tools under `~/.local/share/mediaforce/tools`. A Mac uses Homebrew in a separate
+prefix so its previous libraries remain usable. Linux builds from the checked
+source archives at lowest priority. Workers select a version through `current`;
+a pending switch holds the worker out of service until picture, sound and quality
+checks pass. An interrupted switch restores the previous selection.
+
+The controller is not a computer by
 default; add it as an SSH address such as `user@localhost` to give it work.
 Computers reach media mounted, streamed, or copied to scratch space; see
 [staged encode hosts](../architecture/staged-encode-hosts.md).

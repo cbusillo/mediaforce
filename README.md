@@ -49,19 +49,25 @@ some shows need more, and your results will vary.
   mounts. Mediaforce reconnects a share in the background using the password
   saved in your Keychain. It also needs a separate working folder, outside the
   library, for new files and the Cleanup folder.
-- **ffmpeg** from Homebrew (`brew install ffmpeg-full`) on the Mac that runs
-  Mediaforce.
+- **FFmpeg and ab-av1** from Homebrew (`brew install ffmpeg-full ab-av1`)
+  on the Mac that runs Mediaforce.
 - **At least one computer to do the work**, reached over SSH. That can be
   the same Mac: turn on Remote Login and add it under Settings › Computers.
   - **Another Mac** needs Remote Login turned on. Set up computer installs
     this Mac's SSH key (asking for that account's password once), and
-    installs Homebrew's `ffmpeg-full` and `ab-av1` when they are missing.
-  - **A Linux computer** needs SSH, ffmpeg with the SVT-AV1 encoder, and
-    `ab-av1` already installed. Linux computers compress files but do not make
-    samples.
+    prepares its work folders. Homebrew supplies Mediaforce’s tools on Macs.
+  - **A Linux computer** needs SSH, Python 3 and build tools for FFmpeg and
+    ab-av1, including a C/C++ compiler, CMake, Meson, Ninja, xxd and Cargo.
+    Linux computers compress files but do not make samples.
 - **Optional:** a Plex server for posters and when each show was added, a
   TMDB read-access token so Mediaforce can tell cartoons from live action and
   which seasons are still airing, and Docker for the sound score on samples.
+
+Computers checks each worker’s picture, sound and quality tools against the versions
+running on this Mac. An idle worker prepares a separate copy and switches to it
+only for Mediaforce. It checks a short file before accepting work. If a check
+fails, it switches back and Computers shows why. Macs keep the existing Homebrew
+installation and pinned tools. Linux builds run at idle disk and lowest CPU priority.
 
 ## Install
 

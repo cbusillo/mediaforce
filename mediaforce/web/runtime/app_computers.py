@@ -26,7 +26,7 @@ RECENT_FILE_LIMIT = 12
 WEEK = timedelta(days=7)
 TYPICAL_EPISODE = {"duration_seconds": 3600.0, "height": 1080}
 EPISODE_PATTERN = re.compile(r"[Ss]\d{1,2}[Ee](\d{1,3})")
-FIX_FIELDS = ("available", "setup_supported", "setup_requires_password", "trust_reset_supported", "issues", "recovery")
+FIX_FIELDS = ("tool_message", "available", "setup_supported", "setup_requires_password", "trust_reset_supported", "issues", "recovery")
 STARTING_STATES = {"starting": "getting_ready", "quality_search": "finding_size"}
 SYSTEM_PROFILER = "/usr/sbin/system_profiler"
 

@@ -1,6 +1,7 @@
 import socket
 
 from mediaforce.core.type_defs import object_dict
+from mediaforce.hosts.tool_versions import TOOLS_RELATIVE_DIRECTORY
 from mediaforce.hosts.types import DEFAULT_HOST_MEDIA_ACCESS, HostStatus, REMOTE_SHELL_PATH
 
 
@@ -62,7 +63,7 @@ def _host_supports_capability(host: dict[str, object], capability: str) -> bool:
 
 
 def remote_shell_path_export_line() -> str:
-    return f'export PATH="{REMOTE_SHELL_PATH}:$PATH"'
+    return f'export PATH="$HOME/{TOOLS_RELATIVE_DIRECTORY}/current/bin:{REMOTE_SHELL_PATH}:$PATH"'
 
 
 def _parse_utc_offset_minutes(value: object) -> int | None:

@@ -242,6 +242,10 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
                                       "sample_status": "completed", "sample_ready": true, "one_time": false,
                                       "settings_available": false, "sample_start_prefix": NSNull()]]
         facts["work"] = work
+        facts["computers"] = [
+            ["key": "mini", "name": "M1 mini", "platform": "macos", "state": "not_ready", "needs_you": false, "running_count": 0],
+            ["key": "studio", "name": "M4 Studio", "platform": "macos", "state": "busy", "needs_you": false, "running_count": 1]
+        ]
         var samples = facts["samples"] as! [String: Any]
         var waiting = samples["waiting_on_you"] as! [[String: Any]]
         waiting.append(["prefix": "tv/ER/Season 1", "show_prefix": "tv/ER", "show": "ER", "season_folder": "Season 1",
