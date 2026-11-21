@@ -10,7 +10,7 @@ from mediaforce import execution
 from mediaforce.core import process_control
 from mediaforce.core.process_control import run_command
 from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, guard_command_for_schedule_deadline
-from mediaforce.hosts.status_helpers import _host_capability_issues
+from mediaforce.hosts import status_helpers
 from mediaforce.hosts.transport import run_remote_command
 
 
@@ -83,14 +83,26 @@ def test_streamed_encode_runs_the_remote_encoder_at_idle_disk_priority(tmp_path:
     assert output.read_bytes() == b"-n 19/-c 3\nfixture video"
 
 
-def test_linux_worker_cannot_claim_media_work_without_idle_disk_priority() -> None:
+def test_linux_worker_checks_disk_priority_before_taking_work(tmp_path: Path) -> None:
     tools = {"ffmpeg": True, "ffmpeg_libsvtav1": True, "ab_av1": True, "ffmpeg_xpsnr": True}
     host: dict[str, object] = {"capabilities": ["encode_queue"]}
-    for available in (False, True):
-        issues = _host_capability_issues(
-            host, tools={**tools, "low_priority": available}, platform_name="linux", repo_path=None, repo_path_exists=True,
+    _install_worker_tools(tmp_path, "Linux", "true", "exit 0")
+    for utility in (Path("/usr/bin/tr"), Path("/bin/date"), Path("/usr/bin/readlink")):
+        (tmp_path / utility.name).symlink_to(utility)
+    with patch.object(status_helpers, "remote_shell_path_export_line", return_value=":"):
+        script = status_helpers._remote_status_script(paths=[], repo_path="", include_expensive_tools=False)
+    ionice = tmp_path / "ionice"
+    for state in ("available", "denied", "missing"):
+        if state == "denied":
+            ionice.write_text("#!/bin/sh\nexit 1\n")
+        elif state == "missing":
+            ionice.unlink()
+        result = subprocess.run(["/bin/sh", "-c", script], env={"PATH": str(tmp_path)}, capture_output=True, text=True, check=True)
+        snapshot = status_helpers._parse_remote_status_output(result.stdout)["tools"]
+        issues = status_helpers._host_capability_issues(
+            host, tools={**tools, "low_priority": snapshot["low_priority"]}, platform_name="linux", repo_path=None, repo_path_exists=True,
         )
-        assert bool(issues) is (not available)
+        assert bool(issues) == (state != "available")
 
 
 def test_trusted_quality_tool_is_deprioritized_after_its_identity_check() -> None:
