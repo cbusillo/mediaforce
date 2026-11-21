@@ -12,6 +12,7 @@ from typing import Any, cast
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from mediaforce.core.media_storage import STORAGE_WAIT_REASON, probe_media_path
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow, open_db
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, motion_keep_decisions, \
@@ -26,7 +27,7 @@ from mediaforce.library.remake_intents import (
     INTENT_KEY,
     finish_remake_intents,
     remake_intent,
-    requested_copy_is_present,
+    requested_copy_probe,
     save_remake_intent,
     stored_validation as _stored_validation,
 )
@@ -97,7 +98,10 @@ def decide_size_held_file(
         if not held and not final_size_miss:
             return {"ok": False, "message": NOT_HELD_MESSAGE}
         intent = remake_intent(row)
-        if intent and not requested_copy_is_present(row):
+        copy_probe = requested_copy_probe(row)
+        if copy_probe.unavailable:
+            return {"ok": False, "message": STORAGE_WAIT_REASON}
+        if intent and not copy_probe.is_file:
             return {"ok": False, "message": "This file is waiting to be made again. Retry Make again with its saved settings."}
         name = Path(str(row["rel_path"])).name
         now = now_iso()
@@ -176,7 +180,7 @@ def remake_staged_files(
                     left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason,
                                      "codes": [code], "busy": code == "copy_in_use"})
                     continue
-                if not intent or requested_copy_is_present(row):
+                if not intent or requested_copy_probe(row).is_file:
                     run_prefix, mode, _available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
                     intent = {"prefix": run_prefix, "mode": mode, "approval": recovery["approval"],
                               "reason": recovery["reason"], "state": "requested"}
@@ -349,7 +353,8 @@ def staged_remake_details(
     if not path_matches_scope(str(row.get("rel_path") or ""), prefix) and "rel_path" in row:
         return None
     intent = remake_intent(row)
-    if requested_copy_is_present(row):
+    requested_copy = requested_copy_probe(row)
+    if requested_copy.is_file:
         intent = {}
     validation = _stored_validation(row)
     outcome = staged_validation_outcome(row["validation_json"])
@@ -413,17 +418,20 @@ def staged_remake_details(
         ))
     original = Path(str(row["original_source_path"] or ""))
     staging = Path(str(row["staging_path"] or ""))
-    if not original.is_file():
+    original_probe = probe_media_path(original)
+    if not original_probe.is_file and not original_probe.unavailable:
         blocked.append((
             "original_unreachable", "Restore access to the original file before making it again. Nothing was removed.",
         ))
-    elif original.resolve() in {staging.resolve(), partial_output_path(staging).resolve()}:
+    elif original_probe.is_file and original.resolve() in {staging.resolve(), partial_output_path(staging).resolve()}:
         blocked.append((
             "copy_points_at_original",
             "The compressed copy points at the original. Check this file’s paths before making it again.",
         ))
     # Work still running here clears by itself; every other blocker needs someone to act.
     lasting_blockers = len(blocked)
+    if original_probe.unavailable or requested_copy.unavailable:
+        blocked.append(("storage_unavailable", STORAGE_WAIT_REASON))
     sample = load_latest_job(connection, run_prefix)
     if sample and sample.get("status") in EXECUTION_ACTIVE_JOB_STATUSES:
         blocked.append(("sampling", "Mediaforce is still sampling here. Make this file again once that sample finishes."))

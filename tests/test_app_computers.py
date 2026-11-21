@@ -95,3 +95,8 @@ def test_speed_is_unknown_until_the_computer_finishes_a_file(connection: DBClien
         hour_takes = _payload(connection, tmp_path)["computers"][0]["hour_takes_seconds"]
     assert unknown is None
     assert hour_takes is not None and hour_takes >= 2 * 3600
+
+
+def test_a_timed_out_storage_check_does_not_show_the_share_as_connected(connection: DBClient, tmp_path: Path) -> None:
+    computer = _computer(available=False, check_failure="controller_storage_unavailable")
+    assert _payload(connection, tmp_path, computer)["computers"][0]["storage"] == "missing"

@@ -146,7 +146,9 @@ final class MainWindowModel {
         var answered = true
         do {
             let result = try await client.deleteCleanupFolder()
-            if !result.ok { notice = .publishing }
+            if !result.ok {
+                notice = result.message.map { ActionNotice(title: ActionNotice.publishing.title, message: $0) } ?? .publishing
+            }
         } catch {
             answered = false
         }

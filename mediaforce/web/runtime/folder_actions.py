@@ -11,6 +11,7 @@ from typing import Any, cast, Literal, Protocol, TypeAlias
 from fastapi import HTTPException
 from sqlalchemy import delete, func, or_, select, update
 
+from mediaforce.core.media_storage import STORAGE_WAIT_REASON, probe_media_path
 from mediaforce.core.config import MediaforceConfig, load_config, with_folder_policy_override
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, staged_artifacts
@@ -1551,14 +1552,12 @@ def validate_folder_outputs_action(
                     else "No staged encoded files are ready to validate for this folder."
                 ),
             }
-        ready_items = items
-        items, held = _hold_unreachable_staged_items(ready_items)
+        items, held = _hold_unreachable_staged_items(items)
         if not items:
-            return _inaccessible_staged_item_response(
-                items=ready_items,
-                action="validate",
-                zero_count_key="validated_count",
-            ) or {"ok": False, "message": "No staged encoded files are ready to validate for this folder."}
+            unreachable = sum(file.waiting for file in held)
+            return {"ok": False, "message": _held_files_copy(held, verb="checked").strip(),
+                    "validated_count": 0, "failed_count": len(held), "item_count": len(held),
+                    "remote_unreachable_count": unreachable, "missing_count": len(held) - unreachable}
         manifest: ManifestPayload = {"items": items}
         _end_scope_check_snapshot(connection)
         results: list[ActionPayload] = []
@@ -1752,12 +1751,15 @@ def _hold_unreachable_staged_items(items: list[FolderItem]) -> tuple[list[Folder
     reachable: list[FolderItem] = []
     held: list[HeldFile] = []
     for item in items:
-        if Path(str(item.get("staging_path") or "")).exists():
+        probe = probe_media_path(Path(str(item.get("staging_path") or "")))
+        if probe.info is not None:
             reachable.append(item)
             continue
         rel_path = str(item.get("rel_path") or item.get("source_path") or "")
         host = str(item.get("staging_host_label") or item.get("staging_host_key") or "").strip()
-        if host:
+        if probe.unavailable:
+            held.append(HeldFile(rel_path, STORAGE_WAIT_REASON, waiting=True))
+        elif host:
             held.append(HeldFile(rel_path, f"Its finished file is on {host}, which cannot be reached now", waiting=True))
         else:
             held.append(HeldFile(rel_path, "Its finished file is missing", waiting=False))
@@ -1772,18 +1774,18 @@ def _hold_conflicting_destinations(
     conflict = _promotion_conflict_response(config, items)
     if conflict is None:
         return items, []
-    reasons: dict[str, str] = {}
+    holds: dict[str, HeldFile] = {}
     for entry in object_list(conflict.get("conflicts")):
         entry = object_dict(entry)
-        reason = (
-            "Another file in this folder would land in the same place"
-            if entry.get("kind") == "duplicate_destination"
-            else "A different file is already at its place in the library"
-        )
+        waiting = entry.get("kind") == "storage_unavailable"
+        reason = {
+            "duplicate_destination": "Another file in this folder would land in the same place",
+            "storage_unavailable": STORAGE_WAIT_REASON,
+        }.get(str(entry.get("kind")), "A different file is already at its place in the library")
         for rel_path in object_list(entry.get("rel_paths")):
-            reasons.setdefault(str(rel_path), reason)
-    clear = [item for item in items if str(item.get("rel_path") or item.get("source_path")) not in reasons]
-    return clear, [HeldFile(rel_path, reason, waiting=False) for rel_path, reason in reasons.items()]
+            holds.setdefault(str(rel_path), HeldFile(str(rel_path), reason, waiting=waiting))
+    clear = [item for item in items if str(item.get("rel_path") or item.get("source_path")) not in holds]
+    return clear, list(holds.values())
 
 
 def _promotion_refresh_prefix(
@@ -2037,9 +2039,12 @@ def _promotion_conflict_response(
         for item_key, item_destination, source_path, rel_path in destination_sources:
             if item_key != destination_key:
                 continue
-            if item_destination != source_path and item_destination.exists():
+            if item_destination == source_path:
+                continue
+            probe = probe_media_path(item_destination)
+            if probe.unavailable or probe.info is not None:
                 conflicts.append({
-                    "kind": "destination_exists",
+                    "kind": "storage_unavailable" if probe.unavailable else "destination_exists",
                     "destination_path": str(item_destination),
                     "rel_paths": [rel_path],
                 })
@@ -2054,51 +2059,6 @@ def _promotion_conflict_response(
         "promoted_count": 0,
         "conflicts": conflicts,
     }
-
-
-def _inaccessible_staged_item_response(
-        *,
-        items: list[FolderItem],
-        action: str,
-        zero_count_key: str,
-) -> ActionPayload | None:
-    inaccessible_items = [item for item in items if not Path(str(item.get("staging_path") or "")).exists()]
-    if not inaccessible_items:
-        return None
-    remote_items = [
-        item
-        for item in inaccessible_items
-        if str(item.get("staging_host_label") or item.get("staging_host_key") or "").strip()
-    ]
-    missing_count = len(inaccessible_items) - len(remote_items)
-    inaccessible_hosts = sorted(
-        {
-            str(item.get("staging_host_label") or item.get("staging_host_key") or "").strip()
-            for item in inaccessible_items
-            if str(item.get("staging_host_label") or item.get("staging_host_key") or "").strip()
-        }
-    )
-    host_copy = f" Encoded hosts: {', '.join(inaccessible_hosts)}." if inaccessible_hosts else ""
-    access_reason = (
-        f"{len(remote_items)} staged file{'s are' if len(remote_items) != 1 else ' is'} remote-only or unreachable"
-        if remote_items
-        else f"{missing_count} staged file{'s are' if missing_count != 1 else ' is'} missing locally"
-    )
-    response = {
-        "ok": False,
-        "message": (
-            f"Cannot {action} this folder from the current web host because {access_reason}.{host_copy}"
-        ),
-        zero_count_key: 0,
-        "failed_count": len(inaccessible_items),
-        "item_count": len(items),
-        "remote_unreachable_count": len(remote_items),
-        "missing_count": missing_count,
-    }
-    if zero_count_key == "promoted_count":
-        response.pop("failed_count")
-        response.pop("item_count")
-    return response
 
 
 def _build_manifest_shards(_config: MediaforceConfig, manifest: ManifestPayload) -> list[list[int]]:

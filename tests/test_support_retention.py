@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 import pytest
 
+from storage_outage import storage_outage
+
 from mediaforce import state_cleanup
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db
@@ -66,6 +68,18 @@ def _sweep(config: MediaforceConfig) -> None:
             return_value=state_cleanup.CleanupProcessSnapshot((), ()),
     ):
         state_cleanup.purge_transient_artifacts(config, force=True)
+
+
+def test_cleanup_leaves_a_timed_out_temp_folder_for_the_next_sweep(config: MediaforceConfig) -> None:
+    root = config.staging_root
+    old = _work_folder(root, ".ab-av1-old", age_days=30)
+    os.utime(old, (old.stat().st_mtime - 30 * DAY,) * 2)
+    with patch.object(state_cleanup, "_staging_roots_for_cleanup", return_value=[root]):
+        with storage_outage(root, old):
+            _sweep(config)
+        assert old.is_dir()
+        _sweep(config)
+    assert not old.exists()
 
 
 def _old_run_plan(config: MediaforceConfig, trait_column: str | None = None) -> Path:

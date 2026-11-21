@@ -332,6 +332,7 @@ struct BackupsStatus {
 
     var line: String {
         if deleting { return Words.deletingBackups(cleanup.deletion) }
+        if let reason = cleanup.waitingReason { return reason }
         if cleanup.fileCount > 0 { return Words.deleteBackupsLine(cleanup.fileCount, cleanup.totalSizeBytes) }
         if let deletion = cleanup.deletion, deletion.state == .finished { return Words.backupDeletionResult(deletion) }
         return Words.noBackupsWaiting
@@ -392,7 +393,9 @@ struct DeleteBackups: View {
     private func askFirst() async {
         do {
             let found = try await model.client.cleanupFolder()
-            if found.fileCount > 0 {
+            if let reason = found.waitingReason {
+                model.notice = ActionNotice(title: Words.deleteBackups, message: reason)
+            } else if found.fileCount > 0 {
                 folder = found
                 confirming = true
             } else {

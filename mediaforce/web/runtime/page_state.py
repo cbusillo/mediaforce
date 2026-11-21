@@ -230,6 +230,7 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
         return PageState(
             "sample_waiting",
             "attention" if sample_status == "retry_backoff" else "quiet",
+            wait_detail=object_dict(sample_job.get("progress")).get("waiting_reason"),
             source_job=_source_job(sample_job, "sample"),
         )
     if lane == "blocked" and not awaits_review:

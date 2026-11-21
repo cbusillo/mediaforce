@@ -18,6 +18,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.core.media_storage import STORAGE_WAIT_REASON, probe_media_path
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.helpers import resolve_item_source_path
@@ -26,6 +27,7 @@ from mediaforce.encoding.quality import RemoteQualityTimeoutError, SampleEncodeR
 from mediaforce.encoding.video_filters import build_video_filter, planned_output_dimensions
 from mediaforce.encoding.staged_host import STAGED_JOB_KEY, host_scratch_root, staged_job, staged_job_for_host
 from mediaforce.hosts.config import host_media_access_for_host, host_targets_current_machine, ssh_target_for_host
+from mediaforce.hosts.types import HostReadinessError
 from mediaforce.hosts.transport import EncodeConnectionLostError, ssh_host_unreachable
 from mediaforce.remote import execution_mode_for_host, run_remote_command, ssh_client_options
 from mediaforce.reviewing.artifact_identity import reviewed_artifact_fingerprint
@@ -149,15 +151,14 @@ class _CalibrationTelemetry:
         self.progress["last_progress_at"] = self.deps.now_iso()
         self._persist(progress=self.progress)
 
-    def wait_for_computer(self, *, computer: str, waiting_reason: str, retry_not_before: str) -> None:
-        """Show that the sample waits for its computer; ``finish`` saves it."""
+    def wait_for_retry(self, *, computer: str | None, waiting_reason: str, retry_not_before: str) -> None:
         now = self.deps.now_iso()
         self.progress.update(
             {
-                "stage": WAITING_FOR_COMPUTER_STAGE,
+                "stage": WAITING_FOR_COMPUTER_STAGE if computer else "waiting_for_storage",
                 "stage_started_at": now,
                 "last_progress_at": now,
-                WAITING_FOR_COMPUTER_STAGE: computer,
+                **({WAITING_FOR_COMPUTER_STAGE: computer} if computer else {}),
                 "waiting_reason": waiting_reason,
                 "retry_not_before": retry_not_before,
             }
@@ -455,9 +456,12 @@ def restore_staged_artifact(
 
 
 def remove_path(path: Path | None) -> None:
-    if path is None or not path.exists():
+    if path is None:
         return
-    if path.is_dir():
+    probe = probe_media_path(path)
+    if probe.info is None:
+        return
+    if probe.is_dir:
         shutil.rmtree(path, ignore_errors=True)
         return
     try:
@@ -667,8 +671,9 @@ def run_calibration_job(
             },
         )
     except Exception as exc:
-        if _lost_sample_computer(exc, host_data):
-            terminal_status = _handle_lost_sample_computer(
+        storage_unavailable = isinstance(exc, HostReadinessError) and exc.failure_kind == "controller_storage_unavailable"
+        if storage_unavailable or _lost_sample_computer(exc, host_data):
+            terminal_status = _retry_sample(
                 exc,
                 config=config,
                 prefix=prefix,
@@ -677,6 +682,7 @@ def run_calibration_job(
                 host_data=host_data,
                 process_controller=process_controller,
                 telemetry=telemetry,
+                storage_unavailable=storage_unavailable,
                 deps=deps,
             )
         else:
@@ -782,7 +788,7 @@ def _sample_computer_retry_delay_seconds(attempt: int) -> int:
     return min(delay, SAMPLE_COMPUTER_RETRY_MAX_DELAY_SECONDS)
 
 
-def _handle_lost_sample_computer(
+def _retry_sample(
         exc: Exception,
         *,
         config: MediaforceConfig,
@@ -792,12 +798,9 @@ def _handle_lost_sample_computer(
         host_data: dict[str, Any],
         process_controller: ManagedProcessController,
         telemetry: _CalibrationTelemetry,
+        storage_unavailable: bool,
         deps: CalibrationRunDeps,
 ) -> str:
-    """Wait for the computer and try again, or ask the owner once the tries are used up.
-
-    Returns the job's status after this try.
-    """
     now_iso = deps.now_iso()
     if process_controller.cancelled:
         # The owner's Stop ended the link, so the sample stays stopped and does not try again.
@@ -817,9 +820,9 @@ def _handle_lost_sample_computer(
         return "stopped"
     computer = _sample_computer_label(host_data)
     previous = object_dict(object_dict(job.get("result")).get(COMPUTER_RETRY_RESULT_KEY))
-    attempt = int_value(previous.get("attempts")) + 1
+    attempt = int_value(previous.get("attempts")) + (0 if storage_unavailable else 1)
     detail = quality_error_message(exc)
-    if attempt > SAMPLE_COMPUTER_RETRY_LIMIT:
+    if not storage_unavailable and attempt > SAMPLE_COMPUTER_RETRY_LIMIT:
         return _fail_unless_ended(
             config=config,
             prefix=prefix,
@@ -837,7 +840,7 @@ def _handle_lost_sample_computer(
     retry_not_before = (
         datetime.fromisoformat(now_iso) + timedelta(seconds=_sample_computer_retry_delay_seconds(attempt))
     ).isoformat(timespec="seconds")
-    waiting_reason = sample_waiting_for_computer_reason(host_data)
+    waiting_reason = STORAGE_WAIT_REASON if storage_unavailable else sample_waiting_for_computer_reason(host_data)
     retry = {
         "attempts": attempt,
         "retry_not_before": retry_not_before,
@@ -855,8 +858,8 @@ def _handle_lost_sample_computer(
     if not requeued:
         # The owner stopped it while this try was ending; their Stop stands.
         return "stopped"
-    LOGGER.info("Sample %s lost %s and will try again at %s: %s", job_id, computer, retry_not_before, detail)
-    telemetry.wait_for_computer(computer=computer, waiting_reason=waiting_reason, retry_not_before=retry_not_before)
+    LOGGER.info("Sample %s will try again at %s: %s", job_id, retry_not_before, detail)
+    telemetry.wait_for_retry(computer=None if storage_unavailable else computer, waiting_reason=waiting_reason, retry_not_before=retry_not_before)
     return "queued"
 
 
@@ -1127,6 +1130,10 @@ def _run_sampled_calibration_on_host(
     review_moments = []
     if progress_callback is not None:
         progress_callback("selecting_review_moments")
+    source_probe = None if remote_review else probe_media_path(controller_source_path)
+    if source_probe is not None and source_probe.unavailable:
+        raise HostReadinessError(STORAGE_WAIT_REASON, failure_kind="controller_storage_unavailable")
+    can_analyze_source = source_probe is not None and source_probe.info is not None
     if deps.recommend_review_moments is not None:
         review_moments = deps.recommend_review_moments(
             controller_source_path,
@@ -1134,12 +1141,12 @@ def _run_sampled_calibration_on_host(
             8.0,
             media_fingerprint=object_dict(sample_item.get("media_fingerprint")),
             media_fingerprint_decision=object_dict(sample_item.get("media_fingerprint_decision")),
-            analyze_source=not remote_review and controller_source_path.exists(),
+            analyze_source=can_analyze_source,
             process_controller=process_controller,
         )
     timestamps = [moment.timestamp_seconds for moment in review_moments]
     if not timestamps:
-        if not remote_review and controller_source_path.exists():
+        if can_analyze_source:
             timestamps = deps.recommend_review_timestamps(
                 controller_source_path,
                 float_value(sample_item.get("duration_seconds")),

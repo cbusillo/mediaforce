@@ -444,7 +444,7 @@ def ensure_sample_host_ready(config: MediaforceConfig, host_payload: dict[str, A
     if not status.available:
         raise HostReadinessError(
             status.detail or status.message or "Sample host is not available.",
-            failure_kind="host_unavailable",
+            failure_kind="controller_storage_unavailable" if status.check_failure == "controller_storage_unavailable" else "host_unavailable",
         )
     return _confirm_full_wake(config, host, status)
 

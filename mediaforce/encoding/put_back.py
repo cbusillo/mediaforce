@@ -16,6 +16,7 @@ from uuid import uuid4
 from sqlalchemy import RowMapping, delete, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, motion_keep_decisions, source_transitions, \
     source_versions, staged_artifacts
@@ -143,13 +144,17 @@ def put_original_back(
     archive_path = Path(str(stage["archived_source_path"] or ""))
     original_path = Path(str(stage["source_path"]))
     out_path = Path(str(stage["staging_path"]))
-    if not stage["archived_source_path"] or not archive_path.is_file():
+    archive = probe_media_path(archive_path)
+    library = probe_media_path(library_path)
+    if archive.unavailable or library.unavailable:
+        raise PutBackRefused("storage_unavailable", "Storage is unavailable. Try putting the original back when it returns.")
+    if not stage["archived_source_path"] or not archive.is_file:
         raise PutBackRefused("backup_gone", "Its original backup was deleted, so there is nothing to put back.")
-    if Path(str(item["source_path"])) != library_path or not library_path.is_file():
+    if Path(str(item["source_path"])) != library_path or not library.is_file:
         raise PutBackRefused("file_changed", "The file in the library is not the one Mediaforce put there.")
-    if original_path != library_path and original_path.exists():
+    if original_path != library_path and probe_media_path(original_path).exists_or_raise():
         raise PutBackRefused("occupied", "Another file is already where the original goes.")
-    if out_path.exists():
+    if probe_media_path(out_path).exists_or_raise():
         raise PutBackRefused("occupied", "Another file is already where the compressed copy goes.")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     original_path.parent.mkdir(parents=True, exist_ok=True)

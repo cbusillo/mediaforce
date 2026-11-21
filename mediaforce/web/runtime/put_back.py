@@ -60,4 +60,6 @@ def put_original_back_action(config: MediaforceConfig, prefix: str, library_item
             "message": "Putting the original back failed partway, and Mediaforce could not return the files. "
                        "Look in the library and the original backups folder before trying again.",
         }
+    except OSError:
+        return {"ok": False, "code": "storage_unavailable", "message": "Storage is unavailable. Try putting the original back when it returns."}
     return {"ok": True, "rel_path": str(rel_path), "original_path": str(original)}

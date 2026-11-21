@@ -90,6 +90,7 @@ enum Words {
         case "too_little_time": "Not enough time left in this window for the waiting files"
         case "cooling_down": "Resting after repeated failures"
         case "not_encoding": "Makes samples only"
+        case "controller_storage_unavailable": "Waiting for shared storage"
         case "storage_unreachable": "Can't reach shared storage"
         case "password_needed": "Needs its password once"
         case "away": "Away. Picks up work when it returns"
@@ -630,7 +631,7 @@ extension Words {
         let name = season(facts.show, facts.season)
         return switch (facts.state, facts.action) {
         case ("making_test", _): "Making a sample of \(name).\(ready)"
-        case ("sample_waiting", _): "The \(name) sample waits for a free computer."
+        case ("sample_waiting", _): facts.waitDetail.map { "\(name): \($0)" } ?? "The \(name) sample waits for a free computer."
         case ("ready_to_compare", _): "The \(name) sample is ready. Watch it next to the original."
         default: "\(name): \(sampleHeadline(facts))"
         }
@@ -646,7 +647,7 @@ extension Words {
         switch (facts.state, facts.action) {
         case ("preparing_sample", _): preparingSample
         case ("making_test", _): "Making the sample now."
-        case ("sample_waiting", _): "The sample waits for a free computer."
+        case ("sample_waiting", _): facts.waitDetail ?? "The sample waits for a free computer."
         case ("ready_to_compare", _): facts.approvalKind.map {
             "Watch the sample. Approving it sets the look for all \(kindName($0).lowercased())."
         } ?? "The sample is ready. Watch it next to the original."
@@ -786,7 +787,7 @@ extension Words {
     }
 
     static func tvSeasonState(_ season: TVShowsFacts.Season) -> String {
-        if season.state == "waiting_for_measurement", let detail = season.waitDetail { return detail }
+        if let detail = season.waitDetail { return detail }
         if season.needsYou, !["ready_to_compare", "needs_help"].contains(season.state), season.action != "decide_motion" {
             return "\(seasonState(season.state, season.action)). Some files need you."
         }
@@ -1529,6 +1530,7 @@ extension Words {
 
     static func playerCaption(_ file: ItemFacts.File, comparing: Bool) -> String {
         if let held = file.heldCopy {
+            if let reason = held.waitingReason { return reason }
             guard held.present else { return "\(fileName(file)): \(size(file.bytes)), as it is now. Its new copy is gone, so make it again." }
             let newCopy = held.bytes.map { "new copy \(size($0))" } ?? "new copy"
             return "\(fileName(file)): original \(size(file.bytes)), \(newCopy). The new copy isn't in the library yet."

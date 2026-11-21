@@ -9,6 +9,10 @@ from unittest.mock import patch
 
 from sqlalchemy import update
 
+from storage_outage import storage_outage
+from mediaforce.hosts import status_runtime
+from mediaforce.web.runtime import host_runtime
+
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import calibration_jobs
@@ -218,6 +222,25 @@ class SampleComputerRetryTests(unittest.TestCase):
         self.assertIn(COMPUTER, progress["waiting_reason"])
         self.assertEqual(datetime.fromisoformat(progress["retry_not_before"]), FIRST_RETRY_AT)
         self.assertEqual(job["result"]["computer_retry"]["attempts"], 1)
+
+    def test_sample_waits_when_the_local_computer_cannot_reach_its_work_folder(self) -> None:
+        self._save_job(status="running")
+        self.config.staging_root.mkdir()
+        self.config.source_root_map["tv"].mkdir(parents=True)
+        with storage_outage(self.config.staging_root), patch.object(status_runtime, "_local_platform_name", return_value="macos"):
+            status = status_runtime._current_machine_host_status(
+                self.config, HOST, ssh_host="localhost", label=COMPUTER, repo_path=None,
+                local_tool_status_snapshot=lambda: {},
+            )
+        self.assertFalse(status.available)
+        self.assertIn("storage", status.message.lower())
+        with patch.object(host_runtime, "fresh_host_status_for_key", return_value=status):
+            self._run(self._deps(host_ready=lambda host: host_runtime.ensure_sample_host_ready(self.config, host)))
+        job = self._job()
+        self.assertEqual(job["status"], "queued")
+        self.assertIn("storage", job["progress"]["waiting_reason"].lower())
+        self.assertEqual(self._queue_pass(now=NOW), [])
+        self.assertEqual(self._queue_pass(now=FIRST_RETRY_AT.isoformat()), [JOB_ID])
 
     def test_a_link_dropped_mid_sample_waits_for_its_computer_and_tries_again(self) -> None:
         self._save_job(status="running")

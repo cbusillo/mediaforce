@@ -24,6 +24,7 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy import select
 
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, is_database_busy_failure
 from mediaforce.core.db_tables import (
@@ -562,29 +563,21 @@ def _validate_sources(
             raise HTTPException(status_code=409, detail="The recovery source identity changed.")
         path = Path(str(row["source_path"])).expanduser()
         root = config.source_root_map.get(str(row.get("media_root") or ""))
-        if root is None or not _under_root(path, root) or not path.is_file():
+        if root is None or not _under_root(path, root):
             raise HTTPException(status_code=409, detail="The recovery source is inaccessible.")
-        try:
-            stat = path.stat()
-            if stat.st_size != int(row["size_bytes"]) or stat.st_mtime_ns != int(row["mtime_ns"]):
-                raise HTTPException(
-                    status_code=409,
-                    detail="The recovery source size or modification time changed.",
-                )
-            row["_stat"] = {
-                "dev": int(stat.st_dev),
-                "ino": int(stat.st_ino),
-                "size": int(stat.st_size),
-                "mtime_ns": int(stat.st_mtime_ns),
-            }
-        except OSError:
-            raise HTTPException(status_code=409, detail="The recovery source is inaccessible.") from None
+        probe = probe_media_path(path)
+        stat = probe.info
+        if stat is None or not probe.is_file:
+            raise HTTPException(status_code=409, detail="The recovery source is inaccessible.")
+        if stat.st_size != int(row["size_bytes"]) or stat.st_mtime_ns != int(row["mtime_ns"]):
+            raise HTTPException(status_code=409, detail="The recovery source size or modification time changed.")
+        row["_stat"] = {"dev": int(stat.st_dev), "ino": int(stat.st_ino), "size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
         output_value = str(item.get("staging_path") or "").strip()
         if not output_value:
             raise HTTPException(status_code=409, detail="Recovery output path is missing.")
         output_path = Path(output_value).expanduser()
         try:
-            if not config.staging_root.is_dir() or not _under_root(output_path, config.staging_root):
+            if not probe_media_path(config.staging_root).is_dir or not _under_root(output_path, config.staging_root):
                 raise HTTPException(
                     status_code=409,
                     detail="Recovery output storage is inaccessible or changed.",

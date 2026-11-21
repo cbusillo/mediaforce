@@ -12,6 +12,7 @@ from sqlalchemy import insert, or_, select, update
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, DBRow, open_db
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.core.utils import file_fingerprint, timestamp
 from mediaforce.encoding.encode_queue import load_active_encode_jobs_for_prefix
@@ -149,7 +150,7 @@ def _try_publish_file(
         )
     except FileNotFoundError as exc:
         connection.rollback()
-        reachable_parent = bool(exc.filename and Path(exc.filename).parent.is_dir())
+        reachable_parent = bool(exc.filename and probe_media_path(Path(exc.filename).parent).is_dir)
         reason = (
             "A required file is missing from a reachable folder. Inspect the original and saved work before replacing it."
             if reachable_parent
@@ -329,7 +330,7 @@ def _publish_file(
     ).scalars()
     if any(
         Path(str(other)).with_suffix(destination.suffix) == destination
-        and Path(str(other)).exists()
+        and probe_media_path(Path(str(other))).exists_or_raise()
         for other in other_sources
     ):
         _record_wait(

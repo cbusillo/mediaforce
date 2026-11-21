@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.execution import describe_item_plan, resolve_stream_budget_ledger
@@ -257,7 +258,7 @@ def build_multimodal_review_pack(
     if primary_audio_track and audio_action == "libopus":
         first_moment = moments[0]
         source_path = Path(str(sample_item.get("source_path") or ""))
-        if source_path.exists():
+        if probe_media_path(source_path).is_file:
             artifact_path = output_dir / "review-audio-compare.png"
             try:
                 audio_result = render_audio_spectrogram_compare(

@@ -12,6 +12,7 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow
 from mediaforce.core.db_tables import library_items, staged_artifacts
+from mediaforce.core.media_storage import STORAGE_WAIT_REASON, probe_media_path
 from mediaforce.core.type_defs import object_dict
 from mediaforce.library.media_scopes import (
     MediaScope,
@@ -294,13 +295,13 @@ def _classify_row(row: DBRow, staging_roots: tuple[_StagingRoot, ...]) -> Staged
             staging_path,
             "The staged path is outside configured staging roots and cannot be inspected safely.",
         )
-    try:
-        stat_result = path.stat()
-    except OSError:
-        if root.remote or _row_has_remote_origin(row) or (
-                str(row["encode_host_key"] or "").strip()
-                and not root.path.is_dir()
-        ):
+    probe = probe_media_path(path)
+    stat_result = probe.info
+    if stat_result is None:
+        root_probe = probe_media_path(root.path)
+        if probe.unavailable or root_probe.unavailable:
+            return _record("remote_only_or_unreachable", item_id, rel_path, staging_path, STORAGE_WAIT_REASON)
+        if root.remote or _row_has_remote_origin(row) or (str(row["encode_host_key"] or "").strip() and not root_probe.is_dir):
             return _record(
                 "remote_only_or_unreachable",
                 item_id,
@@ -309,7 +310,7 @@ def _classify_row(row: DBRow, staging_roots: tuple[_StagingRoot, ...]) -> Staged
                 "The staged output is configured on a remote host but is not reachable from this host.",
             )
         return _record("missing", item_id, rel_path, staging_path, "The recorded staged output is missing.")
-    if not path.is_file():
+    if not probe.is_file:
         return _record("missing", item_id, rel_path, staging_path, "The recorded staged output is not a regular file.")
     expected_size = _optional_int(row["staging_size_bytes"])
     expected_mtime = _optional_int(row["staging_mtime_ns"])
@@ -440,8 +441,9 @@ def _discover_untracked_outputs(
 
 
 def _bounded_files(root: Path, *, limit: int, output_suffix: str) -> tuple[list[Path], bool]:
-    if not root.is_dir():
-        return [], False
+    probe = probe_media_path(root)
+    if not probe.is_dir:
+        return [], probe.unavailable
     files: list[Path] = []
     pending = [root]
     incomplete = False

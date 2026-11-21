@@ -10,6 +10,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from storage_outage import storage_outage
+
 from test_controller_work_window import configure_controller_night, controller_clock
 from sqlalchemy import select
 
@@ -685,6 +687,19 @@ def test_a_show_run_file_publishes_only_while_the_show_approval_governs_it(
     assert (_status(config, item_id) == "promoted") == (season_approval == "none")
 
 
+def test_publish_keeps_files_in_place_when_it_cannot_check_for_a_previous_backup(config: MediaforceConfig) -> None:
+    item_id, item, staged = _stage(config, "tv/Show/Season 1/one.mkv", checked=True)
+    archive = config.archive_root / item["rel_path"]
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"earlier rollback")
+    with storage_outage(archive):
+        _run(config)
+    assert archive.read_bytes() == b"earlier rollback"
+    assert staged.is_file()
+    assert _status(config, item_id) == "validated"
+    assert Path(item["source_path"]).read_bytes() == b"original media file"
+
+
 def test_retained_rollback_is_counted_and_owner_cleanup_reaches_it(
     config: MediaforceConfig,
 ) -> None:
@@ -870,6 +885,19 @@ def test_collision_holds_both_files_for_a_manual_choice(config: MediaforceConfig
     assert _status(config, second) == "validated"
     assert not Path(first_item["source_path"]).with_suffix(".mkv").exists()
     assert Path(second_item["source_path"]).read_bytes() == b"original media file"
+
+
+def test_publish_waits_when_it_cannot_check_the_missing_sources_folder(config: MediaforceConfig) -> None:
+    item_id, item, staged = _stage(config, "tv/Show/Season 1/one.mkv", checked=True)
+    source = Path(item["source_path"])
+    source.unlink()
+    with storage_outage(source.parent):
+        _run(config)
+    with open_db(config.paths.db_path) as connection:
+        record = staged_integrity_report(connection, config, item["rel_path"], discover=False).records[0]
+    assert record.item_id == item_id
+    assert "retry" in (record.publish_wait_reason or "").lower()
+    assert staged.is_file()
 
 
 def test_missing_source_has_a_specific_wait_when_parent_is_reachable(config: MediaforceConfig) -> None:

@@ -841,3 +841,10 @@ def test_running_show_only_flags_seasons_with_their_own_decisions(config: Mediaf
 
         manifest.unlink()
         assert _page_state(connection, config, quiet_season, {})["needs_you"] is True
+
+
+def test_queued_sample_shows_the_reason_its_work_is_waiting() -> None:
+    reason = "Waiting for the media folder."
+    job = _sample("queued", finished_at=None, progress={"waiting_reason": reason})
+    state = decide_page_state(PageStateFacts(SEASON, None, sample_job=job))
+    assert state.wait_detail == reason

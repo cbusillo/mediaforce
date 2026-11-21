@@ -27,6 +27,13 @@ final class SpaceSavedTests: XCTestCase {
         try JSONDecoder.mediaforce.decode(CleanupFolder.self, from: Data(json.utf8))
     }
 
+    func testUnavailableBackupCountShowsTheReasonAndOffersNoDeletion() throws {
+        let folder = try cleanup(#"{"file_count": 0, "total_size_bytes": 0, "waiting_reason": "Waiting for storage."}"#)
+        let status = BackupsStatus(cleanup: folder, asking: false)
+        XCTAssertEqual(status.line, "Waiting for storage.")
+        XCTAssertFalse(status.showsDelete)
+    }
+
     func testARunningDeletionShowsItsProgressAndTheButtonCannotBePressed() throws {
         let folder = try cleanup("""
         {"file_count": 22, "total_size_bytes": 92000000000, "deletion": {"state": "running", "total_count": 34,
