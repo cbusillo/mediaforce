@@ -837,6 +837,7 @@ def _run_streamed_remote_encode_command(
         host=host,
         progress_callback=progress_callback,
         ssh_client_options=ssh_client_options,
+        remote_shell_path_export_line=remote_shell_path_export_line,
         build_streaming_remote_ffmpeg_command=_build_streaming_remote_ffmpeg_command,
         update_ffmpeg_progress_state=_update_ffmpeg_progress_state,
         process_cancelled_error=ProcessCancelledError,

@@ -11,7 +11,7 @@ from mediaforce.hosts.status_helpers import _classify_ssh_failure, _command_outp
     _should_retry_remote_status_failure, _ssh_access_must_be_fixed_first, _status_from_paths, \
     _status_platform
 from mediaforce.hosts.setup_runtime import _find_remote_host, reset_remote_host_trust
-from mediaforce.hosts.setup_runtime import _finish_remote_host_prepare, _remote_ffmpeg_install_commands
+from mediaforce.hosts.setup_runtime import _finish_remote_host_prepare
 from mediaforce.hosts.transport import _run_remote_ssh, ssh_client_options
 from mediaforce.hosts.wake_runtime import _ensure_remote_awake_for_ssh, _learn_remote_wake_mac, \
     _wake_remote_host_if_configured
@@ -71,7 +71,6 @@ __all__ = [
     "_private_key_path_for_public_key",
     "_remote_setup_needs_password",
     "_remote_status_script",
-    "_remote_ffmpeg_install_commands",
     "_run_remote_ssh",
     "_resolve_host_to_ip",
     "_resolved_ssh_network_host",

@@ -72,12 +72,13 @@ def test_streamed_encode_runs_the_remote_encoder_at_idle_disk_priority(tmp_path:
         assert command[0] == "ssh"
         shell, flag, script = shlex.split(command[-1])
         assert (shell, flag) == ("sh", "-lc")
-        return popen(["/bin/sh", "-c", script], env={"PATH": str(tmp_path)}, **kwargs)
+        return popen(["/bin/sh", "-c", script], env={"PATH": str(tmp_path / "empty-login-path")}, **kwargs)
 
-    with patch.object(subprocess, "Popen", side_effect=fixture_ssh), patch.object(execution, "ssh_client_options", return_value=[]):
+    with (patch.object(subprocess, "Popen", side_effect=fixture_ssh), patch.object(execution, "ssh_client_options", return_value=[]),
+          patch.object(execution, "remote_shell_path_export_line", return_value="export PATH="+shlex.quote(str(tmp_path)))):
         result = execution._run_streamed_remote_encode_command(
             ffmpeg_cmd=["ffmpeg", "-i", str(source), str(output)],
-            source_path=source, temp_output=output, host={"key": "fixture.invalid"}, process_controller=None, progress_callback=None,
+            source_path=source, temp_output=output, host={"key": "fixture.invalid", "ffmpeg_path": "/retired/ffmpeg"}, process_controller=None, progress_callback=None,
         )
     assert result.returncode == 0
     assert output.read_bytes() == b"-n 19/-c 3\nfixture video"

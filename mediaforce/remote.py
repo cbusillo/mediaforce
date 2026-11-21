@@ -28,8 +28,8 @@ from mediaforce.hosts.setup_runtime import _finish_remote_host_prepare as _finis
     _request_remote_xcode_install as _request_remote_xcode_install_impl, \
     _wait_for_remote_xcode_install as _wait_for_remote_xcode_install_impl, \
     prepare_remote_host_with_password as prepare_remote_host_with_password_impl, \
-    _remote_ffmpeg_install_commands as _remote_ffmpeg_install_commands_impl, \
     reset_remote_host_trust as reset_remote_host_trust_impl
+from mediaforce.hosts.managed_tools import request_update
 from mediaforce.hosts.status_helpers import _classify_ssh_failure, _default_public_key_path, \
     _local_tool_status_snapshot, _needs_initial_ssh_key_install, \
     _private_key_path_for_public_key, _should_retry_remote_status_exception, \
@@ -71,6 +71,7 @@ __all__ = [
     "learn_controller_smb_mounts",
     "normalize_host_media_access",
     "prepare_remote_host_with_password",
+    "prepare_host_tools",
     "probe_host_status",
     "recover_remote_host_mounts_no_ui",
     "recover_remote_host_mounts",
@@ -538,6 +539,7 @@ def prepare_remote_host_with_password(
         host_key,
         password=password,
         remote_host_status=_remote_host_status,
+        prepare_tools=prepare_host_tools,
         needs_initial_ssh_key_install=_needs_initial_ssh_key_install,
         install_local_ssh_key=_install_local_ssh_key,
         ssh_access_must_be_fixed_first=_ssh_access_must_be_fixed_first,
@@ -563,8 +565,8 @@ def _finish_remote_host_prepare(
     )
 
 
-def _remote_ffmpeg_install_commands(*, sample_calibration: bool) -> list[str]:
-    return _remote_ffmpeg_install_commands_impl(sample_calibration=sample_calibration)
+def prepare_host_tools(config: MediaforceConfig, host: dict[str, Any], status: HostStatus, *, requested: bool = True) -> HostSetupResult:
+    return request_update(config, host, status, _run_remote_ssh, requested=requested)
 
 
 def _run_remote_status_probe(

@@ -82,7 +82,16 @@ class HostStatus:
     probe_available: bool | None = None
     check_failure: str | None = None
     computer_model: str | None = None
+    tool_target: dict[str, str] = field(default_factory=dict)
+    tool_message: str | None = None
+    repair_video_tools: bool = False
     dark_wake: bool = False
+
+    @property
+    def can_update_tools(self) -> bool:
+        return bool(self.tool_target and not self.missing_mounts and not self.setup_requires_password and
+                    (self.platform == "linux" or (self.platform == "macos" and
+                     "Xcode Command Line Tools are not installed on the remote Mac." not in self.issues)))
 
 
 @dataclass(slots=True)
@@ -118,6 +127,7 @@ __all__ = [
     "SOURCE_ROOT_READ_MISSING_ISSUE",
     "STAGING_ROOT_WRITE_MISSING_ISSUE",
     "VMAF_MODEL_MISSING_ISSUE",
+    "VMAF_SELF_TEST_ARGS",
     "is_stop_signal_exit",
     "is_storage_io_failure",
     "is_vmaf_model_load_failure",

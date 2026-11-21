@@ -1,3 +1,4 @@
+import json
 import subprocess
 import time
 from pathlib import Path
@@ -8,6 +9,7 @@ from mediaforce.core.media_storage import MediaPathProbe, probe_media_path
 from mediaforce.core.type_defs import object_dict
 from mediaforce.hosts.config import _host_capabilities, _host_priority, _parse_utc_offset_minutes, \
     host_media_access_for_host, host_targets_current_machine, stream_host_has_remote_source_roots
+from mediaforce.hosts import managed_tools
 from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
 from mediaforce.hosts.status_helpers import _classify_ssh_failure, _find_local_tool, _host_capability_issues, \
     computer_check_failure_copy, _host_setup_supported, _local_platform_name, _local_schedule_timezone, \
@@ -51,12 +53,15 @@ def _store_remote_tool_payload(ssh_host: str, payload: dict[str, object], *, now
             "tool_meta": dict(object_dict(payload.get("tool_meta"))),
             "platform": str(payload.get("platform") or "unknown"),
             "computer_model": payload.get("computer_model"),
+            "managed_tools": payload.get("managed_tools"),
         },
     )
 
 
 def _cached_remote_tools_compatible(payload: dict[str, object], cached: dict[str, object] | None) -> bool:
     if not cached:
+        return False
+    if payload.get("managed_tools") != cached.get("managed_tools"):
         return False
     current_meta = object_dict(payload.get("tool_meta"))
     cached_meta = object_dict(cached.get("tool_meta"))
@@ -212,7 +217,7 @@ def _remote_host_status(
         writable_paths=writable_paths,
     )
     try:
-        result = run_remote_status_probe(host, script, timeout=8)
+        result = run_remote_status_probe(host, script, timeout=20)
     except Exception as exc:
         return HostStatus(
             key=ssh_host,
@@ -285,7 +290,7 @@ def _remote_host_status(
             writable_paths=writable_paths,
         )
         try:
-            result = run_remote_status_probe(host, full_script, timeout=8)
+            result = run_remote_status_probe(host, full_script, timeout=20)
         except Exception as exc:
             return HostStatus(
                 key=ssh_host,
@@ -374,7 +379,7 @@ def _remote_host_status(
         staging_path=staging_path,
         supports_remote_stream_quality=supports_remote_stream_quality,
     )
-    return _status_from_paths(
+    status = _status_from_paths(
         key=ssh_host,
         label=label,
         mode="ssh",
@@ -395,6 +400,46 @@ def _remote_host_status(
         require_paths=require_paths,
         dark_wake=payload.get("dark_wake") == "1",
     )
+
+    try:
+        record = json.loads(str(payload.get("managed_tools") or "{}"))
+        if not isinstance(record, dict) or not isinstance(record.get("versions"), dict):
+            raise ValueError
+    except ValueError:
+        status.tool_message = "Could not finish checking this computer’s media tools. Mediaforce will try again."
+    else:
+        target = managed_tools.controller_versions()
+        issue = managed_tools.version_issue(target, record["versions"])
+        required = ["ffmpeg_picture_sound", "ffmpeg_libvmaf_usable", "ffmpeg_xpsnr", "ffmpeg_libsvtav1"]
+        if platform_name == "macos":
+            required.append("ffmpeg_videotoolbox")
+        status.repair_video_tools = "ffmpeg_picture_sound" in tools and not all(tools.get(key) for key in required)
+        if record.get("needs_python"):
+            status.tool_message = f"Install Python 3 on {label} so Mediaforce can check its media tools."
+            status.check_failure = "python_missing"
+        elif record.get("updating"):
+            status.tool_message = "Updating and checking media tools."
+        elif record.get("pending") or issue or status.repair_video_tools:
+            status.tool_message = ("Media tools need to match this Mac. They will update when this computer is free."
+                                   if issue else "Checking the previous media tools after an interrupted update.")
+            if status.repair_video_tools and not issue:
+                status.tool_message = "The picture or sound tools failed their checks. They will update when this computer is free."
+            status.detail = issue or status.detail
+            if all(target.get(name) for name in ("ffmpeg", "ffprobe", "ab-av1", "opus", "libvmaf", "svt-av1")):
+                status.tool_target = target
+                latest = managed_tools.update_result(config, ssh_host, target)
+                if latest and not latest.ok:
+                    status.tool_message = latest.message
+            elif issue:
+                status.tool_message = "This Mac could not confirm its own media tools. Mediaforce will check again."
+    if platform_name == "linux" and (status.tool_target or staging_path in status.missing_paths):
+        status.setup_supported = True
+    if status.tool_message:
+        status.available = False
+        if not status.issues and not status.missing_mounts and not status.missing_paths:
+            status.message = status.tool_message
+        status.issues.append(status.tool_message)
+    return status
 
 
 def _current_machine_host_status(

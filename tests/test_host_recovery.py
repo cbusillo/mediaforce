@@ -1088,3 +1088,22 @@ def test_work_that_needs_a_computer_reconnects_its_storage_without_a_dialog(
                     config, host, lifecycle_command_timeout_seconds=1, lifecycle_poll_seconds=0,
                 )
     assert mount.call_count == 2
+
+
+@pytest.mark.parametrize("job_type", ["sample", "encode"])
+def test_a_file_between_media_commands_holds_its_computer_out_of_an_update(config: MediaforceConfig, job_type: str) -> None:
+    from mediaforce.core.db import open_db
+    from mediaforce.core.db_tables import calibration_jobs, encode_jobs
+    from mediaforce.hosts.managed_tools import host_is_busy
+
+    row = dict(job_id="job", prefix="tv/example", status="running", host_json=json.dumps({"key": "user@worker"}),
+               created_at=NOW.isoformat(), updated_at=NOW.isoformat())
+    with open_db(config.paths.db_path) as connection:
+        if job_type == "sample":
+            connection.execute(calibration_jobs.insert().values(**row, lane="sample", action="make_sample",
+                                                               policy_json="{}", sample_item_json="{}"))
+        else:
+            connection.execute(encode_jobs.insert().values(**row, manifest_path="fixture"))
+        connection.commit()
+    assert host_is_busy(config, config.remote_hosts[0])
+    assert not host_is_busy(config, {"host": "other@fixture.invalid"})

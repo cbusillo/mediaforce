@@ -13,6 +13,7 @@ from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQU
     normalize_execution_platform
 from mediaforce.hosts.config import _host_supports_capability, host_media_access_for_host, \
     _parse_utc_offset_minutes, remote_shell_path_export_line, stream_host_has_remote_source_roots
+from mediaforce.hosts.managed_tools import worker_probe_script
 from mediaforce.hosts.mount_runtime import mount_output_field
 from mediaforce.hosts.transport import MACOS_DARK_WAKE_SHELL_TEST
 from mediaforce.hosts.types import VMAF_MODEL_MISSING_ISSUE, VMAF_SELF_TEST_ARGS
@@ -485,6 +486,11 @@ def _remote_status_script(
         'FFMPEG_BIN="$(command -v ffmpeg || true)"',
         'PLATFORM_NAME="$(uname -s 2>/dev/null | tr "[:upper:]" "[:lower:]")"',
         'if [ "$PLATFORM_NAME" = "darwin" ]; then PLATFORM_NAME="macos"; fi',
+        'if [ "$PLATFORM_NAME" != macos ] || xcode-select -p >/dev/null 2>&1; then',
+        '  if command -v python3 >/dev/null 2>&1; then',
+        worker_probe_script(),
+        """  else printf 'meta|managed_tools|{"versions":{},"needs_python":true}\\n'; fi""",
+        'fi',
         'AB_AV1_BIN="$(command -v ab-av1 || true)"',
         'if [ -z "$AB_AV1_BIN" ] && [ -x /opt/homebrew/bin/ab-av1 ]; then AB_AV1_BIN=/opt/homebrew/bin/ab-av1; fi',
         'if [ -z "$AB_AV1_BIN" ] && [ -x /usr/local/bin/ab-av1 ]; then AB_AV1_BIN=/usr/local/bin/ab-av1; fi',
@@ -511,6 +517,8 @@ def _remote_status_script(
     ])
     if include_expensive_tools:
         lines.extend([
+            'if printf "%s\\n" "$FFMPEG_FILTERS" | grep -qw idet && printf "%s\\n" "$FFMPEG_ENCODERS" | grep -qw libopus; '
+            'then printf "tool|ffmpeg_picture_sound|1\\n"; else printf "tool|ffmpeg_picture_sound|0\\n"; fi',
             'if printf "%s\\n" "$FFMPEG_HWACCELS" | grep -qi "videotoolbox"; then printf "tool|ffmpeg_videotoolbox|1\\n"; else printf "tool|ffmpeg_videotoolbox|0\\n"; fi',
             'if printf "%s\\n" "$FFMPEG_FILTERS" | grep -qi "libvmaf"; then printf "tool|ffmpeg_libvmaf|1\\n"; else printf "tool|ffmpeg_libvmaf|0\\n"; fi',
             'if printf "%s\\n" "$FFMPEG_FILTERS" | grep -qi "libvmaf" && "$FFMPEG_BIN" '
@@ -641,13 +649,11 @@ def _ssh_access_must_be_fixed_first(status: HostStatus) -> bool:
         SAMPLE_METRIC_MISSING_ISSUE,
         SAMPLE_AV1_ENCODER_MISSING_ISSUE,
     }
-    if status.repo_path and f"Repo path is missing: {status.repo_path}" in status.issues:
-        remaining_issues = [
-            issue for issue in status.issues if issue != f"Repo path is missing: {status.repo_path}"
-        ]
-    else:
-        remaining_issues = list(status.issues)
-    return any(issue not in prep_fixable_issues for issue in remaining_issues)
+    if status.repo_path:
+        prep_fixable_issues.add(f"Repo path is missing: {status.repo_path}")
+    if status.tool_message:
+        prep_fixable_issues.add(status.tool_message)
+    return any(issue not in prep_fixable_issues for issue in status.issues)
 
 
 __all__ = [

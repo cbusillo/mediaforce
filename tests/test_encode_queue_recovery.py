@@ -88,7 +88,7 @@ from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.media_scopes import media_scope_from_prefix
 from mediaforce.library.run_manifests import select_encode_candidates
-from mediaforce.hosts import status_runtime as host_status_runtime
+from mediaforce.hosts import managed_tools, status_runtime as host_status_runtime
 from mediaforce.hosts.transport import EncodeConnectionLostError
 from mediaforce.encoding.staged_host import SCRATCH_DIR_PREFIX, ScratchStillInUseError
 from mediaforce.hosts.types import SOURCE_ROOT_READ_MISSING_ISSUE, STAGING_ROOT_WRITE_MISSING_ISSUE, \
@@ -209,6 +209,10 @@ def _record_advice_payload(
     return saved
 
 
+FIXTURE_TOOL_VERSIONS = dict.fromkeys(("ffmpeg", "ffprobe", "ab-av1", "opus", "svt-av1", "libvmaf"), "1.0")
+MATCHING_MEDIA_TOOLS = "meta|managed_tools|" + json.dumps({"versions": FIXTURE_TOOL_VERSIONS})
+
+
 class EncodeQueueRecoveryTests(unittest.TestCase):
     database_template: sqlite3.Connection
 
@@ -224,6 +228,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 connection.backup(cls.database_template)
 
     def setUp(self) -> None:
+        versions = patch.object(managed_tools, "controller_versions", return_value=FIXTURE_TOOL_VERSIONS)
+        versions.start()
+        self.addCleanup(versions.stop)
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
         self.config = self._build_config()
@@ -12004,6 +12011,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|1",
                 "tool|ffmpeg_libvmaf|1",
                 "tool|ffmpeg_xpsnr|1",
@@ -12055,6 +12063,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|0",
                 "tool|brew|0",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|0",
                 "tool|ffmpeg_libvmaf|0",
                 "tool|ffmpeg_xpsnr|1",
@@ -12104,6 +12113,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|1",
                 "tool|ffmpeg_libvmaf|1",
                 "tool|ffmpeg_xpsnr|1",
@@ -12211,6 +12221,7 @@ raise SystemExit(0)
                         "tool|xcode_clt|1",
                         "tool|brew|1",
                         "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                         "tool|ffmpeg_videotoolbox|1",
                         "tool|ffmpeg_libvmaf|1",
                         "tool|ffmpeg_xpsnr|1",
@@ -12252,6 +12263,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|1",
                 "tool|ffmpeg_libvmaf|1",
                 "tool|ffmpeg_xpsnr|1",
@@ -12288,6 +12300,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "toolpath|ffmpeg|/opt/homebrew/bin/ffmpeg",
                 "toolmeta|ffmpeg_signature|/opt/homebrew/Cellar/ffmpeg-full/8.1/bin/ffmpeg:123:456",
                 "tool|ffmpeg_videotoolbox|1",
@@ -12307,6 +12320,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "toolpath|ffmpeg|/opt/homebrew/bin/ffmpeg",
                 "toolmeta|ffmpeg_signature|/opt/homebrew/Cellar/ffmpeg-full/8.1/bin/ffmpeg:123:456",
                 "tool|ab_av1|1",
@@ -12351,6 +12365,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "toolpath|ffmpeg|/opt/homebrew/bin/ffmpeg",
                 "toolmeta|ffmpeg_signature|/opt/homebrew/Cellar/ffmpeg-full/8.1/bin/ffmpeg:123:456",
                 "tool|ffmpeg_videotoolbox|1",
@@ -12371,6 +12386,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "toolpath|ffmpeg|/opt/homebrew/bin/ffmpeg",
                 "toolmeta|ffmpeg_signature|/opt/homebrew/Cellar/ffmpeg-full/8.2/bin/ffmpeg:222:999",
                 "tool|ab_av1|1",
@@ -12387,6 +12403,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "toolpath|ffmpeg|/opt/homebrew/bin/ffmpeg",
                 "toolmeta|ffmpeg_signature|/opt/homebrew/Cellar/ffmpeg-full/8.2/bin/ffmpeg:222:999",
                 "tool|ffmpeg_videotoolbox|1",
@@ -12435,6 +12452,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|0",
                 "tool|brew|0",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|0",
                 "tool|ffmpeg_libvmaf|0",
                 "tool|ffmpeg_xpsnr|0",
@@ -12466,6 +12484,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|0",
                 "tool|brew|0",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|0",
                 "tool|ffmpeg_libvmaf|0",
                 "tool|ffmpeg_xpsnr|0",
@@ -12506,6 +12525,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|0",
                 "tool|brew|0",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|0",
                 "tool|ffmpeg_libvmaf|1",
                 "tool|ffmpeg_xpsnr|1",
@@ -12543,6 +12563,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|0",
                 "tool|brew|0",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|0",
                 "tool|ffmpeg_libvmaf|1",
                 "tool|ffmpeg_xpsnr|1",
@@ -12580,6 +12601,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|0",
                 "tool|brew|0",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|0",
                 "tool|ffmpeg_libvmaf|0",
                 "tool|ffmpeg_xpsnr|0",
@@ -12616,6 +12638,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|0",
                 "tool|brew|0",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|0",
                 "tool|ffmpeg_libvmaf|1",
                 "tool|ffmpeg_xpsnr|1",
@@ -12670,6 +12693,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|0",
                 "tool|brew|0",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|0",
                 "tool|ffmpeg_libvmaf|0",
                 "tool|ffmpeg_xpsnr|1",
@@ -12704,6 +12728,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|0",
                 "tool|brew|0",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|0",
                 "tool|ffmpeg_libvmaf|0",
                 "tool|ffmpeg_xpsnr|1",
@@ -12736,6 +12761,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|0",
                 "tool|brew|0",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|0",
                 "tool|ffmpeg_libvmaf|0",
                 "tool|ffmpeg_xpsnr|1",
@@ -12800,6 +12826,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|1",
                 "tool|ffmpeg_libvmaf|0",
                 "tool|ffmpeg_xpsnr|0",
@@ -12831,6 +12858,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|1",
                 "tool|ffmpeg_libvmaf|0",
                 "tool|ffmpeg_xpsnr|0",
@@ -12862,6 +12890,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|0",
                 "tool|ffmpeg_libvmaf|0",
                 "tool|ffmpeg_xpsnr|0",
@@ -12892,6 +12921,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|0",
                 "tool|brew|0",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|0",
                 "tool|ffmpeg_libvmaf|0",
                 "tool|ffmpeg_xpsnr|1",
@@ -12925,6 +12955,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|0",
                 "tool|brew|0",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|0",
                 "tool|ffmpeg_libvmaf|0",
                 "tool|ffmpeg_xpsnr|0",
@@ -12959,6 +12990,7 @@ raise SystemExit(0)
                 "tool|xcode_clt|0",
                 "tool|brew|0",
                 "tool|ffmpeg|1",
+                MATCHING_MEDIA_TOOLS,
                 "tool|ffmpeg_videotoolbox|0",
                 "tool|ffmpeg_libvmaf|1",
                 "tool|ffmpeg_xpsnr|1",
@@ -12978,37 +13010,6 @@ raise SystemExit(0)
         self.assertEqual(status.message, "Linux sample unsupported")
         self.assertIn(remote.LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE, status.issues)
         self.assertIn("Repo path is missing: /srv/mediaforce", status.issues)
-
-    def test_finish_remote_host_prepare_installs_ab_av1_for_sample_hosts(self) -> None:
-        host = {
-            "host": "cbusillo@sample-host",
-            "label": "Sample Host",
-            "capabilities": ["encode_queue", "sample_calibration"],
-        }
-        ready_status = HostStatus(
-            key="cbusillo@sample-host",
-            label="Sample Host",
-            mode="ssh",
-            priority=0,
-            capabilities=["encode_queue", "sample_calibration"],
-            available=True,
-            message="Mounted and ready",
-            missing_paths=[],
-            repo_path=None,
-        )
-        with patch(
-                "mediaforce.remote._run_remote_ssh",
-                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
-        ) as run_remote_ssh_mock, patch("mediaforce.remote._remote_host_status", return_value=ready_status):
-            result = remote._finish_remote_host_prepare(self.config, host, prep_steps=[])
-        self.assertTrue(result.ok)
-        self.assertIn("Installed ffmpeg-full with Homebrew for sampled calibration hosts when required.",
-                      result.performed_steps)
-        self.assertIn("Installed ab-av1 with Homebrew for encode and sample hosts if it was missing.",
-                      result.performed_steps)
-        prep_script = run_remote_ssh_mock.call_args.args[3]
-        self.assertIn("install ffmpeg-full", prep_script)
-        self.assertIn('install ab-av1', prep_script)
 
     def test_prepare_remote_host_with_password_requires_password_for_initial_ssh_setup(self) -> None:
         host = {"host": "cbusillo@sample-host", "label": "Sample Host"}

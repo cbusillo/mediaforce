@@ -182,7 +182,7 @@ def run_encode_command(
         if not ssh_host:
             raise RuntimeError("Remote encode host is missing an SSH target.")
         staged_cmd = ffmpeg_command_with_progress(
-            remote_ffmpeg_command(ffmpeg_cmd, staged, executable=str(host_payload.get("ffmpeg_path") or "") or None)
+            remote_ffmpeg_command(ffmpeg_cmd, staged, executable="ffmpeg")
         )
         staged_script = " && ".join(
             [
@@ -274,6 +274,7 @@ def run_streamed_remote_encode_command(
         host: dict[str, Any] | None,
         progress_callback: Callable[[dict[str, Any]], None] | None,
         ssh_client_options: Callable[[], list[str]],
+        remote_shell_path_export_line: Callable[[], str],
         build_streaming_remote_ffmpeg_command: Callable[..., list[str]],
         update_ffmpeg_progress_state: Callable[..., dict[str, Any] | None],
         process_cancelled_error: type[Exception],
@@ -289,9 +290,9 @@ def run_streamed_remote_encode_command(
         ffmpeg_cmd,
         source_path=source_path,
         output_path=temp_output,
-        executable_path=str(host_payload.get("ffmpeg_path") or "") or None,
+        executable_path="ffmpeg",
     )
-    remote_script = remote_low_priority_shell(remote_ffmpeg_cmd)
+    remote_script = remote_shell_path_export_line() + "\n" + remote_low_priority_shell(remote_ffmpeg_cmd)
     if deadline is not None:
         remote_script = guard_shell_script_for_schedule_deadline(remote_script, deadline)
     ssh_cmd = [

@@ -27,6 +27,7 @@ from mediaforce.encoding.staged_host import STAGED_JOB_KEY, StagedJob, staged_jo
 from mediaforce.hosts import setup_runtime
 from mediaforce import remote
 from mediaforce.hosts.transport import keep_awake_while_running, run_remote_command
+from mediaforce.hosts.managed_tools import update_worker
 from mediaforce.hosts.types import HostSetupResult
 
 _FAKE_CAFFEINATE = """#!/bin/sh
@@ -301,7 +302,7 @@ class RemoteKeepAwakeTests(unittest.TestCase):
             path.chmod(0o700)
         scratch = PurePosixPath(str(self.root / "scratch"))
         staged = StagedJob(scratch, scratch / "input.mkv", scratch / "output.mkv")
-        for host in ({"key": "mac"}, {"key": "mac", STAGED_JOB_KEY: staged.to_payload()}):
+        for host in ({"key": "mac"}, {"key": "mac", "ffmpeg_path": "/stale/ffmpeg", STAGED_JOB_KEY: staged.to_payload()}):
             shell = self._start(_shell_script(self._encode_ssh_argument(host)))
             stdout, _stderr = shell.communicate(timeout=10)
             self.assertEqual(shell.returncode, 7)
@@ -355,6 +356,7 @@ class RemoteKeepAwakeTests(unittest.TestCase):
                 host={"key": "mac", "mode": "ssh"},
                 progress_callback=None,
                 ssh_client_options=lambda: [],
+                remote_shell_path_export_line=lambda: ":",
                 build_streaming_remote_ffmpeg_command=lambda *_args, **_kwargs: ["ffmpeg"],
                 update_ffmpeg_progress_state=lambda *_args, **_kwargs: None,
                 process_cancelled_error=ProcessCancelledError,
@@ -453,21 +455,10 @@ class SetupKeepAwakeTests(unittest.TestCase):
 
     def test_preparing_a_computer_keeps_it_awake_through_its_installs(self) -> None:
         run_remote_ssh = Mock(return_value=subprocess.CompletedProcess(["ssh"], 1, "", "stopped by the test"))
-        config = Mock()
-        config.staging_root_for_host.return_value = Path("/staging")
-        config.archive_root_for_host.return_value = Path("/archive")
-
-        setup_runtime._finish_remote_host_prepare(
-            config,
-            {"host": "mac.example", "capabilities": ["encode_queue", "sample_calibration"]},
-            [],
-            run_remote_ssh=run_remote_ssh,
-            remote_host_status=Mock(side_effect=AssertionError("the failed step must stop preparation")),
-        )
-
-        program, flag, script = run_remote_ssh.call_args.args[1:]
-        self.assertEqual((program, flag), ("sh", "-lc"))
-        self._assert_kept_awake(script)
+        with patch("mediaforce.hosts.managed_tools.controller_sources", return_value={}):
+            result = update_worker({"host": "mac.example"}, {}, run_remote_ssh)
+        self.assertFalse(result.ok)
+        self._assert_kept_awake(run_remote_ssh.call_args.kwargs["input_text"])
 
     def test_installing_homebrew_keeps_the_computer_awake(self) -> None:
         run_remote_ssh = Mock(return_value=subprocess.CompletedProcess(["ssh"], 0, "", ""))
