@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 
 from sqlalchemy import select
 
+from mediaforce.core.binaries import low_priority_command
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items
@@ -106,6 +107,7 @@ class FakeEncodeComputers:
             timeout: int,
             input_text: str | None = None,
             process_controller: ManagedProcessController | None = None,
+            *, media_work: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         _ = input_text
         self.calls.append(
@@ -116,6 +118,7 @@ class FakeEncodeComputers:
                 self.on_version_check(process_controller)
             return subprocess.CompletedProcess(command, 0, f"{REMOTE_FFMPEG_VERSION}\nbuilt with clang\n", "")
         if command[:2] == ["python3", "-c"]:
+            assert media_work
             if self.controller_source is None:
                 return subprocess.CompletedProcess(command, 0, json.dumps({"strength": "observed", "sample_fingerprint": "0" * 40,
                     "stat": [0, 0, 1, 1, 1], "size_bytes": 1}), "")
@@ -243,6 +246,7 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
                 _timeout: int,
                 input_text: str | None = None,
                 process_controller: ManagedProcessController | None = None,
+                **_kwargs: object,
         ) -> subprocess.CompletedProcess[str]:
             _ = input_text, process_controller
             if command == ["ffmpeg", "-version"]:
@@ -268,7 +272,7 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
             )
 
         self.assertTrue(local_commands)
-        self.assertEqual(remote_commands, local_commands)
+        self.assertEqual([low_priority_command(command) for command in remote_commands], local_commands)
         self.assertEqual(summary["analysis"]["tool"]["ffmpeg_version"], REMOTE_FFMPEG_VERSION)
         self.assertEqual(summary["analysis"]["tool"]["host"], "m1-mini.example")
 

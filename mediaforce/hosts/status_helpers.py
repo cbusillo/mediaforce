@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from mediaforce.core.binaries import low_priority_command, remote_low_priority_shell
 from mediaforce.core.timezones import system_timezone_name
 from mediaforce.core.type_defs import object_list
 from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQUIRED_ISSUE, has_videotoolbox_hwaccel, \
@@ -20,12 +21,19 @@ from mediaforce.hosts.types import AB_AV1_MISSING_ISSUE, FFMPEG_MISSING_ISSUE, H
     SOURCE_ROOT_READ_MISSING_ISSUE, STAGING_ROOT_WRITE_MISSING_ISSUE
 
 
+_BACKGROUND_DISK_UNAVAILABLE = (
+    "This computer cannot give other programs first use of its disk. "
+    "Check that ionice is installed and allowed, then retry the connection."
+)
+
+
 def _local_tool_status_snapshot() -> dict[str, bool]:
     ffmpeg_bin = _find_local_tool("ffmpeg", fallback_paths=["/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"])
     ffmpeg_filters = _command_output([ffmpeg_bin, "-hide_banner", "-filters"]) if ffmpeg_bin else ""
     ffmpeg_encoders = _command_output([ffmpeg_bin, "-hide_banner", "-encoders"]) if ffmpeg_bin else ""
     ffmpeg_hwaccels = _command_output([ffmpeg_bin, "-hide_banner", "-hwaccels"]) if ffmpeg_bin else ""
     return {
+        "low_priority": _local_platform_name() != "linux" or _command_succeeds(low_priority_command(["true"])),
         "xcode_clt": _command_succeeds(["xcode-select", "-p"]),
         "brew": bool(_find_local_tool("brew", fallback_paths=["/opt/homebrew/bin/brew", "/usr/local/bin/brew"])),
         "ffmpeg": bool(ffmpeg_bin),
@@ -115,6 +123,8 @@ def _host_capability_issues(
             if bool(tools.get("ffmpeg")) and not bool(tools.get("ffmpeg_libsvtav1")):
                 capability_issues.append(SAMPLE_AV1_ENCODER_MISSING_ISSUE)
     elif platform_name == "linux":
+        if (supports_encode or supports_sample) and tools.get("low_priority") is False:
+            capability_issues.append(_BACKGROUND_DISK_UNAVAILABLE)
         if not bool(tools.get("ffmpeg")):
             capability_issues.append(FFMPEG_MISSING_ISSUE)
         if needs_remote_ab_av1 and not bool(tools.get("ab_av1")):
@@ -279,6 +289,8 @@ def _host_message(
         return "Mounted and ready"
     if missing_mounts:
         return "Shared storage disconnected"
+    if _BACKGROUND_DISK_UNAVAILABLE in issues:
+        return "Cannot run media work in the background"
     if any(issue == LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE for issue in issues):
         return "Linux sample unsupported"
     if any(issue == "Xcode Command Line Tools are not installed on the remote Mac." for issue in issues):
@@ -487,7 +499,10 @@ def _remote_status_script(
             'if [ -n "$FFMPEG_BIN" ]; then FFMPEG_ENCODERS="$("$FFMPEG_BIN" -hide_banner -encoders 2>/dev/null || true)"; fi',
             'if [ -n "$FFMPEG_BIN" ]; then FFMPEG_HWACCELS="$("$FFMPEG_BIN" -hide_banner -hwaccels 2>/dev/null || true)"; fi',
         ])
+    priority_probe = remote_low_priority_shell(["true"])
     lines.extend([
+        f'if [ "$PLATFORM_NAME" = linux ]; then if {priority_probe} >/dev/null 2>&1; then '
+        'printf "tool|low_priority|1\\n"; else printf "tool|low_priority|0\\n"; fi; fi',
         'if xcode-select -p >/dev/null 2>&1; then printf "tool|xcode_clt|1\\n"; else printf "tool|xcode_clt|0\\n"; fi',
         'if [ -n "$BREW_BIN" ]; then printf "tool|brew|1\\n"; else printf "tool|brew|0\\n"; fi',
         'if [ -n "$FFMPEG_BIN" ]; then printf "tool|ffmpeg|1\\n"; else printf "tool|ffmpeg|0\\n"; fi',

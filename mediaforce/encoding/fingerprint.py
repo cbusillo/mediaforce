@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.evidence import build_evidence_envelope, evidence_staleness, stable_policy_hash
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, prepare_local_command
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 
 if TYPE_CHECKING:
@@ -554,9 +554,11 @@ def _run_bounded_media_command(
             timeout_seconds=timeout_seconds,
             process_controller=process_controller,
         )
+    command, env = prepare_local_command(command)
     try:
         process = subprocess.Popen(
             command,
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             encoding="utf-8",

@@ -12,6 +12,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import BinaryIO
 
+from mediaforce.core.binaries import is_media_tool_command, low_priority_command
+
 
 class ProcessCancelledError(RuntimeError):
     unproven_remote_run: Exception | None = None
@@ -53,37 +55,16 @@ _PROCESS_REAP_TIMEOUT_SECONDS = 2.0
 _PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS = 8.0
 _PROCESS_DEADLINE_HELPER_MAXIMUM_BYTES = 1024 * 1024
 _TRUSTED_PROCESS_GROUP_CONTAINMENT_MODE = "trusted-process-group"
-_MEDIA_TOOL_NAMES = {"ffmpeg", "ffprobe"}
-_MEDIA_TOOL_OVERRIDE_KEYS = ("MEDIAFORCE_FFMPEG", "MEDIAFORCE_FFPROBE")
 
 
-def _normalized_executable_path(value: str) -> str:
-    return os.path.normcase(os.path.abspath(os.path.expanduser(value)))
-
-
-def _is_media_tool_command(cmd: list[str], env: Mapping[str, str] | None) -> bool:
-    if not cmd:
-        return False
-    executable = cmd[0]
-    if os.path.basename(executable) in _MEDIA_TOOL_NAMES:
-        return True
-    normalized_executable = _normalized_executable_path(executable)
-    for environment in (os.environ, env):
-        if environment is None:
-            continue
-        for key in _MEDIA_TOOL_OVERRIDE_KEYS:
-            override = environment.get(key)
-            if override and _normalized_executable_path(override) == normalized_executable:
-                return True
-    return False
-
-
-def _command_environment(cmd: list[str], env: Mapping[str, str] | None) -> Mapping[str, str] | None:
-    if not _is_media_tool_command(cmd, env):
-        return env
+def prepare_local_command(
+        cmd: list[str], env: Mapping[str, str] | None = None,
+) -> tuple[list[str], Mapping[str, str] | None]:
+    if not is_media_tool_command(cmd, env):
+        return cmd, env
     resolved_env = dict(os.environ if env is None else env)
     resolved_env.pop("DYLD_LIBRARY_PATH", None)
-    return resolved_env
+    return low_priority_command(cmd), resolved_env
 
 
 def _process_deadline_helper_state(info: os.stat_result) -> tuple[int, ...]:
@@ -795,7 +776,7 @@ def run_command(
     A silent run raises ``ProcessOutputStalledError``. Watching output needs the managed runner,
     so a call without a controller gets one of its own.
     """
-    resolved_env = _command_environment(cmd, env)
+    cmd, resolved_env = prepare_local_command(cmd, env)
     if idle_timeout is not None:
         if not capture_output:
             raise ValueError("An idle timeout needs captured output to watch.")
@@ -845,7 +826,7 @@ def run_trusted_local_orchestrator_command(
         )
     controller = process_controller or ManagedProcessController()
     return _run_managed_command(
-        cmd,
+        low_priority_command(cmd),
         process_controller=controller,
         capture_output=capture_output,
         text=text,
