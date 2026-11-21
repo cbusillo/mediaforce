@@ -57,7 +57,10 @@ def controller_sources(target: dict[str, str]) -> dict[str, dict[str, str]]:
     for name in ("ffmpeg", *tool_versions.LIBRARIES, "ab-av1"):
         formula = "ffmpeg-full" if name == "ffmpeg" else name
         keg = (prefix.parent / "opt" / formula).resolve(strict=True)
-        package = json.loads((keg / "sbom.spdx.json").read_text(encoding="utf-8"))["packages"][0]
+        source_record = keg / "sbom.spdx.json"
+        if not source_record.is_file():
+            raise ValueError(f"Reinstall {formula} with Homebrew on this Mac to restore its source record, then choose Retry connection.")
+        package = json.loads(source_record.read_text(encoding="utf-8"))["packages"][0]
         checksum = next((item["checksumValue"] for item in package["checksums"] if item["algorithm"] == "SHA256"), "")
         if (
             package["name"] != formula
@@ -66,7 +69,7 @@ def controller_sources(target: dict[str, str]) -> dict[str, dict[str, str]]:
             or not package["downloadLocation"].startswith("https://")
         ):
             raise ValueError(f"This Mac could not confirm the source for {name} {target[name]}.")
-        revision = json.loads((keg / "INSTALL_RECEIPT.json").read_text(encoding="utf-8"))["source"]["tap_git_head"]
+        revision = json.loads((keg / "INSTALL_RECEIPT.json").read_text(encoding="utf-8"))["source"].get("tap_git_head")
         sources[name] = {
             "url": package["downloadLocation"],
             "sha256": checksum,
@@ -197,7 +200,6 @@ def request_update(
                 and prior.target == target
                 and prior.result.failure_kind == "update_failed"
                 and result.failure_kind == "update_failed"
-                and prior.result.message == result.message
             ):
                 result.failure_kind = "needs_attention"
                 retry_at = float("inf")

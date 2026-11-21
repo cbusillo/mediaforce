@@ -43,7 +43,8 @@ def install_mac(
     formulae = {"ffmpeg-full" if key == "ffmpeg" else key: target[key] for key in needed}
     pins = set(run(["brew", "list", "--pinned"]).split()) & (formulae.keys() | ({"ffmpeg"} if "ffmpeg" in needed else set()))
     if pins:
-        raise RuntimeError(f"Homebrew has pinned {', '.join(sorted(pins))}. Its libraries must stay together.")
+        names = ", ".join(sorted(pins))
+        raise RuntimeError(f"Homebrew has pinned {names}. To allow the update, unpin {names} on this computer and choose Retry connection.")
     brew_root = run(["brew", "--repository"])
     private = prefix / "homebrew"
     run(["git", "clone", "--quiet", "--local", brew_root, str(private)])
@@ -187,7 +188,10 @@ def activate(current: Path, candidate: Path, previous_versions: dict[str, str], 
         select_tools(current, candidate)
         verify()
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
-        restore_previous(current, journal)
+        try:
+            restore_previous(current, journal)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as restore_error:
+            raise RuntimeError(f"The new tools failed their check. {error}. {restore_error}") from restore_error
         raise RuntimeError(f"Restored the previous media tools. {error}") from error
     select_tools(current.with_name("previous"), previous)
     journal.unlink()
@@ -301,7 +305,12 @@ def update(target: dict[str, str], sources: dict[str, dict[str, str]], quality: 
             candidate = [str(binaries / name) if (binaries / name).exists() else name for name in tool_versions.PROGRAMS]
             if tool_versions.running_versions(candidate) != target:
                 raise RuntimeError("The new media tools do not match this Mac. The previous tools are still selected.")
-            ensure_idle()
+            while True:
+                try:
+                    ensure_idle()
+                    break
+                except BlockingIOError:
+                    time.sleep(5)
 
             def verify() -> None:
                 if tool_versions.running_versions(list(tool_versions.PROGRAMS)) != target:

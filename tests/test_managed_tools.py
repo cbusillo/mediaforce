@@ -85,7 +85,8 @@ def test_candidate_cannot_take_work_until_the_new_tools_pass(tmp_path: Path, mon
     current = root / "current"
     monkeypatch.setattr(tool_versions, "TOOLS_DIRECTORY", root)
     monkeypatch.setattr(worker.shutil, "which", lambda program: str(existing / program))
-    monkeypatch.setattr(worker, "ensure_idle", lambda: None)
+    monkeypatch.setattr(worker, "ensure_idle", Mock(side_effect=[None, BlockingIOError("busy"), None]))
+    monkeypatch.setattr(worker.time, "sleep", lambda _: None)
     monkeypatch.setattr(worker.sys, "platform", "linux")
 
     def install(prefix: Path, _sources: dict, needed: set[str]) -> None:
@@ -144,7 +145,7 @@ def test_fresh_readiness_holds_an_otherwise_capable_computer_after_library_drift
     assert not status.available and status.can_update_tools and status.repair_video_tools
 
 
-def test_retry_connection_restarts_a_build_after_two_identical_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_retry_connection_restarts_a_failed_build_even_when_each_error_names_a_different_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from mediaforce.hosts.types import HostSetupResult
 
     config, status = Mock(), Mock(key="fixture.invalid", tool_target=VERSIONS)
@@ -152,7 +153,8 @@ def test_retry_connection_restarts_a_build_after_two_identical_failures(tmp_path
     clock = Mock(return_value=0)
     monkeypatch.setattr(tools.time, "monotonic", clock)
     monkeypatch.setattr(tools, "host_is_busy", lambda *_: False)
-    update = Mock(side_effect=lambda *_, **__: HostSetupResult(False, "A build tool is missing.", failure_kind="update_failed"))
+    update = Mock(side_effect=[HostSetupResult(False, f"Build failed in {tmp_path / str(attempt)}.",
+                                               failure_kind="update_failed") for attempt in range(3)])
     monkeypatch.setattr(tools, "update_worker", update)
     monkeypatch.setattr(tools.threading, "Thread", lambda target, args, **_: Mock(start=lambda: target(*args)))
     host = {"host": status.key}

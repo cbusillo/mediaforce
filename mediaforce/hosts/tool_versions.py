@@ -75,6 +75,11 @@ def library_release(path: Path, library: str) -> str | None:
         package = json.loads(metadata.read_text(encoding="utf-8"))["packages"][0]
         if package["name"] == library:
             return package["versionInfo"]
+    install_record = keg / "INSTALL_RECEIPT.json"
+    if keg.parent.name == library and install_record.is_file():
+        source = json.loads(install_record.read_text(encoding="utf-8")).get("source", {})
+        if source.get("tap") == "homebrew/core":
+            return source.get("versions", {}).get("stable")
     receipt = keg / "mediaforce-sources.json"
     if keg.parent == TOOLS_DIRECTORY.resolve() and receipt.is_file():
         versions = json.loads(receipt.read_text(encoding="utf-8"))

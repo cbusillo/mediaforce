@@ -406,7 +406,7 @@ def _remote_host_status(
         if not isinstance(record, dict) or not isinstance(record.get("versions"), dict):
             raise ValueError
     except ValueError:
-        status.tool_message = "Could not check this computer's media tool versions."
+        status.tool_message = "Could not finish checking this computer’s media tools. Mediaforce will try again."
     else:
         target = managed_tools.controller_versions()
         issue = managed_tools.version_issue(target, record["versions"])
@@ -414,7 +414,10 @@ def _remote_host_status(
         if platform_name == "macos":
             required.append("ffmpeg_videotoolbox")
         status.repair_video_tools = "ffmpeg_picture_sound" in tools and not all(tools.get(key) for key in required)
-        if record.get("updating"):
+        if record.get("needs_python"):
+            status.tool_message = f"Install Python 3 on {label} so Mediaforce can check its media tools."
+            status.check_failure = "python_missing"
+        elif record.get("updating"):
             status.tool_message = "Updating and checking media tools."
         elif record.get("pending") or issue or status.repair_video_tools:
             status.tool_message = ("Media tools need to match this Mac. They will update when this computer is free."
@@ -428,7 +431,7 @@ def _remote_host_status(
                 if latest and not latest.ok:
                     status.tool_message = latest.message
             elif issue:
-                status.tool_message = issue
+                status.tool_message = "This Mac could not confirm its own media tools. Mediaforce will check again."
     if platform_name == "linux" and (status.tool_target or staging_path in status.missing_paths):
         status.setup_supported = True
     if status.tool_message:
