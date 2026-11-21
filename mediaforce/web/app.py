@@ -17,7 +17,7 @@ from typing import Any, NamedTuple
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
 from sqlalchemy import literal_column
@@ -693,10 +693,15 @@ def create_app(
     app.state.evidence_runner = evidence_runner
     library_calculations = LibraryCalculations()
 
+    from mediaforce.ops.runtime_install import update_hold_reason
+
     @app.middleware("http")
     async def periodic_cleanup(
             request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            if reason := update_hold_reason(config.paths.db_path.parent, allow_during_drain=True):
+                return JSONResponse({"ok": False, "message": reason}, status_code=409)
         if _request_triggers_periodic_cleanup(request.method, request.url.path):
             _run_periodic_cleanup(
                 config,
@@ -1197,12 +1202,13 @@ def create_app(
             "controller_storage_admission": controller_storage_admission(config),
         }
 
-    def _release_work_snapshot() -> ReleaseWorkSnapshot:
-        from mediaforce.ops.runtime_install import bundle_build, bundled_app_path
+    from mediaforce.ops.runtime_install import bundle_build, bundled_app_path
+    running_build = bundle_build(bundled_app_path())
 
+    def _release_work_snapshot() -> ReleaseWorkSnapshot:
         snapshot = release_work_payload(config.paths.db_path)
         # An update checks that this answer comes from the exact build and database it started.
-        snapshot["server"] = {"build": bundle_build(bundled_app_path()), "database": str(config.paths.db_path.resolve())}
+        snapshot["server"] = {"build": running_build, "database": str(config.paths.db_path.resolve())}
         return snapshot
 
     register_release_routes(app, work_snapshot=_release_work_snapshot)
@@ -2418,7 +2424,7 @@ def main(argv: list[str] | None = None) -> None:
         from mediaforce.ops.runtime_install import bundle_service, require_own_support
 
         require_own_support(bundle, config.paths.db_path, Path.home())
-        require_update_startup_allowed(config.paths.db_path.parent, bundle)
+        require_update_startup_allowed(config.paths.db_path, bundle)
         port = bundle_service(bundle)[1]
         if args.port is not None and args.port != port:
             raise SystemExit(f"this app's server uses port {port}")

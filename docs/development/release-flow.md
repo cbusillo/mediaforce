@@ -71,8 +71,13 @@ given after confirming the release is not older.
    same queued work. Its storage check must then run again a full 90-second
    freshness window after its first pass, and either admit work or name a real
    reason such as an unmounted share (#1340).
-7. The stage becomes the protected rollback, the record is removed and the
-   queue resumes.
+7. A usable app and database pair becomes the protected rollback. If the
+   installed app was already missing or damaged, the previous protected stage
+   stays in place. Without a usable prior stage, the installer saves the
+   repaired app, launch item and matching database in a separate stage while
+   work is held. The result names the retained stage and its contents.
+   Removing the update record releases work. An online install resumes the
+   encode queue alone. A stopped install preserves each queue's prior state.
 8. A Mediaforce app still running from the installed path, found by its
    bundle path, is asked to quit as from its menu and opens again from the new
    bundle, as after an update. A proof install restarts only the proof's own
@@ -90,8 +95,7 @@ cannot be put back or the old service does not come back, the service stays
 disabled and the record stays. Once the new server has started, when the port
 does not close, or after any failure in a stopped install, the service stays
 disabled and the record stays, with the failure in it. Old code never starts
-against a database the release may have migrated. A lost resume response
-leaves the healthy release running; check the dashboard before retrying.
+against a database the release may have migrated. The update record holds work through the final check.
 
 A record left in place, by a failure or an interrupted run, has two ways
 forward:
@@ -99,7 +103,7 @@ forward:
 - Forward: stop the service if it runs (`launchctl bootout
   gui/$(id -u)/com.mediaforce.web`) and run the script again with `--stopped`,
   a fresh stage and the same or a newer release. It checks the port and work
-  records, backs up again and finishes the install.
+  records, saves the new attempt and keeps the original rollback pair.
 - Back: run `/Applications/Mediaforce.app/Contents/MacOS/mediaforce-server
   service update rollback`. It is the app update's own rollback: it keeps the
   current database and app aside, restores the stage's `before.sqlite`, app and
@@ -107,11 +111,14 @@ forward:
   removes the record once it answers. When the saved launch item runs the clone
   runtime, it rolls back without the app and says so. When it runs a bundled app
   whose saved copy is missing or damaged, it refuses before changing anything;
-  repair forward instead.
+  repair forward instead. Older stages without a recorded database path
+  prove the destination by comparing a fresh SQLite backup before replacement. If the
+  destination cannot be verified, use the stopped forward repair.
 
-A release that failed its checks after starting is added to
+A release that fails validation after starting is added to
 `runtime/failed-update-builds.json`, so the app never installs it again
-through Sparkle.
+through Sparkle. A dropped identity response retries twice before a continued
+failure triggers rollback and excludes that build.
 
 ### First install from the clone runtime
 
@@ -135,13 +142,12 @@ installed. The script skips the dashboard and verifies that the port is closed
 and that no encode, sample, scan or evidence record is running. Missing or
 running work records require reconciliation; this mode never clears them.
 
-The backup keeps the work records with its encode queue paused, as in the
-online flow, and the source database is unchanged until that backup passes its
-integrity check. Then the script pauses the encode queue through the
-database's custody guards before the new server starts. The queue resumes only
-if it was running before; an existing pause is preserved. Because the database
-was touched, any failure leaves the service stopped, with the saved launch
-item and backup ready for the rollback below.
+The stopped installer saves a rollback copy with encoding paused. It leaves
+the source database at its original schema until the candidate starts. The
+update record holds new work while the candidate is checked, including
+automatically approved seasons. The app asks you to try changes again once
+validation finishes. During the earlier drain it can still take changes. A stopped
+repair preserves the saved encoding, background and measurement pauses.
 
 ### Rollback and cleanup ownership
 
@@ -222,17 +228,19 @@ an app on build 3, since Sparkle reads it as older.
    private key matches `public-key`. It builds the app with `scripts/build-mac-app.sh release`, which runs the
    package verifier on the app. Apple notarizes it, the ticket is stapled and
    Gatekeeper must accept it. The notarized app's server must start and answer
-   as its build. Then it signs the zip for Sparkle, uploads a draft release,
-   downloads it again to check the bytes and signature, publishes it and
-   checks anyone can download it. The `feed` job publishes the feed to Pages
+   as its build. It signs the zip for Sparkle, saves the Pages artifact and
+   verifies the draft release's bytes and signature. The separate `publish`
+   job makes that draft public and checks its downloaded SHA-256. The `feed` job publishes the feed to Pages
    last and checks the served feed offers the new build.
 6. Report the release page, the version and the served feed to the Director.
 
 If the `release` job fails before publishing, read what failed, delete a
 leftover draft, fix the cause and dispatch again: the version stays and the
 build is numbered again from the unchanged feed. Once the
-release is published, never run that job again. If only the `feed` job failed,
-re-run that job alone: it republishes the same feed without rebuilding.
+draft is verified, rerun failed jobs on the same run. A publication retry
+uses the same archive digest and feed artifact. A Pages retry needs only the
+`feed` job. The feed artifact is retained for 30 days. Both jobs check for
+a newer public release before proceeding.
 Removing a feed item does not downgrade an installed app; a bad release is
 replaced by a newer build.
 

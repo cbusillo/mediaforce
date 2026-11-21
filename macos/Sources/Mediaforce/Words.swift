@@ -2,6 +2,7 @@ import Foundation
 
 enum Words {
     static let needsYou = "Needs you"
+    static let updateRolledBack = "Mediaforce went back to the previous version after the update failed its checks."
     static let updated = "Mediaforce updated itself between files and is running again."
     static let updateWaitingForQuietTime = "Mediaforce installs this update between files."
     static let updateServerUnavailable = "Mediaforce can't update because its background service isn't set up on this Mac."

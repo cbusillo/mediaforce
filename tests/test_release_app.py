@@ -146,10 +146,15 @@ def _verify(published: Path, tmp_path: Path, *, proof: bool = True, archive: str
     signed: list[str] = []
     with patch.object(release_app, "require_signature", side_effect=lambda _key, signature, _archive: signed.append(signature)), \
             patch.object(release_app, "notarized_app", return_value=published / "built/Mediaforce.app") as notarized:
-        verified = verify_release(str(published / archive), scratch, feed=str(published / "appcast.xml"),
+        verified = verify_release(str(published / archive), scratch, feed=str(published.resolve() / "appcast.xml"),
                                   public_key=PROOF_KEY, proof=proof)
     assert signed == ["c2lnbmF0dXJl"] and notarized.called
     return verified
+
+
+def test_local_archive_verifies_with_its_bare_filename(published: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(published)
+    assert _verify(Path("."), tmp_path).identity["CFBundleVersion"] == "7"
 
 
 def test_tag_names_its_archive_on_github_releases() -> None:
@@ -234,5 +239,5 @@ def test_retained_rollback_has_a_usable_app_when_the_old_launch_item_needs_one(t
     stage.mkdir(parents=True)
     program = "/clone/.venv/bin/mediaforce-web" if saved == "clone runtime" else "/Applications/Mediaforce.app/Contents/MacOS/mediaforce-server"
     (stage / "launch-item.before.plist").write_bytes(plistlib.dumps({"ProgramArguments": [program]}))
-    with patch.object(release_app, "usable_app", return_value=False):
+    with patch.object(release_app, "usable_saved_app", return_value=False):
         assert release_app.retained_rollback(stage)["app"] is (saved == "clone runtime")

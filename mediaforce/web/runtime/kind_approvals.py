@@ -27,6 +27,7 @@ from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifac
 from mediaforce.library.calculation_reuse import LibraryCalculations, reuse_library_calculation
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, RUNNABLE_ENCODE_JOB_KINDS, load_queue_state
 from mediaforce.core.type_defs import object_dict
+from mediaforce.ops.runtime_install import update_hold_reason
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES, derive_item_workflow_state
@@ -252,7 +253,7 @@ def background_queue_blocker(
         connection: DBClient, *, library_item_ids: Collection[int] | None = None, config: MediaforceConfig | None = None,
 ) -> dict[str, Any] | None:
     """Why the background queue waits: the owner paused work, or a production run is queued or running."""
-    if _queue_waits(connection):
+    if (config is not None and update_hold_reason(config.paths.db_path.parent)) or _queue_waits(connection):
         return {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
     if library_item_ids is not None:
         files = _waiting_files(connection, library_item_ids=library_item_ids)
@@ -375,7 +376,7 @@ def next_kind_season(
         load_calibration_state: LoadCalibrationState,
         now: float,
 ) -> KindSeason | None:
-    if background_queue_blocker(connection) is not None:
+    if background_queue_blocker(connection, config=config) is not None:
         return None
     return next_approved_season(connection, config, load_calibration_state=load_calibration_state, now=now)
 

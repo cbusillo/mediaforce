@@ -19,7 +19,7 @@ from urllib.request import urlopen
 from xml.etree import ElementTree
 
 from mediaforce.ops.controller_deploy import (
-    APPLICATIONS_APP, DEFAULT_STARTUP_TIMEOUT, usable_app, install_release, relaunch_installed_app, saved_app_is_needed,
+    APPLICATIONS_APP, DEFAULT_STARTUP_TIMEOUT, usable_saved_app, install_release, relaunch_installed_app, saved_app_is_needed,
 )
 from mediaforce.ops.login_item import _verify_signed_bundle
 from mediaforce.ops.runtime_install import SERVICE_LABEL, bundle_service, retained_deploy_stage
@@ -203,7 +203,7 @@ def verify_release(release: str, folder: Path, *, feed: str, public_key: str, pr
     downloads.mkdir()
     extracted.mkdir()
     archive = fetch(location, downloads)
-    digest = require_listed_digest(archive, fetch(location.rsplit("/", 1)[0] + "/SHA256SUMS", downloads))
+    digest = require_listed_digest(archive, fetch(location.removesuffix(archive.name) + "SHA256SUMS", downloads))
     feed_text = fetch(feed, downloads).read_text()
     offer = feed_offer(feed_text, archive)
     require_signature(public_key, offer.signature, archive)
@@ -217,10 +217,9 @@ def verify_release(release: str, folder: Path, *, feed: str, public_key: str, pr
 
 
 def retained_rollback(stage: Path) -> dict[str, object]:
-    saved_app = stage / "Mediaforce.app"
     return {"stage": str(stage), "retained": retained_deploy_stage(stage.parent.parent) == stage,
             **{name: (stage / name).is_file() for name in ("before.sqlite", "launch-item.before.plist")},
-            "app": not saved_app_is_needed(stage) or usable_app(saved_app)}
+            "app": not saved_app_is_needed(stage) or usable_saved_app(stage)}
 
 
 def install(args: argparse.Namespace) -> dict[str, object]:
@@ -236,9 +235,8 @@ def install(args: argparse.Namespace) -> dict[str, object]:
                         startup_timeout=args.startup_timeout, stopped=args.stopped,
                         allow_unknown_build=args.allow_unknown_build)
     require_identity(destination, release.identity)
-    rollback = retained_rollback(stage)
-    if not all(rollback.values()):
-        raise RuntimeError(f"the release runs, but its saved rollback is incomplete: {rollback}")
+    retained = retained_deploy_stage(stage.parent.parent)
+    rollback = retained_rollback(retained or stage)
     return {"installed": str(destination), **release.identity, "rollback": rollback,
             "app": relaunch_installed_app(destination)}
 

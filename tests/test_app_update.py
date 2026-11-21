@@ -276,7 +276,7 @@ def test_quiet_server_saves_complete_old_pair_before_sparkle_may_install(update:
         assert saved.execute("pragma quick_check").fetchall() == [("ok",)]
     assert retained_deploy_stage(app_update.support) == stage and server.launchctl[-1][0] == "disable"
     with pytest.raises(deploy.UpdateRefused):
-        deploy.require_update_startup_allowed(app_update.support, app_update.app)
+        deploy.require_update_startup_allowed(app_update.config.paths.db_path, app_update.app)
 
 
 def test_newer_offer_while_prepared_reuses_the_saved_pair(update: Update) -> None:
@@ -423,3 +423,132 @@ def test_proof_build_names_the_live_launch_item_it_cannot_read(tmp_path: Path) -
     live.write_bytes(plistlib.dumps({"ProgramArguments": ["/old/clone/.venv/bin/mediaforce-web"], "WorkingDirectory": "/old/clone"}))
     with pytest.raises(RuntimeProtectionError, match="com.mediaforce.web.plist or the config it names cannot be read"):
         require_own_support(proof, tmp_path / "proof/library.sqlite3", tmp_path)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_rollback_refuses_a_switched_database_before_stopping_service(update: Update, legacy: bool) -> None:
+    change, server = update
+    deploy.prepare_update(change, "2")
+    _install(change, build="2")
+    intent = _intent(change)
+    if legacy:
+        del intent["database"]
+    deploy._write_intent(change.support, {**intent, "phase": "starting"})
+    change.config_path.write_text(change.config_path.read_text().replace("library.sqlite3", "other.sqlite3"))
+    change = deploy.AppUpdate(change.config_path, change.app, change.home)
+    with sqlite3.connect(change.config.paths.db_path) as other:
+        other.execute("create table other_library (id integer)")
+    calls = list(server.launchctl)
+    with pytest.raises(deploy.UpdateRefused):
+        deploy.rollback_update(change)
+    assert server.launchctl == calls
+    with sqlite3.connect(change.config.paths.db_path) as other:
+        assert other.execute("select * from other_library").fetchall() == []
+
+
+def test_an_identical_copy_cannot_prepare_the_installed_service(update: Update, tmp_path: Path) -> None:
+    change, server = update
+    other = tmp_path / "second" / change.app.name
+    shutil.copytree(change.app, other)
+    with pytest.raises(deploy.UpdateRefused):
+        deploy.prepare_update(deploy.AppUpdate(change.config_path, other, change.home), "2")
+    assert server.launchctl == [] and _phase(change) is None
+
+
+def test_rejected_candidate_signature_restores_the_prepared_pair(update: Update) -> None:
+    change, _ = update
+    deploy.prepare_update(change, "2")
+    _install(change, build="2")
+
+    def verify(app: Path) -> None:
+        if app == change.app and deploy.bundle_build(app) == "2":
+            raise deploy.LoginItemError("invalid candidate")
+
+    with patch.object(deploy, "_verify_signed_bundle", side_effect=verify):
+        assert deploy.reconcile_update(change) == "rolled back"
+    assert deploy.bundle_build(change.app) == "1" and _phase(change) is None
+
+
+def test_reopened_candidate_retries_identity_without_starting_twice(update: Update) -> None:
+    change, server = update
+    deploy.prepare_update(change, "2")
+    _install(change, build="2")
+    with patch.object(deploy, "wait_until_healthy", side_effect=KeyboardInterrupt), pytest.raises(KeyboardInterrupt):
+        deploy.reconcile_update(change)
+    attempts = 0
+
+    def flaky_identity(base: str, route: str) -> dict[str, Any]:
+        nonlocal attempts
+        if route == "/api/release/work":
+            attempts += 1
+            if attempts == 1:
+                raise TimeoutError("one lost response")
+        return server.api(base, route)
+
+    with patch.object(deploy, "_api", side_effect=flaky_identity), patch.object(deploy, "_listener_is_closed", return_value=False), \
+            patch.object(deploy, "start_saved_launch_item", side_effect=RuntimeError("already running")):
+        assert deploy.reconcile_update(change) == "updated"
+    assert attempts >= 2 and deploy._failed(change) == []
+
+
+def test_prepare_recovers_after_a_failed_pointer_write(update: Update) -> None:
+    change, _ = update
+    with patch.object(deploy, "retain_deploy_stage", side_effect=OSError("disk full")), pytest.raises(OSError):
+        deploy.prepare_update(change, "2")
+    deploy.prepare_update(change, "2")
+    assert _phase(change) == "prepared"
+
+
+def test_download_keeps_its_backup_across_quit_until_sparkle_aborts_or_installs(update: Update) -> None:
+    change, server = update
+    deploy.prepare_update(change, "2")
+    deploy._write_intent(change.support, {**_intent(change), "phase": "downloading"})
+    calls = list(server.launchctl)
+    with pytest.raises(deploy.UpdateRefused):
+        deploy.back_out_update(change)
+    assert calls == server.launchctl and _phase(change) == "downloading"
+    with pytest.raises(deploy.UpdateRefused):
+        deploy.back_out_update(change, aborted_build="2")
+    deploy._write_intent(change.support, {**_intent(change), "phase": "prepared"})
+    deploy.back_out_update(change, aborted_build="2")
+    assert _phase(change) is None
+    deploy.prepare_update(change, "2")
+    deploy._write_intent(change.support, {**_intent(change), "phase": "downloading"})
+    _install(change, build="2")
+    assert deploy.reconcile_update(change) == "updated"
+
+
+@pytest.mark.parametrize("transport_failure", [False, True])
+def test_a_candidate_that_repeatedly_fails_the_identity_request_is_quarantined(update: Update, transport_failure: bool) -> None:
+    from email.message import Message
+    from urllib.error import HTTPError
+
+    change, server = update
+    deploy.prepare_update(change, "2")
+    _install(change, build="2")
+
+    def broken(base: str, route: str) -> dict[str, Any]:
+        if route == "/api/release/work":
+            if transport_failure:
+                raise ConnectionResetError("candidate disconnected")
+            raise HTTPError(base + route, 500, "fixture failure", Message(), None)
+        return server.api(base, route)
+
+    with patch.object(deploy, "_api", side_effect=broken):
+        assert deploy.reconcile_update(change) == "rolled back"
+    assert "2" in deploy._failed(change)
+
+
+def test_unbound_legacy_preparation_finishes_against_its_unchanged_database(update: Update) -> None:
+    change, _ = update
+    deploy.prepare_update(change, "2")
+    intent = _intent(change)
+    del intent["database"]
+    stage = Path(intent["stage"])
+    (stage / "config.toml").unlink()
+    with (stage / "before.sqlite").open("r+b") as saved:
+        saved.seek(96)
+        saved.write((3_008_002).to_bytes(4, "big"))
+    deploy._write_intent(change.support, intent)
+    _install(change, build="2")
+    assert deploy.reconcile_update(change) == "updated"

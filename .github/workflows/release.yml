@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   release:
-    name: Build, notarize and publish
+    name: Build, notarize and verify the draft
     if: github.ref == 'refs/heads/main'
     runs-on: macos-latest
     timeout-minutes: 120
@@ -25,6 +25,9 @@ jobs:
       checks: read
       contents: write
     outputs:
+      tag: ${{ steps.identity.outputs.tag }}
+      archive: ${{ steps.identity.outputs.archive }}
+      sha256: ${{ steps.sign.outputs.sha256 }}
       feed: ${{ steps.identity.outputs.feed }}
       build: ${{ steps.build.outputs.build }}
     steps:
@@ -149,6 +152,7 @@ jobs:
         run: bash scripts/build-mac-app.sh smoke "$RUNNER_TEMP/build/Mediaforce.app"
 
       - name: Sign the update and write the feed
+        id: sign
         env:
           SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
           TAG: ${{ steps.identity.outputs.tag }}
@@ -158,6 +162,7 @@ jobs:
           archive="$RUNNER_TEMP/release/$ARCHIVE"
           signature="$(printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | "$sign_update" --ed-key-file - -p "$archive")"
           ( cd "$RUNNER_TEMP/release" && shasum -a 256 "$ARCHIVE" > SHA256SUMS )
+          echo "sha256=$(cut -d ' ' -f1 "$RUNNER_TEMP/release/SHA256SUMS")" >> "$GITHUB_OUTPUT"
           mkdir -p "$RUNNER_TEMP/site"
           uv run python -m scripts.release_app appcast --app "$RUNNER_TEMP/build/Mediaforce.app" \
             --archive "$archive" --signature "$signature" \
@@ -166,6 +171,12 @@ jobs:
             ${PREVIOUS_FEED:+--previous "$PREVIOUS_FEED"} --output "$RUNNER_TEMP/site/appcast.xml"
           echo "SIGNATURE=$signature" >> "$GITHUB_ENV"
           cat "$RUNNER_TEMP/site/appcast.xml"
+
+      - name: Hand the feed to Pages
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ runner.temp }}/site
+          retention-days: 30
 
       - name: Upload a draft release and check its bytes
         env:
@@ -185,23 +196,6 @@ jobs:
           printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | .build/mac-app/SourcePackages/artifacts/sparkle/Sparkle/bin/sign_update \
             --verify --ed-key-file - "$RUNNER_TEMP/uploaded/$ARCHIVE" "$SIGNATURE"
 
-      - name: Publish the release and check anyone can download it
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.identity.outputs.tag }}
-        run: |
-          set -euo pipefail
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
-          mkdir "$RUNNER_TEMP/public"
-          curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/public/$ARCHIVE" \
-            "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ARCHIVE"
-          cmp "$RUNNER_TEMP/release/$ARCHIVE" "$RUNNER_TEMP/public/$ARCHIVE"
-
-      - name: Hand the feed to Pages
-        uses: actions/upload-pages-artifact@v4
-        with:
-          path: ${{ runner.temp }}/site
-
       - name: Remove the temporary keychain
         if: always()
         run: |
@@ -209,11 +203,38 @@ jobs:
             security delete-keychain "$RELEASE_KEYCHAIN"
           fi
 
+  publish:
+    name: Publish the verified archive
+    environment: release
+    timeout-minutes: 15
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the release and check anyone can download it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+          ARCHIVE: ${{ needs.release.outputs.archive }}
+          SHA256: ${{ needs.release.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          latest=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 1 --json tagName --jq '.[].tagName')
+          if [[ -n "$latest" && "$(printf '%s\n' "$latest" "$TAG" | sort -V | tail -1)" != "$TAG" ]]; then
+            echo "A newer release is public: $latest" >&2
+            exit 1
+          fi
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          curl -fsSL --retry 5 --retry-all-errors -o "$ARCHIVE" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ARCHIVE"
+          printf '%s  %s\n' "$SHA256" "$ARCHIVE" | sha256sum -c -
+
   # The feed goes out last, after the release it names is public. If this job fails, re-run it alone:
   # it republishes the same feed and never rebuilds the release.
   feed:
     name: Publish the update feed
-    needs: release
+    needs: [release, publish]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
@@ -224,6 +245,12 @@ jobs:
       pages: write
       id-token: write
     steps:
+      - name: Check the public release still matches this feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: test "$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" = "$TAG"
+
       - name: Deploy the feed
         id: deploy
         uses: actions/deploy-pages@v4

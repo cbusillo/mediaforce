@@ -22,6 +22,7 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
     var showAnswer: @MainActor (String) -> Void = Updates.alert
     /// Tells the Director in a notification; a test reads it instead.
     var notify: @MainActor (String) -> Void = Updates.post
+    var relaunch: @MainActor () -> Void = Updates.relaunchRestoredApp
     /// The server's update steps, the wait between tries and the time; a test stands in for each.
     var runStep: @MainActor ([String]) async -> ServerUpdateStep.Answer = ServerUpdateStep.run
     var sleep: @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
@@ -49,20 +50,22 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
 
     func start() async {
         // Recovery runs on every launch, even in a build that no longer names a feed.
-        state = await ServerUpdateStep.run(["reconcile"])
+        state = await runStep(["reconcile"])
         switch state.outcome {
         case "updated": notify(Words.updated)
-        case "rolled back": return relaunchRestoredApp()
+        case "rolled back":
+            notify(Words.updateRolledBack)
+            return relaunch()
         default: if let problem = state.error, state.intent != nil { notify(Words.updateNeedsYou(problem)) }
         }
         if let intent = state.intent, intent.phase == "draining" { prepare(intent.to) }
-        if state.intent?.phase == "prepared", !Self.isConfigured { state = await ServerUpdateStep.run(["cancel"]) }
+        if state.intent?.phase == "prepared", !Self.isConfigured { state = await runStep(["cancel"]) }
         guard Self.isConfigured, controller == nil else { return }
         let controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
         self.controller = controller
         use(controller.updater)
         // Quit or restarted after preparing: the server is stopped, so fetch the prepared build now, not on schedule.
-        if state.intent?.phase == "prepared" { checker?.checkForUpdatesInBackground() }
+        if state.intent?.awaitsSparkle == true { checker?.checkForUpdatesInBackground() }
     }
 
     func use(_ checker: UpdateChecker) {
@@ -86,10 +89,35 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
             found = Words.updateFailedBefore(build: version)
             throw UpdateWait(Words.updateFailedBefore(build: version))
         }
-        if let intent = state.intent, intent.to == build, intent.phase == "prepared" { return }
+        if let intent = state.intent, intent.awaitsSparkle, let runtime = state.runtime,
+           Self.setDownloadPhase("downloading", build: build, expected: intent, runtime: URL(filePath: runtime)) {
+            state.intent = .init(phase: "downloading", to: build, stage: intent.stage)
+            return
+        }
         if preparing == nil { prepare(build, version: version) }
         found = stuck ?? Words.updateWillInstall(version: version)
         throw UpdateWait(Words.updateWaitingForQuietTime)
+    }
+
+    private static func setDownloadPhase(_ phase: String, build: String, expected: ServerUpdateStep.Intent, runtime: URL) -> Bool {
+        guard let lock = try? FileHandle(forUpdating: runtime.appending(path: "deploy.lock")) else { return false }
+        defer { try? lock.close() }
+        guard flock(lock.fileDescriptor, LOCK_EX | LOCK_NB) == 0 else { return false }
+        let record = runtime.appending(path: "update-intent.json")
+        do {
+            let data = try Data(contentsOf: record)
+            let intent = try JSONDecoder().decode(ServerUpdateStep.Intent.self, from: data)
+            guard intent.phase == expected.phase, intent.stage == expected.stage, intent.to == expected.to,
+                  let installed = intent.app,
+                  URL(filePath: installed).resolvingSymlinksInPath().path == Bundle.main.bundleURL.resolvingSymlinksInPath().path,
+                  var fields = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+            fields["phase"] = phase
+            fields["to"] = build
+            try JSONSerialization.data(withJSONObject: fields).write(to: record, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// The end of a check: only a check someone asked for gets an answer.
@@ -121,7 +149,6 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
     // The prepared build is downloaded: install it now and relaunch; the server is already stopped and saved.
     nonisolated func updater(_ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem, immediateInstallationBlock: @escaping () -> Void) -> Bool {
         MainActor.assumeIsolated {
-            // An answer still on screen must not hold the app open; it has nothing left to say.
             if let window = NSApp.modalWindow, window.identifier == Self.answerWindow { NSApp.abortModal() }
         }
         immediateInstallationBlock()
@@ -137,13 +164,20 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
     }
 
     private func cancelPreparedUpdate(error: Error) {
-        guard state.intent?.phase == "prepared", !cancelling, found == nil, !(error is UpdateWait) else { return }
+        guard let intent = state.intent, intent.awaitsSparkle, !cancelling, found == nil, !(error is UpdateWait) else { return }
+        if intent.phase == "downloading" {
+            guard let runtime = state.runtime,
+                  Self.setDownloadPhase("prepared", build: intent.to, expected: intent, runtime: URL(filePath: runtime)) else {
+                notify(Words.updateNeedsYou("Open Mediaforce again to finish the update."))
+                return
+            }
+        }
         cancelling = true
         let answer = Self.answer(found: nil, error: error)
         let report = asked || answer == Words.upToDate ? nil : answer
         Task {
             defer { cancelling = false }
-            state = await runStep(["cancel"])
+            state = await runStep(["cancel", "--build", intent.to])
             if let problem = state.error { notify(Words.updateNeedsYou(problem)) }
             else if let report { notify(report) }
         }
@@ -181,7 +215,7 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
     }
 
     /// After going back, this process is the failed build; the restored app at the same place takes over.
-    private func relaunchRestoredApp() {
+    private static func relaunchRestoredApp() {
         NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: {
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.createsNewApplicationInstance = true
@@ -244,15 +278,19 @@ enum ServerUpdateStep {
     struct Intent: Decodable {
         let phase: String
         let to: String
+        var app: String?
+        var stage: String?
+        var awaitsSparkle: Bool { phase == "prepared" || phase == "downloading" }
     }
 
     struct Answer: Decodable {
         var error: String?
         var outcome: String?
+        var runtime: String?
         var intent: Intent?
         var failedBuilds: [String] = []
 
-        enum CodingKeys: String, CodingKey { case error, outcome, intent, failedBuilds = "failed_builds" }
+        enum CodingKeys: String, CodingKey { case error, outcome, runtime, intent, failedBuilds = "failed_builds" }
     }
 
     static func run(_ step: [String]) async -> Answer {
