@@ -11,6 +11,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import signal
 
 from mediaforce.hosts import tool_versions
 
@@ -27,7 +29,11 @@ def run_command(command: list[str], *, cwd: Path | None = None) -> str:
     )
     if result.returncode:
         lines = result.stdout.strip().splitlines()
-        raise RuntimeError(f"{Path(command[0]).name} failed. {lines[-1][:320] if lines else result.returncode}")
+        detail = next(
+            (line for line in reversed(lines) if re.search(r"error:|not found|is required", line, re.I)),
+            lines[-1] if lines else str(result.returncode),
+        )
+        raise RuntimeError(f"{Path(command[0]).name} failed. {detail[:320]}")
     return result.stdout.strip()
 
 
@@ -164,13 +170,13 @@ def restore_previous(current: Path, journal: Path) -> None:
     record = json.loads(journal.read_text(encoding="utf-8"))
     previous = record["previous"]
     select_tools(current, Path(previous) if previous else None)
-    if tool_versions.running_versions(list(tool_versions.PROGRAMS)) != record["versions"]:
-        raise RuntimeError("The previous tools were selected again, but their versions could not be verified.")
     journal.unlink()
+    if tool_versions.running_versions(list(tool_versions.PROGRAMS)) != record["versions"]:
+        raise RuntimeError("The previous tools were selected again. Their versions changed and will be checked again.")
 
 
 def activate(current: Path, candidate: Path, previous_versions: dict[str, str], verify: Callable[[], None]) -> None:
-    previous = current.resolve(strict=True) if current.is_symlink() else None
+    previous = current.resolve() if current.is_symlink() and current.exists() else None
     journal = current.with_name("pending")
     staging = journal.with_suffix(".tmp")
     staging.write_text(
@@ -183,7 +189,25 @@ def activate(current: Path, candidate: Path, previous_versions: dict[str, str], 
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         restore_previous(current, journal)
         raise RuntimeError(f"Restored the previous media tools. {error}") from error
+    select_tools(current.with_name("previous"), previous)
     journal.unlink()
+
+
+def retire_unused_builds(root: Path) -> None:
+    kept = set()
+    for link in (root / "current", root / "previous"):
+        if not link.is_symlink():
+            continue
+        bundle = link.resolve()
+        kept.add(bundle)
+        for name in tool_versions.PROGRAMS:
+            binary = (bundle / "bin" / name).resolve()
+            if root in binary.parents:
+                kept.add(root / binary.relative_to(root).parts[0])
+    for marker in root.glob("ffmpeg-*/.mediaforce-build"):
+        bundle = marker.parent
+        if not bundle.is_symlink() and bundle not in kept:
+            shutil.rmtree(bundle)
 
 
 def self_test(quality: list[str]) -> None:
@@ -229,40 +253,52 @@ def self_test(quality: list[str]) -> None:
 def ensure_idle() -> None:
     processes = run_command(["ps", "-A", "-o", "comm="])
     if any(Path(line.strip()).name in tool_versions.PROGRAMS for line in processes.splitlines()):
-        raise RuntimeError("A media program is still running on this computer.")
+        raise BlockingIOError("A media program is still running on this computer.")
 
 
-def update(target: dict[str, str], sources: dict[str, dict[str, str]], quality: list[str]) -> None:
-    root = tool_versions.TOOLS_DIRECTORY
+def update(target: dict[str, str], sources: dict[str, dict[str, str]], quality: list[str], repair_video: bool = False) -> None:
+    root = tool_versions.TOOLS_DIRECTORY.resolve()
     root.mkdir(parents=True, exist_ok=True)
     current = root / "current"
     with (root / "lock").open("a", encoding="utf-8") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        deadline = time.monotonic() + 8
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise BlockingIOError("Another tool check is still running.") from None
+                time.sleep(0.15)
         ensure_idle()
         pending = root / "pending"
         if pending.exists():
             restore_previous(current, pending)
+        retire_unused_builds(root)
         before = tool_versions.running_versions(list(tool_versions.PROGRAMS))
-        if before == target:
+        if before == target and not repair_video:
             self_test(quality)
             return
         prefix = Path(tempfile.mkdtemp(prefix=f"ffmpeg-{target['ffmpeg']}-", dir=root))
+        (prefix / ".mediaforce-build").touch()
         try:
             video = {"ffmpeg", "svt-av1", "opus", "libvmaf"}
-            needed = video.copy() if any(before.get(name) != target[name] for name in (*video, "ffprobe")) else set()
+            needed = video.copy() if repair_video or any(before.get(name) != target[name] for name in (*video, "ffprobe")) else set()
             if before.get("ab-av1") != target["ab-av1"]:
                 needed.add("ab-av1")
             binaries = prefix / "bin"
             binaries.mkdir()
             for name in tool_versions.PROGRAMS:
                 if ("ffmpeg" if name == "ffprobe" else name) not in needed:
-                    (binaries / name).symlink_to(Path(shutil.which(name) or name).resolve(strict=True))
+                    selected = Path(shutil.which(name) or name).resolve(strict=True)
+                    if root in selected.parents:
+                        (binaries / name).symlink_to(selected)
             if sys.platform == "darwin":
                 install_mac(prefix, target, sources, needed)
             else:
                 install_linux(prefix, sources, needed)
                 (prefix / "mediaforce-sources.json").write_text(json.dumps(target), encoding="utf-8")
-            candidate = [str(prefix / "bin" / name) for name in tool_versions.PROGRAMS]
+            candidate = [str(binaries / name) if (binaries / name).exists() else name for name in tool_versions.PROGRAMS]
             if tool_versions.running_versions(candidate) != target:
                 raise RuntimeError("The new media tools do not match this Mac. The previous tools are still selected.")
             ensure_idle()
@@ -273,6 +309,7 @@ def update(target: dict[str, str], sources: dict[str, dict[str, str]], quality: 
                 self_test(quality)
 
             activate(current, prefix, before, verify)
+            retire_unused_builds(root)
         finally:
             if current.resolve() != prefix and not pending.exists():
                 shutil.rmtree(prefix)
@@ -280,6 +317,12 @@ def update(target: dict[str, str], sources: dict[str, dict[str, str]], quality: 
 
 if __name__ == "__main__":
     try:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
         update(*[json.loads(argument) for argument in sys.argv[1:]])
+    except BlockingIOError as busy:
+        print(str(busy), file=sys.stderr)
+        sys.exit(75)
+    except FileNotFoundError as missing:
+        sys.exit(f"This computer needs {missing.filename} to prepare the media tools.")
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as failure:
         sys.exit(str(failure))

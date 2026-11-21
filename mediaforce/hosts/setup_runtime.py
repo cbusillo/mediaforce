@@ -90,7 +90,7 @@ def _finish_remote_host_prepare(
             performed_steps=prep_steps,
         )
     if refreshed.can_update_tools and not refreshed.missing_paths:
-        return request_update(config, host, refreshed, run_remote_ssh)
+        return request_update(config, host, refreshed, run_remote_ssh, requested=True)
     if refreshed.missing_paths:
         return HostSetupResult(
             ok=False,
@@ -144,7 +144,7 @@ def prepare_remote_host_with_password(
                 performed_steps=prep_steps,
             )
         if status.can_update_tools:
-            if status.platform == "macos" and (status.missing_paths or (
+            if (str(config.staging_root_for_host(host)) in status.missing_paths or (
                     status.repo_path and f"Repo path is missing: {status.repo_path}" in status.issues
             )):
                 return finish_remote_host_prepare(config, host, prep_steps)

@@ -41,7 +41,7 @@ def running_versions(programs: list[str]) -> dict[str, str]:
             if name == "ffmpeg":
                 links = output if sys.platform == "darwin" else command_output(["ldd", shutil.which(path) or path])
                 versions.update(linked_versions(links))
-        except (OSError, ValueError, subprocess.SubprocessError):
+        except (OSError, ValueError, subprocess.CalledProcessError):
             continue
     return versions
 
@@ -54,17 +54,21 @@ def linked_versions(links: str) -> dict[str, str]:
             continue
         path = Path(match[1].split(" => ")[-1])
         try:
+            release = library_release(path, library)
+            if release:
+                versions[library] = release
+                continue
             function = getattr(ctypes.CDLL(str(path)), symbol)
             function.restype = ctypes.c_char_p
             version = re.fullmatch(rf"(?:libopus |v)?({VERSION})", function().decode())
             if version:
-                versions[library] = library_release(path, library, version[1])
+                versions[library] = version[1]
         except (OSError, ValueError, IndexError, KeyError, AttributeError):
             continue
     return versions
 
 
-def library_release(path: Path, library: str, reported: str) -> str:
+def library_release(path: Path, library: str) -> str | None:
     keg = path.resolve().parent.parent
     metadata = keg / "sbom.spdx.json"
     if metadata.is_file():
@@ -72,11 +76,11 @@ def library_release(path: Path, library: str, reported: str) -> str:
         if package["name"] == library:
             return package["versionInfo"]
     receipt = keg / "mediaforce-sources.json"
-    if keg.parent == TOOLS_DIRECTORY and receipt.is_file():
+    if keg.parent == TOOLS_DIRECTORY.resolve() and receipt.is_file():
         versions = json.loads(receipt.read_text(encoding="utf-8"))
         if library in versions:
             return versions[library]
-    return reported
+    return None
 
 
 def probe_record() -> str:

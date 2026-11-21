@@ -159,8 +159,13 @@ def _recovery_pass(
     elif state_error:
         state.update(status="action_required", reason=state_error)
     elif status.can_update_tools:
-        result = prepare_host_tools(config, host, status)
-        state.update(status="retrying", reason=result.message)
+        if previous.get("tool_hold") == status.tool_target and not requested:
+            state.update(status="action_required", reason=previous["reason"], tool_hold=status.tool_target)
+        else:
+            result = prepare_host_tools(config, host, status, requested=requested)
+            state.update(status="retrying", reason=result.message)
+            if result.failure_kind == "needs_attention":
+                state.update(status="action_required", tool_hold=status.tool_target)
     elif remote_mount_recovery_supported(config, host, status) and previous.get("retry_paused") and not requested:
         # Only someone at that computer can fix this; keep asking, and keep checking often so
         # the warning clears soon after Retry connection, Set up computer or a manual connection.

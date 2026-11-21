@@ -480,13 +480,15 @@ def _remote_status_script(
     quoted_writable_paths = " ".join(shlex.quote(path) for path in (writable_paths or []))
     lines = [
         remote_shell_path_export_line(),
-        worker_probe_script(),
         'BREW_BIN="$(command -v brew || true)"',
         'if [ -z "$BREW_BIN" ] && [ -x /opt/homebrew/bin/brew ]; then BREW_BIN=/opt/homebrew/bin/brew; fi',
         'if [ -z "$BREW_BIN" ] && [ -x /usr/local/bin/brew ]; then BREW_BIN=/usr/local/bin/brew; fi',
         'FFMPEG_BIN="$(command -v ffmpeg || true)"',
         'PLATFORM_NAME="$(uname -s 2>/dev/null | tr "[:upper:]" "[:lower:]")"',
         'if [ "$PLATFORM_NAME" = "darwin" ]; then PLATFORM_NAME="macos"; fi',
+        'if [ "$PLATFORM_NAME" != macos ] || xcode-select -p >/dev/null 2>&1; then',
+        worker_probe_script(),
+        'fi',
         'AB_AV1_BIN="$(command -v ab-av1 || true)"',
         'if [ -z "$AB_AV1_BIN" ] && [ -x /opt/homebrew/bin/ab-av1 ]; then AB_AV1_BIN=/opt/homebrew/bin/ab-av1; fi',
         'if [ -z "$AB_AV1_BIN" ] && [ -x /usr/local/bin/ab-av1 ]; then AB_AV1_BIN=/usr/local/bin/ab-av1; fi',
@@ -513,6 +515,8 @@ def _remote_status_script(
     ])
     if include_expensive_tools:
         lines.extend([
+            'if printf "%s\\n" "$FFMPEG_FILTERS" | grep -qw idet && printf "%s\\n" "$FFMPEG_ENCODERS" | grep -qw libopus; '
+            'then printf "tool|ffmpeg_picture_sound|1\\n"; else printf "tool|ffmpeg_picture_sound|0\\n"; fi',
             'if printf "%s\\n" "$FFMPEG_HWACCELS" | grep -qi "videotoolbox"; then printf "tool|ffmpeg_videotoolbox|1\\n"; else printf "tool|ffmpeg_videotoolbox|0\\n"; fi',
             'if printf "%s\\n" "$FFMPEG_FILTERS" | grep -qi "libvmaf"; then printf "tool|ffmpeg_libvmaf|1\\n"; else printf "tool|ffmpeg_libvmaf|0\\n"; fi',
             'if printf "%s\\n" "$FFMPEG_FILTERS" | grep -qi "libvmaf" && "$FFMPEG_BIN" '

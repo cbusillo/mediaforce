@@ -57,7 +57,8 @@ some shows need more, and your results will vary.
     this Mac's SSH key (asking for that account's password once), and
     prepares its work folders. Homebrew supplies Mediaforce’s tools on Macs.
   - **A Linux computer** needs SSH, Python 3 and build tools for FFmpeg and
-    ab-av1, including a C/C++ compiler, CMake, Meson, Ninja, xxd and Cargo.
+    ab-av1, including a C/C++ compiler, CMake, Meson, Ninja, pkg-config, xxd, Cargo,
+    and NASM on x86. The development libraries for its enabled FFmpeg features must be installed.
     Linux computers compress files but do not make samples.
 - **Optional:** a Plex server for posters and when each show was added, a
   TMDB read-access token so Mediaforce can tell cartoons from live action and

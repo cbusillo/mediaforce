@@ -565,8 +565,8 @@ def _finish_remote_host_prepare(
     )
 
 
-def prepare_host_tools(config: MediaforceConfig, host: dict[str, Any], status: HostStatus) -> HostSetupResult:
-    return request_update(config, host, status, _run_remote_ssh)
+def prepare_host_tools(config: MediaforceConfig, host: dict[str, Any], status: HostStatus, *, requested: bool = True) -> HostSetupResult:
+    return request_update(config, host, status, _run_remote_ssh, requested=requested)
 
 
 def _run_remote_status_probe(

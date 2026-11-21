@@ -302,7 +302,7 @@ class RemoteKeepAwakeTests(unittest.TestCase):
             path.chmod(0o700)
         scratch = PurePosixPath(str(self.root / "scratch"))
         staged = StagedJob(scratch, scratch / "input.mkv", scratch / "output.mkv")
-        for host in ({"key": "mac"}, {"key": "mac", STAGED_JOB_KEY: staged.to_payload()}):
+        for host in ({"key": "mac"}, {"key": "mac", "ffmpeg_path": "/stale/ffmpeg", STAGED_JOB_KEY: staged.to_payload()}):
             shell = self._start(_shell_script(self._encode_ssh_argument(host)))
             stdout, _stderr = shell.communicate(timeout=10)
             self.assertEqual(shell.returncode, 7)
@@ -356,6 +356,7 @@ class RemoteKeepAwakeTests(unittest.TestCase):
                 host={"key": "mac", "mode": "ssh"},
                 progress_callback=None,
                 ssh_client_options=lambda: [],
+                remote_shell_path_export_line=lambda: ":",
                 build_streaming_remote_ffmpeg_command=lambda *_args, **_kwargs: ["ffmpeg"],
                 update_ffmpeg_progress_state=lambda *_args, **_kwargs: None,
                 process_cancelled_error=ProcessCancelledError,

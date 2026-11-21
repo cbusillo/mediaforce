@@ -177,6 +177,7 @@ class RunnerProgressFailureTests(unittest.TestCase):
                         RuntimeError("progress persistence failed")
                     ),
                     ssh_client_options=lambda: [],
+                    remote_shell_path_export_line=lambda: ":",
                     build_streaming_remote_ffmpeg_command=lambda *_args, **_kwargs: [sys.executable, "-c", child],
                     update_ffmpeg_progress_state=_progress_state,
                     process_cancelled_error=ProcessCancelledError,

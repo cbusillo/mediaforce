@@ -84,6 +84,7 @@ class HostStatus:
     computer_model: str | None = None
     tool_target: dict[str, str] = field(default_factory=dict)
     tool_message: str | None = None
+    repair_video_tools: bool = False
     dark_wake: bool = False
 
     @property

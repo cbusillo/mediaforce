@@ -59,14 +59,13 @@ def test_pinned_ffmpeg_refused_before_homebrew_installs(tmp_path: Path) -> None:
 
 
 def test_linked_package_release_identifies_a_patch_with_an_older_runtime_version(tmp_path: Path) -> None:
-    from mediaforce.hosts.tool_versions import library_release
 
     binary = tmp_path / "lib" / "libvmaf.3.dylib"
     binary.parent.mkdir()
     binary.touch()
     package = {"packages": [{"name": "libvmaf", "versionInfo": "3.2.1"}]}
     (tmp_path / "sbom.spdx.json").write_text(json.dumps(package), encoding="utf-8")
-    assert library_release(binary, "libvmaf", "3.2.0") == "3.2.1"
+    assert tool_versions.linked_versions(f"loaded {binary}") == {"libvmaf": "3.2.1"}
 
 
 def test_interrupted_switch_refuses_work_even_with_matching_versions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -94,7 +93,7 @@ def test_candidate_cannot_take_work_until_the_new_tools_pass(tmp_path: Path, mon
         (prefix / "bin/ab-av1").touch()
 
     def inspect(programs: list[str]) -> dict[str, str]:
-        return VERSIONS if current.is_symlink() or Path(programs[0]).is_absolute() else previous
+        return VERSIONS if current.is_symlink() or Path(programs[-1]).is_absolute() else previous
 
     def check(_quality: list[str]) -> None:
         assert (root / "pending").is_file()
@@ -115,11 +114,20 @@ def test_fresh_readiness_holds_an_otherwise_capable_computer_after_library_drift
     config.explicit_source_root_map_for_host.return_value = {}
     host = {"host": "test@version-drift.invalid", "media_access": "stream", "capabilities": ["encode_queue"]}
     versions = VERSIONS.copy()
+    picture_sound = True
 
     def probe(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        reply = ["tool|ffmpeg|1", "tool|ffmpeg_libsvtav1|1", "tool|ffmpeg_videotoolbox|0",
-                 "tool|ffmpeg_libvmaf|1", "tool|ffmpeg_xpsnr|1", "tool|ab_av1|1", "meta|platform|linux",
-                 "meta|managed_tools|" + json.dumps({"versions": versions})]
+        reply = [
+            "tool|ffmpeg|1",
+            "tool|ffmpeg_libsvtav1|1",
+            "tool|ffmpeg_videotoolbox|0",
+            "tool|ffmpeg_libvmaf|1",
+            "tool|ffmpeg_xpsnr|1",
+            "tool|ab_av1|1",
+            "meta|platform|linux",
+            "meta|managed_tools|" + json.dumps({"versions": versions}),
+        ]
+        reply.extend([f"tool|ffmpeg_picture_sound|{int(picture_sound)}", "tool|ffmpeg_libvmaf_usable|1"])
         return subprocess.CompletedProcess([], 0, stdout="\n".join(reply), stderr="")
 
     monkeypatch.setattr(tools, "controller_versions", lambda: VERSIONS)
@@ -130,3 +138,44 @@ def test_fresh_readiness_holds_an_otherwise_capable_computer_after_library_drift
     status = remote.probe_host_status(config, host)
     assert not status.available and status.can_update_tools
     assert status.detail and "libvmaf" in status.detail
+    versions.update(VERSIONS)
+    picture_sound = False
+    status = remote.probe_host_status(config, host)
+    assert not status.available and status.can_update_tools and status.repair_video_tools
+
+
+def test_retry_connection_restarts_a_build_after_two_identical_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from mediaforce.hosts.types import HostSetupResult
+
+    config, status = Mock(), Mock(key="fixture.invalid", tool_target=VERSIONS)
+    config.paths.db_path = tmp_path / "db"
+    clock = Mock(return_value=0)
+    monkeypatch.setattr(tools.time, "monotonic", clock)
+    monkeypatch.setattr(tools, "host_is_busy", lambda *_: False)
+    update = Mock(side_effect=lambda *_, **__: HostSetupResult(False, "A build tool is missing.", failure_kind="update_failed"))
+    monkeypatch.setattr(tools, "update_worker", update)
+    monkeypatch.setattr(tools.threading, "Thread", lambda target, args, **_: Mock(start=lambda: target(*args)))
+    host = {"host": status.key}
+    for moment in (0, 301, 602):
+        clock.return_value = moment
+        tools.request_update(config, host, status, Mock())
+    assert update.call_count == 2
+    failed = tools.update_result(config, status.key, VERSIONS)
+    assert failed and failed.failure_kind == "needs_attention"
+    tools.request_update(config, host, status, Mock(), requested=True)
+    assert update.call_count == 3
+
+
+def test_retirement_keeps_rollback_and_libraries_shared_with_an_older_build(tmp_path: Path) -> None:
+    root = tmp_path / "tools"
+    bundles = [root / f"ffmpeg-{index}" for index in range(4)]
+    for bundle in bundles:
+        (bundle / "bin").mkdir(parents=True)
+        (bundle / ".mediaforce-build").touch()
+    (bundles[0] / "bin/ffmpeg").touch()
+    (bundles[2] / "bin/ffmpeg").symlink_to(bundles[0] / "bin/ffmpeg")
+    (root / "current").symlink_to(bundles[2])
+    (root / "previous").symlink_to(bundles[1])
+    worker.retire_unused_builds(root)
+    assert (root / "current/bin/ffmpeg").is_file() and (root / "previous").is_dir()
+    assert not bundles[3].exists()

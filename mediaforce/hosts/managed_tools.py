@@ -5,6 +5,7 @@ import re
 import logging
 import shutil
 import subprocess
+from dataclasses import dataclass
 import threading
 import time
 
@@ -23,7 +24,12 @@ from mediaforce.hosts.types import HostSetupResult, HostStatus, VMAF_SELF_TEST_A
 
 
 def controller_versions() -> dict[str, str]:
-    return tool_versions.running_versions([ffmpeg_binary(), ffprobe_binary(), shutil.which("ab-av1") or "/opt/homebrew/bin/ab-av1"])
+    try:
+        return tool_versions.running_versions(
+            [ffmpeg_binary(), ffprobe_binary(), shutil.which("ab-av1") or "/opt/homebrew/bin/ab-av1"]
+        )
+    except subprocess.TimeoutExpired:
+        return {}
 
 
 def version_issue(target: dict[str, str], actual: dict[str, str]) -> str:
@@ -77,7 +83,11 @@ def update_when_idle(*, busy: Callable[[], bool], execute: Callable[[], HostSetu
 
 
 def update_worker(
-    host: dict[str, object], target: dict[str, str], run_remote_ssh: Callable[..., subprocess.CompletedProcess[str]]
+    host: dict[str, object],
+    target: dict[str, str],
+    run_remote_ssh: Callable[..., subprocess.CompletedProcess[str]],
+    *,
+    repair_video: bool = False,
 ) -> HostSetupResult:
     try:
         sources = controller_sources(target)
@@ -89,6 +99,7 @@ def update_worker(
             json.dumps(target),
             json.dumps(sources),
             json.dumps(VMAF_SELF_TEST_ARGS),
+            json.dumps(repair_video),
         ]
         lines = [
             remote_shell_path_export_line(),
@@ -110,20 +121,31 @@ def update_worker(
         lines.append(remote_low_priority_shell(arguments))
         body = "\n".join(lines)
         result = run_remote_ssh(
-            host, "sh", "-s", input_text=keep_awake_while_running(body), wake_before_connect=False, timeout=14400
+            host, "sh", "-s", input_text=keep_awake_while_running(body), wake_before_connect=False, timeout=24 * 60 * 60
         )
     except (OSError, KeyError, ValueError, IndexError, subprocess.SubprocessError) as exc:
-        return HostSetupResult(False, f"Could not complete the media tool update. {exc}")
+        return HostSetupResult(False, f"Could not complete the media tool update. {exc}", failure_kind="update_failed")
     if result.returncode:
         reason = (result.stderr or result.stdout).strip().splitlines()
+        if result.returncode == 75:
+            return HostSetupResult(False, reason[-1] if reason else "Waiting for the computer to finish its current work.")
         return HostSetupResult(
-            False, "Media tools could not update. " + (reason[-1] if reason else "The computer stopped answering.")
+            False,
+            "Media tools could not update. " + (reason[-1] if reason else "The computer stopped answering."),
+            failure_kind="update_failed",
         )
     return HostSetupResult(True, "Media tools updated and checked.")
 
 
+@dataclass
+class _UpdateAttempt:
+    target: dict[str, str]
+    retry_at: float
+    result: HostSetupResult
+
+
 _UPDATE_LOCK = threading.RLock()
-_UPDATE_RESULTS: dict[tuple[Path, str], tuple[str, float, HostSetupResult]] = {}
+_UPDATE_RESULTS: dict[tuple[Path, str], _UpdateAttempt] = {}
 _UPDATING = "Updating and checking media tools."
 
 
@@ -142,10 +164,8 @@ def host_is_busy(config: MediaforceConfig, host: dict[str, object]) -> bool:
 def update_result(config: MediaforceConfig, key: str, target: dict[str, str]) -> HostSetupResult | None:
     with _UPDATE_LOCK:
         record = _UPDATE_RESULTS.get((config.paths.db_path, key))
-        if record and (
-            record[1] == float("inf") or (record[0] == json.dumps(target, sort_keys=True) and time.monotonic() < record[1])
-        ):
-            return record[2]
+        if record and (record.result.failure_kind == "updating" or (record.target == target and time.monotonic() < record.retry_at)):
+            return record.result
     return None
 
 
@@ -154,28 +174,41 @@ def request_update(
     host: dict[str, object],
     status: HostStatus,
     run_remote_ssh: Callable[..., subprocess.CompletedProcess[str]],
+    *,
+    requested: bool = False,
 ) -> HostSetupResult:
     key = (config.paths.db_path, status.key)
     target = status.tool_target
-    signature = json.dumps(target, sort_keys=True)
 
     def execute() -> HostSetupResult:
-        return update_worker(host, target, run_remote_ssh)
+        return update_worker(host, target, run_remote_ssh, repair_video=status.repair_video_tools)
 
-    def work() -> None:
+    def work(prior: _UpdateAttempt | None) -> None:
         try:
             result = update_when_idle(busy=lambda: host_is_busy(config, host), execute=execute)
         except (SQLAlchemyError, OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError):
             logging.getLogger(__name__).exception("Could not complete media tool setup for %s", status.key)
             result = HostSetupResult(False, "Mediaforce could not finish checking this computer. It will try again.")
         with _UPDATE_LOCK:
-            _UPDATE_RESULTS[key] = (signature, time.monotonic() + (30 if result.ok else 300), result)
+            retry_at = time.monotonic() + (300 if result.failure_kind == "update_failed" else 30)
+            if (
+                not requested
+                and prior
+                and prior.target == target
+                and prior.result.failure_kind == "update_failed"
+                and result.failure_kind == "update_failed"
+                and prior.result.message == result.message
+            ):
+                result.failure_kind = "needs_attention"
+                retry_at = float("inf")
+            _UPDATE_RESULTS[key] = _UpdateAttempt(target, retry_at, result)
 
     with _UPDATE_LOCK:
         previous = update_result(config, status.key, target)
-        if previous:
+        if previous and (not requested or previous.failure_kind == "updating"):
             return previous
-        updating = HostSetupResult(False, _UPDATING)
-        _UPDATE_RESULTS[key] = (signature, float("inf"), updating)
-        threading.Thread(target=work, name="media-tool-update", daemon=True).start()
+        last = _UPDATE_RESULTS.get(key)
+        updating = HostSetupResult(False, _UPDATING, failure_kind="updating")
+        _UPDATE_RESULTS[key] = _UpdateAttempt(target, float("inf"), updating)
+        threading.Thread(target=work, args=(last,), name="media-tool-update", daemon=True).start()
         return updating

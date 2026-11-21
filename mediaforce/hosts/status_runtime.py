@@ -217,7 +217,7 @@ def _remote_host_status(
         writable_paths=writable_paths,
     )
     try:
-        result = run_remote_status_probe(host, script, timeout=8)
+        result = run_remote_status_probe(host, script, timeout=20)
     except Exception as exc:
         return HostStatus(
             key=ssh_host,
@@ -290,7 +290,7 @@ def _remote_host_status(
             writable_paths=writable_paths,
         )
         try:
-            result = run_remote_status_probe(host, full_script, timeout=8)
+            result = run_remote_status_probe(host, full_script, timeout=20)
         except Exception as exc:
             return HostStatus(
                 key=ssh_host,
@@ -410,11 +410,17 @@ def _remote_host_status(
     else:
         target = managed_tools.controller_versions()
         issue = managed_tools.version_issue(target, record["versions"])
+        required = ["ffmpeg_picture_sound", "ffmpeg_libvmaf_usable", "ffmpeg_xpsnr", "ffmpeg_libsvtav1"]
+        if platform_name == "macos":
+            required.append("ffmpeg_videotoolbox")
+        status.repair_video_tools = "ffmpeg_picture_sound" in tools and not all(tools.get(key) for key in required)
         if record.get("updating"):
             status.tool_message = "Updating and checking media tools."
-        elif record.get("pending") or issue:
+        elif record.get("pending") or issue or status.repair_video_tools:
             status.tool_message = ("Media tools need to match this Mac. They will update when this computer is free."
                                    if issue else "Checking the previous media tools after an interrupted update.")
+            if status.repair_video_tools and not issue:
+                status.tool_message = "The picture or sound tools failed their checks. They will update when this computer is free."
             status.detail = issue or status.detail
             if all(target.get(name) for name in ("ffmpeg", "ffprobe", "ab-av1", "opus", "libvmaf", "svt-av1")):
                 status.tool_target = target
@@ -423,6 +429,8 @@ def _remote_host_status(
                     status.tool_message = latest.message
             elif issue:
                 status.tool_message = issue
+    if platform_name == "linux" and (status.tool_target or staging_path in status.missing_paths):
+        status.setup_supported = True
     if status.tool_message:
         status.available = False
         if not status.issues and not status.missing_mounts and not status.missing_paths:
