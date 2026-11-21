@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import delete, select, update
 
+from mediaforce.core.media_storage import MediaPathProbe, probe_media_path
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.type_defs import object_dict
@@ -27,9 +28,10 @@ def remake_intent(row: Any) -> dict[str, Any]:
     return object_dict(stored_validation(row).get(INTENT_KEY))
 
 
-def requested_copy_is_present(row: Any) -> bool:
-    return (remake_intent(row).get("state") == "requested"
-            and Path(str(row["staging_path"] or "")).is_file())
+def requested_copy_probe(row: Any) -> MediaPathProbe:
+    if remake_intent(row).get("state") == "requested" and row["staging_path"]:
+        return probe_media_path(Path(row["staging_path"]))
+    return MediaPathProbe(None)
 
 
 def save_remake_intent(connection: DBClient, row: Any, intent: dict[str, Any], *, now: str) -> None:

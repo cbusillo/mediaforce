@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from sqlalchemy import select, update
 
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, source_generations, source_moves, source_transitions, source_versions
 from mediaforce.library.source_evidence import append_version, ensure_active_source_version, json_text, observe_file, \
@@ -116,7 +117,7 @@ def apply_source_moves(connection: DBClient, operation: str) -> None:
     for move in moves:
         old, new = Path(move["from_path"]), Path(move["to_path"])
         expected = json.loads(move["checks_json"])
-        if not _matches(old, expected) or new.exists():
+        if not _matches(old, expected) or probe_media_path(new).exists_or_raise():
             raise RuntimeError("Publish move no longer matches its prepared identities")
         shutil.move(str(old), str(new))
         observed = observe_file(new)
@@ -158,7 +159,7 @@ def reconcile_source_publish(connection: DBClient, operation: str) -> bool:
             if at_old == at_new:
                 raise RuntimeError("The recorded file location is ambiguous or unavailable")
             if at_new:
-                if old.exists():
+                if probe_media_path(old).exists_or_raise():
                     raise RuntimeError("Cannot restore source over an occupied path")
                 shutil.move(str(new), str(old))
                 if not _matches(old, identity):

@@ -98,6 +98,15 @@ final class SampleTests: XCTestCase {
         XCTAssertNil(Words.sampleCoverage(notMade))
     }
 
+    func testWaitingSampleShowsTheStorageReasonOnItsOwnAndKindPages() throws {
+        let reason = "Waiting for shared storage."
+        var payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(Self.facts(state: "sample_waiting", action: nil).utf8)) as? [String: Any])
+        payload["wait_detail"] = reason
+        let facts = try JSONDecoder.mediaforce.decode(SampleFacts.self, from: JSONSerialization.data(withJSONObject: payload))
+        XCTAssertEqual(Words.sampleHeadline(facts), reason)
+        XCTAssertTrue(Words.sampleHeadline(facts, namesSeason: true, now: Date()).contains(reason))
+    }
+
     func testBlockedMeasuringShowsItsSavedReasonWithoutApprovalActions() throws {
         var payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(Self.facts(state: "waiting_for_measurement", action: nil).utf8)) as? [String: Any])
         payload["wait_detail"] = "Measuring is blocked. The original measurements disagree."

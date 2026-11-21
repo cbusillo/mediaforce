@@ -13,6 +13,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy import update
 
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.binaries import ffprobe_binary
 from mediaforce.core.config import MediaforceConfig
@@ -159,10 +160,10 @@ def finalize_output_path(
 
 def _finalize_visible_output(temp_output: Path, staging_path: Path) -> bool:
     def _finalize() -> bool:
-        if temp_output.exists():
+        if probe_media_path(temp_output).exists_or_raise():
             temp_output.replace(staging_path)
             return True
-        return staging_path.exists()
+        return probe_media_path(staging_path).exists_or_raise()
 
     return bool(_retry_transient_file_busy(_finalize))
 
@@ -716,8 +717,11 @@ def promote_one_item(
         raise RuntimeError(f"Item {item['library_item_id']} must be validated before promotion")
     # The stage-time record can say "passed" before the size check ever ran, so the hold is enforced here too.
     staged_size_bytes = int_value(stage_row.get("staging_size_bytes"))
-    if staged_size_bytes <= 0 and Path(str(stage_row.get("staging_path") or "")).is_file():
-        staged_size_bytes = Path(str(stage_row["staging_path"])).stat().st_size
+    if staged_size_bytes <= 0:
+        probe = probe_media_path(Path(str(stage_row["staging_path"])))
+        info = probe.checked_info()
+        if info is not None and probe.is_file:
+            staged_size_bytes = info.st_size
     size_prediction = staged_size_prediction(object_dict(validation), staged_size_bytes)
     if not force and size_prediction is not None and size_prediction["held"]:
         raise PromotionWaiting(
@@ -731,7 +735,7 @@ def promote_one_item(
     destination_path = source_path.with_suffix(f".{config.output_container}")
     archive_path = config.archive_root / Path(item["rel_path"])
 
-    if destination_path.exists() and destination_path != source_path:
+    if probe_media_path(destination_path).exists_or_raise() and destination_path != source_path:
         raise FileExistsError(f"Destination already exists: {destination_path}")
 
     reserve = reserve_preflight(
@@ -757,7 +761,7 @@ def promote_one_item(
     destination_path.parent.mkdir(parents=True, exist_ok=True)
 
     target_outcome = prepare_target_production_outcome(stage_row, item)
-    archive_backup_path = _archive_backup_path(archive_path) if archive_path.exists() else None
+    archive_backup_path = _archive_backup_path(archive_path) if probe_media_path(archive_path).exists_or_raise() else None
     operation = prepare_source_publish(
         connection, int(item["library_item_id"]), source_path=source_path, staging_path=staging_path,
         archive_path=archive_path, destination_path=destination_path, backup_path=archive_backup_path,

@@ -841,3 +841,16 @@ def test_running_show_only_flags_seasons_with_their_own_decisions(config: Mediaf
 
         manifest.unlink()
         assert _page_state(connection, config, quiet_season, {})["needs_you"] is True
+
+
+def test_queued_sample_shows_the_reason_its_work_is_waiting() -> None:
+    reason = "Waiting for the media folder."
+    job = _sample("queued", finished_at=None, progress={"waiting_reason": reason})
+    state = decide_page_state(PageStateFacts(SEASON, None, sample_job=job))
+    assert state.wait_detail == reason
+
+
+def test_expired_storage_retry_does_not_keep_a_stale_reason_on_the_sample() -> None:
+    progress = {"waiting_reason": "Waiting for storage.", "retry_not_before": "2000-01-01T00:00:00Z"}
+    job = _sample("queued", finished_at=None, progress=progress)
+    assert decide_page_state(PageStateFacts(SEASON, None, sample_job=job)).wait_detail is None

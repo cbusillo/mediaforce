@@ -3,6 +3,7 @@ import Foundation
 
 struct CleanupFolder: Decodable, Sendable {
     let fileCount: Int
+    var waitingReason: String?
     let totalSizeBytes: Int64
     // The latest deletion since Mediaforce started, as the server is doing it; nil when there has been none.
     var deletion: BackupDeletion?
@@ -30,6 +31,7 @@ struct BackupDeletion: Decodable, Sendable, Equatable {
 
 struct CleanupResult: Decodable, Sendable {
     let ok: Bool
+    var message: String?
 }
 
 struct MediaforceClient: Sendable {

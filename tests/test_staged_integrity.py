@@ -1,4 +1,5 @@
 import contextlib
+import errno
 import json
 import tempfile
 import shlex
@@ -11,6 +12,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from sqlalchemy import select, update
+
+from storage_outage import storage_outage
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
@@ -111,6 +114,23 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertEqual(len(shown_details), 3)
         for detail in shown_details:
             self.assertNotRegex(detail, r"(?i)\b(promot\w*|tracked|staged|artifact|machine validation)\b")
+
+    def test_temporarily_unreachable_copy_waits_and_discovery_reports_an_incomplete_scan(self) -> None:
+        prefix = "tv/Show/Season 1"
+        rel_path = f"{prefix}/Episode.mkv"
+        with open_db(self.config.paths.db_path) as connection:
+            item = self._insert_item(connection, rel_path, status="validated")
+            stage = self._write_stage(rel_path, b"finished")
+            self._insert_artifact(connection, item, stage, passed=True)
+            with storage_outage(stage, stage.parent.resolve(), error=errno.ENOTCONN):
+                report = staged_integrity_report(connection, self.config, prefix, discover=True)
+            recovered = staged_integrity_report(connection, self.config, prefix, discover=True)
+
+        self.assertEqual(report.records[0].disposition, "remote_only_or_unreachable")
+        self.assertIn("storage", report.records[0].detail.lower())
+        self.assertTrue(report.discovery_truncated)
+        self.assertEqual(recovered.records[0].disposition, "promotable")
+        self.assertFalse(recovered.discovery_truncated)
 
     def test_relative_media_paths_mean_the_same_folders_from_any_working_directory(self) -> None:
         config_path = self.root / "config" / "mediaforce.toml"

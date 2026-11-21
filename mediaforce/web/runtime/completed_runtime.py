@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
 from mediaforce.library.media_scopes import media_scope_from_prefix
@@ -171,7 +172,12 @@ def list_completed_folders(
         if not _path_is_within_root(archived_path, resolved_archive_root):
             folder.outside_archive_root_count += 1
             continue
-        if not archived_path.is_file():
+        probe = probe_media_path(archived_path)
+        if problem := probe.problem:
+            folder.cleanup_detail = problem.reason
+            folder.cleanup_state = "blocked"
+            continue
+        if not probe.is_file or probe.info is None:
             if int(row["library_item_id"]) in confirmed_item_ids:
                 folder.originals_removed_count += 1
                 continue
@@ -179,11 +185,7 @@ def list_completed_folders(
             continue
         folder.archived_backup_count += 1
         counted_backup_paths.add(archived_path.resolve())
-        try:
-            folder.archived_backup_size_bytes += archived_path.stat().st_size
-        except FileNotFoundError:
-            folder.archived_backup_count -= 1
-            folder.missing_backup_count += 1
+        folder.archived_backup_size_bytes += probe.info.st_size
 
     # A later publish retains the previous rollback beside the latest original.
     # Include those retained copies in the same folder's owner-approved cleanup count.
@@ -200,23 +202,22 @@ def list_completed_folders(
             if not retained_path:
                 continue
             backup = Path(retained_path)
-            if not backup.is_file() or not _path_is_within_root(
-                backup, resolved_archive_root
-            ):
-                continue
-            if backup.resolve() in counted_backup_paths:
+            if not _path_is_within_root(backup, resolved_archive_root) or backup.resolve() in counted_backup_paths:
                 continue
             folder = grouped.get(item_folder_prefixes.get(int(event["library_item_id"]), ""))
-            if folder is not None:
-                try:
-                    size = backup.stat().st_size
-                except FileNotFoundError:
-                    continue
+            if folder is None:
+                continue
+            probe = probe_media_path(backup)
+            if problem := probe.problem:
+                folder.cleanup_state, folder.cleanup_detail = "blocked", problem.reason
+            elif probe.is_file and probe.info is not None:
                 folder.archived_backup_count += 1
-                folder.archived_backup_size_bytes += size
+                folder.archived_backup_size_bytes += probe.info.st_size
                 counted_backup_paths.add(backup.resolve())
 
     for folder in grouped.values():
+        if folder.cleanup_state == "blocked":
+            continue
         folder.cleanup_state, folder.cleanup_detail = _folder_cleanup_state(
             folder,
             archive_root_configured=archive_root is not None,

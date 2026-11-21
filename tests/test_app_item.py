@@ -1,8 +1,11 @@
+import errno
 import json
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from storage_outage import storage_outage
+
 from sqlalchemy import select
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
@@ -197,6 +200,21 @@ def test_a_size_held_file_plays_its_held_copy_against_the_file_as_it_is(config: 
     assert original is not None and original.read_bytes() == b"N" * 900
     assert facts is not None
     assert facts["files"][0]["held_copy"] == {"bytes": 40, "present": True}
+
+
+@pytest.mark.parametrize(("error", "reason"), [(errno.ETIMEDOUT, "storage"), (errno.EACCES, "permission")])
+def test_player_waits_when_a_held_copy_cannot_be_checked(
+        config: MediaforceConfig, tmp_path: Path, error: int, reason: str,
+) -> None:
+    path = tmp_path / "staging" / SEASON / "episode.mkv"
+    with open_db(config.paths.db_path) as connection:
+        item = _held(connection, tmp_path, 1, held_copy=path)
+    with storage_outage(path, error=error):
+        assert player_source(config, item, "compressed") is None
+        facts = item_payload(config, SEASON, sound=lambda _prefix: None)
+    assert facts is not None
+    assert reason in facts["files"][0]["held_copy"]["waiting_reason"].lower()
+    assert player_source(config, item, "compressed") == path
 
 
 def test_a_held_copy_that_is_gone_is_refused_and_said(config: MediaforceConfig, tmp_path: Path) -> None:

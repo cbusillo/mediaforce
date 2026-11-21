@@ -26,6 +26,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.sql.elements import ColumnElement
 from fastapi import HTTPException
 
+from mediaforce.core.media_storage import probe_media_path, stalled_media_read
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.runtime.scratch_reservations import calibration_scratch_reservations
 from mediaforce.ops.runtime_install import update_hold_reason
@@ -1399,7 +1400,7 @@ def _remove_stale_staging_path(
             return result
         # `rm -f` also succeeds when the share is not mounted there; the controller sees the same path.
         try:
-            still_present = path.exists()
+            still_present = probe_media_path(path).exists_or_raise()
         except OSError as exc:
             return _StagingPathCleanupResult(
                 _StagingPathCleanupOutcome.CLEANUP_DEFERRED,
@@ -1412,10 +1413,6 @@ def _remove_stale_staging_path(
             )
         return result
     try:
-        if path.exists():
-            result = _remove_path(path)
-            _prune_empty_quality_temp_dir(path.parent)
-            return result
         result = _remove_path(path)
         _prune_empty_quality_temp_dir(path.parent)
         return result
@@ -2218,8 +2215,10 @@ def encode_job_outputs_completed(connection: DBClient, job: dict[str, Any]) -> b
         if (
                 execution_mode_for_host(host) != "ssh"
                 or host_media_access_for_host(host) == "stream"
-        ) and not staging_path.exists():
-            return False
+        ):
+            probe = probe_media_path(staging_path)
+            if probe.info is None and not probe.unavailable:
+                return False
     return True
 
 
@@ -3256,13 +3255,15 @@ def _controller_staging_access_issue(
         return None
     nearest_existing = staging_root
     try:
-        while not nearest_existing.exists():
+        probe = probe_media_path(nearest_existing)
+        while not probe.exists_or_raise():
             parent = nearest_existing.parent
             if parent == nearest_existing:
                 break
             nearest_existing = parent
+            probe = probe_media_path(nearest_existing)
         accessible = (
-            nearest_existing.is_dir()
+            probe.is_dir
             and os.access(nearest_existing, os.W_OK | os.X_OK)
         )
     except OSError:
@@ -5692,7 +5693,7 @@ def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
         return "ssh_transport"
     if is_vmaf_model_load_failure(message):
         return "host_configuration"
-    if is_storage_io_failure(message):
+    if stalled_media_read(exc) or is_storage_io_failure(message):
         return "storage_io"
     if is_database_busy_failure(message):
         return "controller_database_busy"
@@ -5725,10 +5726,11 @@ def _encode_failure_is_quality_policy_failure(message: str) -> bool:
     )
 
 
-def _remove_path(path: Path | None) -> _StagingPathCleanupResult:
-    if path is None or not path.exists():
+def _remove_path(path: Path) -> _StagingPathCleanupResult:
+    probe = probe_media_path(path)
+    if not probe.exists_or_raise():
         return _StagingPathCleanupResult(_StagingPathCleanupOutcome.CLEANED)
-    if path.is_dir():
+    if probe.is_dir:
         return _StagingPathCleanupResult(
             _StagingPathCleanupOutcome.CLEANUP_FAILED,
             detail=f"expected a file but found a directory: {path}",

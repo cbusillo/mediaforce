@@ -18,6 +18,7 @@ from sqlalchemy import tuple_
 from sqlalchemy import update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow
 from mediaforce.core.db_tables import item_events
@@ -811,11 +812,7 @@ def _iter_media_files(
     scan_state = enumeration or _RootEnumeration()
     if limit is not None and seen >= limit:
         return
-    try:
-        if not root_path.is_dir():
-            scan_state.issue_code = "source_unavailable"
-            return
-    except OSError:
+    if not probe_media_path(root_path).is_dir:
         scan_state.issue_code = "source_unavailable"
         return
 

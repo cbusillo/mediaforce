@@ -227,9 +227,12 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
     if sample_status in SAMPLE_RUNNING_STATUSES:
         return PageState("making_test", "active", source_job=_source_job(sample_job, "sample"))
     if sample_status in SAMPLE_WAITING_STATUSES:
+        progress = object_dict(sample_job.get("progress"))
+        retry_at = _timestamp(progress.get("retry_not_before"))
         return PageState(
             "sample_waiting",
             "attention" if sample_status == "retry_backoff" else "quiet",
+            wait_detail=progress.get("waiting_reason") if retry_at is None or retry_at > datetime.now(UTC) else None,
             source_job=_source_job(sample_job, "sample"),
         )
     if lane == "blocked" and not awaits_review:

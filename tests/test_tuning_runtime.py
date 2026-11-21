@@ -13,6 +13,8 @@ from typing import Any
 from unittest.mock import Mock, patch
 
 from fastapi.routing import APIRoute
+from storage_outage import storage_outage
+
 from sqlalchemy import select
 
 from mediaforce.advisor import (
@@ -971,6 +973,27 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(response.request_disposition, "honored")
         self.assertIn("smaller", response.request_response)
         self._assert_structured_subprocess_call(commands)
+
+    def test_cleanup_waits_if_a_backup_cannot_be_counted(self) -> None:
+        archived, = self._archived_backups("episode.mkv")
+        with storage_outage(archived):
+            summary = archive_cleanup_summary(self.config)
+            result = clear_archive_cleanup_action(self.config)
+        self.assertIn("storage", summary["waiting_reason"].lower())
+        self.assertFalse(result["ok"])
+        self.assertTrue(archived.is_file())
+
+    def test_unreachable_backup_is_not_reported_as_already_removed(self) -> None:
+        from mediaforce.web import app as web_app
+
+        rel_path = "tv/Example Show/Season 1/Episode.mkv"
+        self._insert_promoted_artifact(rel_path=rel_path, promoted_at="2026-04-10T10:00:00+00:00",
+                                       archived_size_bytes=3, bytes_saved=12)
+        with open_db(self.config.paths.db_path) as connection, storage_outage(self.config.archive_root / rel_path):
+            folder, = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)["folders"]
+        self.assertEqual(folder["cleanup_state"], "blocked")
+        self.assertIn("storage", folder["cleanup_detail"].lower())
+        self.assertEqual(folder["missing_backup_count"], 0)
 
     def test_archive_cleanup_summary_counts_files_and_size(self) -> None:
         archive_root = self.config.archive_root

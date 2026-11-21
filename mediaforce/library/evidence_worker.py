@@ -16,6 +16,7 @@ from typing import Any, Literal, cast
 from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
 
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import library_items
@@ -989,24 +990,19 @@ def _source_fingerprint(
         source_path: Path,
 ) -> tuple[SourceAvailability, str | None]:
     root_path = config.source_root_map.get(claim.media_root)
-    if root_path is None:
+    if root_path is None or not probe_media_path(root_path).is_dir:
         return "root_unavailable", None
-    try:
-        if not root_path.is_dir():
-            return "root_unavailable", None
-        if not source_path.is_file():
-            return "source_unavailable", None
-        stat_result = source_path.stat()
-        if claim.uses_content_fingerprint:
-            return "available", content_version_fingerprint(source_path, stat_result)
-        return "available", file_fingerprint(source_path, stat_result, claim.duration_seconds)
-    except OSError:
+    source = probe_media_path(source_path)
+    if source.is_file and source.info is not None:
         try:
-            if not root_path.is_dir():
-                return "root_unavailable", None
+            if claim.uses_content_fingerprint:
+                return "available", content_version_fingerprint(source_path, source.info)
+            return "available", file_fingerprint(source_path, source.info, claim.duration_seconds)
         except OSError:
-            return "root_unavailable", None
-        return "source_unavailable", None
+            return ("source_unavailable" if probe_media_path(root_path).is_dir else "root_unavailable"), None
+    if source.unavailable and not probe_media_path(root_path).is_dir:
+        return "root_unavailable", None
+    return "source_unavailable", None
 
 
 def _retry_delay_seconds(attempt_count: int, deps: EvidenceWorkerDeps) -> int:

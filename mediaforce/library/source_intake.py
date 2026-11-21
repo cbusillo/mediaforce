@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from sqlalchemy import ColumnElement, and_, exists, func, or_, select, update
 
+from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow, open_db
 from mediaforce.core.db_tables import (
@@ -277,7 +278,7 @@ def assess_source_input(
         )
     path = Path(item["source_path"]).resolve()
     root = config.source_root_map.get(item["media_root"])
-    if root is None or not root.is_dir():
+    if root is None or not probe_media_path(root).is_dir:
         raise RuntimeError("The original's library is unavailable")
     before = observe_file(path)
     if not _matches_scanned_identity(item, before):

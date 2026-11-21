@@ -187,6 +187,8 @@ def _last_answered_at(computer: Mapping[str, Any]) -> str | None:
 
 
 def _storage(computer: Mapping[str, Any]) -> str:
+    if computer.get("check_failure") in {"controller_storage_unavailable", "controller_media_access"}:
+        return "missing"
     if computer.get("media_access") == "stream":
         return "sent"
     if computer.get("missing_mounts") or computer.get("controller_storage_issue"):

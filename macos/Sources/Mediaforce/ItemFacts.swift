@@ -86,6 +86,7 @@ struct ItemFacts: Decodable, Sendable {
     struct HeldCopy: Decodable, Sendable, Equatable {
         let bytes: Int64?
         let present: Bool
+        var waitingReason: String?
     }
 
     /// The file needs more than its size goal to keep the picture right.
