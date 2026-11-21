@@ -37,6 +37,8 @@ def update_hold_reason(support_dir: Path, *, allow_during_drain: bool = False) -
     intent = read_update_intent(support_dir)
     if intent is None or allow_during_drain and intent.get("phase") == "draining":
         return None
+    if allow_during_drain:
+        return "Mediaforce is checking an update. Please try this change again when it finishes."
     return f"Mediaforce is updating to build {intent.get('to', 'unknown')}. New work waits until it finishes."
 
 

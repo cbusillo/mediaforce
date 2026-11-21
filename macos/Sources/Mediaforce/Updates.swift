@@ -108,7 +108,8 @@ final class Updates: NSObject, SPUUpdaterDelegate, ObservableObject {
             let data = try Data(contentsOf: record)
             let intent = try JSONDecoder().decode(ServerUpdateStep.Intent.self, from: data)
             guard intent.phase == expected.phase, intent.stage == expected.stage, intent.to == expected.to,
-                  intent.app == Bundle.main.bundleURL.path,
+                  let installed = intent.app,
+                  URL(filePath: installed).resolvingSymlinksInPath().path == Bundle.main.bundleURL.resolvingSymlinksInPath().path,
                   var fields = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
             fields["phase"] = phase
             fields["to"] = build

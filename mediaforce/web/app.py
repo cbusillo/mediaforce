@@ -701,7 +701,7 @@ def create_app(
     ) -> Response:
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             if reason := update_hold_reason(config.paths.db_path.parent, allow_during_drain=True):
-                return JSONResponse({"ok": False, "detail": reason, "message": reason}, status_code=503)
+                return JSONResponse({"ok": False, "message": reason}, status_code=409)
         if _request_triggers_periodic_cleanup(request.method, request.url.path):
             _run_periodic_cleanup(
                 config,

@@ -117,8 +117,8 @@ forward:
 
 A release that fails validation after starting is added to
 `runtime/failed-update-builds.json`, so the app never installs it again
-through Sparkle. A dropped identity response retries. Transport errors during
-that check allow the build to be offered again after rollback.
+through Sparkle. A dropped identity response retries twice before a continued
+failure triggers rollback and excludes that build.
 
 ### First install from the clone runtime
 

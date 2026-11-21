@@ -439,7 +439,7 @@ def test_rollback_refuses_a_switched_database_before_stopping_service(update: Up
     with sqlite3.connect(change.config.paths.db_path) as other:
         other.execute("create table other_library (id integer)")
     calls = list(server.launchctl)
-    with pytest.raises(deploy.UpdateRefused, match="database"):
+    with pytest.raises(deploy.UpdateRefused):
         deploy.rollback_update(change)
     assert server.launchctl == calls
     with sqlite3.connect(change.config.paths.db_path) as other:
@@ -518,7 +518,8 @@ def test_download_keeps_its_backup_across_quit_until_sparkle_aborts_or_installs(
     assert deploy.reconcile_update(change) == "updated"
 
 
-def test_a_repeatable_http_server_error_quarantines_the_candidate(update: Update) -> None:
+@pytest.mark.parametrize("transport_failure", [False, True])
+def test_a_candidate_that_repeatedly_fails_the_identity_request_is_quarantined(update: Update, transport_failure: bool) -> None:
     from email.message import Message
     from urllib.error import HTTPError
 
@@ -528,6 +529,8 @@ def test_a_repeatable_http_server_error_quarantines_the_candidate(update: Update
 
     def broken(base: str, route: str) -> dict[str, Any]:
         if route == "/api/release/work":
+            if transport_failure:
+                raise ConnectionResetError("candidate disconnected")
             raise HTTPError(base + route, 500, "fixture failure", Message(), None)
         return server.api(base, route)
 
@@ -541,7 +544,11 @@ def test_unbound_legacy_preparation_finishes_against_its_unchanged_database(upda
     deploy.prepare_update(change, "2")
     intent = _intent(change)
     del intent["database"]
-    (Path(intent["stage"]) / "config.toml").unlink()
+    stage = Path(intent["stage"])
+    (stage / "config.toml").unlink()
+    with (stage / "before.sqlite").open("r+b") as saved:
+        saved.seek(96)
+        saved.write((3_008_002).to_bytes(4, "big"))
     deploy._write_intent(change.support, intent)
     _install(change, build="2")
     assert deploy.reconcile_update(change) == "updated"

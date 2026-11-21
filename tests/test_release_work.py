@@ -163,8 +163,12 @@ def test_real_app_registers_readonly_http_evidence_and_fails_without_database(tm
     for path in (SIZE_DECISION_PATH, "/api/encode-queue/pause"):
         held: list[Message] = []
         asyncio.run(request_over_http(app, held, method="POST", path=path))
-        assert held[0]["status"] == 503
+        assert held[0]["status"] == 409
         assert json.loads(b"".join(message.get("body", b"") for message in held))["ok"] is False
+    _write_intent(config.paths.db_path.parent, {"phase": "draining", "to": "next"})
+    draining: list[Message] = []
+    asyncio.run(request_over_http(app, draining, method="POST", path=SIZE_DECISION_PATH))
+    assert draining[0]["status"] == 415
     config.paths.db_path.unlink()
     failed: list[Message] = []
     with pytest.raises(FileNotFoundError):

@@ -16,7 +16,6 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError
 from urllib.request import urlopen
 
 from mediaforce.core.config import MediaforceConfig, load_config
@@ -384,7 +383,7 @@ def _switch(job: ReleaseInstall, evidence: dict[str, str]) -> None:
         _require_server(job.base_url, bundle_build(job.install), job.config, pending_encode)
         require_storage_admission(job.base_url, started_at)
     except Exception as failure:
-        if candidate_started and not _connection_failed(failure):
+        if candidate_started:
             _record_failed_build(job.support, bundle_build(job.app))
         if candidate_started or job.stopped or isinstance(failure, ListenerStillOpen):
             # Migrations, an unknown process on the port or a database the stopped install already touched require
@@ -470,17 +469,20 @@ def _require_saved_database(config: MediaforceConfig, intent: dict) -> None:
         with tempfile.TemporaryDirectory(dir=stage) as scratch:
             current = Path(scratch) / "database.sqlite"
             backup_database(database, current)
-            if filecmp.cmp(current, stage / "before.sqlite", shallow=False):
+            saved = stage / "before.sqlite"
+            # https://sqlite.org/fileformat2.html#write_library_version_number_and_version_valid_for_number
+            writer_version_offset = 96
+            with saved.open("rb") as original, current.open("r+b") as comparison:
+                original.seek(writer_version_offset)
+                comparison.seek(writer_version_offset)
+                comparison.write(original.read(4))
+            if filecmp.cmp(current, saved, shallow=False):
                 intent["database"] = str(database)
                 _write_intent(database.parent, intent)
                 return
     if recorded != str(database):
         raise UpdateRefused("The rollback database cannot be matched to this config. Restore the matching config "
                             "or use the stopped repair to install forward.")
-
-
-def _connection_failed(failure: Exception) -> bool:
-    return isinstance(failure, (OSError, HTTPException)) and not isinstance(failure, HTTPError)
 
 
 def _require_server(base_url: str, build: str | None, config: MediaforceConfig, pending_encode: int) -> None:
@@ -787,8 +789,7 @@ def _finish(update: AppUpdate, intent: dict) -> None:
         disable_login_item(update.paths)
         intent.update(phase="failed", failure=str(exc))
         _save_intent(update, intent)
-        if not _connection_failed(exc):
-            _record_failed_build(update.support, intent["to"])
+        _record_failed_build(update.support, intent["to"])
         raise
     _end(update)
 
