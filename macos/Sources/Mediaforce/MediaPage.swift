@@ -89,6 +89,14 @@ enum MediaKind: String, CaseIterable, Identifiable, Sendable {
     case everything, tv, movies, other
     var id: String { rawValue }
 
+    init(libraryType: String?) {
+        switch libraryType {
+        case "movie": self = .movies
+        case nil, "tv": self = .tv
+        default: self = .other
+        }
+    }
+
     var symbol: String {
         switch self {
         case .everything: "books.vertical"

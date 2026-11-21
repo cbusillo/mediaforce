@@ -39,15 +39,23 @@ without waiting for a cache to expire.
   finished when every present file is replaced or kept original, including a
   season kept entirely original, which saved nothing; its `finished_at` is its
   last replacement or keep decision.
-- `biggest_not_started`: the largest shows with no encode job, no replaced
-  file and no approved sample. `waiting_sample_prefix` names a season whose
-  sample waits on the owner.
+- `recently_finished`: the Library shelf combines finished TV seasons with
+  individually replaced or kept movie and VR & 3D files, newest first.
+  Selecting a file opens that exact file. Older Mac clients still read
+  `recently_finished_seasons`. Keep that field while those clients are supported.
+- `biggest_not_started`: ranks TV shows, movie titles and individual VR & 3D
+  files together by size. A job, a replaced or kept file, or an approved
+  sample takes its entry off the list. `waiting_sample_prefix` opens the
+  sample that needs review.
 - `samples`: `waiting_on_you` (page state `ready_to_compare`, or `needs_help`
   for a sample) and `approved_not_started` (`ready_to_make`). `state`,
   `action` and `failure` are the folder page's own codes, from
   `mediaforce/web/runtime/page_state.py`. Their
   waiting-list membership is selected from the season's canonical `needs_you`
-  fact.
+  fact. Movie and VR & 3D files and folders with a recorded sample use the
+  same page states. The read checks those scopes only while present files
+  still have work left. A sample being made or queued takes its title off
+  Biggest not started. Samples handled under a kind go to its group in Needs you.
 - `computers`: each computer's `state`, from the same rows as the computers
   page: `ready`, `busy`, `finishing_file` (a running file without a close deadline
   or an explicit bypass), `schedule_disabled`, `outside_schedule` (with `schedule_opens_at`),

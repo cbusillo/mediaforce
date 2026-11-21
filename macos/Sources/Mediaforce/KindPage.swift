@@ -203,7 +203,7 @@ struct KindShows: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
-                Text(Words.showsOfThisKind).font(.headline)
+                Text(Words.titlesOfThisKind).font(.headline)
                 Spacer()
                 if leftOut > 0 {
                     Button(Words.seasonsWithoutKind(leftOut), action: openLeftOut).buttonStyle(QuietLinkStyle())

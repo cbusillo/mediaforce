@@ -277,10 +277,10 @@ extension Words {
         }
         sentences.append(contentsOf: work.originalCheckWaitReasons)
         if work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
-            sentences.append("Nothing is being compressed. \(count(facts.samples.waitingOnYou.count, "sample")) under Samples need you first.")
+            sentences.append("Nothing is being compressed. \(count(facts.samples.waitingOnYou.count, "sample")) in Needs you.")
         }
         if !work.kindsNeedingYou.isEmpty {
-            sentences.append("\(count(work.kindsNeedingYou.count, "group")) of shows waiting in Needs you.")
+            sentences.append("\(count(work.kindsNeedingYou.count, "group")) waiting in Needs you.")
         }
         if !work.seasonsNeedingYou.isEmpty {
             sentences.append("\(count(work.seasonsNeedingYou.count, "season")) waiting for you in \(mediaKind(.tv)).")
@@ -310,14 +310,14 @@ extension Words {
         switch code {
         case "arithmetic_infeasible", "bound_exhausted", "quality_conflict":
             "It can't reach the size goal at good quality."
-        case "goal_too_small": "The size goal is too small for this season."
+        case "goal_too_small": "The size goal is too small for this sample."
         case "size_under_target", "size_over_target", "size_unverified": "The sample came out the wrong size."
         case "no_access": "Mediaforce couldn't open the source files."
         case "missing_clips": "Its comparison clips are gone."
         case "restarted": "It was interrupted by a restart."
         case "stopped": "It was stopped."
         case "containment_unproven":
-            "Mediaforce couldn't confirm a computer finished an episode's picture check. Once it's idle, try that episode again."
+            "Mediaforce couldn't confirm a computer finished the picture check. Once it's idle, try that file again."
         default: recordedStop(code)
         }
     }
@@ -426,6 +426,9 @@ extension Words {
     }
 
     static func finishedNotice(_ season: MainWindowFacts.FinishedSeason, keptReasons: [String]) -> String {
+        if MediaKind(libraryType: season.mediaType) != .tv {
+            return season.keptEntirelyOriginal ? "The file was kept original." : "\(size(season.bytesSaved)) saved."
+        }
         if season.keptEntirelyOriginal {
             var reasons: [String] = []
             for reason in keptReasons.map(keptReason) where !reasons.contains(reason) {
@@ -444,6 +447,7 @@ extension Words {
 
     static func finishedSummary(_ season: MainWindowFacts.FinishedSeason) -> String {
         let name = Words.season(season.show, season.season)
+        if let mediaType = season.mediaType, mediaType != "tv" { return "\(name): \(finishedSaved(season))" }
         if season.keptEntirelyOriginal { return "\(name): every episode kept original" }
         let kept = season.keptOriginalCount > 0 ? ", \(season.keptOriginalCount) kept original" : ""
         return "\(name): \(count(season.episodeCount, "episode")) replaced\(kept), \(size(season.bytesSaved)) saved"
@@ -466,7 +470,7 @@ extension Words {
 extension Words {
     static let watchSample = "Watch sample"
     static let watchApprovedSample = "Watch approved sample"
-    static let approveOnlySeason = "Approve only this season"
+    static let approveOnlySeason = "Approve this sample only"
 
     static func sampleApproval(scope: String) -> String {
         scope == "season" ? approveSample : "Approve \(kindName(scope))"
@@ -485,7 +489,7 @@ extension Words {
         return result.needsChoice ? .compressNeedsChoice : .approvedNotCompressing
     }
 
-    static let approveSample = "Approve and compress the season"
+    static let approveSample = "Approve and start compressing"
     static let preparingSample = "Preparing the sample…"
     static let sampleDidNotStart = "The sample didn't start"
     static let makeSampleAgain = "Make sample again"
@@ -644,25 +648,25 @@ extension Words {
         case ("making_test", _): "Making the sample now."
         case ("sample_waiting", _): "The sample waits for a free computer."
         case ("ready_to_compare", _): facts.approvalKind.map {
-            "Watch the sample. Approving it sets how all \(kindName($0).lowercased()) shows should look."
+            "Watch the sample. Approving it sets the look for all \(kindName($0).lowercased())."
         } ?? "The sample is ready. Watch it next to the original."
         case ("needs_help", "choose_size"): "The sample can't reach the size goal at good quality. Choose another size."
-        case ("needs_help", "retry_encode"): "Compressing stopped. Finished episodes are safe; the rest need trying again."
-        case ("needs_help", "check_computer"): "An episode is on hold until a computer is checked."
-        case ("needs_help", "review_files"): "Some files need you before the season can go on."
+        case ("needs_help", "retry_encode"): "Compressing stopped. Finished files are safe. Try the unfinished files again."
+        case ("needs_help", "check_computer"): "A file is on hold until a computer is checked."
+        case ("needs_help", "review_files"): "Some files need your attention."
         case ("needs_help", _): "The sample needs making again."
-        case (_, "choose_size"): "Choose a size for this season's first sample."
-        case ("needs_test", _), ("waiting_for_kind", "make_sample"): "This season has no sample yet."
-        case ("waiting_for_measurement", _): facts.waitDetail ?? "This season needs original measurements before its kind can be chosen."
-        case ("waiting_for_kind", _): "This season will follow the choice for its kind of content."
-        case ("ready_to_make", _): "Approved. The season waits to be compressed."
-        case ("making_season", _): "Compressing the season."
-        case ("motion_held", "decide_motion"): "Some episodes need a decision about their motion pattern."
-        case ("motion_held", _): "The remaining episodes stay original because their motion can't be converted safely."
-        case ("ready_to_check", _): "The compressed episodes are ready for their safety check."
-        case ("finish_blocked", _): "Some compressed episodes aren't ready to replace their originals yet."
-        case ("ready_to_finish", _): "The compressed episodes passed their checks and can replace the originals."
-        case ("finished", _): "This season is finished."
+        case (_, "choose_size"): "Choose a size for the first sample."
+        case ("needs_test", _), ("waiting_for_kind", "make_sample"): "No sample has been made yet."
+        case ("waiting_for_measurement", _): facts.waitDetail ?? "The originals need measuring before a look can be chosen."
+        case ("waiting_for_kind", _): "Waiting for a look for this kind of content."
+        case ("ready_to_make", _): "Approved. Waiting to start compressing."
+        case ("making_season", _): "Compressing now."
+        case ("motion_held", "decide_motion"): "Some files need a decision about their motion pattern."
+        case ("motion_held", _): "The remaining files stay original because their motion can't be converted safely."
+        case ("ready_to_check", _): "The compressed files are ready for their safety check."
+        case ("finish_blocked", _): "Some compressed files aren't ready to replace their originals yet."
+        case ("ready_to_finish", _): "The compressed files passed their checks and can replace the originals."
+        case ("finished", _): "Finished."
         default: "Nothing needs you here right now."
         }
     }
@@ -676,7 +680,7 @@ extension Words {
         case "confirm_absolute": "Keep this size"
         default: "Size goal"
         }
-        return "\(name), \(size(choice.targetBytes)) an episode"
+        return "\(name), \(size(choice.targetBytes)) per file"
     }
 
     static func clipSize(_ clip: SampleFacts.Clip) -> String {
@@ -689,10 +693,10 @@ extension Words {
 
     static func sampleFacts(_ facts: SampleFacts) -> [(label: String, value: String)] {
         [
-            ("This episode now", facts.episodeBytes > 0 ? size(facts.episodeBytes) : "Not known"),
+            ("Original file size", facts.episodeBytes > 0 ? size(facts.episodeBytes) : "Not known"),
             ("Estimated after", facts.estimatedEpisodeBytes > 0 ? "About \(size(facts.estimatedEpisodeBytes))" : "No estimate yet"),
-            ("Season space saved", facts.estimatedSavedBytes.map { "About \(size($0)) from \(count(facts.seasonEpisodeCount, "episode"))" } ?? "No estimate yet"),
-            ("Size goal", facts.goalBytes > 0 ? "\(size(facts.goalBytes)) an episode" : "Not set"),
+            ("Estimated space saved", facts.estimatedSavedBytes.map { "About \(size($0)) from \(count(facts.seasonEpisodeCount, "file"))" } ?? "No estimate yet"),
+            ("Size goal", facts.goalBytes > 0 ? "\(size(facts.goalBytes)) per file" : "Not set"),
         ]
     }
 
@@ -704,7 +708,7 @@ extension Words {
         )
         case "confirm_size_tradeoff": (
             "This sample missed your size goal.",
-            "The season may come out larger or smaller than the goal. The estimate on this page is the size you would accept."
+            "The finished files may be larger or smaller than the goal. The estimate on this page is the size you would accept."
         )
         default: nil
         }
@@ -713,7 +717,7 @@ extension Words {
 
 extension ActionNotice {
     static func kindNotExtended(_ code: String) -> ActionNotice {
-        ActionNotice(title: "This season was approved; its kind wasn't", message: Words.kindRefusal(code))
+        ActionNotice(title: "Sample approved for this title only", message: Words.kindRefusal(code))
     }
 
     static let sampleStartTimedOut = ActionNotice(
@@ -728,12 +732,12 @@ extension ActionNotice {
 
     static let approvedNotCompressing = ActionNotice(
         title: "Compressing didn't start",
-        message: "The sample is approved, but the season isn't compressing. Press Start compressing to try again."
+        message: "The sample is approved, but compression hasn't started. Press Start compressing to try again."
     )
 
     static let approvalScopeChanged = ActionNotice(
         title: "This sample no longer decides the kind",
-        message: "Approve only this season, or open the kind to review its current choice. Nothing was approved."
+        message: "Approve this sample only, or open the kind to review its current choice. Nothing was approved."
     )
 
     static let sampleChanged = ActionNotice(
@@ -743,7 +747,7 @@ extension ActionNotice {
 
     static let compressNeedsChoice = ActionNotice(
         title: "Compressing needs a choice first",
-        message: "The season is approved, but compression did not start. Choose a size for a fresh sample on the sample page."
+        message: "The sample is approved, but compression did not start. Choose a size for a fresh sample on the sample page."
     )
 
 }
@@ -1311,6 +1315,23 @@ extension Words {
         return parts.joined(separator: ", ") + "."
     }
 
+    static func movieQueueStatus(_ work: SampleFacts, queue: ItemFacts.MovieQueue?) -> String {
+        guard work.state == "ready_to_make", let queue else { return sampleHeadline(work) }
+        var lines: [String] = []
+        if queue.waits.contains("queue_paused") { lines.append("Compression is paused.") }
+        if queue.waits.contains("production_active") { lines.append("The current compression run finishes first.") }
+        if let refusal = queue.refusal {
+            if refusal.code == "free_space_reserve", let measured = refusal.measurable {
+                lines.append(measured ? "There isn’t enough free space for the original and the compressed copy."
+                                      : "Mediaforce can’t check how much free space is available.")
+            } else if let reason = refusal.message {
+                lines.append(reason)
+            }
+            lines.append("Mediaforce will try this movie again.")
+        }
+        return lines.isEmpty ? "Approved. Movies and TV seasons take their turn by size, largest first." : lines.joined(separator: " ")
+    }
+
     static func fileName(_ file: ItemFacts.File) -> String {
         guard let episode = file.episode else { return file.name }
         if file.inShowPage, let season = file.season { return "Season \(season), Episode \(episode)" }
@@ -1321,7 +1342,14 @@ extension Words {
         switch file.stage {
         case "needs_you": file.sizeQuestion != nil ? "Needs more than its size goal" : waitLabel(file.waitReason?.code ?? file.validation)
         case "kept_original": "\(keptOriginal): \(keptReason("motion_\(file.keptReason ?? "")"))"
-        case "held": file.needsMotionChoice ? motionQuestion : file.heldReason == "motion_pattern" ? unsafeMotion : "Waiting to start"
+        case "held":
+            switch file.heldReason {
+            case "motion_pattern": file.needsMotionChoice ? motionQuestion : unsafeMotion
+            case "movie_extra": "This is an extra. It stays out when the movie is compressed."
+            case "movie_uncertain": "Mediaforce can’t tell whether this file is part of the movie."
+            case "browse_only": "This library is set to browse only."
+            default: "Waiting to start"
+            }
         case "compressing": file.percentComplete.map { "Compressing, \($0)%" } ?? "Compressing"
         case "measuring": "Finding the right size"
         case "getting_ready": "Getting ready"
@@ -1368,6 +1396,12 @@ extension Words {
         case "storage_repair": "The storage it's on needs to be mounted or repaired."
         case "storage_reconnect": "The storage it's on needs to be reconnected."
         case "copy_missing": "Its compressed copy is missing, so there's nothing to check."
+        case "target_lower_bound_exceeds_source_relative_cap":
+            "The size goal is larger than this file is allowed to be. Lower the goal or raise the largest allowed size."
+        case "source_relative_cap_consumed_by_non_video_budget":
+            "The sound and subtitles alone use the whole allowed file size. Keep fewer tracks or raise the largest allowed size."
+        case "target_consumed_by_minimum_non_video_bytes", "target_consumed_by_reserved_non_video_bytes":
+            "The sound and subtitles leave no room for the picture at this size goal. Keep fewer tracks or raise the goal."
         case "settings_block": "Mediaforce can't start it with its library's current settings."
         case let code: recordedStop(code) ?? "It needs a decision from you."
         }
@@ -1394,6 +1428,8 @@ extension Words {
         case "storage_repair": "Storage needs a repair"
         case "storage_reconnect": "Storage disconnected"
         case "copy_missing": "Compressed copy missing"
+        case "target_lower_bound_exceeds_source_relative_cap", "source_relative_cap_consumed_by_non_video_budget",
+             "target_consumed_by_minimum_non_video_bytes", "target_consumed_by_reserved_non_video_bytes": "Size settings conflict"
         case "settings_block": "Can't start"
         default: "Needs a decision"
         }
@@ -1569,7 +1605,7 @@ extension Words {
         case .checkFiles: "Check New Files"
         case .reviewFiles: "Review Files"
         case .replaceOriginals: "Replace Originals…"
-        case .retryUnfinished: "Retry Unfinished Episodes"
+        case .retryUnfinished: "Retry Unfinished Files"
         case .decideMotion: "Review Motion"
         }
     }
@@ -1629,13 +1665,13 @@ extension Words {
 // The page for how each kind of content should look.
 extension Words {
     static let howItShouldLook = "How it should look"
-    static let showsOfThisKind = "Shows and movies"
+    static let titlesOfThisKind = "Titles with this look"
     static let fourK = "4K"
     static let keepFourK = "Keep 4K"
     static func bringDownTo(_ height: Int) -> String { "Bring down to \(height)p" }
     static let approvedShow = "Approved"
     // Stopping removes the shared setting, so each show of the kind goes back to its own sample.
-    static let stopUsingKind = "Decide Show by Show"
+    static let stopUsingKind = "Decide Each Title Separately"
     static let kindRefusedTitle = "Mediaforce didn't use that setting"
     static let ok = "OK"
     static let backOneFrame = "Back one frame"
@@ -1650,10 +1686,10 @@ extension Words {
     static func oneAtATimeHelp(_ other: String) -> String {
         "Click the picture to switch between the original and the \(other.lowercased())"
     }
-    static let couldNotPlayEpisode = "Couldn't play this episode."
+    static let couldNotPlayEpisode = "Couldn't play this file."
     static let couldNotPlaySample = "Couldn't play this moment of the sample."
     static let gettingSampleReady = "Getting the sample ready to play"
-    static let gettingEpisodeReady = "Getting the episode ready to play"
+    static let gettingEpisodeReady = "Getting the file ready to play"
     static let seasonsWithoutKindTitle = "Not measured yet"
     static let showEverything = "Show Everything"
 
@@ -1669,7 +1705,8 @@ extension Words {
     static func kindMembers(_ kind: KindsFacts.Kind) -> [String] {
         let movies = kind.shows.filter(\.isMovie).count
         let shows = kind.shows.count - movies
-        return [shows > 0 || movies == 0 ? count(shows, "show") : nil, movies > 0 ? count(movies, "movie") : nil].compactMap { $0 }
+        if kind.shows.isEmpty { return [count(0, "title")] }
+        return [shows > 0 ? count(shows, "show") : nil, movies > 0 ? count(movies, "movie") : nil].compactMap { $0 }
     }
 
     static func kindSubtitle(_ kind: KindsFacts.Kind) -> String {
@@ -1683,7 +1720,7 @@ extension Words {
     static func sizeSetting(_ setting: KindsFacts.Setting) -> String {
         guard let megabytes = setting.sizeGoalMb else { return "its approved size" }
         let amount = "\(Int(megabytes.rounded())) MB"
-        return setting.sizeGoalMode == "normalized" ? "\(amount) per 45-minute episode" : "\(amount) per episode"
+        return setting.sizeGoalMode == "normalized" ? "\(amount) per 45 minutes" : "\(amount) per file"
     }
 
     static func showSetting(_ show: String, _ setting: KindsFacts.Setting) -> String {
@@ -1697,14 +1734,14 @@ extension Words {
     }
 
     static func decidedShowByShow(_ code: String) -> String {
-        code == "cartoon" ? "Each cartoon is decided on its own." : "Each \(kindName(code)) show is decided on its own."
+        code == "cartoon" ? "Each cartoon is decided on its own." : "Each title is decided on its own."
     }
 
     static func kindEmpty(_ code: String) -> String {
         "Nothing measures as \(kindName(code).lowercased()) yet."
     }
 
-    static let kindNothingToWatch = "No episode made with this setting is kept to compare yet."
+    static let kindNothingToWatch = "No file made with this setting is available to compare yet."
     static let makeASample = "Make a Sample"
 
     static func makeSampleOf(_ show: String) -> String {
@@ -1714,11 +1751,11 @@ extension Words {
     static func kindRefusal(_ code: String?) -> String {
         switch code {
         case "sample_changed": "The approved sample changed before it could be used for this kind. The kind wasn't changed."
-        case "approval_not_current": "That show's sample approval has changed. Approve its sample again first."
-        case "size_goal_not_scalable": "That setting is a size per episode, so it can't carry to other shows."
-        case "source_kind_differs": "That show's sample was made on a season of another kind."
-        case "no_folder_approval": "That show has no approved sample of its own."
-        case "kind_is_one_time": "Each of these shows is decided on its own sample."
+        case "approval_not_current": "The approval has changed. Review the sample again first."
+        case "size_goal_not_scalable": "That size is fixed per file, so it can’t carry to other titles."
+        case "source_kind_differs": "That sample was made for a different kind of content."
+        case "no_folder_approval": "This title has no approved sample of its own."
+        case "kind_is_one_time": "Each title needs its own approved sample."
         default: "Mediaforce didn't say why."
         }
     }
@@ -1748,7 +1785,7 @@ extension Words {
     static let watchIt = "Watch it"
     static let chooseSettings = "Choose settings"
     static let chooseDetail = "Choose detail"
-    static let chooseAnotherShow = "Choose another show"
+    static let chooseAnotherShow = "Choose another title"
     static let openSample = "Open sample"
     static let showSeason = "Show season"
     static let showComputer = "Show computer"
@@ -1777,7 +1814,7 @@ extension Words {
     }
 
     static func useSettingsAsk(_ setting: KindsFacts.Setting?) -> String {
-        guard let setting else { return "Use the settings you approved for another show?" }
+        guard let setting else { return "Use settings from another title?" }
         return "Use \(setting.name)'s settings, \(sizeSetting(setting))?"
     }
 

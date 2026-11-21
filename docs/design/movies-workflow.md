@@ -35,6 +35,13 @@ second encode path.
 
 ## Movie Page
 
+- A movie covered by the approved live-action look takes its turn alongside TV
+  seasons, largest total waiting size first. The planner picks the next title
+  or season when the current production run clears.
+- The movie page explains when a title is waiting for measurement, when a file
+  falls outside title-wide compression, and when its size limits conflict.
+  An approved title shows a paused or busy queue and, during a retry wait,
+  the reason its last attempt could not start.
 - Movie scopes reuse the existing folder APIs, calibration, manifests, queue,
   validation, promotion, and recovery machinery.
 - The route selects movie or TV presentation from `media_scope.domain`.

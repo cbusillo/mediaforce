@@ -252,7 +252,7 @@ def test_biggest_not_started_leaves_out_shows_with_any_work(connection: DBClient
 
     assert [show["show"] for show in biggest] == ["ER", "Psych"]
     assert biggest[0] == {
-        "show_prefix": "tv/ER", "show": "ER", "bytes": 1800, "episode_count": 2, "season_count": 2,
+        "show_prefix": "tv/ER", "show": "ER", "media_type": "tv", "bytes": 1800, "episode_count": 2, "season_count": 2,
         "waiting_sample_prefix": None,
     }
     assert biggest[1]["waiting_sample_prefix"] == "tv/Psych/Season 1"
@@ -636,3 +636,55 @@ def test_automatic_sample_retries_stay_quiet_until_the_existing_retry_limit(
     assert bool(facts["work"]["kinds_needing_you"]) == (has_kind and exhausted)
     assert bool(facts["samples"]["waiting_on_you"]) == (exhausted and not has_kind)
     assert not facts["work"]["seasons_needing_you"]
+
+
+def test_biggest_not_started_ranks_movies_and_vr_with_shows(connection: DBClient) -> None:
+    _item(connection, "movies/Feature/part1.mkv", size=600)
+    _item(connection, "movies/Feature/part2.mkv", size=500)
+    _item(connection, "tv/Series/Season 2/episode.mkv", size=900)
+    _item(connection, "other/Trips/Coast.mkv", size=800)
+    _item(connection, "other/Trips/Mountains.mkv", size=1500)
+    _encode_job(connection, "other/Trips/Mountains.mkv")
+    _item(connection, "movies/Started/cut.mkv", size=2000)
+    _encode_job(connection, "movies/Started/cut.mkv")
+
+    rows = _payload(connection)["biggest_not_started"]
+
+    assert [(row["show_prefix"], row["bytes"]) for row in rows] == [
+        ("movies/Feature", 1100), ("tv/Series", 900), ("other/Trips/Coast.mkv", 800),
+    ]
+
+
+def test_finished_lately_includes_replaced_and_kept_non_tv_files_by_date(connection: DBClient) -> None:
+    _replaced(connection, "tv/Series/Season 2/episode.mkv", saved=300, at="2026-10-20")
+    _replaced(connection, "movies/Feature/feature.mkv", saved=600, at="2026-10-21")
+    path = "other/Trips/Coast.mkv"
+    _keep_original(connection, _item(connection, path), path, at="2026-10-22")
+    _item(connection, "movies/Unfinished.mkv")
+
+    payload = _payload(connection)
+
+    assert [(row["prefix"], row["bytes_saved"]) for row in payload["recently_finished"]] == [
+        (path, 0), ("movies/Feature/feature.mkv", 600), ("tv/Series/Season 2", 300),
+    ]
+    assert payload["space_saved"]["season_count"] == 1
+
+
+def test_latest_opens_nested_movie_and_vr_files_without_inventing_seasons(connection: DBClient) -> None:
+    paths = ["movies/Film/Extras/Clip.mkv", "other/Travel/Season 2/Coast.mkv"]
+    for path in paths:
+        _event(connection, _item(connection, path), "encoding_completed", NOW)
+
+    events = _payload(connection)["events"]
+
+    assert [event["rel_path"] for event in events] == paths[::-1]
+    assert all(event["season"] is None for event in events)
+
+
+def test_work_headline_names_a_running_vr_file_under_a_season_named_folder(connection: DBClient) -> None:
+    _item(connection, "other/Travel/Season 2/Coast.mkv")
+    _encode_job(connection, "other/Travel/Season 2/Coast.mkv", status="running")
+
+    [running] = _payload(connection)["work"]["running_seasons"]
+
+    assert (running["show"], running["season"], running["show_prefix"]) == ("Coast", None, running["prefix"])

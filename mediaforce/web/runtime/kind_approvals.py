@@ -252,10 +252,7 @@ def background_queue_blocker(
         connection: DBClient, *, library_item_ids: Collection[int] | None = None, config: MediaforceConfig | None = None,
 ) -> dict[str, Any] | None:
     """Why the background queue waits: the owner paused work, or a production run is queued or running."""
-    active = connection.execute(select(encode_jobs.c.job_id).where(
-        encode_jobs.c.status.in_(ACTIVE_ENCODE_JOB_STATUSES), encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS),
-    ).limit(1)).first()
-    if load_queue_state(connection).get("is_paused") or active is not None:
+    if _queue_waits(connection):
         return {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
     if library_item_ids is not None:
         files = _waiting_files(connection, library_item_ids=library_item_ids)
@@ -264,12 +261,24 @@ def background_queue_blocker(
     return None
 
 
-def _waiting_seasons(connection: DBClient, config: MediaforceConfig) -> list[tuple[str, int, tuple[int, ...]]]:
+def _queue_waits(connection: DBClient) -> list[str]:
+    active = connection.execute(select(encode_jobs.c.job_id).where(
+        encode_jobs.c.status.in_(ACTIVE_ENCODE_JOB_STATUSES), encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS),
+    ).limit(1)).first()
+    waits = ["queue_paused"] if load_queue_state(connection).get("is_paused") else []
+    if active is not None:
+        waits.append("production_active")
+    return waits
+
+
+def _waiting_seasons(
+        connection: DBClient, config: MediaforceConfig, *, library_item_ids: Collection[int] | None = None,
+) -> list[tuple[str, int, tuple[int, ...]]]:
     """Seasons and movie titles with files still to compress, largest waiting space first, with those files' ids.
 
     Files the owner chose to keep original are finished, so they never bring a season back.
     """
-    rows = _waiting_files(connection)
+    rows = _waiting_files(connection, library_item_ids=library_item_ids)
     blocked = _files_waiting_for_owner(connection, rows, config=config)
     library_types = offered_library_types(config)
     waiting: dict[str, tuple[int, list[int]]] = {}
@@ -338,6 +347,8 @@ def record_kind_attempt(config: MediaforceConfig, chosen: KindSeason, result: Ma
         return
     attempts = _load_attempts(config)
     attempts[chosen.season] = {"approval": chosen.approval, "files": list(chosen.files), "ok": bool(result.get("ok")), "at": at}
+    if not result.get("ok"):
+        attempts[chosen.season]["refusal"] = {key: result[key] for key in ("code", "message", "measurable") if key in result}
     path = _attempts_file(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False, suffix=".tmp") as handle:
@@ -345,12 +356,16 @@ def record_kind_attempt(config: MediaforceConfig, chosen: KindSeason, result: Ma
     os.replace(handle.name, path)
 
 
+def _retry_pending(record: Mapping[str, Any], now: float) -> bool:
+    return not record.get("ok") and now < float(record.get("at") or 0) + KIND_RETRY_SECONDS
+
+
 def _attempted(attempt: Any, chosen: KindSeason, now: float) -> bool:
     """True when this season was already tried under this approval with the same waiting files."""
     record = object_dict(attempt)
     if record.get("approval") != chosen.approval or tuple(record.get("files") or ()) != chosen.files:
         return False
-    return bool(record.get("ok")) or now - float(record.get("at") or 0) < KIND_RETRY_SECONDS
+    return bool(record.get("ok")) or _retry_pending(record, now)
 
 
 def next_kind_season(
@@ -375,17 +390,39 @@ def next_approved_season(
     for season, waiting_bytes, files in _waiting_seasons(connection, config):
         if any(season == prefix or season.startswith(f"{prefix}/") or prefix.startswith(f"{season}/") for prefix in active_prefixes):
             continue
-        approval = effective_production_approval(config, season, load_calibration_state)
-        if approval is None or not approval.current:
-            continue
-        sample_prefix, _sample = production_calibration(config, season, load_calibration_state)
-        if sample_prefix != approval.prefix:
-            continue
-        chosen = KindSeason(season, approval.kind, waiting_bytes, approval_identity(approval.calibration, approval.contract), files)
-        if _attempted(attempts.get(season), chosen, now):
-            continue
-        return chosen
+        chosen = _approved_candidate(config, season, waiting_bytes, files, load_calibration_state)
+        if chosen is not None and not _attempted(attempts.get(season), chosen, now):
+            return chosen
     return None
+
+
+def _approved_candidate(
+        config: MediaforceConfig, season: str, waiting_bytes: int, files: tuple[int, ...], load: LoadCalibrationState,
+) -> KindSeason | None:
+    approval = effective_production_approval(config, season, load)
+    if approval is None or not approval.current:
+        return None
+    sample_prefix, _sample = production_calibration(config, season, load)
+    if sample_prefix != approval.prefix:
+        return None
+    return KindSeason(season, approval.kind, waiting_bytes, approval_identity(approval.calibration, approval.contract), files)
+
+
+def movie_queue_facts(
+        connection: DBClient, config: MediaforceConfig, prefix: str, file_ids: Collection[int], load: LoadCalibrationState,
+        *, now: float,
+) -> dict[str, Any]:
+    facts: dict[str, Any] = {"waits": _queue_waits(connection), "refusal": None}
+    attempt = object_dict(_load_attempts(config).get(prefix))
+    if not attempt or not _retry_pending(attempt, now):
+        return facts
+    for season, size, files in _waiting_seasons(connection, config, library_item_ids=file_ids):
+        if season == prefix:
+            chosen = _approved_candidate(config, season, size, files, load)
+            if chosen is not None and _attempted(attempt, chosen, now):
+                facts["refusal"] = object_dict(attempt.get("refusal"))
+            break
+    return facts
 
 
 KINDS_IN_ORDER = (LIVE_ACTION, "cartoon")
@@ -610,7 +647,8 @@ def kinds_payload(
             season = str(row["season"])
             seasons[row["kind"]].setdefault("/".join(season.split("/")[:2]), []).append((int(row["waiting_bytes"]), season))
     # A show's sample is made on its biggest waiting season of the kind, the one that saves the most.
-    shows = {kind: {show: {"seasons": len(found), "waiting_bytes": sum(size for size, _ in found),
+    library_types = config.library_type_map
+    shows = {kind: {show: {"media_type": library_types.get(show.partition("/")[0]), "seasons": len(found), "waiting_bytes": sum(size for size, _ in found),
                            "sample_season": min(found, key=lambda entry: (-entry[0], entry[1]))[1]}
                     for show, found in by_show.items()}
              for kind, by_show in seasons.items()}
