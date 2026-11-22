@@ -64,11 +64,15 @@ test)
 	# An unsigned build is a new program to macOS every time, so it asks again to read the drive the build is on
 	# and the test runner hangs until someone answers. With the team's certificate one answer lasts.
 	# The team is only looked up when a certificate is here, so CI needs no Python setup to run the tests.
-	identity=()
+	# The test host gets its own identity. With the installed app's bundle identifier, the test harness asked
+	# Launch Services for that identifier and opened the installed app; the service label and port keep a test host
+	# away from the running service too.
+	identity=(MEDIAFORCE_BUNDLE_IDENTIFIER=com.shinycomputers.mediaforce.testhost
+		MEDIAFORCE_SERVICE_LABEL=com.mediaforce.web.testhost MEDIAFORCE_SERVER_PORT=8797)
 	if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application: "; then
 		team_id="$(team_id)"
 		if security find-identity -v -p codesigning | grep -q "Developer ID Application: .*($team_id)"; then
-			identity=(CODE_SIGN_IDENTITY="Developer ID Application" DEVELOPMENT_TEAM="$team_id")
+			identity+=(CODE_SIGN_IDENTITY="Developer ID Application" DEVELOPMENT_TEAM="$team_id")
 		fi
 	fi
 	xcodebuild -project "$project" -scheme Mediaforce -destination 'platform=macOS' \
