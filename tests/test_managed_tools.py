@@ -86,11 +86,21 @@ def test_private_homebrew_reads_package_info_during_ruby_setup(
             worker.install_mac(tmp_path, VERSIONS, sources, {"ab-av1"}, run)
 
 
-def test_ssh_errors_do_not_reach_computers(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_build_program_names_what_the_computer_needs(tmp_path: Path) -> None:
+    with pytest.raises(tool_versions.ToolUpdateError, match="cmake"):
+        worker.run_command([str(tmp_path / "cmake"), "--build", "."])
+
+
+def test_only_worker_explanations_reach_computers(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(tools, "controller_sources", lambda _: {})
     result = tools.update_worker({}, VERSIONS, Mock(return_value=subprocess.CompletedProcess([], 255, "", "raw-ssh-error")))
     assert result.failure_kind == "update_failed"
     assert "raw-ssh-error" not in result.message
+    reason = "This computer needs cmake to prepare the media tools."
+    code = worker.report_update_error(reason)
+    stdout = "shell startup output\n" + capsys.readouterr().out
+    result = tools.update_worker({}, VERSIONS, Mock(return_value=subprocess.CompletedProcess([], code, stdout, "build log")))
+    assert result.message == reason
 
 
 def test_linked_package_release_identifies_a_patch_with_an_older_runtime_version(tmp_path: Path) -> None:
@@ -194,6 +204,9 @@ def test_fresh_readiness_holds_an_otherwise_capable_computer_after_library_drift
     assert status.detail and "libvmaf" in status.detail
     failure = HostSetupResult(False, "Homebrew could not read the tool versions.", failure_kind="update_failed")
     monkeypatch.setattr(tools, "update_result", lambda *_: failure)
+    failure.failure_kind = None
+    assert not remote.probe_host_status(config, host).available
+    failure.failure_kind = "update_failed"
     status = remote.probe_host_status(config, host)
     assert status.available and status.can_update_tools
     assert not status.issues and status.tool_message and failure.message in status.tool_message
@@ -221,6 +234,9 @@ def test_failed_build_retries_automatically_and_retry_connection_can_shortcut_th
     for moment in (0, 301, 602):
         clock.return_value = moment
         tools.request_update(config, host, status, Mock())
+    assert update.call_count == 2
+    clock.return_value += 24 * 60 * 60
+    tools.request_update(config, host, status, Mock())
     assert update.call_count == 3
     failed = tools.update_result(config, status.key, VERSIONS)
     assert failed and failed.failure_kind == "update_failed"

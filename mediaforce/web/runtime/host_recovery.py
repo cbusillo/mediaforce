@@ -134,9 +134,7 @@ def _recovery_pass(
     status = probe_host_status(config, host)
     update = prepare_host_tools(config, host, status, requested=requested) if status.can_update_tools and not state_error else None
     if update and status.available and update.failure_kind == "updating":
-        status.available = False
-        status.message = status.tool_message = update.message
-        status.issues.append(update.message)
+        status.hold_for_tool_update(update.message)
     publish_host_status(config, status)
     count = min(int(previous.get("failure_count") or 0) + 1, 1000)
     state = {

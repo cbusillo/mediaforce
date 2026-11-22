@@ -1127,10 +1127,14 @@ def test_background_tool_retry_leaves_checked_worker_available_until_an_update_s
         assert not host_status.checked_host_statuses(config)[0].available
 
 
-def test_saved_tool_failure_is_rechecked_without_showing_old_command_output(config: MediaforceConfig) -> None:
+@pytest.mark.parametrize("held", [True, False])
+def test_saved_tool_failure_is_rechecked_without_showing_old_command_output(config: MediaforceConfig, held: bool) -> None:
     stale = {"status": "action_required", "reason": "Media tools could not update. raw command output",
              "label": "Worker", "tool_hold": {"ffmpeg": "9.0"}, "failure_count": 2,
              "first_failure_at": NOW.isoformat(), "mount_uncertain": False}
+    if not held:
+        stale.update(status="retrying")
+        del stale["tool_hold"]
     save_runtime_settings(recovery.host_recovery_path(config), {"schema_version": 1, "hosts": {"user@worker": stale}})
     record = recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]
     assert record["status"] == "retrying" and "raw command output" not in record["reason"]

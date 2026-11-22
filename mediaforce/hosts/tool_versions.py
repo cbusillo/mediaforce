@@ -23,7 +23,7 @@ TOOLS_DIRECTORY = Path.home() / TOOLS_RELATIVE_DIRECTORY
 
 
 class ToolUpdateError(RuntimeError):
-    pass
+    prefix = "mediaforce-update: "
 
 
 def command_output(arguments: list[str], **environment: str) -> str:

@@ -87,6 +87,13 @@ class HostStatus:
     repair_video_tools: bool = False
     dark_wake: bool = False
 
+    def hold_for_tool_update(self, message: str) -> None:
+        self.available = False
+        self.tool_message = message
+        if not self.issues and not self.missing_mounts and not self.missing_paths:
+            self.message = message
+        self.issues.append(message)
+
     @property
     def can_update_tools(self) -> bool:
         return bool(self.tool_target and not self.missing_mounts and not self.setup_requires_password and

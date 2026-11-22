@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import errno
 import fcntl
 import hashlib
 import json
@@ -19,14 +20,19 @@ from mediaforce.hosts.tool_versions import ToolUpdateError
 
 
 def run_command(command: list[str], *, cwd: Path | None = None, include_stderr: bool = False) -> str:
-    result = subprocess.run(
-        command,
-        cwd=cwd,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except FileNotFoundError as error:
+        if cwd is not None and not cwd.is_dir():
+            raise ToolUpdateError("The folder for preparing the new media tools is missing.") from error
+        raise ToolUpdateError(f"This computer needs {Path(command[0]).name} to prepare the media tools.") from error
     if result.returncode:
         print((result.stderr or result.stdout)[-2000:], file=sys.stderr)
         raise ToolUpdateError(f"{Path(command[0]).name} could not finish preparing the media tools.")
@@ -329,6 +335,11 @@ def update(target: dict[str, str], sources: dict[str, dict[str, str]], quality: 
                 shutil.rmtree(prefix)
 
 
+def report_update_error(message: str) -> int:
+    print(f"{ToolUpdateError.prefix}{message}")
+    return 65
+
+
 if __name__ == "__main__":
     try:
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
@@ -336,5 +347,10 @@ if __name__ == "__main__":
     except BlockingIOError:
         sys.exit(75)
     except ToolUpdateError as failure:
-        print(str(failure))
-        sys.exit(65)
+        sys.exit(report_update_error(str(failure)))
+    except OSError as failure:
+        if failure.errno == errno.ENOSPC:
+            sys.exit(report_update_error("This computer ran out of space while preparing the new tools."))
+        if isinstance(failure, PermissionError):
+            sys.exit(report_update_error("This computer did not allow Mediaforce to prepare or select its tools."))
+        raise
