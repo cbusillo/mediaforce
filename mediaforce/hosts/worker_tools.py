@@ -15,26 +15,22 @@ import time
 import signal
 
 from mediaforce.hosts import tool_versions
+from mediaforce.hosts.tool_versions import ToolUpdateError
 
 
-def run_command(command: list[str], *, cwd: Path | None = None) -> str:
+def run_command(command: list[str], *, cwd: Path | None = None, include_stderr: bool = False) -> str:
     result = subprocess.run(
         command,
         cwd=cwd,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        capture_output=True,
         encoding="utf-8",
         errors="replace",
     )
     if result.returncode:
-        lines = result.stdout.strip().splitlines()
-        detail = next(
-            (line for line in reversed(lines) if re.search(r"error:|not found|is required", line, re.I)),
-            lines[-1] if lines else str(result.returncode),
-        )
-        raise RuntimeError(f"{Path(command[0]).name} failed. {detail[:320]}")
-    return result.stdout.strip()
+        print((result.stderr or result.stdout)[-2000:], file=sys.stderr)
+        raise ToolUpdateError(f"{Path(command[0]).name} could not finish preparing the media tools.")
+    return (result.stdout + (result.stderr if include_stderr else "")).strip()
 
 
 def install_mac(
@@ -44,13 +40,13 @@ def install_mac(
     pins = set(run(["brew", "list", "--pinned"]).split()) & (formulae.keys() | ({"ffmpeg"} if "ffmpeg" in needed else set()))
     if pins:
         names = ", ".join(sorted(pins))
-        raise RuntimeError(f"Homebrew has pinned {names}. To allow the update, unpin {names} on this computer and choose Retry connection.")
+        raise ToolUpdateError(f"Homebrew has pinned {names}. To allow the update, unpin {names} on this computer and choose Retry connection.")
     brew_root = run(["brew", "--repository"])
     private = prefix / "homebrew"
     run(["git", "clone", "--quiet", "--local", brew_root, str(private)])
     brew = str(private / "bin/brew")
     if Path(run([brew, "--prefix"])).resolve() != private.resolve():
-        raise RuntimeError("Homebrew could not prepare a separate copy of the media tools.")
+        raise ToolUpdateError("Homebrew could not prepare a separate copy of the media tools.")
     os.environ.update(
         HOMEBREW_NO_INSTALL_CLEANUP="1", HOMEBREW_NO_AUTO_UPDATE="1", HOMEBREW_NO_INSTALL_FROM_API="1", HOMEBREW_NO_ANALYTICS="1"
     )
@@ -63,10 +59,15 @@ def install_mac(
     base = sources["ffmpeg" if "ffmpeg" in needed else "ab-av1"]["revision"]
     run([*git, "fetch", "--depth=1", "origin", base])
     run([*git, "checkout", "--detach", "FETCH_HEAD"])
-    info = json.loads(run([brew, "info", "--json=v2", *formulae]))
-    for row in info["formulae"]:
-        formula = row["name"]
-        if row["versions"]["stable"] != formulae[formula]:
+    try:
+        info = json.loads(run([brew, "info", "--json=v2", *formulae]))
+        available = {row["name"]: row["versions"]["stable"] for row in info["formulae"]}
+        if available.keys() != formulae.keys():
+            raise ValueError
+    except (ValueError, KeyError, TypeError) as error:
+        raise ToolUpdateError("Homebrew could not report the versions of the requested media tools.") from error
+    for formula, version in available.items():
+        if version != formulae[formula]:
             name = "ffmpeg" if formula == "ffmpeg-full" else formula
             (core / "Formula" / formula[0] / f"{formula}.rb").write_text(sources[name]["recipe"], encoding="utf-8")
     run([brew, "install", *formulae])
@@ -80,7 +81,7 @@ def install_mac(
 
 
 def install_linux(prefix: Path, sources: dict[str, dict[str, str]], needed: set[str]) -> None:
-    configure = run_command(["ffmpeg", "-buildconf"]) if shutil.which("ffmpeg") else ""
+    configure = run_command(["ffmpeg", "-buildconf"], include_stderr=True) if shutil.which("ffmpeg") else ""
     features = re.findall(r"^\s*(--enable-[a-z0-9-]+)\s*$", configure, re.MULTILINE)
     os.environ.update(
         PKG_CONFIG_PATH=str(prefix / "lib/pkgconfig"),
@@ -114,7 +115,7 @@ def install_linux(prefix: Path, sources: dict[str, dict[str, str]], needed: set[
                 for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                     digest.update(chunk)
             if digest.hexdigest() != source["sha256"]:
-                raise RuntimeError(f"The downloaded {name} source did not match this Mac.")
+                raise ToolUpdateError(f"The downloaded {name} source did not match this Mac.")
             tree = Path(work) / name
             tree.mkdir()
             run_command(["tar", "-xf", str(archive), "--strip-components=1", "-C", str(tree)])
@@ -173,7 +174,7 @@ def restore_previous(current: Path, journal: Path) -> None:
     select_tools(current, Path(previous) if previous else None)
     journal.unlink()
     if tool_versions.running_versions(list(tool_versions.PROGRAMS)) != record["versions"]:
-        raise RuntimeError("The previous tools were selected again. Their versions changed and will be checked again.")
+        raise ToolUpdateError("The previous tools were selected again. Their versions changed and will be checked again.")
 
 
 def activate(current: Path, candidate: Path, previous_versions: dict[str, str], verify: Callable[[], None]) -> None:
@@ -191,8 +192,9 @@ def activate(current: Path, candidate: Path, previous_versions: dict[str, str], 
         try:
             restore_previous(current, journal)
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as restore_error:
-            raise RuntimeError(f"The new tools failed their check. {error}. {restore_error}") from restore_error
-        raise RuntimeError(f"Restored the previous media tools. {error}") from error
+            raise ToolUpdateError("The new tools failed their check. Mediaforce could not confirm the previous tools.") from restore_error
+        reason = str(error) if isinstance(error, ToolUpdateError) else "The new tools failed their check."
+        raise ToolUpdateError(f"Restored the previous media tools. {reason}") from error
     select_tools(current.with_name("previous"), previous)
     journal.unlink()
 
@@ -239,16 +241,18 @@ def self_test(quality: list[str]) -> None:
                 sample,
             ]
         )
-        streams = json.loads(run_command(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name", "-of", "json", sample]))[
-            "streams"
-        ]
-        if {stream["codec_name"] for stream in streams} != {"av1", "opus"}:
-            raise RuntimeError("The test file failed its picture or sound check.")
+        report = run_command(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name", "-of", "json", sample])
+        try:
+            codecs = {stream["codec_name"] for stream in json.loads(report)["streams"]}
+        except (ValueError, TypeError, KeyError) as error:
+            raise ToolUpdateError("The computer could not read the test file’s picture and sound details.") from error
+        if codecs != {"av1", "opus"}:
+            raise ToolUpdateError("The test file failed its picture or sound check.")
         run_command(["ffmpeg", "-v", "error", "-i", sample, "-vf", "idet", "-f", "null", "-"])
         run_command(["ffmpeg", *quality])
         run_command(["ffmpeg", *["xpsnr" if arg == "libvmaf" else arg for arg in quality]])
         if sys.platform == "darwin" and "videotoolbox" not in run_command(["ffmpeg", "-hwaccels"]).lower():
-            raise RuntimeError("The Mac could not use its video hardware.")
+            raise ToolUpdateError("The Mac could not use its video hardware.")
         run_command(
             ["ab-av1", "sample-encode", "-i", sample, "--crf", "32", "--preset", "10", "--temp-dir", directory], cwd=Path(directory)
         )
@@ -278,6 +282,7 @@ def update(target: dict[str, str], sources: dict[str, dict[str, str]], quality: 
         pending = root / "pending"
         if pending.exists():
             restore_previous(current, pending)
+            raise ToolUpdateError("The update was interrupted. The previous media tools were restored.")
         retire_unused_builds(root)
         before = tool_versions.running_versions(list(tool_versions.PROGRAMS))
         if before == target and not repair_video:
@@ -304,7 +309,7 @@ def update(target: dict[str, str], sources: dict[str, dict[str, str]], quality: 
                 (prefix / "mediaforce-sources.json").write_text(json.dumps(target), encoding="utf-8")
             candidate = [str(binaries / name) if (binaries / name).exists() else name for name in tool_versions.PROGRAMS]
             if tool_versions.running_versions(candidate) != target:
-                raise RuntimeError("The new media tools do not match this Mac. The previous tools are still selected.")
+                raise ToolUpdateError("The new media tools do not match this Mac. The previous tools are still selected.")
             while True:
                 try:
                     ensure_idle()
@@ -314,7 +319,7 @@ def update(target: dict[str, str], sources: dict[str, dict[str, str]], quality: 
 
             def verify() -> None:
                 if tool_versions.running_versions(list(tool_versions.PROGRAMS)) != target:
-                    raise RuntimeError("The selected tools reported unexpected versions.")
+                    raise ToolUpdateError("The selected tools reported unexpected versions.")
                 self_test(quality)
 
             activate(current, prefix, before, verify)
@@ -328,10 +333,8 @@ if __name__ == "__main__":
     try:
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
         update(*[json.loads(argument) for argument in sys.argv[1:]])
-    except BlockingIOError as busy:
-        print(str(busy), file=sys.stderr)
+    except BlockingIOError:
         sys.exit(75)
-    except FileNotFoundError as missing:
-        sys.exit(f"This computer needs {missing.filename} to prepare the media tools.")
-    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as failure:
-        sys.exit(str(failure))
+    except ToolUpdateError as failure:
+        print(str(failure))
+        sys.exit(65)

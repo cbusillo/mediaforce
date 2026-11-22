@@ -67,7 +67,8 @@ some shows need more, and your results will vary.
 Computers checks each worker’s picture, sound and quality tools against the versions
 running on this Mac. An idle worker prepares a separate copy and switches to it
 only for Mediaforce. It checks a short file before accepting work. If a check
-fails, it switches back and Computers shows why. If Homebrew has pinned a tool
+fails, it switches back and Computers shows why. After a failed update, a worker
+whose current tools pass their checks keeps working while it waits to retry. If Homebrew has pinned a tool
 that needs an update, Computers names it. To allow the update, unpin that formula
 on the worker and choose Retry connection. Linux builds run at idle disk and lowest CPU priority.
 

@@ -59,7 +59,7 @@ def controller_sources(target: dict[str, str]) -> dict[str, dict[str, str]]:
         keg = (prefix.parent / "opt" / formula).resolve(strict=True)
         source_record = keg / "sbom.spdx.json"
         if not source_record.is_file():
-            raise ValueError(f"Reinstall {formula} with Homebrew on this Mac to restore its source record, then choose Retry connection.")
+            raise tool_versions.ToolUpdateError(f"Reinstall {formula} with Homebrew on this Mac to restore its source record, then choose Retry connection.")
         package = json.loads(source_record.read_text(encoding="utf-8"))["packages"][0]
         checksum = next((item["checksumValue"] for item in package["checksums"] if item["algorithm"] == "SHA256"), "")
         if (
@@ -68,7 +68,7 @@ def controller_sources(target: dict[str, str]) -> dict[str, dict[str, str]]:
             or not re.fullmatch("[0-9a-f]{64}", checksum)
             or not package["downloadLocation"].startswith("https://")
         ):
-            raise ValueError(f"This Mac could not confirm the source for {name} {target[name]}.")
+            raise tool_versions.ToolUpdateError(f"This Mac could not confirm the source for {name} {target[name]}.")
         revision = json.loads((keg / "INSTALL_RECEIPT.json").read_text(encoding="utf-8"))["source"].get("tap_git_head")
         sources[name] = {
             "url": package["downloadLocation"],
@@ -81,7 +81,7 @@ def controller_sources(target: dict[str, str]) -> dict[str, dict[str, str]]:
 
 def update_when_idle(*, busy: Callable[[], bool], execute: Callable[[], HostSetupResult]) -> HostSetupResult:
     if busy():
-        return HostSetupResult(False, "Waiting for the current file to finish before updating media tools.")
+        return HostSetupResult(False, "Waiting for the current file to finish before updating media tools.", failure_kind="busy")
     return execute()
 
 
@@ -126,17 +126,17 @@ def update_worker(
         result = run_remote_ssh(
             host, "sh", "-s", input_text=keep_awake_while_running(body), wake_before_connect=False, timeout=24 * 60 * 60
         )
-    except (OSError, KeyError, ValueError, IndexError, subprocess.SubprocessError) as exc:
-        return HostSetupResult(False, f"Could not complete the media tool update. {exc}", failure_kind="update_failed")
+    except tool_versions.ToolUpdateError as error:
+        return HostSetupResult(False, str(error), failure_kind="update_failed")
+    except (OSError, KeyError, ValueError, TypeError, IndexError, subprocess.SubprocessError):
+        logging.getLogger(__name__).exception("Could not prepare or send the media tool update")
+        return HostSetupResult(False, "This Mac could not prepare or send the media tool update.", failure_kind="update_failed")
+    if result.returncode == 75:
+        return HostSetupResult(False, "Waiting for the computer to finish its current work.", failure_kind="busy")
     if result.returncode:
-        reason = (result.stderr or result.stdout).strip().splitlines()
-        if result.returncode == 75:
-            return HostSetupResult(False, reason[-1] if reason else "Waiting for the computer to finish its current work.")
-        return HostSetupResult(
-            False,
-            "Media tools could not update. " + (reason[-1] if reason else "The computer stopped answering."),
-            failure_kind="update_failed",
-        )
+        logging.getLogger(__name__).warning("Worker tool update failed (%s): %s", result.returncode, result.stderr)
+        reason = result.stdout.strip() if result.returncode == 65 else ""
+        return HostSetupResult(False, reason or "The computer could not finish its media tool update.", failure_kind="update_failed")
     return HostSetupResult(True, "Media tools updated and checked.")
 
 
@@ -167,7 +167,7 @@ def host_is_busy(config: MediaforceConfig, host: dict[str, object]) -> bool:
 def update_result(config: MediaforceConfig, key: str, target: dict[str, str]) -> HostSetupResult | None:
     with _UPDATE_LOCK:
         record = _UPDATE_RESULTS.get((config.paths.db_path, key))
-        if record and (record.result.failure_kind == "updating" or (record.target == target and time.monotonic() < record.retry_at)):
+        if record and (record.result.failure_kind == "updating" or record.target == target):
             return record.result
     return None
 
@@ -186,31 +186,22 @@ def request_update(
     def execute() -> HostSetupResult:
         return update_worker(host, target, run_remote_ssh, repair_video=status.repair_video_tools)
 
-    def work(prior: _UpdateAttempt | None) -> None:
+    def work() -> None:
         try:
             result = update_when_idle(busy=lambda: host_is_busy(config, host), execute=execute)
         except (SQLAlchemyError, OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError):
             logging.getLogger(__name__).exception("Could not complete media tool setup for %s", status.key)
-            result = HostSetupResult(False, "Mediaforce could not finish checking this computer. It will try again.")
+            result = HostSetupResult(False, "Mediaforce could not finish checking this computer.", failure_kind="update_failed")
         with _UPDATE_LOCK:
             retry_at = time.monotonic() + (300 if result.failure_kind == "update_failed" else 30)
-            if (
-                not requested
-                and prior
-                and prior.target == target
-                and prior.result.failure_kind == "update_failed"
-                and result.failure_kind == "update_failed"
-            ):
-                result.failure_kind = "needs_attention"
-                retry_at = float("inf")
             _UPDATE_RESULTS[key] = _UpdateAttempt(target, retry_at, result)
 
     with _UPDATE_LOCK:
-        previous = update_result(config, status.key, target)
-        if previous and (not requested or previous.failure_kind == "updating"):
-            return previous
-        last = _UPDATE_RESULTS.get(key)
+        previous = _UPDATE_RESULTS.get(key)
+        if previous and (previous.result.failure_kind == "updating" or
+                         (previous.target == target and not requested and time.monotonic() < previous.retry_at)):
+            return previous.result
         updating = HostSetupResult(False, _UPDATING, failure_kind="updating")
         _UPDATE_RESULTS[key] = _UpdateAttempt(target, float("inf"), updating)
-        threading.Thread(target=work, args=(last,), name="media-tool-update", daemon=True).start()
+        threading.Thread(target=work, name="media-tool-update", daemon=True).start()
         return updating

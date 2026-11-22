@@ -83,7 +83,7 @@ def _finish_remote_host_prepare(
 
     prep_steps.append("Prepared this computer’s work folders.")
     refreshed = remote_host_status(config, host)
-    if refreshed.available:
+    if refreshed.available and not refreshed.can_update_tools:
         return HostSetupResult(
             ok=True,
             message=f"{refreshed.label} is mounted and ready.",
@@ -137,7 +137,7 @@ def prepare_remote_host_with_password(
     prep_steps: list[str] = []
     for _ in range(6):
         status = remote_host_status(config, host)
-        if status.available:
+        if status.available and not status.can_update_tools:
             return HostSetupResult(
                 ok=True,
                 message=f"{status.label} is mounted and ready.",

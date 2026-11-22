@@ -401,6 +401,7 @@ def _remote_host_status(
         dark_wake=payload.get("dark_wake") == "1",
     )
 
+    using_current_tools = False
     try:
         record = json.loads(str(payload.get("managed_tools") or "{}"))
         if not isinstance(record, dict) or not isinstance(record.get("versions"), dict):
@@ -430,11 +431,17 @@ def _remote_host_status(
                 latest = managed_tools.update_result(config, ssh_host, target)
                 if latest and not latest.ok:
                     status.tool_message = latest.message
+                    using_current_tools = (
+                        latest.failure_kind in {"update_failed", "busy"} and status.available and not record.get("pending")
+                        and all(tools.get(key) for key in required) and all(record["versions"].get(name) for name in target)
+                    )
+                    if using_current_tools and latest.failure_kind == "update_failed":
+                        status.tool_message = f"{latest.message} Using the current tools. Mediaforce will try again later."
             elif issue:
                 status.tool_message = "This Mac could not confirm its own media tools. Mediaforce will check again."
     if platform_name == "linux" and (status.tool_target or staging_path in status.missing_paths):
         status.setup_supported = True
-    if status.tool_message:
+    if status.tool_message and not using_current_tools:
         status.available = False
         if not status.issues and not status.missing_mounts and not status.missing_paths:
             status.message = status.tool_message

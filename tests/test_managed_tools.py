@@ -1,5 +1,6 @@
 import json
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -9,6 +10,7 @@ from mediaforce import remote
 from mediaforce.hosts import managed_tools as tools
 from mediaforce.hosts import tool_versions
 from mediaforce.hosts import worker_tools as worker
+from mediaforce.hosts.types import HostSetupResult
 
 
 VERSIONS = {"ffmpeg": "9.0", "ffprobe": "9.0", "ab-av1": "0.11", "svt-av1": "4.3", "opus": "1.6", "libvmaf": "3.2"}
@@ -58,6 +60,39 @@ def test_pinned_ffmpeg_refused_before_homebrew_installs(tmp_path: Path) -> None:
     assert [call.args[0] for call in run.call_args_list] == [["brew", "list", "--pinned"]]
 
 
+@pytest.mark.parametrize("valid_reply", [True, False])
+def test_private_homebrew_reads_package_info_during_ruby_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, valid_reply: bool
+) -> None:
+    private = tmp_path / "homebrew"
+    info = {"formulae": [{"name": "ab-av1", "versions": {"stable": VERSIONS["ab-av1"]}}]}
+    reply = json.dumps(info) if valid_reply else "package information unavailable"
+    monkeypatch.setattr(worker.os, "environ", worker.os.environ.copy())
+
+    def run(command: list[str]) -> str:
+        if "--prefix" in command:
+            return str(private)
+        if "info" in command:
+            script = "import sys; print('Pouring portable Ruby', file=sys.stderr); print(sys.argv[1])"
+            return worker.run_command([sys.executable, "-c", script, reply])
+        return ""
+
+    sources = {"ab-av1": {"revision": "HEAD"}}
+    if valid_reply:
+        worker.install_mac(tmp_path, VERSIONS, sources, {"ab-av1"}, run)
+        assert (tmp_path / "bin/ab-av1").is_symlink()
+    else:
+        with pytest.raises(RuntimeError, match="Homebrew.*version"):
+            worker.install_mac(tmp_path, VERSIONS, sources, {"ab-av1"}, run)
+
+
+def test_ssh_errors_do_not_reach_computers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tools, "controller_sources", lambda _: {})
+    result = tools.update_worker({}, VERSIONS, Mock(return_value=subprocess.CompletedProcess([], 255, "", "raw-ssh-error")))
+    assert result.failure_kind == "update_failed"
+    assert "raw-ssh-error" not in result.message
+
+
 def test_linked_package_release_identifies_a_patch_with_an_older_runtime_version(tmp_path: Path) -> None:
 
     binary = tmp_path / "lib" / "libvmaf.3.dylib"
@@ -73,6 +108,23 @@ def test_interrupted_switch_refuses_work_even_with_matching_versions(tmp_path: P
     monkeypatch.setattr(tool_versions, "running_versions", lambda _: VERSIONS)
     (tmp_path / "pending").write_text("null", encoding="utf-8")
     assert json.loads(tool_versions.probe_record())["pending"]
+
+
+def test_interrupted_switch_restores_previous_selection_before_attempting_a_new_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    previous = tmp_path / "old"
+    previous.mkdir()
+    current = tmp_path / "current"
+    current.symlink_to(tmp_path / "unverified")
+    pending = tmp_path / "pending"
+    pending.write_text(json.dumps({"previous": str(previous), "versions": VERSIONS}), encoding="utf-8")
+    monkeypatch.setattr(tool_versions, "TOOLS_DIRECTORY", tmp_path)
+    monkeypatch.setattr(tool_versions, "running_versions", lambda _: VERSIONS)
+    monkeypatch.setattr(worker, "ensure_idle", lambda: None)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        worker.update({**VERSIONS, "ab-av1": "0.12"}, {}, [])
+    assert current.resolve() == previous and not pending.exists()
 
 
 def test_candidate_cannot_take_work_until_the_new_tools_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -99,7 +151,7 @@ def test_candidate_cannot_take_work_until_the_new_tools_pass(tmp_path: Path, mon
     def check(_quality: list[str]) -> None:
         assert (root / "pending").is_file()
         if current.is_symlink():
-            raise RuntimeError("test sound could not be decoded")
+            raise tool_versions.ToolUpdateError("test sound could not be decoded")
 
     monkeypatch.setattr(worker, "install_linux", install)
     monkeypatch.setattr(tool_versions, "running_versions", inspect)
@@ -116,6 +168,7 @@ def test_fresh_readiness_holds_an_otherwise_capable_computer_after_library_drift
     host = {"host": "test@version-drift.invalid", "media_access": "stream", "capabilities": ["encode_queue"]}
     versions = VERSIONS.copy()
     picture_sound = True
+    pending = False
 
     def probe(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
         reply = [
@@ -126,7 +179,7 @@ def test_fresh_readiness_holds_an_otherwise_capable_computer_after_library_drift
             "tool|ffmpeg_xpsnr|1",
             "tool|ab_av1|1",
             "meta|platform|linux",
-            "meta|managed_tools|" + json.dumps({"versions": versions}),
+            "meta|managed_tools|" + json.dumps({"versions": versions, "pending": pending}),
         ]
         reply.extend([f"tool|ffmpeg_picture_sound|{int(picture_sound)}", "tool|ffmpeg_libvmaf_usable|1"])
         return subprocess.CompletedProcess([], 0, stdout="\n".join(reply), stderr="")
@@ -139,33 +192,40 @@ def test_fresh_readiness_holds_an_otherwise_capable_computer_after_library_drift
     status = remote.probe_host_status(config, host)
     assert not status.available and status.can_update_tools
     assert status.detail and "libvmaf" in status.detail
+    failure = HostSetupResult(False, "Homebrew could not read the tool versions.", failure_kind="update_failed")
+    monkeypatch.setattr(tools, "update_result", lambda *_: failure)
+    status = remote.probe_host_status(config, host)
+    assert status.available and status.can_update_tools
+    assert not status.issues and status.tool_message and failure.message in status.tool_message
+    assert "try again" in status.tool_message
+    pending = True
+    assert not remote.probe_host_status(config, host).available
+    pending = False
     versions.update(VERSIONS)
     picture_sound = False
     status = remote.probe_host_status(config, host)
     assert not status.available and status.can_update_tools and status.repair_video_tools
 
 
-def test_retry_connection_restarts_a_failed_build_even_when_each_error_names_a_different_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from mediaforce.hosts.types import HostSetupResult
-
+def test_failed_build_retries_automatically_and_retry_connection_can_shortcut_the_delay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config, status = Mock(), Mock(key="fixture.invalid", tool_target=VERSIONS)
     config.paths.db_path = tmp_path / "db"
     clock = Mock(return_value=0)
     monkeypatch.setattr(tools.time, "monotonic", clock)
     monkeypatch.setattr(tools, "host_is_busy", lambda *_: False)
     update = Mock(side_effect=[HostSetupResult(False, f"Build failed in {tmp_path / str(attempt)}.",
-                                               failure_kind="update_failed") for attempt in range(3)])
+                                               failure_kind="update_failed") for attempt in range(4)])
     monkeypatch.setattr(tools, "update_worker", update)
-    monkeypatch.setattr(tools.threading, "Thread", lambda target, args, **_: Mock(start=lambda: target(*args)))
+    monkeypatch.setattr(tools.threading, "Thread", lambda target, **_: Mock(start=target))
     host = {"host": status.key}
     for moment in (0, 301, 602):
         clock.return_value = moment
         tools.request_update(config, host, status, Mock())
-    assert update.call_count == 2
-    failed = tools.update_result(config, status.key, VERSIONS)
-    assert failed and failed.failure_kind == "needs_attention"
-    tools.request_update(config, host, status, Mock(), requested=True)
     assert update.call_count == 3
+    failed = tools.update_result(config, status.key, VERSIONS)
+    assert failed and failed.failure_kind == "update_failed"
+    tools.request_update(config, host, status, Mock(), requested=True)
+    assert update.call_count == 4
 
 
 def test_retirement_keeps_rollback_and_libraries_shared_with_an_older_build(tmp_path: Path) -> None:
