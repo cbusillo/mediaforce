@@ -47,7 +47,8 @@ targets:
         MediaforceServerPort: $(MEDIAFORCE_SERVER_PORT)
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.shinycomputers.mediaforce
+        PRODUCT_BUNDLE_IDENTIFIER: $(MEDIAFORCE_BUNDLE_IDENTIFIER)
+        MEDIAFORCE_BUNDLE_IDENTIFIER: com.shinycomputers.mediaforce
         PRODUCT_NAME: Mediaforce
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CURRENT_PROJECT_VERSION: "1"
