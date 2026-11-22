@@ -60,9 +60,9 @@ def test_pinned_ffmpeg_refused_before_homebrew_installs(tmp_path: Path) -> None:
     assert [call.args[0] for call in run.call_args_list] == [["brew", "list", "--pinned"]]
 
 
-@pytest.mark.parametrize("valid_reply", [True, False])
-def test_private_homebrew_reads_package_info_during_ruby_setup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, valid_reply: bool
+@pytest.mark.parametrize(("valid_reply", "bottle"), [(True, True), (True, False), (False, False)])
+def test_private_homebrew_checks_the_version_and_installs_only_the_missing_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, valid_reply: bool, bottle: bool
 ) -> None:
     private = tmp_path / "homebrew"
     info = {"formulae": [{"name": "ab-av1", "versions": {"stable": VERSIONS["ab-av1"]}}]}
@@ -75,12 +75,22 @@ def test_private_homebrew_reads_package_info_during_ruby_setup(
         if "info" in command:
             script = "import sys; print('Pouring portable Ruby', file=sys.stderr); print(sys.argv[1])"
             return worker.run_command([sys.executable, "-c", script, reply])
+        if "--cache" in command:
+            return "ab-av1.arm64.bottle.tar.gz" if bottle else "ab-av1.tar.gz"
+        if "install" in command:
+            if not bottle and "--ignore-dependencies" in command:
+                raise tool_versions.ToolUpdateError("Building ab-av1 from source requires Rust.")
+            if bottle and "--ignore-dependencies" not in command:
+                raise tool_versions.ToolUpdateError("The FFmpeg dependency needs a compiler on this Mac.")
+            binary = private / "opt/ab-av1/bin/ab-av1"
+            binary.parent.mkdir(parents=True)
+            binary.touch()
         return ""
 
     sources = {"ab-av1": {"revision": "HEAD"}}
     if valid_reply:
         worker.install_mac(tmp_path, VERSIONS, sources, {"ab-av1"}, run)
-        assert (tmp_path / "bin/ab-av1").is_symlink()
+        assert (tmp_path / "bin/ab-av1").is_file()
     else:
         with pytest.raises(RuntimeError, match="Homebrew.*version"):
             worker.install_mac(tmp_path, VERSIONS, sources, {"ab-av1"}, run)
@@ -257,3 +267,10 @@ def test_retirement_keeps_rollback_and_libraries_shared_with_an_older_build(tmp_
     worker.retire_unused_builds(root)
     assert (root / "current/bin/ffmpeg").is_file() and (root / "previous").is_dir()
     assert not bundles[3].exists()
+
+
+def test_failed_homebrew_install_names_the_step_and_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    failed = subprocess.CompletedProcess([], 1, "", "Error: Your Command Line Tools (CLT) does not support macOS 27.")
+    monkeypatch.setattr(worker.subprocess, "run", Mock(return_value=failed))
+    with pytest.raises(tool_versions.ToolUpdateError, match="install ab-av1.*Command Line Tools"):
+        worker.run_command(["/private/build/bin/brew", "install", "--ignore-dependencies", "ab-av1"])

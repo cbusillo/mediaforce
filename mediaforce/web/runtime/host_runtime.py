@@ -15,7 +15,9 @@ from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.type_defs import float_value, object_dict
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
-from mediaforce.web.runtime.host_recovery import host_absence_state, host_recovery_snapshot, retry_host_connection
+from mediaforce.web.runtime.host_recovery import (
+    host_absence_state, host_recovery_snapshot, retry_host_connection, status_with_connection_history,
+)
 from mediaforce.web.runtime.host_status import publish_host_status
 from mediaforce.hosts.transport import REQUEST_FULL_WAKE_SHELL_LINE
 from mediaforce.remote import HostReadinessError, HostStatus, collect_host_statuses, host_status_targets_current_machine, \
@@ -63,7 +65,9 @@ def host_runtime_rows(
     recovery = host_recovery_snapshot(config)["hosts"]
     rows: list[dict[str, Any]] = []
     current_time = now or datetime.now(UTC)
-    for status in statuses:
+    for checked in statuses:
+        history = object_dict(recovery.get(checked.key))
+        status = status_with_connection_history(checked, history)
         host_config = host_config_for_key(config, status.key)
         storage_recovery_available = remote_mount_recovery_supported(config, host_config, status)
         capabilities = {capability.lower() for capability in status.capabilities}
@@ -147,10 +151,9 @@ def host_runtime_rows(
             }
             if storage_recovery_available:
                 status_payload["message"] = "Storage is reconnecting in the background"
-            needs_action = object_dict(recovery.get(status.key))
-            if not status.available and needs_action.get("status") == "action_required" and needs_action.get("reason"):
+            if not status.available and history.get("status") == "action_required" and history.get("reason"):
                 # Background reconnects stopped for something only someone at that computer can do.
-                status_payload["message"] = active_reason = str(needs_action["reason"])
+                status_payload["message"] = active_reason = str(history["reason"])
         controller_issue = controller_storage_admission_issue(config, host_config)
         if controller_issue:
             queue_active = False
@@ -176,7 +179,7 @@ def host_runtime_rows(
                 "active_flag": _host_active_flag(active_encode_count=active_encode_count, queue_active=queue_active),
                 "active_reason": active_reason,
                 "controller_storage_issue": controller_issue,
-                "recovery": host_recovery_row(recovery.get(status.key)),
+                "recovery": host_recovery_row(history),
             }
         )
     return rows

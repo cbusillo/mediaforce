@@ -1139,3 +1139,30 @@ def test_saved_tool_failure_is_rechecked_without_showing_old_command_output(conf
     record = recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]
     assert record["status"] == "retrying" and "raw command output" not in record["reason"]
     assert not record.get("tool_hold") and not record.get("next_retry_at")
+
+
+@pytest.mark.parametrize(("address", "answered", "advice"), [
+    ("worker@mini.LOCAL.", True, "off or asleep"),
+    ("worker@mini.local", False, "Check the address"),
+    ("worker@mini.example", True, "Check the address"),
+])
+def test_computers_remembers_which_local_address_answered(
+    config: MediaforceConfig, empty_host_status_cache: None, address: str, answered: bool, advice: str,
+) -> None:
+    config.raw["remote_hosts"][0]["host"] = address
+    missing = _checked(config, _CHECK_FAILURES["not_found"])
+    missing.key = address
+    online = status(available=True)
+    online.key = address
+    with patch_attr(recovery, "probe_host_status") as probe:
+        if answered:
+            probe.return_value = online
+            recovery.retry_host_connection(config, address)
+        probe.return_value = missing
+        for _ in range(2):
+            recovery.retry_host_connection(config, address)
+        with patch_attr(host_status, "collect_host_statuses", return_value=[missing]):
+            host_status.refresh_host_status_cache(config)
+        card = _host_cards(config)[address]
+    assert advice in " ".join(card["issues"])
+    assert card["recovery"]["reason"] == card["probe_message"]

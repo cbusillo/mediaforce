@@ -224,10 +224,13 @@ Readiness runs FFmpeg, ffprobe and ab-av1 and identifies the SVT-AV1, Opus and
 libvmaf libraries FFmpeg loaded. The controller's installed Homebrew receipts
 identify the sources for each release. An idle remote computer prepares changed
 tools under `~/.local/share/mediaforce/tools`. A Mac uses Homebrew in a separate
-prefix so its previous libraries remain usable. Linux builds from the checked
+prefix so its previous libraries remain usable. When only ab-av1 needs updating,
+it uses the already-matching FFmpeg. Linux builds from the checked
 source archives at lowest priority. Workers select a version through `current`;
 a pending switch holds the worker out of service until picture, sound and quality
 checks pass. An interrupted switch restores the previous selection.
+Computers shows a previously reached `.local` address as possibly off or asleep
+when its name disappears from the network.
 
 The controller is not a computer by
 default; add it as an SSH address such as `user@localhost` to give it work.
