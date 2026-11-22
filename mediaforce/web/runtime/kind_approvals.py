@@ -12,6 +12,7 @@ the season's kind comes from its originals' traits
 import json
 import os
 import tempfile
+from collections import Counter
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -42,7 +43,7 @@ from mediaforce.web.runtime.production_approval import KEEP_FULL_HEIGHT_FIELD, E
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
 from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES, SIZE_GOAL_FAILURES, sample_failure, sample_review_status
 from mediaforce.web.runtime.production_holds import approval_identity
-from mediaforce.web.runtime.encode_runtime import _host_allows_library
+from mediaforce.web.runtime.encode_runtime import _host_allows_library, available_encode_slots
 from mediaforce.web.runtime.file_encode_outcomes import file_encode_outcomes
 
 LIVE_ACTION = "live_action"
@@ -276,24 +277,21 @@ def _libraries_to_top_up(
     ).order_by(encode_jobs.c.created_at, encode_jobs.c.job_id)).all()
     if not jobs:
         return libraries
-    slots: list[set[str]] = []
+    slots: Counter[frozenset[str]] = Counter()
     for computer in computers:
-        if not computer["queue_active"] or computer.get("cooldown_until") or not computer.get("probe_available", True):
-            continue
-        allowed = {key for key in libraries if _host_allows_library(computer, key.lower())}
-        slots.extend([allowed] * (computer["max_parallel_encodes"] - computer["active_encode_count"]))
-    slots.sort(key=len)
+        if computer["schedule_open"] and not computer.get("cooldown_until") and not computer.get("controller_storage_issue"):
+            allowed = frozenset(key for key in libraries if _host_allows_library(computer, key.lower()))
+            slots[allowed] += available_encode_slots(computer)
+    restricted_first = sorted(slots, key=len)
     for status, prefix in jobs:
-        if not slots:
-            break
         if status != "queued":
             continue
         library = prefix.partition("/")[0]
-        for index, allowed in enumerate(slots):
-            if library in allowed:
-                slots.pop(index)
+        for allowed in restricted_first:
+            if slots[allowed] and library in allowed:
+                slots[allowed] -= 1
                 break
-    return {key for allowed in slots for key in allowed}
+    return {key for allowed, remaining in slots.items() if remaining for key in allowed}
 
 
 def _waiting_seasons(

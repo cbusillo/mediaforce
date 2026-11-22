@@ -1817,15 +1817,22 @@ def test_library_lists_an_approved_non_tv_sample_until_its_file_is_finished(tmp_
         assert not window()["samples"]["waiting_on_you"]
 
 
-def test_idle_computer_receives_next_season_while_another_finishes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("available,start,recover", [(True, "", False), (False, "wake", False), (False, "", True)])
+def test_idle_computer_receives_next_season_while_another_finishes(tmp_path: Path, available: bool, start: str, recover: bool) -> None:
     config = _config(tmp_path)
     _waiting_episode(config, EPISODE, 1_000)
     _waiting_episode(config, f"{OTHER_SEASON}/last.mkv", 2_000)
     load = _loader({SEASON: _approved(config), OTHER_SEASON: _approved(config)}, {})
     _encode_job(config, OTHER_SEASON, "running", job_kind="shard")
 
-    computers = [{"queue_active": True, "max_parallel_encodes": 2, "active_encode_count": 0},
-                 {"queue_active": False, "max_parallel_encodes": 1, "active_encode_count": 1}]
+    computers = [{"available": available, "probe_available": available, "schedule_open": True,
+                  "start_command": start, "storage_recovery_available": recover, "capabilities": ["encode_queue"],
+                  "max_parallel_encodes": 2, "active_encode_count": 0},
+                 {"available": True, "schedule_open": True, "capabilities": ["encode_queue"],
+                  "max_parallel_encodes": 1, "active_encode_count": 1}]
+    computers[0]["schedule_open"] = False
+    assert _next(config, load, computers=computers) is None
+    computers[0]["schedule_open"] = True
     chosen = _next(config, load, computers=computers)
     assert chosen is not None and chosen.season == SEASON
     with open_db(config.paths.db_path) as connection:
@@ -1843,9 +1850,11 @@ def test_queued_files_cover_only_open_slots_in_libraries_the_computer_can_compre
     movie_id = _waiting_episode(config, movie, 1_000)
     _waiting_episode(config, EPISODE, 2_000)
     load = _loader({movie: _approved(config), SEASON: _approved(config)}, {})
-    computers = [{"queue_active": True, "max_parallel_encodes": 2, "active_encode_count": 1,
+    computers = [{"available": True, "schedule_open": True, "capabilities": ["encode_queue"],
+                  "max_parallel_encodes": 2, "active_encode_count": 1,
                   "allowed_libraries": ["tv"]},
-                 {"queue_active": True, "max_parallel_encodes": 1, "active_encode_count": 0,
+                 {"available": True, "schedule_open": True, "capabilities": ["encode_queue"],
+                  "max_parallel_encodes": 1, "active_encode_count": 0,
                   "allowed_libraries": ["movies"]}]
     _encode_job(config, OTHER_SEASON, "queued", job_kind="shard")
     _encode_job(config, "movies/Retry.mkv", "retry_backoff")
