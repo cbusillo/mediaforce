@@ -89,7 +89,7 @@ from mediaforce.tuning.stream_budget import StreamBudgetIdentityError, StreamBud
 from mediaforce.remote import HostReadinessError, execution_mode_for_host, host_media_access_for_host, run_remote_command
 from mediaforce.web.runtime.encode_scheduler import COMPUTER_WORK_WINDOW_WAITING_REASON, HOST_WINDOW_IMPOSSIBLE_MARKER, \
     HOST_WINDOW_TOO_SHORT_REASON, SCHEDULE_CLOSE_WAITING_REASON
-from mediaforce.web.runtime.host_runtime import host_config_for_key
+from mediaforce.web.runtime.host_runtime import host_config_for_key, host_lifecycle_start_command
 from mediaforce.library.motion_keep_state import any_motion_keep_decision, library_item_ids_kept_original
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
 
@@ -3276,6 +3276,19 @@ def _controller_staging_access_issue(
     )
 
 
+def available_encode_slots(
+        host: dict[str, Any], *, start_command: Callable[[dict[str, Any]], str] = host_lifecycle_start_command,
+) -> int:
+    if "encode_queue" not in {str(capability).lower() for capability in host.get("capabilities") or []}:
+        return 0
+    if host.get("available"):
+        if not host.get("probe_available", True):
+            return 0
+    elif object_list(host.get("issues")) or not (start_command(host) or host.get("storage_recovery_available")):
+        return 0
+    return max(0, int(host.get("max_parallel_encodes") or 1) - int(host.get("active_encode_count") or 0))
+
+
 def select_encode_host(
         connection: DBClient | None,
         config: MediaforceConfig,
@@ -3314,37 +3327,14 @@ def select_encode_host(
             host_payload=host,
         )
 
-    def _probe_available(host: dict[str, Any]) -> bool:
-        return bool(host.get("probe_available", host.get("available")))
-
-    active_host_candidates = [
-        host
-        for host in host_rows
-        if bool(host.get("available"))
-        and _probe_available(host)
-        and "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
-        and int(host.get("active_encode_count") or 0) < int(host.get("max_parallel_encodes") or 1)
-        and _schedule_open(host)
-    ]
+    candidates = [host for host in host_rows
+                  if available_encode_slots(host, start_command=deps.host_lifecycle_start_command) and _schedule_open(host)]
+    active_host_candidates = [host for host in candidates if host.get("available")]
+    startable_host_candidates = [host for host in candidates if not host.get("available")]
     encode_capable_hosts = [
-        host
-        for host in host_rows
-        if "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
+        host for host in host_rows if "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
     ]
-    startable_host_candidates = [
-        host
-        for host in host_rows
-        if not bool(host.get("available"))
-        and not object_list(host.get("issues"))
-        and (
-            bool(deps.host_lifecycle_start_command(host))
-            or bool(host.get("storage_recovery_available"))
-        )
-        and "encode_queue" in {str(capability).lower() for capability in host.get("capabilities") or []}
-        and int(host.get("active_encode_count") or 0) < int(host.get("max_parallel_encodes") or 1)
-        and _schedule_open(host)
-    ]
-    if not encode_capable_hosts and not startable_host_candidates:
+    if not encode_capable_hosts:
         return None, "waiting for an available computer"
 
     storage_issues: list[str] = []

@@ -1194,7 +1194,7 @@ def create_app(
 
     def _hosts_payload(compact: int = 0) -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection:
-            hosts = _host_runtime_rows(connection, config, collect_statuses=_cached_host_statuses)
+            hosts = _cached_computers(connection, config)
         return {
             "compact": bool(compact),
             "hosts": hosts,
@@ -1225,7 +1225,7 @@ def create_app(
                 season_cards=cards,
                 file_sample_cards=lambda paths: library_file_sample_cards(connection, config, _page_state_sources(), paths),
                 remaking_samples=samples_to_remake(cards, lambda prefix: sample_failures_in_a_row(connection, prefix, limit=SAMPLE_REMAKE_LIMIT)),
-                computers=_host_runtime_rows(connection, config, collect_statuses=_cached_host_statuses),
+                computers=_cached_computers(connection, config),
                 controller_storage=controller_storage_recovery_snapshot(config),
                 storage_admits_work=controller_storage_admission_issue(config, None) is None,
                 observed_at=observed_at,
@@ -1239,7 +1239,7 @@ def create_app(
         from mediaforce.web.runtime.app_activity import activity_payload
 
         with open_db(config.paths.db_path) as connection, library_calculations.request(connection), kind_snapshot(connection, config, _load_calibration_state):
-            computers = _host_runtime_rows(connection, config, collect_statuses=_cached_host_statuses)
+            computers = _cached_computers(connection, config)
             following = next_approved_season(connection, config, load_calibration_state=_load_calibration_state, now=wall_time())
             return activity_payload(
                 connection, config, computers, observed_at=datetime.now(UTC),
@@ -1251,7 +1251,7 @@ def create_app(
         from mediaforce.web.runtime.app_computers import computers_payload
 
         with open_db(config.paths.db_path) as connection:
-            computers = _host_runtime_rows(connection, config, collect_statuses=_cached_host_statuses)
+            computers = _cached_computers(connection, config)
             return computers_payload(connection, config, computers, observed_at=datetime.now(UTC))
 
     def _tv_shows_payload() -> dict[str, Any]:
@@ -1885,22 +1885,25 @@ def create_app(
     def _queue_next_kind_season() -> None:
         # The season is chosen and its connection closed before queueing opens its own write transaction.
         with open_db(config.paths.db_path) as connection:
-            chosen = next_kind_season(connection, config, load_calibration_state=_load_calibration_state, now=wall_time())
+            chosen = next_kind_season(connection, config, load_calibration_state=_load_calibration_state, now=wall_time(),
+                                      computers=_cached_computers(connection, config))
         if chosen is None:
             return
+        season = chosen.season
         selected_files = chosen.files
         try:
             result = _queue_encode_action(
-                chosen.season, "Queued under its current approval.", False,
+                season, "Queued under its current approval.", False,
                 only_library_item_ids=selected_files,
                 admission_blocker=lambda queue_connection, queue_config: background_queue_blocker(
-                    queue_connection, library_item_ids=selected_files, config=queue_config,
+                    queue_connection, queue_config, season, library_item_ids=selected_files,
+                    computers=_cached_computers(queue_connection, queue_config),
                 ),
             )
         except HTTPException as refusal:
             result = {"ok": False, "message": str(refusal.detail)}
         record_kind_attempt(config, chosen, result, at=wall_time())
-        LOGGER.info("Approved season %s: %s", chosen.season, result.get("message") or result.get("code") or result.get("ok"))
+        LOGGER.info("Approved season %s: %s", season, result.get("message") or result.get("code") or result.get("ok"))
 
     def _prepare_sample(
             folder: Mapping[str, Any], status: Mapping[str, Any], size: str | None = None,
@@ -2355,7 +2358,8 @@ def create_app(
         ),
         make_sample_action=_make_app_sample_action,
         compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=_queue_folder_encode_action),
-        item_payload=lambda prefix: item_payload(config, prefix, sound=_audio_preset_payload, load_calibration_state=_load_calibration_state),
+        item_payload=lambda prefix: item_payload(config, prefix, sound=_audio_preset_payload, load_calibration_state=_load_calibration_state,
+                                                 computers=_cached_computers),
         player_source=lambda library_item_id, side: player_source(config, library_item_id, side),
         kinds_payload=_kinds_payload,
         approve_kind_action=_approve_app_kind,
@@ -2768,6 +2772,10 @@ def _host_runtime_rows(
         now=current_time,
     )
     return mark_host_cooldowns(rows, connection, parse_iso=_parse_iso, now=current_time)
+
+
+def _cached_computers(connection: DBClient, config: MediaforceConfig) -> list[dict[str, Any]]:
+    return _host_runtime_rows(connection, config, collect_statuses=_cached_host_statuses)
 
 
 def evidence_host_rows(
