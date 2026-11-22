@@ -22,6 +22,10 @@ TOOLS_RELATIVE_DIRECTORY = ".local/share/mediaforce/tools"
 TOOLS_DIRECTORY = Path.home() / TOOLS_RELATIVE_DIRECTORY
 
 
+class ToolUpdateError(RuntimeError):
+    prefix = "mediaforce-update: "
+
+
 def command_output(arguments: list[str], **environment: str) -> str:
     result = subprocess.run(
         arguments, capture_output=True, encoding="utf-8", errors="replace", timeout=4, env={**os.environ, **environment}, check=True

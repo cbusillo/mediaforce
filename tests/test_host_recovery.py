@@ -1107,3 +1107,35 @@ def test_a_file_between_media_commands_holds_its_computer_out_of_an_update(confi
         connection.commit()
     assert host_is_busy(config, config.remote_hosts[0])
     assert not host_is_busy(config, {"host": "other@fixture.invalid"})
+
+
+def test_background_tool_retry_leaves_checked_worker_available_until_an_update_starts(config: MediaforceConfig) -> None:
+    checked = status(available=True)
+    checked.tool_target = {"ab-av1": "0.11"}
+    checked.tool_message = "Using the current tools."
+    failed = remote.HostSetupResult(False, "Could not finish updating.", failure_kind="update_failed")
+    updating = remote.HostSetupResult(False, "Updating the tools.", failure_kind="updating")
+    with patch_attr(recovery, "probe_host_status", return_value=checked), patch_attr(
+        recovery, "prepare_host_tools", side_effect=[failed, updating],
+    ), patch_attr(recovery, "datetime", wraps=datetime) as clock:
+        clock.now.return_value = NOW
+        recovery.process_host_recovery_once(config)
+        assert recovery.host_recovery_snapshot(config)["hosts"][checked.key]["status"] == "ready"
+        clock.now.return_value += timedelta(minutes=10)
+        recovery.process_host_recovery_once(config)
+        assert recovery.host_recovery_snapshot(config)["hosts"][checked.key]["status"] == "retrying"
+        assert not host_status.checked_host_statuses(config)[0].available
+
+
+@pytest.mark.parametrize("held", [True, False])
+def test_saved_tool_failure_is_rechecked_without_showing_old_command_output(config: MediaforceConfig, held: bool) -> None:
+    stale = {"status": "action_required", "reason": "Media tools could not update. raw command output",
+             "label": "Worker", "tool_hold": {"ffmpeg": "9.0"}, "failure_count": 2,
+             "first_failure_at": NOW.isoformat(), "mount_uncertain": False}
+    if not held:
+        stale.update(status="retrying")
+        del stale["tool_hold"]
+    save_runtime_settings(recovery.host_recovery_path(config), {"schema_version": 1, "hosts": {"user@worker": stale}})
+    record = recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]
+    assert record["status"] == "retrying" and "raw command output" not in record["reason"]
+    assert not record.get("tool_hold") and not record.get("next_retry_at")

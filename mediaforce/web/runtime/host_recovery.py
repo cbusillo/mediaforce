@@ -49,6 +49,10 @@ def _validated_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
                 or (state.get("status") != "ready" and _parse_time(state.get("first_failure_at")) is None)
             ):
                 raise ValueError("Invalid host recovery record")
+            if state.pop("tool_hold", None) or (state.get("reason") or "").startswith(
+                ("Media tools could not update. ", "Could not complete the media tool update. ")
+            ):
+                state.update(status="retrying", reason="The last media tool update failed. Mediaforce will check again.", next_retry_at=None)
     return payload or {"schema_version": 1, "hosts": {}}
 
 
@@ -106,7 +110,7 @@ def retry_host_connection(config: MediaforceConfig, host_key: str, *, requested:
         state = _recovery_pass(config, host, host_key, previous, state_error=state_error, requested=requested)
     if state["status"] == "ready":
         return True, f"{state['label']} is connected."
-    reason = (state["reason"] or "").strip()
+    reason = (state.get("reason") or "").strip()
     if reason and not reason.endswith((".", "!", "?")):
         reason += "."
     return False, f"{state['label']} is still unavailable. {reason}".strip()
@@ -128,6 +132,9 @@ def _recovery_pass(
     """
     now = datetime.now(timezone.utc)
     status = probe_host_status(config, host)
+    update = prepare_host_tools(config, host, status, requested=requested) if status.can_update_tools and not state_error else None
+    if update and status.available and update.failure_kind == "updating":
+        status.hold_for_tool_update(update.message)
     publish_host_status(config, status)
     count = min(int(previous.get("failure_count") or 0) + 1, 1000)
     state = {
@@ -158,14 +165,8 @@ def _recovery_pass(
         return state
     elif state_error:
         state.update(status="action_required", reason=state_error)
-    elif status.can_update_tools:
-        if previous.get("tool_hold") == status.tool_target and not requested:
-            state.update(status="action_required", reason=previous["reason"], tool_hold=status.tool_target)
-        else:
-            result = prepare_host_tools(config, host, status, requested=requested)
-            state.update(status="retrying", reason=result.message)
-            if result.failure_kind == "needs_attention":
-                state.update(status="action_required", tool_hold=status.tool_target)
+    elif update:
+        state.update(status="retrying", reason=update.message)
     elif remote_mount_recovery_supported(config, host, status) and previous.get("retry_paused") and not requested:
         # Only someone at that computer can fix this; keep asking, and keep checking often so
         # the warning clears soon after Retry connection, Set up computer or a manual connection.

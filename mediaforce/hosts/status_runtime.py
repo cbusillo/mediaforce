@@ -401,6 +401,7 @@ def _remote_host_status(
         dark_wake=payload.get("dark_wake") == "1",
     )
 
+    using_current_tools = False
     try:
         record = json.loads(str(payload.get("managed_tools") or "{}"))
         if not isinstance(record, dict) or not isinstance(record.get("versions"), dict):
@@ -413,7 +414,8 @@ def _remote_host_status(
         required = ["ffmpeg_picture_sound", "ffmpeg_libvmaf_usable", "ffmpeg_xpsnr", "ffmpeg_libsvtav1"]
         if platform_name == "macos":
             required.append("ffmpeg_videotoolbox")
-        status.repair_video_tools = "ffmpeg_picture_sound" in tools and not all(tools.get(key) for key in required)
+        video_tools_checked = all(tools.get(key) for key in required)
+        status.repair_video_tools = "ffmpeg_picture_sound" in tools and not video_tools_checked
         if record.get("needs_python"):
             status.tool_message = f"Install Python 3 on {label} so Mediaforce can check its media tools."
             status.check_failure = "python_missing"
@@ -430,15 +432,18 @@ def _remote_host_status(
                 latest = managed_tools.update_result(config, ssh_host, target)
                 if latest and not latest.ok:
                     status.tool_message = latest.message
+                    using_current_tools = (
+                        latest.failure_kind == "update_failed" and status.available and not record.get("pending")
+                        and video_tools_checked and all(record["versions"].get(name) for name in target)
+                    )
+                    if using_current_tools:
+                        status.tool_message = f"{latest.message} Using the current tools. Mediaforce will try again later."
             elif issue:
                 status.tool_message = "This Mac could not confirm its own media tools. Mediaforce will check again."
     if platform_name == "linux" and (status.tool_target or staging_path in status.missing_paths):
         status.setup_supported = True
-    if status.tool_message:
-        status.available = False
-        if not status.issues and not status.missing_mounts and not status.missing_paths:
-            status.message = status.tool_message
-        status.issues.append(status.tool_message)
+    if status.tool_message and not using_current_tools:
+        status.hold_for_tool_update(status.tool_message)
     return status
 
 
