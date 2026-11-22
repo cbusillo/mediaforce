@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import open_readonly_db
+from mediaforce.core.db import DBClient, open_readonly_db
 from mediaforce.core.db_tables import library_items, motion_keep_decisions, staged_artifacts
 from mediaforce.core.type_defs import int_value
 from mediaforce.library.candidate_selection import encode_candidate_decisions, scope_lifecycle_payload_from_decisions, \
@@ -41,6 +41,7 @@ def item_payload(
         *,
         sound: Callable[[str], dict[str, Any] | None],
         load_calibration_state: LoadCalibrationState | None = None,
+        computers: Callable[[DBClient, MediaforceConfig], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any] | None:
     """Everything the item page shows for this prefix, or None when it names nothing in the library."""
     with open_readonly_db(config.paths.db_path) as connection:
@@ -61,7 +62,8 @@ def item_payload(
             for episode in load_season_episode_progress(connection, items, config=config)
         }
         ids = [item.item_id for item in items]
-        queue = (movie_queue_facts(connection, config, scope.prefix, ids, load_calibration_state, now=time())
+        queue = (movie_queue_facts(connection, config, scope.prefix, ids, load_calibration_state, now=time(),
+                                  computers=computers(connection, config) if computers else ())
                  if scope.kind in {"movie_title", "movie_file"} and load_calibration_state is not None else None)
         sizes = {
             int(item_id): int(size or 0)

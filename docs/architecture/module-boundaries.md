@@ -170,9 +170,10 @@ app.
       action once at startup, darker first
     - the background choice of the next waiting season or movie title a
       current folder, show, or kind approval covers, from libraries set to
-      compress,
-      largest first and one at a time: never while work is paused or a run is
-      queued or running (checked again inside the queueing transaction). Each
+      compress, largest first. An empty queue can start a run. While files are
+      in progress, the planner adds work for computers with open slots after
+      accounting for queued files from libraries they can compress. It rechecks
+      capacity, pause, update holds and overlapping runs in the queueing transaction. Each
       file follows its newest runnable-job outcome across scopes, using saved
       manifest IDs and indexes, with paths for legacy manifests. A question or
       Stop holds that file while its siblings continue. A newer completion

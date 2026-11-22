@@ -338,10 +338,10 @@ def _encode_job(
     return job_id
 
 
-def _next(config: MediaforceConfig, load: KindAwareLoader, *, now: float = 0.0) -> KindSeason | None:
+def _next(config: MediaforceConfig, load: KindAwareLoader, *, now: float = 0.0, computers: Collection[dict[str, Any]] = ()) -> KindSeason | None:
     try:
         with open_db(config.paths.db_path) as connection:
-            return next_kind_season(connection, config, load_calibration_state=load, now=now)
+            return next_kind_season(connection, config, load_calibration_state=load, now=now, computers=computers)
     finally:
         reset_engine_cache()
 
@@ -363,8 +363,8 @@ def test_movies_and_tv_share_one_size_order_excluding_extras_and_vr(tmp_path: Pa
 
     _encode_job(config, SEASON, "running")
     with open_db(config.paths.db_path) as connection:
-        assert next_kind_season(connection, config, load_calibration_state=load, now=0) is None
-        assert movie_queue_facts(connection, config, title, [feature], load, now=0)["waits"] == ["production_active"]
+        assert next_kind_season(connection, config, load_calibration_state=load, now=0, computers=[]) is None
+        assert movie_queue_facts(connection, config, title, [feature], load, now=0)["waits"] == ["computer_capacity"]
         connection.execute(encode_jobs.update().values(status="completed"))
 
     offered = []
@@ -508,7 +508,7 @@ def test_a_refused_season_is_tried_again_later_or_when_its_files_change(tmp_path
     assert again is not None and again.season == SEASON and again.files != chosen.files
 
 
-def test_no_season_is_offered_while_work_is_paused_running_or_left_with_the_director(tmp_path: Path) -> None:
+def test_no_season_is_offered_while_paused_without_a_free_computer_or_left_with_the_director(tmp_path: Path) -> None:
     config = _config(tmp_path)
     _waiting_episode(config, EPISODE, 1_000)
     approve_kind(config, LIVE_ACTION, APPROVED_SEASON, _approved(config), approved_at="now")
@@ -516,7 +516,7 @@ def test_no_season_is_offered_while_work_is_paused_running_or_left_with_the_dire
 
     with open_db(config.paths.db_path) as connection:
         save_queue_state(connection, {"queue_name": DEFAULT_QUEUE_NAME, "is_paused": True, "updated_at": "now"})
-        assert background_queue_blocker(connection) == {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
+        assert background_queue_blocker(connection, config, SEASON, library_item_ids=[], computers=[]) == {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
     assert _next(config, load) is None
     with open_db(config.paths.db_path) as connection:
         save_queue_state(connection, {"queue_name": DEFAULT_QUEUE_NAME, "is_paused": False, "updated_at": "now"})
@@ -524,7 +524,7 @@ def test_no_season_is_offered_while_work_is_paused_running_or_left_with_the_dire
     assert _next(config, load) is None
     with open_db(config.paths.db_path) as connection:
         connection.execute(encode_jobs.update().values(status="completed"))
-        assert background_queue_blocker(connection) is None
+        assert background_queue_blocker(connection, config, SEASON, library_item_ids=[], computers=[]) is None
     _encode_job(config, SEASON, "needs_attention")
     assert _next(config, load) is None
     with open_db(config.paths.db_path) as connection:
@@ -897,7 +897,7 @@ def test_a_new_problem_between_selection_and_queueing_keeps_admission_waiting(tm
     _stored_folder_run(config, "tv/Thriller", {item_id: EPISODE}, {item_id: ("stopped", CONTROLLER_RESTART_STOP_REASON)})
 
     with open_db(config.paths.db_path) as connection:
-        assert background_queue_blocker(connection, library_item_ids=[item_id]) == {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
+        assert background_queue_blocker(connection, config, SEASON, library_item_ids=[item_id], computers=[]) == {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
 
 
 def test_completed_files_waiting_for_publication_are_not_offered_again(tmp_path: Path) -> None:
@@ -1599,7 +1599,7 @@ def test_activity_names_next_approved_season_while_production_waits_for_current_
     load = _loader({}, {SEASON: LIVE_ACTION, OTHER_SEASON: LIVE_ACTION})
     _encode_job(config, OTHER_SEASON, "running")
     with open_db(config.paths.db_path) as connection:
-        assert next_kind_season(connection, config, load_calibration_state=load, now=0) is None
+        assert next_kind_season(connection, config, load_calibration_state=load, now=0, computers=[]) is None
         following = next_approved_season(connection, config, load_calibration_state=load, now=0)
         assert following is not None and following.season == SEASON
         assert connection.execute(select(encode_jobs.c.status)).scalar_one() == "running"
@@ -1815,3 +1815,52 @@ def test_library_lists_an_approved_non_tv_sample_until_its_file_is_finished(tmp_
 
         connection.execute(library_items.update().where(library_items.c.rel_path == path).values(status="promoted"))
         assert not window()["samples"]["waiting_on_you"]
+
+
+def test_idle_computer_receives_next_season_while_another_finishes(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _waiting_episode(config, EPISODE, 1_000)
+    _waiting_episode(config, f"{OTHER_SEASON}/last.mkv", 2_000)
+    load = _loader({SEASON: _approved(config), OTHER_SEASON: _approved(config)}, {})
+    _encode_job(config, OTHER_SEASON, "running", job_kind="shard")
+
+    computers = [{"queue_active": True, "max_parallel_encodes": 2, "active_encode_count": 0},
+                 {"queue_active": False, "max_parallel_encodes": 1, "active_encode_count": 1}]
+    chosen = _next(config, load, computers=computers)
+    assert chosen is not None and chosen.season == SEASON
+    with open_db(config.paths.db_path) as connection:
+        assert background_queue_blocker(connection, config, SEASON, library_item_ids=chosen.files, computers=computers) is None
+    result, _ = _queue(config, chosen.season, load, only_library_item_ids=chosen.files, persist_jobs=True)
+    assert result["ok"], result
+    assert _next(config, load, computers=computers) is None
+
+
+def test_queued_files_cover_only_open_slots_in_libraries_the_computer_can_compress(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.raw["media"]["libraries"].append({"key": "movies", "type": "movie", "path": str(tmp_path / "movies"),
+                                            "availability": "production"})
+    movie = "movies/Feature.mkv"
+    movie_id = _waiting_episode(config, movie, 1_000)
+    _waiting_episode(config, EPISODE, 2_000)
+    load = _loader({movie: _approved(config), SEASON: _approved(config)}, {})
+    computers = [{"queue_active": True, "max_parallel_encodes": 2, "active_encode_count": 1,
+                  "allowed_libraries": ["tv"]},
+                 {"queue_active": True, "max_parallel_encodes": 1, "active_encode_count": 0,
+                  "allowed_libraries": ["movies"]}]
+    _encode_job(config, OTHER_SEASON, "queued", job_kind="shard")
+    _encode_job(config, "movies/Retry.mkv", "retry_backoff")
+    _encode_job(config, "movies/Folder", "queued", job_kind="folder")
+    chosen = _next(config, load, computers=computers)
+    assert chosen is not None and chosen.files == (movie_id,)
+    _encode_job(config, "movies/Another.mkv", "queued")
+    with open_db(config.paths.db_path) as connection:
+        assert background_queue_blocker(connection, config, movie, library_item_ids=chosen.files, computers=computers)
+        assert movie_queue_facts(connection, config, movie, chosen.files, load, now=0, computers=computers)["waits"]
+    assert _next(config, load, computers=computers) is None
+    computers[0]["active_encode_count"] = 0
+    following = _next(config, load, computers=computers)
+    assert following is not None and following.season == SEASON
+    _encode_job(config, "tv/Thriller", "running", job_kind="shard")
+    with open_db(config.paths.db_path) as connection:
+        assert background_queue_blocker(connection, config, SEASON, library_item_ids=following.files, computers=computers)
+    assert _next(config, load, computers=computers) is None

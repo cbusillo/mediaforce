@@ -1322,7 +1322,7 @@ extension Words {
         guard work.state == "ready_to_make", let queue else { return sampleHeadline(work) }
         var lines: [String] = []
         if queue.waits.contains("queue_paused") { lines.append("Compression is paused.") }
-        if queue.waits.contains("production_active") { lines.append("The current compression run finishes first.") }
+        if queue.waits.contains("computer_capacity") { lines.append("Waiting for a computer to take another file.") }
         if let refusal = queue.refusal {
             if refusal.code == "free_space_reserve", let measured = refusal.measurable {
                 lines.append(measured ? "There isn’t enough free space for the original and the compressed copy."

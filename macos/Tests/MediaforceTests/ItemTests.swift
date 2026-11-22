@@ -102,10 +102,10 @@ final class ItemTests: XCTestCase {
         XCTAssertEqual(waiting.workActions(actions), actions)
     }
 
-    func testMovieQueueKeepsTheRefusalVisibleAlongsideAnActiveRun() throws {
+    func testMovieQueueKeepsTheRefusalVisibleWhileWaitingForAComputer() throws {
         let approved = try JSONDecoder.mediaforce.decode(SampleFacts.self, from: Data(SampleTests.facts(state: "ready_to_make").utf8))
         let message = "Not enough free space."
-        let busy = ItemFacts.MovieQueue(waits: ["production_active"], refusal: nil)
+        let busy = ItemFacts.MovieQueue(waits: ["computer_capacity"], refusal: nil)
         let refused = ItemFacts.MovieQueue(waits: busy.waits, refusal: .init(code: nil, message: message, measurable: nil))
         let status = Words.movieQueueStatus(approved, queue: refused)
         XCTAssertTrue(status.contains(message))

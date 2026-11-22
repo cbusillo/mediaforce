@@ -25,7 +25,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_readonly_db
 from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifacts, item_events
 from mediaforce.library.calculation_reuse import LibraryCalculations, reuse_library_calculation
-from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, RUNNABLE_ENCODE_JOB_KINDS, load_queue_state
+from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, RUNNABLE_ENCODE_JOB_KINDS, load_active_encode_jobs_for_prefix, load_queue_state
 from mediaforce.core.type_defs import object_dict
 from mediaforce.ops.runtime_install import update_hold_reason
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
@@ -42,6 +42,7 @@ from mediaforce.web.runtime.production_approval import KEEP_FULL_HEIGHT_FIELD, E
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
 from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES, SIZE_GOAL_FAILURES, sample_failure, sample_review_status
 from mediaforce.web.runtime.production_holds import approval_identity
+from mediaforce.web.runtime.encode_runtime import _host_allows_library
 from mediaforce.web.runtime.file_encode_outcomes import file_encode_outcomes
 
 LIVE_ACTION = "live_action"
@@ -250,26 +251,49 @@ KIND_RETRY_SECONDS = 6 * 3600.0
 
 
 def background_queue_blocker(
-        connection: DBClient, *, library_item_ids: Collection[int] | None = None, config: MediaforceConfig | None = None,
+        connection: DBClient, config: MediaforceConfig, prefix: str, *, library_item_ids: Collection[int],
+        computers: Collection[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Why the background queue waits: the owner paused work, or a production run is queued or running."""
-    if (config is not None and update_hold_reason(config.paths.db_path.parent)) or _queue_waits(connection):
+    if (_queue_held(connection, config) or prefix.partition("/")[0] not in _libraries_to_top_up(connection, config, computers)
+            or load_active_encode_jobs_for_prefix(connection, prefix)):
         return {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
-    if library_item_ids is not None:
-        files = _waiting_files(connection, library_item_ids=library_item_ids)
-        if set(library_item_ids) != {int(item["id"]) for item in files} or _files_waiting_for_owner(connection, files, config=config):
-            return {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
+    files = _waiting_files(connection, library_item_ids=library_item_ids)
+    if set(library_item_ids) != {int(item["id"]) for item in files} or _files_waiting_for_owner(connection, files, config=config):
+        return {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
     return None
 
 
-def _queue_waits(connection: DBClient) -> list[str]:
-    active = connection.execute(select(encode_jobs.c.job_id).where(
+def _queue_held(connection: DBClient, config: MediaforceConfig) -> bool:
+    return bool(update_hold_reason(config.paths.db_path.parent) or load_queue_state(connection).get("is_paused"))
+
+
+def _libraries_to_top_up(
+        connection: DBClient, config: MediaforceConfig, computers: Collection[dict[str, Any]],
+) -> set[str]:
+    libraries = set(config.source_root_map)
+    jobs = connection.execute(select(encode_jobs.c.status, encode_jobs.c.prefix).where(
         encode_jobs.c.status.in_(ACTIVE_ENCODE_JOB_STATUSES), encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS),
-    ).limit(1)).first()
-    waits = ["queue_paused"] if load_queue_state(connection).get("is_paused") else []
-    if active is not None:
-        waits.append("production_active")
-    return waits
+    ).order_by(encode_jobs.c.created_at, encode_jobs.c.job_id)).all()
+    if not jobs:
+        return libraries
+    slots: list[set[str]] = []
+    for computer in computers:
+        if not computer["queue_active"] or computer.get("cooldown_until") or not computer.get("probe_available", True):
+            continue
+        allowed = {key for key in libraries if _host_allows_library(computer, key.lower())}
+        slots.extend([allowed] * (computer["max_parallel_encodes"] - computer["active_encode_count"]))
+    slots.sort(key=len)
+    for status, prefix in jobs:
+        if not slots:
+            break
+        if status != "queued":
+            continue
+        library = prefix.partition("/")[0]
+        for index, allowed in enumerate(slots):
+            if library in allowed:
+                slots.pop(index)
+                break
+    return {key for allowed in slots for key in allowed}
 
 
 def _waiting_seasons(
@@ -375,20 +399,27 @@ def next_kind_season(
         *,
         load_calibration_state: LoadCalibrationState,
         now: float,
+        computers: Collection[dict[str, Any]],
 ) -> KindSeason | None:
-    if background_queue_blocker(connection, config=config) is not None:
+    if _queue_held(connection, config):
         return None
-    return next_approved_season(connection, config, load_calibration_state=load_calibration_state, now=now)
+    libraries = _libraries_to_top_up(connection, config, computers)
+    if not libraries:
+        return None
+    return next_approved_season(connection, config, load_calibration_state=load_calibration_state, now=now, libraries=libraries)
 
 
 def next_approved_season(
         connection: DBClient, config: MediaforceConfig, *, load_calibration_state: LoadCalibrationState, now: float,
+        libraries: set[str] | None = None,
 ) -> KindSeason | None:
     attempts = _load_attempts(config)
     active_prefixes = connection.execute(select(encode_jobs.c.prefix).where(
         encode_jobs.c.status.in_(ACTIVE_ENCODE_JOB_STATUSES), encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS),
     )).scalars().all()
     for season, waiting_bytes, files in _waiting_seasons(connection, config):
+        if libraries is not None and season.partition("/")[0] not in libraries:
+            continue
         if any(season == prefix or season.startswith(f"{prefix}/") or prefix.startswith(f"{season}/") for prefix in active_prefixes):
             continue
         chosen = _approved_candidate(config, season, waiting_bytes, files, load_calibration_state)
@@ -411,9 +442,12 @@ def _approved_candidate(
 
 def movie_queue_facts(
         connection: DBClient, config: MediaforceConfig, prefix: str, file_ids: Collection[int], load: LoadCalibrationState,
-        *, now: float,
+        *, now: float, computers: Collection[dict[str, Any]] = (),
 ) -> dict[str, Any]:
-    facts: dict[str, Any] = {"waits": _queue_waits(connection), "refusal": None}
+    waits = ["queue_paused"] if load_queue_state(connection).get("is_paused") else []
+    if prefix.partition("/")[0] not in _libraries_to_top_up(connection, config, computers):
+        waits.append("computer_capacity")
+    facts: dict[str, Any] = {"waits": waits, "refusal": None}
     attempt = object_dict(_load_attempts(config).get(prefix))
     if not attempt or not _retry_pending(attempt, now):
         return facts
