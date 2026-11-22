@@ -336,7 +336,7 @@ final class SampleClientTests: XCTestCase {
 
     func testReviewClipsLoadFromTheServer() {
         let url = client(status: 200, body: "{}").reviewMedia("/review-media/Lucifer S2/preview.mp4")
-        XCTAssertEqual(url.absoluteString, "http://127.0.0.1:8777/review-media/Lucifer%20S2/preview.mp4")
+        XCTAssertEqual(url, ServerConnection.localServer.appending(path: "review-media/Lucifer S2/preview.mp4"))
     }
 }
 
