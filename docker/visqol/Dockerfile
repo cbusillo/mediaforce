@@ -2,7 +2,7 @@
 # ViSQOL does not build with the macOS toolchain, so Mediaforce runs it here.
 # Build: docker build -t mediaforce-visqol:38d0b01 docker/visqol
 
-ARG BASE=ubuntu:22.04@sha256:9abcaffc92a5279fff3a6a41635c0800ea33e528425fb389658806476e7defde
+ARG BASE=ubuntu:22.04@sha256:f64b2ffc2f10ab8f8505aa56b2664bd846cbb9df87c7e2532e30f7667021c0e6
 
 FROM ${BASE} AS build
 ARG VISQOL_COMMIT=38d0b0163e441047d4429bf07ad09e5b9031d02c
