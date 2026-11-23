@@ -3297,7 +3297,7 @@ def select_encode_host(
         *,
         host_rows: list[dict[str, Any]] | None = None,
         now: datetime | None = None,
-        host_admission: Callable[[dict[str, Any]], bool] | None = None,
+        window_rejected_seconds: dict[str, int] | None = None,
         host_rank: Callable[[dict[str, Any]], tuple[int, float, int, str]] | None = None,
         globally_blocked_hosts: dict[str, dict[str, Any]] | None = None,
         scratch_admission_issue: Callable[[dict[str, Any]], str | None] | None = None,
@@ -3312,12 +3312,6 @@ def select_encode_host(
     if library_key:
         host_rows = [host for host in host_rows if _host_allows_library(host, library_key)]
     bypass_schedule = bool(job.get("bypass_schedule"))
-
-    def _admitted(hosts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if host_admission is None:
-            return hosts
-        admitted = [host for host in hosts if bool(host_admission(host))]
-        return sorted(admitted, key=host_rank) if host_rank is not None else admitted
 
     def _schedule_open(host: dict[str, Any]) -> bool:
         return deps.scheduler_allows_encode_run(
@@ -3407,34 +3401,24 @@ def select_encode_host(
     last_host = object_dict(job.get("last_host"))
     blocked_tokens = _host_identity_tokens(last_host)
     if cooldown_until is not None and cooldown_until > current_time and blocked_tokens:
-        eligible_active_hosts = [
-            host
-            for host in active_hosts
-            if not (_host_identity_tokens(host) & blocked_tokens)
-        ]
-        admitted_active_hosts = _admitted(eligible_active_hosts)
-        if admitted_active_hosts:
-            return object_dict(admitted_active_hosts[0]), None
-        eligible_startable_hosts = [
-            host
-            for host in startable_hosts
-            if not (_host_identity_tokens(host) & blocked_tokens)
-        ]
-        admitted_startable_hosts = _admitted(eligible_startable_hosts)
-        if admitted_startable_hosts:
-            return object_dict(admitted_startable_hosts[0]), None
-        if host_admission is not None and (eligible_active_hosts or eligible_startable_hosts):
-            return None, HOST_WINDOW_TOO_SHORT_REASON
-        host_name = str(last_host.get("label") or last_host.get("key") or "the last computer")
-        return None, f"waiting for {host_name} to recover from repeated failures"
-    admitted_active_hosts = _admitted(active_hosts)
-    if admitted_active_hosts:
-        return object_dict(admitted_active_hosts[0]), None
-    admitted_startable_hosts = _admitted(startable_hosts)
-    if admitted_startable_hosts:
-        return object_dict(admitted_startable_hosts[0]), None
-    if host_admission is not None and (active_hosts or startable_hosts):
-        return None, HOST_WINDOW_TOO_SHORT_REASON
+        active_hosts = [host for host in active_hosts if not (_host_identity_tokens(host) & blocked_tokens)]
+        startable_hosts = [host for host in startable_hosts if not (_host_identity_tokens(host) & blocked_tokens)]
+        if not active_hosts and not startable_hosts:
+            host_name = str(last_host.get("label") or last_host.get("key") or "the last computer")
+            return None, f"waiting for {host_name} to recover from repeated failures"
+
+    rejected = window_rejected_seconds or {}
+    for group in (active_hosts, startable_hosts):
+        admitted = [host for host in group if _encode_duration_host_cache_key(host) not in rejected]
+        if admitted:
+            return object_dict(min(admitted, key=host_rank) if host_rank else admitted[0]), None
+    if active_hosts or startable_hosts:
+        def runtime_seconds(host: dict[str, Any]) -> int:
+            return rejected[_encode_duration_host_cache_key(host)]
+
+        host = min(active_hosts + startable_hosts, key=runtime_seconds)
+        runtime = _format_estimated_duration(runtime_seconds(host))
+        return None, f"Estimated runtime {runtime} on {_blocked_host_display_name(host)}; {HOST_WINDOW_TOO_SHORT_REASON}."
     if any(
             int(host.get("active_encode_count") or 0) >= int(host.get("max_parallel_encodes") or 1)
             for host in encode_capable_hosts
@@ -4059,7 +4043,7 @@ def _encode_host_selection_key(job: dict[str, Any]) -> tuple[str, bool, str, str
     )
 
 
-def _duration_aware_encode_waiting_reason(
+def _impossible_encode_window_reason(
         config: MediaforceConfig,
         job: dict[str, Any],
         estimate_items: list[dict[str, Any]],
@@ -4068,7 +4052,6 @@ def _duration_aware_encode_waiting_reason(
         deps: EncodeQueueRuntimeDeps,
         *,
         now: datetime,
-        impossible_only: bool = False,
 ) -> str | None:
     library_key = _encode_job_library_key(job)
     encode_hosts = [
@@ -4079,55 +4062,28 @@ def _duration_aware_encode_waiting_reason(
     ]
     if not estimate_items or not encode_hosts:
         return None
-    best_estimate_seconds: int | None = None
-    best_estimate_host = ""
-    longest_window_seconds = 0.0
+    longest_window_seconds = -1.0
     longest_window_host = ""
     longest_window_estimate_seconds = 0
-    fits_configured_window = False
     for host in encode_hosts:
         estimate = estimate_encode_job_duration(estimate_items, host, duration_samples)
-        if best_estimate_seconds is None or estimate.total_seconds < best_estimate_seconds:
-            best_estimate_seconds = estimate.total_seconds
-            best_estimate_host = _blocked_host_display_name(host)
         policy = deps.schedule_profile_policy_for_host(config, host)
         max_window_seconds = deps.max_encode_schedule_window_seconds(
             policy,
             now=now,
             host_payload=host,
         )
-        if max_window_seconds is None:
-            fits_configured_window = True
-            continue
+        if max_window_seconds is None or estimate.total_seconds <= max_window_seconds:
+            return None
         if max_window_seconds > longest_window_seconds:
             longest_window_seconds = max_window_seconds
             longest_window_host = _blocked_host_display_name(host)
             longest_window_estimate_seconds = estimate.total_seconds
-        if estimate.total_seconds <= max_window_seconds:
-            fits_configured_window = True
-    # Each sentence names the computer whose estimate it quotes: estimates differ by computer.
-    estimate_copy = _format_estimated_duration(best_estimate_seconds or 0)
-    if not fits_configured_window:
-        if longest_window_estimate_seconds:
-            impossible_estimate_seconds, estimate_host = longest_window_estimate_seconds, longest_window_host
-        else:
-            impossible_estimate_seconds, estimate_host = best_estimate_seconds or 0, best_estimate_host
-        impossible_estimate_copy = _format_estimated_duration(impossible_estimate_seconds)
-        longest_copy = _format_estimated_duration(longest_window_seconds)
-        estimate_host_copy = f" on {estimate_host}" if estimate_host else ""
-        window_host_copy = (
-            f" on {longest_window_host}" if longest_window_host and longest_window_host != estimate_host else ""
-        )
-        return (
-            f"Estimated runtime {impossible_estimate_copy}{estimate_host_copy} is {HOST_WINDOW_IMPOSSIBLE_MARKER} "
-            f"(longest {longest_copy}{window_host_copy}). Widen a computer's work window or intentionally bypass the work schedule."
-        )
-    if impossible_only:
-        return None
-    estimate_host_copy = f" on {best_estimate_host}" if best_estimate_host else ""
+    runtime = _format_estimated_duration(longest_window_estimate_seconds)
+    window = _format_estimated_duration(longest_window_seconds)
     return (
-        f"Estimated runtime {estimate_copy}{estimate_host_copy}; "
-        f"{HOST_WINDOW_TOO_SHORT_REASON}."
+        f"Estimated runtime {runtime} on {longest_window_host} is {HOST_WINDOW_IMPOSSIBLE_MARKER} "
+        f"(longest {window}). Widen a computer's work window or intentionally bypass the work schedule."
     )
 
 
@@ -4658,7 +4614,7 @@ def load_next_runnable_encode_job(
                 estimates_by_host[host_key] = host_estimate
             return host_estimate
 
-        host_admission: Callable[[dict[str, Any]], bool] | None = None
+        window_rejected_seconds: dict[str, int] | None = None
         host_rank: Callable[[dict[str, Any]], tuple[int, float, int, str]] | None = None
         admission_key: tuple[tuple[str, int, bool], ...] | None = None
         if estimate_items and not bool(job.get("bypass_schedule")):
@@ -4674,11 +4630,10 @@ def load_next_runnable_encode_job(
                 )
                 for host in host_rows
             ]
-            admitted_host_keys = frozenset(
-                host_key for host_key, _estimated_seconds, admitted in admission_entries if admitted
-            )
+            window_rejected_seconds = {
+                host_key: seconds for host_key, seconds, admitted in admission_entries if not admitted
+            }
             admission_key = tuple(sorted(admission_entries))
-            host_admission = lambda host: _encode_duration_host_cache_key(host) in admitted_host_keys
             if saw_duration_block:
                 host_rank = lambda host: _encode_host_best_fit_score(
                     host,
@@ -4769,7 +4724,7 @@ def load_next_runnable_encode_job(
                 deps,
                 host_rows=host_rows,
                 now=now,
-                host_admission=host_admission,
+                window_rejected_seconds=window_rejected_seconds,
                 host_rank=host_rank,
                 globally_blocked_hosts=globally_blocked_hosts,
                 scratch_admission_issue=scratch_admission_issue if scratch_relevant else None,
@@ -4778,9 +4733,10 @@ def load_next_runnable_encode_job(
             host_selection_cache[selection_key] = selection
         host_payload, waiting_reason = selection
         if host_payload is None:
-            if waiting_reason == HOST_WINDOW_TOO_SHORT_REASON:
+            if HOST_WINDOW_TOO_SHORT_REASON in (waiting_reason or ""):
                 saw_duration_block = True
-                waiting_reason = _duration_aware_encode_waiting_reason(
+            if estimate_items and not bool(job.get("bypass_schedule")):
+                impossible_reason = _impossible_encode_window_reason(
                     config,
                     job,
                     estimate_items,
@@ -4788,17 +4744,6 @@ def load_next_runnable_encode_job(
                     duration_samples,
                     deps,
                     now=now,
-                ) or HOST_WINDOW_TOO_SHORT_REASON
-            elif estimate_items and not bool(job.get("bypass_schedule")):
-                impossible_reason = _duration_aware_encode_waiting_reason(
-                    config,
-                    job,
-                    estimate_items,
-                    host_rows,
-                    duration_samples,
-                    deps,
-                    now=now,
-                    impossible_only=True,
                 )
                 if impossible_reason is not None:
                     waiting_reason = impossible_reason
