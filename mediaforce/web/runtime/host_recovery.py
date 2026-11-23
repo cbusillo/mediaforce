@@ -20,6 +20,9 @@ _INITIAL_RETRY_SECONDS = 30
 _MAX_RETRY_SECONDS = 300
 DESKTOP_ABSENCE_GRACE = timedelta(hours=12)
 _NETWORK_ABSENCE = frozenset({"unreachable", "not_found"})
+_ANSWERED_CHECK_FAILURES = frozenset({
+    "identity_changed", "new_name", "password_needed", "python_missing", "remote_login_off", "unreadable_reply",
+})
 _UNREADABLE_STATE = "Computer recovery state is unreadable; review it before reconnecting storage."
 
 
@@ -155,7 +158,9 @@ def _recovery_pass(
     state = {
         "label": status.label,
         "status": "ready" if status.available else "retrying",
-        "has_answered": bool(status.probe_available or status.available or _has_answered(previous)),
+        "has_answered": bool(
+            status.probe_available or status.available or status.check_failure in _ANSWERED_CHECK_FAILURES or _has_answered(previous)
+        ),
         "reason": None if status.available else status.message,
         "first_failure_at": None if status.available else previous.get("first_failure_at") or now.isoformat(),
         "last_check_at": now.isoformat(),

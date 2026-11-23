@@ -60,12 +60,18 @@ def test_pinned_ffmpeg_refused_before_homebrew_installs(tmp_path: Path) -> None:
     assert [call.args[0] for call in run.call_args_list] == [["brew", "list", "--pinned"]]
 
 
-@pytest.mark.parametrize(("valid_reply", "bottle"), [(True, True), (True, False), (False, False)])
+@pytest.mark.parametrize(("valid_reply", "bottle", "update_video"), [
+    (True, True, False), (True, False, False), (True, True, True), (False, False, False),
+])
 def test_private_homebrew_checks_the_version_and_installs_only_the_missing_tool(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, valid_reply: bool, bottle: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, valid_reply: bool, bottle: bool, update_video: bool
 ) -> None:
     private = tmp_path / "homebrew"
     info = {"formulae": [{"name": "ab-av1", "versions": {"stable": VERSIONS["ab-av1"]}}]}
+    needed = {"ab-av1"}
+    if update_video:
+        needed.add("ffmpeg")
+        info["formulae"].append({"name": "ffmpeg-full", "versions": {"stable": VERSIONS["ffmpeg"]}})
     reply = json.dumps(info) if valid_reply else "package information unavailable"
     monkeypatch.setattr(worker.os, "environ", worker.os.environ.copy())
 
@@ -78,22 +84,24 @@ def test_private_homebrew_checks_the_version_and_installs_only_the_missing_tool(
         if "--cache" in command:
             return "ab-av1.arm64.bottle.tar.gz" if bottle else "ab-av1.tar.gz"
         if "install" in command:
+            if update_video and "--ignore-dependencies" in command:
+                raise tool_versions.ToolUpdateError("FFmpeg needs its libraries.")
             if not bottle and "--ignore-dependencies" in command:
                 raise tool_versions.ToolUpdateError("Building ab-av1 from source requires Rust.")
-            if bottle and "--ignore-dependencies" not in command:
+            if bottle and not update_video and "--ignore-dependencies" not in command:
                 raise tool_versions.ToolUpdateError("The FFmpeg dependency needs a compiler on this Mac.")
             binary = private / "opt/ab-av1/bin/ab-av1"
             binary.parent.mkdir(parents=True)
             binary.touch()
         return ""
 
-    sources = {"ab-av1": {"revision": "HEAD"}}
+    sources = {name: {"revision": "HEAD"} for name in needed}
     if valid_reply:
-        worker.install_mac(tmp_path, VERSIONS, sources, {"ab-av1"}, run)
+        worker.install_mac(tmp_path, VERSIONS, sources, needed, run)
         assert (tmp_path / "bin/ab-av1").is_file()
     else:
         with pytest.raises(RuntimeError, match="Homebrew.*version"):
-            worker.install_mac(tmp_path, VERSIONS, sources, {"ab-av1"}, run)
+            worker.install_mac(tmp_path, VERSIONS, sources, needed, run)
 
 
 def test_missing_build_program_names_what_the_computer_needs(tmp_path: Path) -> None:

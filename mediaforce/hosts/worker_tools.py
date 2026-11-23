@@ -55,7 +55,7 @@ def homebrew_failure(arguments: list[str], detail: str) -> str:
     }.get(action, f"finish the {action} step")
     reason = f"Homebrew could not {step}."
     if "Command Line Tools (CLT) does not support macOS" in detail:
-        reason += " The installed Command Line Tools do not support this version of macOS."
+        reason += " Update the Command Line Tools for this version of macOS in Software Update, then choose Retry connection."
     return reason
 
 
