@@ -1,13 +1,15 @@
 """Queue-independent host checks and bounded no-dialog storage recovery."""
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import threading
 from typing import Any
 
 from mediaforce.core.config import MediaforceConfig, load_runtime_settings, update_runtime_settings
-from mediaforce.hosts.config import host_targets_current_machine
+from mediaforce.hosts.config import _ssh_lookup_host, host_targets_current_machine
 from mediaforce.hosts.controller_mount import controller_mount_lock
+from mediaforce.hosts.status_helpers import computer_check_failure_copy
 from mediaforce.remote import (
     HostStatus, prepare_host_tools, probe_host_status, recover_remote_host_mounts_no_ui,
     remote_mount_recovery_supported,
@@ -18,6 +20,9 @@ _INITIAL_RETRY_SECONDS = 30
 _MAX_RETRY_SECONDS = 300
 DESKTOP_ABSENCE_GRACE = timedelta(hours=12)
 _NETWORK_ABSENCE = frozenset({"unreachable", "not_found"})
+_ANSWERED_CHECK_FAILURES = frozenset({
+    "identity_changed", "new_name", "password_needed", "python_missing", "remote_login_off", "unreadable_reply",
+})
 _UNREADABLE_STATE = "Computer recovery state is unreadable; review it before reconnecting storage."
 
 
@@ -116,6 +121,19 @@ def retry_host_connection(config: MediaforceConfig, host_key: str, *, requested:
     return False, f"{state['label']} is still unavailable. {reason}".strip()
 
 
+def _has_answered(record: dict[str, Any]) -> bool:
+    return bool(record.get("has_answered") or record.get("computer_model") or record.get("status") == "ready")
+
+
+def status_with_connection_history(status: HostStatus, record: dict[str, Any]) -> HostStatus:
+    if status.check_failure != "not_found" or not _has_answered(record):
+        return status
+    if not _ssh_lookup_host(status.key).lower().rstrip(".").endswith(".local"):
+        return status
+    message, issues = computer_check_failure_copy("unreachable", status.label)
+    return replace(status, check_failure="unreachable", message=message, issues=issues)
+
+
 def _recovery_pass(
         config: MediaforceConfig,
         host: dict[str, Any],
@@ -131,7 +149,7 @@ def _recovery_pass(
     tries again after a pause for someone at that computer: the request says they have done it.
     """
     now = datetime.now(timezone.utc)
-    status = probe_host_status(config, host)
+    status = status_with_connection_history(probe_host_status(config, host), previous)
     update = prepare_host_tools(config, host, status, requested=requested) if status.can_update_tools and not state_error else None
     if update and status.available and update.failure_kind == "updating":
         status.hold_for_tool_update(update.message)
@@ -140,6 +158,9 @@ def _recovery_pass(
     state = {
         "label": status.label,
         "status": "ready" if status.available else "retrying",
+        "has_answered": bool(
+            status.probe_available or status.available or status.check_failure in _ANSWERED_CHECK_FAILURES or _has_answered(previous)
+        ),
         "reason": None if status.available else status.message,
         "first_failure_at": None if status.available else previous.get("first_failure_at") or now.isoformat(),
         "last_check_at": now.isoformat(),
@@ -189,7 +210,7 @@ def _recovery_pass(
             if not result.retry:
                 state["next_retry_at"] = (now + timedelta(seconds=_INITIAL_RETRY_SECONDS)).isoformat()
         else:
-            refreshed = probe_host_status(config, host)
+            refreshed = status_with_connection_history(probe_host_status(config, host), state)
             publish_host_status(config, refreshed)
             state.update(status="retrying", reason=refreshed.message)
             if refreshed.available:

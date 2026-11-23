@@ -64,6 +64,8 @@ def computers_payload(
             "abilities": list(computer.get("capabilities") or []),
             "library_kinds": _library_kinds(config, computer.get("allowed_libraries") or []),
             "storage": _storage(computer),
+            "connection_advice": next(iter(computer.get("issues") or []), None)
+            if not computer.get("available") and computer.get("check_failure") in {"unreachable", "not_found"} else None,
             "window": {
                 "name": str(policy.get("label") or ""),
                 "open": bool(computer.get("schedule_open")),

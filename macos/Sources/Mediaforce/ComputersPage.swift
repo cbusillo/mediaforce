@@ -6,6 +6,7 @@ enum HostsFacts {
     struct Host: Decodable, Sendable {
         let key: String
         let toolMessage: String?
+        let connectionAdvice: String?
         let available: Bool
         let setupSupported: Bool
         let setupRequiresPassword: Bool
@@ -262,21 +263,21 @@ private struct ComputerRow: View {
         }
     }
 
-    @ViewBuilder
     private var work: some View {
-        if let message = machine?.host.toolMessage {
-            Text(message).fixedSize(horizontal: false, vertical: true)
-        }
-        if ComputerFix.inTrouble(computer) {
-            ComputerStatus(name: name, state: computer.state, needsYou: computer.needsYou, host: machine?.host, act: act)
-        } else if let running = machine?.running, !running.isEmpty {
-            VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 12) {
+            if let advice = machine?.host.connectionAdvice {
+                Text(advice).fixedSize(horizontal: false, vertical: true)
+            }
+            if let message = machine?.host.toolMessage {
+                Text(message).fixedSize(horizontal: false, vertical: true)
+            }
+            if ComputerFix.inTrouble(computer) {
+                ComputerStatus(name: name, state: computer.state, needsYou: computer.needsYou, host: machine?.host, act: act)
+            } else if let running = machine?.running, !running.isEmpty {
                 ForEach(running) { file in
                     RunningFile(file: file, model: model, posterWidth: 40, open: open)
                 }
-            }
-        } else if machine?.host.toolMessage == nil {
-            VStack(alignment: .leading, spacing: 12) {
+            } else if machine?.host.toolMessage == nil {
                 ComputerStateLine(computer: computer)
                 if let last = machine?.recent.first {
                     LastFinished(file: last, now: now, posters: posters, open: open).padding(.leading, 17)
@@ -383,6 +384,9 @@ struct ComputerPage: View {
 
     private func nowSection(_ computer: MainWindowFacts.Computer?, _ machine: ComputersFacts.Machine) -> some View {
         PageSection(Words.nowColumn) {
+            if let advice = machine.host.connectionAdvice {
+                Text(advice).fixedSize(horizontal: false, vertical: true)
+            }
             if let message = machine.host.toolMessage {
                 Text(message).fixedSize(horizontal: false, vertical: true)
             }

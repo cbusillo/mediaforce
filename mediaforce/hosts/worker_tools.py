@@ -34,9 +34,29 @@ def run_command(command: list[str], *, cwd: Path | None = None, include_stderr: 
             raise ToolUpdateError("The folder for preparing the new media tools is missing.") from error
         raise ToolUpdateError(f"This computer needs {Path(command[0]).name} to prepare the media tools.") from error
     if result.returncode:
-        print((result.stderr or result.stdout)[-2000:], file=sys.stderr)
+        detail = result.stderr or result.stdout
+        print(detail[-2000:], file=sys.stderr)
+        if Path(command[0]).name == "brew":
+            raise ToolUpdateError(homebrew_failure(command[1:], detail))
         raise ToolUpdateError(f"{Path(command[0]).name} could not finish preparing the media tools.")
     return (result.stdout + (result.stderr if include_stderr else "")).strip()
+
+
+def homebrew_failure(arguments: list[str], detail: str) -> str:
+    action = arguments[0]
+    formulae = ", ".join(argument for argument in arguments[1:] if not argument.startswith("-"))
+    step = {
+        "list": "check which tools are pinned",
+        "--repository": "find its installation",
+        "--prefix": "check the separate tool folder",
+        "--cache": f"find the download for {formulae}",
+        "info": f"check the versions of {formulae}",
+        "install": f"install {formulae}",
+    }.get(action, f"finish the {action} step")
+    reason = f"Homebrew could not {step}."
+    if "Command Line Tools (CLT) does not support macOS" in detail:
+        reason += " Update the Command Line Tools for this version of macOS in Software Update, then choose Retry connection."
+    return reason
 
 
 def install_mac(
@@ -76,7 +96,10 @@ def install_mac(
         if version != formulae[formula]:
             name = "ffmpeg" if formula == "ffmpeg-full" else formula
             (core / "Formula" / formula[0] / f"{formula}.rb").write_text(sources[name]["recipe"], encoding="utf-8")
-    run([brew, "install", *formulae])
+    install_options = []
+    if needed == {"ab-av1"} and ".bottle." in Path(run([brew, "--cache", "ab-av1"])).name:
+        install_options.append("--ignore-dependencies")
+    run([brew, "install", *install_options, *formulae])
     binaries = prefix / "bin"
     binaries.mkdir(exist_ok=True)
     for name in tool_versions.PROGRAMS:

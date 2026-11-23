@@ -13,6 +13,7 @@ from fastapi.routing import APIRoute
 import pytest
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig, load_runtime_settings, save_runtime_settings
+from mediaforce.core.db import open_db
 from mediaforce.hosts.controller_mount import ControllerMountProbe
 from mediaforce.hosts.mount_runtime import ControllerSmbMount, NoUiMountResult, save_controller_smb_mounts, \
     controller_smb_mounts_path
@@ -21,6 +22,7 @@ from mediaforce.hosts.transport import REQUEST_FULL_WAKE_SHELL_LINE
 from mediaforce import remote
 from mediaforce.remote import HostReadinessError, HostStatus
 from mediaforce.web import app as web_app
+from mediaforce.web.runtime.app_computers import computers_payload
 from mediaforce.web.runtime import host_recovery as recovery, host_runtime, host_status, recovery_alerts as alerts
 
 NOW = datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
@@ -584,7 +586,6 @@ def test_two_computer_outage_keeps_work_on_the_other_and_readmits_after_a_fresh_
         config: MediaforceConfig, empty_host_status_cache: None,
 ) -> None:
     """Worker loses its storage while Den keeps encoding; nothing waits on the Director (#943)."""
-    from mediaforce.core.db import open_db
     from mediaforce.core.db_tables import encode_jobs
     from mediaforce.web.runtime import controller_storage_recovery as controller
 
@@ -1092,7 +1093,6 @@ def test_work_that_needs_a_computer_reconnects_its_storage_without_a_dialog(
 
 @pytest.mark.parametrize("job_type", ["sample", "encode"])
 def test_a_file_between_media_commands_holds_its_computer_out_of_an_update(config: MediaforceConfig, job_type: str) -> None:
-    from mediaforce.core.db import open_db
     from mediaforce.core.db_tables import calibration_jobs, encode_jobs
     from mediaforce.hosts.managed_tools import host_is_busy
 
@@ -1139,3 +1139,36 @@ def test_saved_tool_failure_is_rechecked_without_showing_old_command_output(conf
     record = recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]
     assert record["status"] == "retrying" and "raw command output" not in record["reason"]
     assert not record.get("tool_hold") and not record.get("next_retry_at")
+
+
+@pytest.mark.parametrize(("address", "prior_check", "kind"), [
+    ("worker@mini.LOCAL.", "ready", "unreachable"),
+    ("worker@mini.local", "password_needed", "unreachable"),
+    ("worker@mini.local", None, "not_found"),
+    ("worker@mini.example", "ready", "not_found"),
+])
+def test_computers_remembers_which_local_address_answered(
+    config: MediaforceConfig, empty_host_status_cache: None, address: str, prior_check: str | None, kind: str,
+) -> None:
+    config.raw["remote_hosts"][0]["host"] = address
+    missing = _checked(config, _CHECK_FAILURES["not_found"])
+    missing.key = address
+    with patch_attr(recovery, "probe_host_status") as probe:
+        if prior_check:
+            online = status(available=True) if prior_check == "ready" else _checked(config, _CHECK_FAILURES[prior_check])
+            online.key = address
+            probe.return_value = online
+            recovery.retry_host_connection(config, address)
+        probe.return_value = missing
+        for _ in range(2):
+            recovery.retry_host_connection(config, address)
+        with patch_attr(host_status, "collect_host_statuses", return_value=[missing]):
+            host_status.refresh_host_status_cache(config)
+        card = _host_cards(config)[address]
+    assert card["check_failure"] == kind
+    message, issues = status_helpers.computer_check_failure_copy(kind, missing.label)
+    assert card["probe_message"] == message
+    with open_db(config.paths.db_path) as connection:
+        machine, = computers_payload(connection, config, [card], observed_at=NOW)["computers"]
+    assert machine["connection_advice"] == issues[0]
+    assert card["recovery"]["reason"] == card["probe_message"]
