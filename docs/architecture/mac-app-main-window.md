@@ -374,7 +374,10 @@ October 1 closes at that day's winter hours. Seasons may not share a date. The
 runtime settings store the same shape with `label`, `days_of_week` and
 `all_day_days_of_week`; one evaluator in `encode_scheduler` reads it for
 opening and closing, the Computers page's week, and whether a file fits before
-closing. `finish_current_file` belongs to the window, not to a season.
+closing. When a queued file is too long for the computers that can take it now,
+its wait names one of those computers and gives its estimate. It also names
+busy computers whose open windows have enough time. The next claim
+checks each computer again. `finish_current_file` belongs to the window, not to a season.
 
 The Plex and TMDB tab is the web page's metadata panel: Plex on or off and its
 server address, TMDB on or off, and for each its access key.

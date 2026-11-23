@@ -20297,6 +20297,34 @@ raise SystemExit(0)
             # The estimate is that computer's own, so the sentence names it.
             self.assertRegex(deferred["waiting_reason"], r"^Estimated runtime about [^;]+ on worker; ")
 
+    def test_window_wait_names_the_idle_host_and_does_not_pin_the_next_claim(self) -> None:
+        close_at = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat()
+        idle = self._encode_host_row("idle", schedule_closes_at=close_at)
+        fast = self._encode_host_row("fast", schedule_closes_at=None)
+        fast["active_encode_count"] = 1
+        samples = self._encode_duration_samples("fast") + (EncodeDurationSample("idle", "idle", 2.0, 60.0),) * 3
+        deps = web_app._encode_queue_runtime_deps()
+        deps.host_runtime_rows = Mock(return_value=[fast, idle])
+        deps.encode_reserve_preflight = Mock(return_value=SimpleNamespace(allowed=True, waiting_reason=None))
+        with open_db(self.config.paths.db_path) as connection, patch.object(
+                encode_runtime, "load_encode_duration_samples", return_value=samples,
+        ):
+            self._write_manifest("episode.json", [self._estimate_manifest_item(7200)])
+            self._save_job(connection, job_id="episode", manifest_name="episode.json", host={}, status="queued", attempt_count=0)
+            connection.commit()
+            self.assertIsNone(encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps))
+            waiting = load_encode_job(connection, "episode")
+            assert waiting is not None
+            self.assertIn("on idle", waiting["waiting_reason"])
+            self.assertIn("fast is busy", waiting["waiting_reason"])
+
+            idle["schedule_closes_at"] = None
+            claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
+            assert claimed is not None
+            self.assertEqual(claimed["host"]["key"], "idle")
+            self.assertEqual(claimed["status"], "running")
+            self.assertIsNone(claimed["waiting_reason"])
+
     def test_duration_aware_selection_surfaces_never_fits_reason(self) -> None:
         close_at = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
         host_row = self._encode_host_row("worker", schedule_closes_at=close_at)
