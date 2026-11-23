@@ -36,7 +36,7 @@ jobs:
           ${{ github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository &&
           startsWith(github.event.pull_request.head.ref, 'launchplane/train/') }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
@@ -148,7 +148,7 @@ jobs:
         run: echo "LANE_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
 
       - name: Check out repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -240,7 +240,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -275,7 +275,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install XcodeGen
         run: |
