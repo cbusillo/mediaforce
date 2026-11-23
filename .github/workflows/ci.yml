@@ -167,7 +167,7 @@ jobs:
 
       - name: Restore media tools archive
         id: media-tools-cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/media-tools/ffmpeg.tar.xz
           key: media-tools-${{ runner.os }}-${{ runner.arch }}-${{ env.FFMPEG_SHA256 }}
