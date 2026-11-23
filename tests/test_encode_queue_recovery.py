@@ -20316,6 +20316,7 @@ raise SystemExit(0)
             waiting = load_encode_job(connection, "episode")
             assert waiting is not None
             self.assertIn("on idle", waiting["waiting_reason"])
+            self.assertIn("fast is busy", waiting["waiting_reason"])
 
             idle["schedule_closes_at"] = None
             claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)

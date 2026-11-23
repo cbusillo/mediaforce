@@ -3412,17 +3412,23 @@ def select_encode_host(
         admitted = [host for host in group if _encode_duration_host_cache_key(host) not in rejected]
         if admitted:
             return object_dict(min(admitted, key=host_rank) if host_rank else admitted[0]), None
+    busy_hosts = [
+        host for host in encode_capable_hosts
+        if int(host.get("active_encode_count") or 0) >= int(host.get("max_parallel_encodes") or 1)
+    ]
     if active_hosts or startable_hosts:
         def runtime_seconds(host: dict[str, Any]) -> int:
             return rejected[_encode_duration_host_cache_key(host)]
 
         host = min(active_hosts + startable_hosts, key=runtime_seconds)
         runtime = _format_estimated_duration(runtime_seconds(host))
-        return None, f"Estimated runtime {runtime} on {_blocked_host_display_name(host)}; {HOST_WINDOW_TOO_SHORT_REASON}."
-    if any(
-            int(host.get("active_encode_count") or 0) >= int(host.get("max_parallel_encodes") or 1)
-            for host in encode_capable_hosts
-    ):
+        reason = f"Estimated runtime {runtime} on {_blocked_host_display_name(host)}; {HOST_WINDOW_TOO_SHORT_REASON}."
+        busy_reasons = [
+            f"{_blocked_host_display_name(busy)} is busy." for busy in busy_hosts
+            if _schedule_open(busy) and _encode_duration_host_cache_key(busy) not in rejected
+        ]
+        return None, " ".join([reason, *busy_reasons])
+    if busy_hosts:
         return None, "waiting for a computer to finish its current work"
     if any(
             not deps.scheduler_allows_encode_run(
