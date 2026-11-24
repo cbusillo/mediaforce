@@ -1808,10 +1808,10 @@ def test_library_lists_an_approved_non_tv_sample_until_its_file_is_finished(tmp_
         sources = PageStateSources(_loader({path: _review_ready()}, {}), lambda _config, _prefix: None)
         pending = window()
         assert [entry["prefix"] for entry in pending["samples"]["waiting_on_you"]] == [path]
-        assert pending["biggest_not_started"][0]["waiting_sample_prefix"] == path
+        assert [row["waiting_sample_prefix"] for row in pending["biggest_not_started"]] == ([path] if kind == "movie" else [])
 
         connection.execute(calibration_jobs.update().where(calibration_jobs.c.prefix == path).values(status="running"))
-        assert not window()["biggest_not_started"]
+        assert [row["show"] for row in window()["biggest_not_started"]] == (["River"] if kind == "movie" else [])
 
         connection.execute(library_items.update().where(library_items.c.rel_path == path).values(status="promoted"))
         assert not window()["samples"]["waiting_on_you"]

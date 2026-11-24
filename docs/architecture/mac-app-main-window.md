@@ -43,9 +43,11 @@ without waiting for a cache to expire.
   individually replaced or kept movie and VR & 3D files, newest first.
   Selecting a file opens that exact file. Older Mac clients still read
   `recently_finished_seasons`. Keep that field while those clients are supported.
-- `biggest_not_started`: ranks TV shows, movie titles and individual VR & 3D
-  files together by size. A job, a replaced or kept file, or an approved
-  sample takes its entry off the list. `waiting_sample_prefix` opens the
+- `biggest_not_started`: ranks the ten largest TV shows and movies by the total
+  size of their present files. Each title has a file Mediaforce can compress
+  and no history of a full production encode. A queued job or an approved
+  sample leaves the title on the list. VR & 3D and browse-only libraries
+  stay off it. `waiting_sample_prefix` opens the
   sample that needs review.
 - `samples`: `waiting_on_you` (page state `ready_to_compare`, or `needs_help`
   for a sample) and `approved_not_started` (`ready_to_make`). `state`,
@@ -54,8 +56,7 @@ without waiting for a cache to expire.
   waiting-list membership is selected from the season's canonical `needs_you`
   fact. Movie and VR & 3D files and folders with a recorded sample use the
   same page states. The read checks those scopes only while present files
-  still have work left. A sample being made or queued takes its title off
-  Biggest not started. Samples handled under a kind go to its group in Needs you.
+  still have work left. Samples handled under a kind go to its group in Needs you.
 - `computers`: each computer's `state`, from the same rows as the computers
   page: `ready`, `busy`, `finishing_file` (a running file without a close deadline
   or an explicit bypass), `schedule_disabled`, `outside_schedule` (with `schedule_opens_at`),

@@ -7,22 +7,26 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, Select, case, func, or_, select
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow
-from mediaforce.core.db_tables import calibration_jobs, encode_jobs, item_events, library_items, motion_keep_decisions, staged_artifacts
+from mediaforce.core.db_tables import (
+    calibration_jobs, encode_jobs, item_events, library_items, motion_keep_decisions, source_admissions, source_versions, staged_artifacts,
+)
 from mediaforce.encoding.duration_estimate import (
     estimate_encode_job_duration, estimate_fits_before_schedule_close, load_encode_duration_samples,
 )
 from mediaforce.encoding.encode_queue import (
     RUNNABLE_ENCODE_JOB_KINDS, count_pending_encode_work, list_encode_jobs, load_queue_state,
 )
+from mediaforce.library.calculation_reuse import reuse_library_calculation
 from mediaforce.library.candidate_selection import SEASON_PATTERN
 from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.evidence_queue import original_check_wait_reasons, paused_check_folders
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import media_scope_from_prefix
+from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, current_admission_filter, current_owner_admissions_query
 from mediaforce.library.workflow_state import build_folder_workflow_states_for_scopes
 from mediaforce.library.motion_keep_state import library_item_source_sql
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
@@ -106,6 +110,7 @@ def app_window_payload(
         controller_storage: Mapping[str, Any],
         storage_admits_work: bool,
         observed_at: datetime,
+        production_roots: Collection[str] | None = None,
         kinds: Iterable[Mapping[str, Any]] = (),
         remaking_samples: Collection[str] = (),
         file_sample_cards: Callable[[Iterable[str]], list[dict[str, Any]]] | None = None,
@@ -132,7 +137,6 @@ def app_window_payload(
         sample_cards.extend(file_sample_cards(item.rel_path for item in items if item.kind != "tv"
                                               and not item.promoted and item.item_id not in kept))
     samples = _samples(sample_cards)
-    underway = kind_samples | set(remaking_samples) | {card["prefix"] for card in sample_cards if (card.get("page_state") or {}).get("key") in {"making_test", "sample_waiting"}}
     waiting_samples = {sample["prefix"] for sample in samples["waiting_on_you"]}
     samples["waiting_on_you"] = [sample for sample in samples["waiting_on_you"]
                                  if sample["prefix"] not in kind_samples and sample["prefix"] not in remaking_samples]
@@ -157,7 +161,9 @@ def app_window_payload(
         "space_saved": _space_saved(items, promotions, finished),
         "recently_finished_seasons": finished[:RECENT_SEASON_LIMIT],
         "recently_finished": _recently_finished(items, finished, promotions, kept),
-        "biggest_not_started": _biggest_not_started(connection, items, promotions, kept, samples, underway),
+        "biggest_not_started": _biggest_not_started(
+            connection, items, kept, samples["waiting_on_you"], library_types.keys() if production_roots is None else production_roots,
+        ),
         "samples": samples,
         "computers": computer_states,
         "events": events,
@@ -534,38 +540,74 @@ def _recently_finished(
     return sorted(finished, key=lambda row: row["finished_at"] or "", reverse=True)[:RECENT_SEASON_LIMIT]
 
 
+def _rejected_source_versions(*reasons: str) -> Select:
+    return select(source_admissions.c.version_id).where(
+        source_admissions.c.tier == "unknown", current_admission_filter(),
+        func.json_extract(source_admissions.c.checks_json, "$.reason").in_(reasons),
+    )
+
+
+def _possible_original_ids(connection: DBClient) -> set[int]:
+    registered = current_owner_admissions_query().with_only_columns(library_items.c.id)
+    rejected = _rejected_source_versions("historical_output_codec_or_unknown", "historical_output_encoder")
+    originals = select(library_items.c.id).where(
+        LIBRARY_ITEM_PRESENT,
+        or_(library_items.c.video_codec.in_(HISTORICAL_OUTPUT_PROFILES["known_input_codecs"]), library_items.c.id.in_(registered)),
+        func.coalesce(library_items.c.active_source_version_id, "").not_in(rejected),
+    )
+    return reuse_library_calculation(
+        connection, "possible_original_ids", (originals,), (), lambda: set(connection.scalars(originals)), copy_result=set.copy,
+    )
+
+
+def _production_encode(origin: ColumnElement, staging_path: ColumnElement) -> ColumnElement[bool]:
+    legacy_origin = case((staging_path.contains("/_calibration/", autoescape=True), "calibration"), else_="")
+    return func.coalesce(origin, legacy_origin).not_in(("calibration", "cli-review"))
+
+
+def _compressed_title_prefixes(connection: DBClient) -> set[str]:
+    staged = select(staged_artifacts.c.library_item_id).where(or_(
+        staged_artifacts.c.promoted_at.is_not(None),
+        _production_encode(staged_artifacts.c.encode_origin, staged_artifacts.c.staging_path),
+    ))
+    details = item_events.c.details_json
+    completed = select(item_events.c.library_item_id).where(or_(
+        item_events.c.event_type == "promotion_completed",
+        (item_events.c.event_type == "encoding_completed") & _production_encode(
+            func.json_extract(details, "$.encode_origin"), func.json_extract(details, "$.staging_path"),
+        ),
+    ))
+    outputs = select(source_versions.c.version_id).where(source_versions.c.role == "output")
+    paths = select(library_items.c.rel_path).where(or_(
+        library_items.c.status == PROMOTED, library_items.c.id.in_(staged.union_all(completed)),
+        library_items.c.active_source_version_id.in_(outputs.union_all(_rejected_source_versions("mediaforce_stamp", "known_output_match"))),
+    ))
+    return reuse_library_calculation(
+        connection, "compressed_title_prefixes", (paths,), (),
+        lambda: {"/".join(PurePosixPath(path).parts[:2]) for path in connection.scalars(paths)}, copy_result=set.copy,
+    )
+
+
 def _biggest_not_started(
         connection: DBClient,
         items: list[_Item],
-        promotions: Mapping[int, _Promotion],
         kept: Mapping[int, Any],
-        samples: Mapping[str, list[dict[str, Any]]],
-        underway: set[str],
+        waiting_samples: list[dict[str, Any]],
+        production_roots: Collection[str],
 ) -> list[dict[str, Any]]:
-    jobs = {str(prefix) for prefix in connection.execute(select(encode_jobs.c.prefix).distinct()).scalars() if prefix}
-    started_scopes = jobs | underway | {sample["prefix"] for sample in samples["approved_not_started"]}
-    started_titles = {"/".join(PurePosixPath(prefix).parts[:2]) for prefix in started_scopes}
-    started: set[str] = set()
-    waiting = {sample["show_prefix"]: sample["prefix"] for sample in reversed(samples["waiting_on_you"])}
+    started = _compressed_title_prefixes(connection)
+    originals = _possible_original_ids(connection) - kept.keys()
+    waiting = {sample["show_prefix"]: sample["prefix"] for sample in reversed(waiting_samples)}
     titles: dict[str, list[_Item]] = defaultdict(list)
     for item in items:
-        prefix = item.title_prefix
-        if not prefix:
+        if item.kind not in {"tv", "movie"} or not item.parts or item.parts[0] not in production_roots:
             continue
-        if (item.promoted or item.item_id in promotions or item.item_id in kept
-                or prefix in started_titles or prefix in started_scopes or item.parts[0] in started_scopes):
-            started.add(prefix)
-        elif item.kind not in {"tv", "movie"}:
-            for parent in PurePosixPath(prefix).parents:
-                if parent.as_posix() in started_scopes:
-                    started.add(prefix)
-                    break
-                if parent.as_posix() in waiting:
-                    waiting.setdefault(prefix, waiting[parent.as_posix()])
-        titles[prefix].append(item)
+        prefix = item.title_prefix
+        if prefix and prefix not in started:
+            titles[prefix].append(item)
     rows = []
     for prefix, members in titles.items():
-        if prefix in started:
+        if not any(item.item_id in originals and (item.kind == "movie" or item.season_prefix) for item in members):
             continue
         first = members[0]
         row = {
