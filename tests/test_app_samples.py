@@ -152,9 +152,9 @@ def test_the_real_approval_check_refuses_a_changed_draft_and_asks_again_for_an_i
     def approve(confirm: Collection[str], draft_hash: str) -> dict[str, Any]:
         return approve_sample(PREFIX, confirm, draft_hash, save_profile=save_profile, queue_encode=lambda *_args: {})
 
-    assert approve(set(), "draft-1") == {"ok": False, "code": "confirm_high_impact"}
-    assert approve({"high_impact"}, "a draft replaced since") == {"ok": False, "code": "sample_changed"}
-    assert approve({"high_impact"}, "") == {"ok": False, "code": "sample_changed"}
+    assert approve(set(), "draft-1")["code"] == "confirm_high_impact"
+    assert approve({"high_impact"}, "a draft replaced since")["code"] == "sample_changed"
+    assert approve({"high_impact"}, "")["code"] == "sample_changed"
 
 
 @pytest.mark.parametrize("saved_level,confirmed,shown", [
@@ -216,15 +216,15 @@ def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_di
     assert saved[-1] == (PREFIX, False, True, "draft-1", "")
     assert _post(endpoint(ok, ok), {"reviewed_draft_hash": "draft-1"})[1]["ok"]
     assert _post(endpoint(folder_actions.ReviewedDraftChanged(), ok), watched) == (
-        409, {"ok": False, "code": "sample_changed"},
+        409, {"ok": False, "code": "sample_changed", "message": folder_actions.ReviewedDraftChanged().detail},
     )
     assert _post(endpoint(ok, {"ok": False, "code": "encode_already_active"}), watched)[1]["compressing"] is True
     assert _post(endpoint(ok, HTTPException(409, "No computer.")), watched) == (
-        200, {"ok": True, "compressing": False, "reason": None},
+        200, {"ok": True, "compressing": False, "reason": None, "message": "No computer."},
     )
     size_guard = folder_actions.ApprovalNeedsConfirmation("size_tradeoff", "Missed the goal.")
-    assert _post(endpoint(size_guard, ok), watched) == (409, {"ok": False, "code": "confirm_size_tradeoff"})
-    assert _post(endpoint(HTTPException(400, "No sample."), ok), watched) == (409, {"ok": False, "code": "refused"})
+    assert _post(endpoint(size_guard, ok), watched) == (409, {"ok": False, "code": "confirm_size_tradeoff", "message": size_guard.detail})
+    assert _post(endpoint(HTTPException(400, "No sample."), ok), watched) == (409, {"ok": False, "code": "refused", "message": "No sample."})
     assert _post(endpoint({"ok": False}, ok), watched) == (409, {"ok": False, "code": "refused"})
 
     queued.clear()
@@ -236,7 +236,8 @@ def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_di
         (folder_actions.QueueNeedsChoice("confirm_compression_goal", "Choose a goal."), "confirm_compression_goal"),
     ]:
         refused = asyncio.run(endpoint(None, refusal, "compress")(PREFIX))
-        assert json.loads(refused.body) == {"ok": True, "compressing": False, "reason": reason}
+        expected_message = {"message": refusal.detail} if isinstance(refusal, HTTPException) else {}
+        assert json.loads(refused.body) == {"ok": True, "compressing": False, "reason": reason, **expected_message}
 
 
 def test_a_second_request_during_preparation_leaves_the_first_request_in_charge() -> None:

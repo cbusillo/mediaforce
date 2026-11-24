@@ -1544,6 +1544,7 @@ def create_app(
             audio_policy=object_dict(policy.get("audio")),
             subtitle_policy=object_dict(policy.get("subtitle")),
             requested_budget_bytes=int_value(object_dict(size_target_analysis).get("budget_bytes")),
+            fallback_size_policy=object_dict(resolved_policy.get("video")) or config.video,
         )
         current_quality_risk_policy = (
             object_dict(object_dict(calibration).get("policy"))

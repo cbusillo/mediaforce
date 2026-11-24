@@ -150,6 +150,16 @@ class SizeGoalTests(unittest.TestCase):
             all(option["operator_intent"]["size_goal"]["mode"] == "normalized" for option in options)
         )
 
+    def test_sample_without_a_saved_size_uses_the_library_goal_for_new_choices(self) -> None:
+        options = guided_size_goal_options(
+            {"max_height": 720}, item_runtime_seconds=90 * 60, default_video_policy={},
+            fallback_size_policy=self.default_video,
+        )
+        expected = guided_size_goal_options(self.default_video, item_runtime_seconds=90 * 60, default_video_policy={})
+        self.assertTrue(options)
+        self.assertEqual([choice["resolved_size_goal"] for choice in options], [choice["resolved_size_goal"] for choice in expected])
+        self.assertEqual(options[0]["operator_intent"]["resolution"]["max_height"], 720)
+
     def test_choosing_a_size_keeps_the_folders_picture_height(self) -> None:
         legacy = {"target_size_mb": 225, "target_runtime_minutes": 45}
         for video, default in ((self.default_video, self.default_video), (legacy, self.default_video), ({**legacy, "max_height": 0}, {})):

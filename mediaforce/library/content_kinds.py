@@ -10,7 +10,7 @@ from typing import Any, Literal
 from sqlalchemy import and_, func, or_, select
 
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import library_item_evidence_state, library_items, series_metadata, source_admissions, source_measurements, \
+from mediaforce.core.db_tables import library_item_evidence_state, library_items, plex_item_metadata, series_metadata, source_admissions, source_measurements, \
     source_transitions, source_versions, source_moves, staged_artifacts, target_production_outcomes, motion_keep_decisions
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.library.candidate_selection import season_identity
@@ -24,8 +24,6 @@ from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, Sourc
 # (Director decision, #517, 2026-10-22). Live action is one look: darkness runs on a smooth scale with no gap, so
 # splitting it left a third of the waiting seasons in no look (Director decision, #1385). 4K is a picture height, not
 # a look: a 4K season takes its look from its other traits, and a look's approval says whether 4K stays 4K.
-# Movies use the live action look; each movie title is grouped like a TV season, through the same code. Movie genres
-# are not stored, so an animated movie cannot be told apart yet and is live action too.
 ContentKind = Literal["live_action", "cartoon"]
 SeasonKind = Literal["live_action", "cartoon", "unmeasured"]
 
@@ -119,8 +117,8 @@ def _in_folder(prefix: str) -> tuple[Any, Any]:
 def _present_items(connection: DBClient, season_prefix: str | None = None) -> Sequence[Mapping[str, Any]]:
     query = select(
         library_items.c.id, library_items.c.rel_path, library_items.c.media_root, library_items.c.status, library_items.c.video_codec,
-        library_items.c.size_bytes,
-    ).where(library_items.c.missing_since.is_(None))
+        library_items.c.size_bytes, plex_item_metadata.c.plex_genres_json,
+    ).outerjoin(plex_item_metadata, plex_item_metadata.c.library_item_id == library_items.c.id).where(library_items.c.missing_since.is_(None))
     if season_prefix is not None:
         # A movie that sits directly in its library is its own title.
         query = query.where(or_(library_items.c.rel_path == season_prefix, and_(*_in_folder(season_prefix))))
@@ -169,9 +167,17 @@ def _seasons(
     return seasons, series_of
 
 
-def _animated(prefix: str, series_of: Mapping[str, str], animation: Mapping[str, bool | None]) -> bool | None:
-    """A TV season is a cartoon by its show's genres; a movie title is never one until movie genres are stored."""
-    return animation.get(series_of[prefix]) if prefix in series_of else False
+def _animated(episodes: Sequence[Mapping[str, Any]], series: str | None, animation: Mapping[str, bool | None]) -> bool | None:
+    if series is not None:
+        return animation.get(series)
+    return any(_animated_genres(item["plex_genres_json"]) for item in episodes)
+
+
+def _animated_genres(encoded: str | None) -> bool | None:
+    try:
+        return is_animated(object_list(json.loads(encoded or "[]")))
+    except json.JSONDecodeError:
+        return None
 
 
 def season_grouping(
@@ -191,7 +197,7 @@ def season_grouping(
     )
     measured = _measured_originals(episodes, admitted, evidence_by_item)
     series = series_of.get(season_prefix)
-    return season_kind(measured, animated=_animated(season_prefix, series_of, _series_animation(connection, series) if series else {}))
+    return season_kind(measured, animated=_animated(episodes, series, _series_animation(connection, series) if series else {}))
 
 
 def _series_animation(connection: DBClient, series_prefix: str | None = None) -> dict[str, bool | None]:
@@ -200,11 +206,7 @@ def _series_animation(connection: DBClient, series_prefix: str | None = None) ->
     if series_prefix is not None:
         query = query.where(series_metadata.c.series_prefix == series_prefix)
     for row in connection.execute(query):
-        try:
-            genres = [str(genre) for genre in object_list(json.loads(row.tmdb_genres_json or "[]"))]
-        except json.JSONDecodeError:
-            genres = []
-        animation[str(row.series_prefix)] = is_animated(genres)
+        animation[str(row.series_prefix)] = _animated_genres(row.tmdb_genres_json)
     return animation
 
 
@@ -269,7 +271,7 @@ def season_kind_report(
             context=context,
         )
         measured_groupings = {prefix: season_kind(_measured_originals(seasons[prefix], admitted, evidence),
-                                         animated=_animated(prefix, series_of, animation)) for prefix in measured_seasons}
+                                         animated=_animated(seasons[prefix], series_of.get(prefix), animation)) for prefix in measured_seasons}
         reasons = {prefix: _measurement_reasons(waiting_by_season[prefix], evidence, {}, measurement_roots)
                    for prefix, measured_grouping in measured_groupings.items() if measured_grouping.reason == "no_measured_original"}
         return reasons, measured_groupings
@@ -280,7 +282,7 @@ def season_kind_report(
                 library_items.c.size_bytes, library_items.c.status, library_items.c.active_source_version_id,
                 library_items.c.content_version_fingerprint, library_items.c.fingerprint, library_items.c.missing_since),
          *(select(table) for table in (source_versions, source_admissions, source_measurements, source_transitions, source_moves,
-                                      staged_artifacts, target_production_outcomes, series_metadata, motion_keep_decisions))),
+                                      staged_artifacts, target_production_outcomes, series_metadata, plex_item_metadata, motion_keep_decisions))),
         (frozenset(measured_seasons), tuple(sorted(library_types.items())), confirmations,
          None if measurement_roots is None else frozenset(measurement_roots),
          json.dumps(HISTORICAL_OUTPUT_PROFILES, sort_keys=True), encoder_rule_hash()), measure,

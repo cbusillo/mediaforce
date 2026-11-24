@@ -129,14 +129,14 @@ def approve_sample(
         return {"ok": False, "code": "approval_scope_changed"}
     try:
         saved = save_profile(prefix, "high_impact" in confirm, "size_tradeoff" in confirm, reviewed_draft_hash, "")
-    except ReviewedDraftChanged:
-        return {"ok": False, "code": "sample_changed"}
+    except ReviewedDraftChanged as exc:
+        return {"ok": False, "code": "sample_changed", **_client_error_message(exc)}
     except ApprovalNeedsConfirmation as needed:
-        return {"ok": False, "code": f"confirm_{needed.confirm}"}
-    except HTTPException:
-        return REFUSED
+        return {"ok": False, "code": f"confirm_{needed.confirm}", **_client_error_message(needed)}
+    except HTTPException as exc:
+        return {**REFUSED, **_client_error_message(exc)}
     if not saved.get("ok"):
-        return REFUSED
+        return {**REFUSED, **_message(saved.get("message"))}
     if scope != "season" and approve_kind is not None:
         extended = approve_kind(scope, prefix, reviewed_draft_hash)
         if not extended.get("ok"):
@@ -149,11 +149,12 @@ def start_compressing(prefix: str, *, queue_encode: QueueEncodeFn) -> dict[str, 
     try:
         queued = queue_encode(prefix, APPROVED_SAMPLE_NOTES, False, False, "")
     except QueueNeedsChoice as refused:
-        queued = {"code": refused.code}
-    except HTTPException:
-        queued = {}
+        queued = {"code": refused.code, **_client_error_message(refused)}
+    except HTTPException as exc:
+        queued = _client_error_message(exc)
     compressing = bool(queued.get("ok")) or queued.get("code") == "encode_already_active"
-    return {"ok": True, "compressing": compressing, "reason": None if compressing else queued.get("code")}
+    return {"ok": True, "compressing": compressing, "reason": None if compressing else queued.get("code"),
+            **({} if compressing else _message(queued.get("message")))}
 
 
 def make_sample(
@@ -198,13 +199,18 @@ def make_sample(
             note, operator_intent = request
             result = ai_tune(prefix, note, "", operator_intent, "")
     except HTTPException as exc:
-        if 400 <= exc.status_code < 500 and isinstance(exc.detail, str):
-            return {**REFUSED, "message": exc.detail}
-        return REFUSED
+        return {**REFUSED, **_client_error_message(exc)}
     if result.get("ok"):
         return {"ok": True, "code": None}
-    message = result.get("message")
-    return {**REFUSED, "message": message} if isinstance(message, str) and message else REFUSED
+    return {**REFUSED, **_message(result.get("message"))}
+
+
+def _client_error_message(exc: HTTPException) -> dict[str, str]:
+    return _message(exc.detail) if 400 <= exc.status_code < 500 else {}
+
+
+def _message(value: object) -> dict[str, str]:
+    return {"message": value} if isinstance(value, str) and value.strip() else {}
 
 
 def kind_sample_candidates(kinds: Iterable[Mapping[str, Any]], cards: Iterable[Mapping[str, Any]]) -> dict[str, list[str]]:

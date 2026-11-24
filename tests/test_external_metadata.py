@@ -550,6 +550,9 @@ class ExternalMetadataTests(unittest.TestCase):
             second = self._sync_show(connection, config, minutes=30, fetch_image_fn=self._poster_fetch(requests))
             show = cached_poster(connection, config.paths.poster_dir, "tv/Show")
             movie = cached_poster(connection, config.paths.poster_dir, "movies/Heat (1995)")
+            movie_genres = connection.execute(select(plex_item_metadata.c.plex_genres_json)
+                                              .where(plex_item_metadata.c.plex_item_rating_key == "8")).scalar_one()
+            self.assertEqual(json.loads(movie_genres), ["Animation"])
             single_file_movie = cached_poster(connection, config.paths.poster_dir, "movies/Up (2009).mkv")
             extras_only_movie = cached_poster(connection, config.paths.poster_dir, "movies/Rebirth (2025)")
             unmatched_feature = cached_poster(connection, config.paths.poster_dir, "movies/Ronin (1998)")
@@ -806,6 +809,7 @@ class ExternalMetadataTests(unittest.TestCase):
                             "Media": [{"Part": [{"id": "part-7", "file": "/plex/movies/Heat (1995)/Heat.mkv"}]}],
                         }, {
                             "ratingKey": "8",
+                            "Genre": [{"tag": "Animation"}] if "Genre" in parse_qs(urlsplit(url).query)["includeElements"][0] else [],
                             "thumb": "/library/metadata/8/thumb/1700000002",
                             "Media": [{"Part": [{"id": "part-8", "file": "/plex/movies/Up (2009).mkv"}]}],
                         }, {
