@@ -154,6 +154,9 @@ has to look up is a defect.
 ## Review decisions
 
 - Let the original and sample evidence dominate the review viewport.
+- In the sample player, show the compressed bytes for the selected clip. Mark the original
+  size as approximate because it uses the original file’s average bitrate over the same seconds.
+  Older clips without a recorded measurement show just the picture names.
 - Place compact facts and the current decision after the evidence rather than
   before it.
 - Keep ordinary review outcomes explicit: `Keep this version`, `Use less

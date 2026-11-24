@@ -37,7 +37,7 @@ def encode_preview_clips(
         process_controller: Any = None,
         execution_mode_for_host: Callable[[dict[str, Any] | None], str],
         encode_preview_clips_remote_fn: Callable[..., list[Any]],
-        render_encoded_preview_clip: Callable[..., None],
+        render_encoded_preview_clip: Callable[..., int | None],
         slug_seconds: Callable[[float], str],
         encoded_preview_clip_factory: Callable[..., Any],
 ) -> list[Any]:
@@ -64,7 +64,7 @@ def encode_preview_clips(
     encoded: list[Any] = []
     for clip_number, clip_time in enumerate(timestamps, start=1):
         output_path = output_dir / f"encoded-{clip_number:02d}-{slug_seconds(clip_time)}.mp4"
-        render_encoded_preview_clip(
+        production_size = render_encoded_preview_clip(
             source_path=source_path,
             source_codec=source_codec,
             output_path=output_path,
@@ -85,6 +85,7 @@ def encode_preview_clips(
                 timestamp_seconds=clip_time,
                 duration_seconds=duration_seconds,
                 size_bytes=output_path.stat().st_size,
+                production_size_bytes=production_size,
             )
         )
     return encoded
@@ -108,7 +109,7 @@ def encode_preview_clips_remote(
         remote_preview_timeout_seconds: int,
         uuid_factory: Callable[[], Any],
         run_remote_command: Callable[..., Any],
-        render_encoded_preview_clip_remote: Callable[..., None],
+        render_encoded_preview_clip_remote: Callable[..., int | None],
         copy_remote_file_to_local: Callable[..., None],
         slug_seconds: Callable[[float], str],
         encoded_preview_clip_factory: Callable[..., Any],
@@ -125,7 +126,7 @@ def encode_preview_clips_remote(
             file_name = f"encoded-{clip_number:02d}-{slug_seconds(clip_time)}.mp4"
             output_path = output_dir / file_name
             remote_output_path = remote_root / file_name
-            render_encoded_preview_clip_remote(
+            production_size = render_encoded_preview_clip_remote(
                 host=host,
                 **managed_kwargs,
                 source_path=source_path,
@@ -159,6 +160,7 @@ def encode_preview_clips_remote(
                     timestamp_seconds=clip_time,
                     duration_seconds=duration_seconds,
                     size_bytes=output_path.stat().st_size,
+                    production_size_bytes=production_size,
                 )
             )
     finally:

@@ -438,6 +438,15 @@ def _goal_bytes(folder: Mapping[str, Any]) -> int:
     )
 
 
+def _estimated_original_bytes(item: Mapping[str, Any], clip: Mapping[str, Any]) -> int | None:
+    duration = float_value(item.get("duration_seconds"))
+    source_bytes = int_value(item.get("source_size_bytes"))
+    seconds = min(float_value(clip.get("duration_seconds")), duration - float_value(clip.get("timestamp_seconds")))
+    if source_bytes > 0 and seconds > 0 and duration > 0:
+        return round(source_bytes * seconds / duration)
+    return None
+
+
 def sample_moments(calibration: Mapping[str, Any], *, review_dir: Path | None = None) -> list[dict[str, Any]]:
     if calibration.get("browser_review_ready") is not True:
         return []
@@ -450,10 +459,12 @@ def sample_moments(calibration: Mapping[str, Any], *, review_dir: Path | None = 
                 for clip in (original, sample)
             ):
                 continue
+            production_bytes = int_value(sample.get("production_size_bytes")) or None
+            original_bytes = _estimated_original_bytes(object_dict(calibration.get("sample_item")), original) if production_bytes else None
             moments.append({
                 "at_seconds": float_value(original.get("timestamp_seconds")),
-                "original": {"url": original["path"], "size_bytes": int_value(original.get("size_bytes"))},
-                "sample": {"url": sample["path"], "size_bytes": int_value(sample.get("size_bytes"))},
+                "original": {"url": original["path"], "size_bytes": int_value(original.get("size_bytes")), "moment_bytes": original_bytes},
+                "sample": {"url": sample["path"], "size_bytes": int_value(sample.get("size_bytes")), "moment_bytes": production_bytes},
             })
     return moments
 
