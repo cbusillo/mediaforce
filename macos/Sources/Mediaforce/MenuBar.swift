@@ -190,7 +190,7 @@ extension MainWindowFacts {
         if work.stopReasons.contains("no_computer_ready") { return .computer(nil) }
         if work.runningCount > 0 { return compressingSeason.map { .item($0.prefix) } }
         if work.waitingCount > 0 { return nil }
-        if work.checksPaused { return .library }
+        if work.checksPaused { return .home }
         return nil
     }
 }

@@ -91,6 +91,7 @@ struct MainWindowFacts: Decodable, Sendable {
 
     struct SpaceSaved: Decodable, Sendable {
         let bytes: Int64
+        let history: SavingsHistory?
         let itemCount: Int
         let episodeCount: Int
         let seasonCount: Int

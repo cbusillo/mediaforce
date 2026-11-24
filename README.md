@@ -35,7 +35,7 @@ some shows need more, and your results will vary.
   example overnight or during off-peak power hours, including seasonal
   time-of-use hours that change through the year. A file that cannot finish
   before its window closes waits for the next one.
-- **Plain screens.** Library, Activity, Computers and Space saved show what
+- **Plain screens.** Home, Library, Activity, Computers and Space saved show what
   is running, what comes next and what has been saved, without encoder
   jargon.
 

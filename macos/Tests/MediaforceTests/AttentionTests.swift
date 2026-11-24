@@ -320,7 +320,7 @@ final class AttentionTests: XCTestCase {
         XCTAssertTrue(Attention.waitingItems(cleared).isEmpty)
         XCTAssertEqual(Attention.waitingOnYou(cleared), 0)
         XCTAssertEqual(Attention.openingPlace(cleared, fallback: .spaceSaved), .spaceSaved)
-        XCTAssertEqual(Attention.openingPlace(cleared), .library)
+        XCTAssertEqual(Attention.openingPlace(cleared), .home)
         XCTAssertEqual(Place(notificationValue: Place.needsYou.notificationValue), .needsYou)
     }
 

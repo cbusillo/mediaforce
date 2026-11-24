@@ -80,7 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let value = response.notification.request.content.userInfo[Place.notificationKey] as? String
         await MainActor.run {
             NSApp.activate()
-            model.placeRequest = PlaceRequest(place: Attention.openingPlace(model.facts, fallback: value.flatMap(Place.init(notificationValue:)) ?? .library))
+            model.placeRequest = PlaceRequest(place: Attention.openingPlace(model.facts, fallback: value.flatMap(Place.init(notificationValue:)) ?? .home))
         }
     }
 

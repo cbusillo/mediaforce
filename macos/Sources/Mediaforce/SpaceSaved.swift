@@ -1,13 +1,12 @@
 import SwiftUI
 
-/// What compressing has given back: the library as one storage bar, the one Delete for the original backups, then an
-/// episode playing beside its original backup. The bar comes from the main window's facts, so it shows at once; the
-/// backups and the shows to compare fill in as Mediaforce answers.
 struct SpaceSavedPage: View {
     let facts: MainWindowFacts
     let model: MainWindowModel
     let openItem: (String) -> Void
     // The whole Cleanup folder, as Delete clears it, not only the backups of seasons listed as finished.
+    @State private var listing = MediaListing()
+    @State private var machines = PageFacts<ComputersFacts>()
     @State private var cleanup: CleanupFolder?
     @State private var shows: [SpaceSavedFacts.Show]?
     @State private var refreshFailed = false
@@ -17,12 +16,14 @@ struct SpaceSavedPage: View {
     static let deletionCheckInterval: Duration = .seconds(1)
 
     var body: some View {
-        PageFrame(title: Words.spaceSaved, subtitle: Words.savedSoFar(facts.spaceSaved.bytes)) {
+        PageFrame(title: Words.spaceSaved) {
             if refreshFailed {
                 StaleNotice(connection: .failing, lastHeard: lastHeard)
                     .padding(.horizontal, -34)
             }
-            SpaceSavedBar(library: facts.library, savedBytes: facts.spaceSaved.bytes, backupBytes: cleanup?.totalSizeBytes ?? 0)
+            SavingsSummary(facts: facts, listing: listing, machines: machines, posters: model.posters, openItem: openItem)
+            Divider()
+            Text("Original backups").font(.headline)
             if let cleanup {
                 DeleteBackups(status: BackupsStatus(cleanup: cleanup, asking: asking), model: model) {
                     Task { await deleteBackups() }
@@ -35,6 +36,18 @@ struct SpaceSavedPage: View {
                 }
             } else if !refreshFailed {
                 ProgressView().frame(maxWidth: 760, minHeight: 200)
+            }
+        }
+        .task { await listing.watch(model.client, kind: .everything) }
+        .task {
+            while !Task.isCancelled {
+                do {
+                    machines.facts = try await model.client.computers()
+                    machines.refreshFailed = false
+                } catch {
+                    machines.refreshFailed = true
+                }
+                try? await Task.sleep(for: MainWindowModel.refreshInterval)
             }
         }
         .task { await watch() }
@@ -253,68 +266,6 @@ struct BackupShowTiles: View {
     }
 }
 
-/// The library as one bar: compressed now, still original, and the space got back, with the backups' share marked.
-struct SpaceSavedBar: View {
-    // Wide enough to see even when the backups are a sliver of the library.
-    static let smallestBackupSlice: CGFloat = 24
-
-    let library: MainWindowFacts.Library
-    let savedBytes: Int64
-    let backupBytes: Int64
-
-    private var nowBytes: Int64 { MediaKind.everything.totalBytes(in: library) }
-    private var stillOriginalBytes: Int64 { MediaKind.everything.originalBytes(in: library) }
-    private var compressedBytes: Int64 { nowBytes - stillOriginalBytes }
-
-    var body: some View {
-        let total = max(Double(nowBytes + savedBytes), 1)
-        VStack(alignment: .leading, spacing: 8) {
-            GeometryReader { geometry in
-                let width = geometry.size.width
-                HStack(spacing: 2) {
-                    Rectangle().fill(Color.accentColor).frame(width: width * Double(compressedBytes) / total)
-                    Rectangle().fill(Color.accentColor.opacity(0.35)).frame(width: width * Double(stillOriginalBytes) / total)
-                    ZStack(alignment: .leading) {
-                        Rectangle().fill(.quaternary)
-                        if backupBytes > 0 {
-                            Rectangle().fill(Color.orange.opacity(0.85))
-                                .frame(width: max(width * Double(backupBytes) / total, Self.smallestBackupSlice))
-                        }
-                    }
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
-            .frame(height: 18)
-            HStack(spacing: 18) {
-                StorageKey(style: AnyShapeStyle(Color.accentColor), text: Words.storageCompressed(compressedBytes))
-                StorageKey(style: AnyShapeStyle(Color.accentColor.opacity(0.35)), text: Words.storageStillOriginal(stillOriginalBytes))
-                StorageKey(style: AnyShapeStyle(.quaternary), text: Words.storageSaved(savedBytes))
-                if backupBytes > 0 {
-                    StorageKey(style: AnyShapeStyle(Color.orange.opacity(0.85)), text: Words.storageBackups(backupBytes))
-                }
-                Spacer()
-            }
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            Text(Words.libraryWasAndIs(nowBytes + savedBytes, nowBytes))
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        }
-    }
-}
-
-struct StorageKey: View {
-    let style: AnyShapeStyle
-    let text: String
-
-    var body: some View {
-        HStack(spacing: 6) {
-            RoundedRectangle(cornerRadius: 2).fill(style).frame(width: 10, height: 10)
-            Text(text).monospacedDigit()
-        }
-    }
-}
-
 /// What the backups line shows: the deletion running, the backups waiting, and how the last deletion ended.
 struct BackupsStatus {
     let cleanup: CleanupFolder
@@ -369,7 +320,7 @@ struct DeleteBackups: View {
                 Spacer()
                 if status.showsDelete {
                     Button(Words.deleteBackups) { Task { await askFirst() } }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
                         .disabled(!status.canDelete)
                         .help(Words.deleteBackupsHelp)
                 }

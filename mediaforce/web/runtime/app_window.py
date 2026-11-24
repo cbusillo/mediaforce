@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -154,7 +154,7 @@ def app_window_payload(
             ],
         },
         "library": _library_totals(items),
-        "space_saved": _space_saved(items, promotions, finished),
+        "space_saved": _space_saved(items, promotions, finished, observed_at),
         "recently_finished_seasons": finished[:RECENT_SEASON_LIMIT],
         "recently_finished": _recently_finished(items, finished, promotions, kept),
         "biggest_not_started": _biggest_not_started(connection, items, promotions, kept, samples, underway),
@@ -502,13 +502,42 @@ def _finished_seasons(
     return sorted(finished, key=lambda finished_season: finished_season["finished_at"] or "", reverse=True)
 
 
-def _space_saved(items: list[_Item], promotions: Mapping[int, _Promotion], finished: list[dict[str, Any]]) -> dict[str, int]:
+def _space_saved(
+        items: list[_Item], promotions: Mapping[int, _Promotion], finished: list[dict[str, Any]], observed_at: datetime,
+) -> dict[str, Any]:
     replaced = [item for item in items if item.promoted and item.item_id in promotions]
+    today = observed_at.astimezone(UTC).date()
+    monday = today - timedelta(days=today.weekday())
+    weeks = {monday - timedelta(weeks=offset): 0 for offset in reversed(range(8))}
+    titles: dict[str, list[_Item]] = defaultdict(list)
+    for item in replaced:
+        promotion = promotions[item.item_id]
+        if prefix := item.title_prefix:
+            titles[prefix].append(item)
+        try:
+            published = datetime.fromisoformat(promotion.promoted_at or "")
+        except ValueError:
+            continue
+        day = (published if published.tzinfo else published.replace(tzinfo=UTC)).astimezone(UTC).date()
+        week = day - timedelta(days=day.weekday())
+        if week in weeks and day <= today:
+            weeks[week] += promotion.bytes_saved
+    wins = []
+    for prefix, files in titles.items():
+        saved = sum(promotions[file.item_id].bytes_saved for file in files)
+        if saved <= 0:
+            continue
+        before = sum(promotions[file.item_id].source_size_bytes or file.size_bytes + promotions[file.item_id].bytes_saved for file in files)
+        wins.append({"prefix": prefix, "title": files[0].title, "media_type": files[0].kind,
+                     "before": before, "after": before - saved})
+    wins.sort(key=lambda win: (win["after"] - win["before"], win["prefix"]))
     return {
         "bytes": sum(promotions[item.item_id].bytes_saved for item in replaced),
         "item_count": len(replaced),
         "episode_count": sum(1 for item in replaced if item.kind == "tv"),
         "season_count": sum(1 for season in finished if season["episode_count"]),
+        "history": {"weeks": [{"start": week.isoformat(), "bytes": size} for week, size in weeks.items()],
+                    "wins": wins[:3]},
     }
 
 

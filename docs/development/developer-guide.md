@@ -114,21 +114,20 @@ enforcing the picture floor.
 ## Mac page screenshots
 
 Render live server data into PNGs, in light and dark, from the app
-executable in a logged-in session. It draws into a window that is never shown
-and needs no Screen Recording permission:
+executable in a logged-in session. It draws the page offscreen and needs no Screen Recording permission:
 
 ```bash
 /Applications/Mediaforce.app/Contents/MacOS/Mediaforce render /path/to/new/empty/dir \
   --page needs-you --page 'sample:tv/Show/Season 1'
 ```
 
-Without `--page` it renders the default set. Page names include `library`,
+Without `--page` it renders the default set. Page names include `home`, `library`,
 `tv`, `movies`, `other` (VR & 3D), `needs-you`, `activity`, `computers`,
 `computer:ADDRESS`, `space-saved`, `media`, `kind:CODE`, `item:PREFIX`,
 `sample:PATH`, `settings:libraries`, `settings:compression`,
 `settings:computers`, `settings:metadata` and `menu`. `--server URL`,
 `--width` and `--height` adjust the source and viewport. A page whose data
-fails to load fails the command. Captures omit the sidebar and Settings tab
+fails to load fails the command. Use `window:home` or `window:space-saved` to include the sidebar. Other captures omit the sidebar and Settings tab
 selector, and compare-player frames may be blank. The `mac-app` CI job runs
 the same renderer and keeps its PNGs in the `mac-pages` artifact; use that
 run to check a branch without touching the workstation's app or server.

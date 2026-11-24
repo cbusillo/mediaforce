@@ -2,14 +2,14 @@ import SwiftUI
 
 /// TV shows, movies and VR & 3D together: how work is going, the sizes, what finished and what waits. Each library's
 /// own list is under Library in the sidebar.
-struct LibraryPage: View {
+struct HomePage: View {
     let model: MainWindowModel
     @State private var listing = MediaListing()
     let open: (Place) -> Void
 
     var body: some View {
         let rows = listing.rows
-        PageFrame(title: Words.library, subtitle: model.facts.map(Words.workHeadline) ?? "") {
+        PageFrame(title: Words.home, subtitle: model.facts.map(Words.workHeadline) ?? "") {
             if let facts = model.facts {
                 if Words.workExplanation(facts) != nil || facts.lastChange != nil {
                     WorkStatus(facts: facts, open: open)

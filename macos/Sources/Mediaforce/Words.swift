@@ -29,6 +29,7 @@ enum Words {
     static func updateFailedBefore(build: String) -> String {
         "Version \(build) didn't start correctly on this Mac, so Mediaforce went back to the earlier version and waits for a newer one."
     }
+    static let home = "Home"
     static let library = "Library"
     static let activity = "Activity"
 
@@ -42,12 +43,12 @@ enum Words {
 
     static func backTitle(_ place: Place) -> String {
         switch place {
-        case .library: library
-        case .mediaKind(let kind, _): kind == .everything ? media : mediaKind(kind)
+        case .home: home
+        case .mediaKind(let kind, _): kind == .everything ? library : mediaKind(kind)
         case .activity: activity
         case .needsYou: needsYou
         case .spaceSaved: spaceSaved
-        case .media: media
+        case .media: library
         case .kind(let code): kindName(code)
         case .seasonsWithoutKind: seasonsWithoutKindTitle
         case .item(let prefix, _): folderName(prefix)
@@ -572,15 +573,6 @@ extension Words {
 
     static func showBackups(_ seasons: Int, _ bytes: Int64) -> String {
         "\(count(seasons, "season")), \(size(bytes)) of backups"
-    }
-
-    static func storageCompressed(_ bytes: Int64) -> String { "Compressed, \(size(bytes))" }
-    static func storageStillOriginal(_ bytes: Int64) -> String { "Still original, \(size(bytes))" }
-    static func storageSaved(_ bytes: Int64) -> String { "Space saved, \(size(bytes))" }
-    static func storageBackups(_ bytes: Int64) -> String { "Backups, \(size(bytes))" }
-
-    static func libraryWasAndIs(_ was: Int64, _ now: Int64) -> String {
-        "The library was \(size(was)) and is \(size(now)) now."
     }
 
     static func deleteBackupsLine(_ count: Int, _ bytes: Int64) -> String {
@@ -1647,7 +1639,6 @@ extension Words {
 }
 
 extension Words {
-    static let media = "Media"
     static let seasonsHeading = "Seasons"
     static let viewLabel = "View"
     static let tableView = "Show as a table"
