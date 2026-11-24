@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow
@@ -106,6 +106,7 @@ def app_window_payload(
         controller_storage: Mapping[str, Any],
         storage_admits_work: bool,
         observed_at: datetime,
+        production_roots: Collection[str] | None = None,
         kinds: Iterable[Mapping[str, Any]] = (),
         remaking_samples: Collection[str] = (),
         file_sample_cards: Callable[[Iterable[str]], list[dict[str, Any]]] | None = None,
@@ -132,7 +133,6 @@ def app_window_payload(
         sample_cards.extend(file_sample_cards(item.rel_path for item in items if item.kind != "tv"
                                               and not item.promoted and item.item_id not in kept))
     samples = _samples(sample_cards)
-    underway = kind_samples | set(remaking_samples) | {card["prefix"] for card in sample_cards if (card.get("page_state") or {}).get("key") in {"making_test", "sample_waiting"}}
     waiting_samples = {sample["prefix"] for sample in samples["waiting_on_you"]}
     samples["waiting_on_you"] = [sample for sample in samples["waiting_on_you"]
                                  if sample["prefix"] not in kind_samples and sample["prefix"] not in remaking_samples]
@@ -157,7 +157,9 @@ def app_window_payload(
         "space_saved": _space_saved(items, promotions, finished),
         "recently_finished_seasons": finished[:RECENT_SEASON_LIMIT],
         "recently_finished": _recently_finished(items, finished, promotions, kept),
-        "biggest_not_started": _biggest_not_started(connection, items, promotions, kept, samples, underway),
+        "biggest_not_started": _biggest_not_started(
+            connection, items, kept, samples["waiting_on_you"], library_types.keys() if production_roots is None else production_roots,
+        ),
         "samples": samples,
         "computers": computer_states,
         "events": events,
@@ -534,38 +536,42 @@ def _recently_finished(
     return sorted(finished, key=lambda row: row["finished_at"] or "", reverse=True)[:RECENT_SEASON_LIMIT]
 
 
+def _compressed_title_prefixes(connection: DBClient) -> set[str]:
+    review_origins = ("calibration", "cli-review")
+    staged = select(staged_artifacts.c.library_item_id).where(or_(
+        staged_artifacts.c.promoted_at.is_not(None),
+        func.coalesce(staged_artifacts.c.encode_origin, "").not_in(review_origins),
+    ))
+    origin = func.json_extract(item_events.c.details_json, "$.encode_origin")
+    completed = select(item_events.c.library_item_id).where(or_(
+        item_events.c.event_type == "promotion_completed",
+        (item_events.c.event_type == "encoding_completed") & func.coalesce(origin, "").not_in(review_origins),
+    ))
+    paths = select(library_items.c.rel_path).where(or_(
+        library_items.c.status == PROMOTED, library_items.c.id.in_(staged.union_all(completed)),
+    ))
+    return {"/".join(PurePosixPath(path).parts[:2]) for path in connection.scalars(paths)}
+
+
 def _biggest_not_started(
         connection: DBClient,
         items: list[_Item],
-        promotions: Mapping[int, _Promotion],
         kept: Mapping[int, Any],
-        samples: Mapping[str, list[dict[str, Any]]],
-        underway: set[str],
+        waiting_samples: list[dict[str, Any]],
+        production_roots: Collection[str],
 ) -> list[dict[str, Any]]:
-    jobs = {str(prefix) for prefix in connection.execute(select(encode_jobs.c.prefix).distinct()).scalars() if prefix}
-    started_scopes = jobs | underway | {sample["prefix"] for sample in samples["approved_not_started"]}
-    started_titles = {"/".join(PurePosixPath(prefix).parts[:2]) for prefix in started_scopes}
-    started: set[str] = set()
-    waiting = {sample["show_prefix"]: sample["prefix"] for sample in reversed(samples["waiting_on_you"])}
+    started = _compressed_title_prefixes(connection)
+    waiting = {sample["show_prefix"]: sample["prefix"] for sample in reversed(waiting_samples)}
     titles: dict[str, list[_Item]] = defaultdict(list)
     for item in items:
-        prefix = item.title_prefix
-        if not prefix:
+        if item.kind not in {"tv", "movie"} or not item.parts or item.parts[0] not in production_roots:
             continue
-        if (item.promoted or item.item_id in promotions or item.item_id in kept
-                or prefix in started_titles or prefix in started_scopes or item.parts[0] in started_scopes):
-            started.add(prefix)
-        elif item.kind not in {"tv", "movie"}:
-            for parent in PurePosixPath(prefix).parents:
-                if parent.as_posix() in started_scopes:
-                    started.add(prefix)
-                    break
-                if parent.as_posix() in waiting:
-                    waiting.setdefault(prefix, waiting[parent.as_posix()])
-        titles[prefix].append(item)
+        prefix = item.title_prefix
+        if prefix and prefix not in started:
+            titles[prefix].append(item)
     rows = []
     for prefix, members in titles.items():
-        if prefix in started:
+        if not any(item.item_id not in kept and (item.kind == "movie" or item.season_prefix) for item in members):
             continue
         first = members[0]
         row = {

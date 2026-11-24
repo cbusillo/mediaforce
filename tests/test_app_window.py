@@ -232,15 +232,25 @@ def _identity(prefix: str) -> dict[str, Any]:
     }
 
 
-def test_biggest_not_started_leaves_out_shows_with_any_work(connection: DBClient) -> None:
+def test_biggest_not_started_keeps_approved_and_queued_shows_until_a_file_is_compressed(connection: DBClient) -> None:
     _item(connection, "tv/ER/Season 1/e1.mkv", size=900)
     _item(connection, "tv/ER/Season 2/e1.mkv", size=900)
     _item(connection, "tv/Psych/Season 1/e1.mkv", size=500)
     _item(connection, "tv/House/Season 1/e1.mkv", size=5000)
-    _encode_job(connection, "tv/House/Season 1")
+    _encode_job(connection, "tv/House/Season 1", status="queued")
     _item(connection, "tv/Lucifer/Season 1/e1.mkv", size=4000)
     _replaced(connection, "tv/Lucifer/Season 2/e1.mkv", saved=10, at=NOW)
-    _item(connection, "tv/Monk/Season 1/e1.mkv", size=3000)
+    reviewed = _item(connection, "tv/Monk/Season 1/e1.mkv", size=3000, status="validated")
+    connection.execute(item_events.insert().values(library_item_id=reviewed, created_at=NOW, event_type="encoding_completed",
+                                                  details_json=json.dumps({"encode_origin": "calibration"})))
+    retried = _item(connection, "tv/Retry/Season 2/e1.mkv", missing=True)
+    _event(connection, retried, "encoding_completed", NOW)
+    _item(connection, "tv/Retry/Season 1/e1.mkv", size=8000)
+    kept = "tv/ER/Season 1/e2.mkv"
+    _keep_original(connection, _item(connection, kept, size=100), kept)
+    kept_only = "tv/Original/Season 1/e1.mkv"
+    _keep_original(connection, _item(connection, kept_only), kept_only)
+    _item(connection, "tv/Loose/pilot.mkv", size=8000)
     cards = [
         {"prefix": "tv/Psych/Season 1", "page_state": {
             "key": "ready_to_compare", "primary_action": "review_sample", "needs_you": True,
@@ -250,12 +260,12 @@ def test_biggest_not_started_leaves_out_shows_with_any_work(connection: DBClient
 
     biggest = _payload(connection, cards=cards)["biggest_not_started"]
 
-    assert [show["show"] for show in biggest] == ["ER", "Psych"]
-    assert biggest[0] == {
-        "show_prefix": "tv/ER", "show": "ER", "media_type": "tv", "bytes": 1800, "episode_count": 2, "season_count": 2,
+    assert [show["show"] for show in biggest] == ["House", "Monk", "ER", "Psych"]
+    assert biggest[2] == {
+        "show_prefix": "tv/ER", "show": "ER", "media_type": "tv", "bytes": 1900, "episode_count": 3, "season_count": 2,
         "waiting_sample_prefix": None,
     }
-    assert biggest[1]["waiting_sample_prefix"] == "tv/Psych/Season 1"
+    assert biggest[3]["waiting_sample_prefix"] == "tv/Psych/Season 1"
 
 
 def test_samples_split_into_waiting_on_owner_and_approved_not_started(connection: DBClient) -> None:
@@ -638,20 +648,23 @@ def test_automatic_sample_retries_stay_quiet_until_the_existing_retry_limit(
     assert not facts["work"]["seasons_needing_you"]
 
 
-def test_biggest_not_started_ranks_movies_and_vr_with_shows(connection: DBClient) -> None:
+def test_biggest_not_started_ranks_movies_with_shows_and_excludes_vr(connection: DBClient) -> None:
     _item(connection, "movies/Feature/part1.mkv", size=600)
     _item(connection, "movies/Feature/part2.mkv", size=500)
     _item(connection, "tv/Series/Season 2/episode.mkv", size=900)
     _item(connection, "other/Trips/Coast.mkv", size=800)
     _item(connection, "other/Trips/Mountains.mkv", size=1500)
-    _encode_job(connection, "other/Trips/Mountains.mkv")
-    _item(connection, "movies/Started/cut.mkv", size=2000)
-    _encode_job(connection, "movies/Started/cut.mkv")
+    _item(connection, "archive/View only.mkv", size=3000)
+    staged = _item(connection, "movies/Started/cut.mkv", size=2000)
+    connection.execute(staged_artifacts.insert().values(library_item_id=staged, staging_path="/staged/cut.mkv", updated_at=NOW))
 
-    rows = _payload(connection)["biggest_not_started"]
+    rows = app_window_payload(
+        connection, library_types={**LIBRARY_TYPES, "archive": "movie"}, production_roots=LIBRARY_TYPES.keys(),
+        computers=[], season_cards=[], controller_storage={}, storage_admits_work=True, observed_at=datetime.now(UTC),
+    )["biggest_not_started"]
 
     assert [(row["show_prefix"], row["bytes"]) for row in rows] == [
-        ("movies/Feature", 1100), ("tv/Series", 900), ("other/Trips/Coast.mkv", 800),
+        ("movies/Feature", 1100), ("tv/Series", 900),
     ]
 
 

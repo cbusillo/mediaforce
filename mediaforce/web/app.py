@@ -1221,6 +1221,7 @@ def create_app(
             cards = [asdict(card) for card in _list_library_detail_cards(config, connection)]
             payload = app_window_payload(
                 connection,
+                production_roots=config.source_root_map.keys(),
                 library_types=config.library_type_map,
                 season_cards=cards,
                 file_sample_cards=lambda paths: library_file_sample_cards(connection, config, _page_state_sources(), paths),
