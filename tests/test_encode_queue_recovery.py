@@ -10516,6 +10516,7 @@ raise SystemExit(0)
             timestamp_seconds=10.0,
             duration_seconds=8.0,
             size_bytes=1024,
+            production_size_bytes=300,
         )
         source_clip = BrowserReviewClip(
             output_path=preview_dir / "source-01-00-10.mp4",
@@ -10636,6 +10637,7 @@ raise SystemExit(0)
                                     )
 
         self.assertIsNone(cleanup_path)
+        self.assertEqual(payload["preview_clips"][0]["production_size_bytes"], preview_clip.production_size_bytes)
         self.assertTrue(payload["preview_clips"][0]["path"].startswith("/review-media/run-123/"))
         self.assertTrue(payload["source_clips"][0]["path"].startswith("/review-media/run-123/"))
         self.assertTrue(payload["compare_clips"][0]["path"].startswith("/review-media/run-123/"))
@@ -16262,9 +16264,10 @@ raise SystemExit(0)
                 "mediaforce.review.ffmpeg_hwaccel_input_args", return_value=["-hwaccel", "videotoolbox"]
         ), patch(
             "mediaforce.review.run_command",
-            return_value=subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr=""),
+            side_effect=[subprocess.CompletedProcess([], 0, "total_size=500\nprogress=continue\ntotal_size=750\nprogress=end\n", ""),
+                         subprocess.CompletedProcess([], 0, "total_size=9000\nprogress=end\n", "")],
         ) as run_mock:
-            review._render_encoded_preview_clip(
+            size = review._render_encoded_preview_clip(
                 source_path=Path("/tmp/input.mkv"),
                 source_codec="h264",
                 output_path=Path("/tmp/preview.mp4"),
@@ -16276,6 +16279,7 @@ raise SystemExit(0)
                 crf=28.25,
                 svt_params=["tune=0", "film-grain=0"],
             )
+        self.assertEqual(size, 750)
         self.assertEqual(run_mock.call_count, 2)
         production_cmd = run_mock.call_args_list[0].args[0]
         browser_cmd = run_mock.call_args_list[1].args[0]
@@ -16287,7 +16291,7 @@ raise SystemExit(0)
         self.assertEqual(production_cmd[production_cmd.index("-t", 9) + 1], "8.000")
         self.assertIn("tune=0:film-grain=0", production_cmd)
         self.assertIn("28.25", production_cmd)
-        self.assertEqual(production_cmd[-1], "/tmp/.preview-production-preview.mp4")
+        self.assertEqual(production_cmd[-1], "/tmp/.preview-production-preview.mkv")
         self.assertEqual(browser_cmd[browser_cmd.index("-c:v") + 1], "libx264")
         self.assertEqual(browser_cmd[browser_cmd.index("-pix_fmt") + 1], "yuv420p")
         self.assertEqual(browser_cmd[browser_cmd.index("-crf") + 1], "16")
@@ -16352,14 +16356,10 @@ raise SystemExit(0)
         browser_cmd = run_mock.call_args_list[1].args[0]
         self.assertIn("0:2", production_cmd)
         self.assertIn("-dn", production_cmd)
-        self.assertEqual(production_cmd[production_cmd.index("-c:a") + 1], "aac")
-        self.assertEqual(production_cmd[production_cmd.index("-b:a") + 1], "256k")
-        self.assertEqual(production_cmd[production_cmd.index("-ar") + 1], "48000")
-        self.assertEqual(production_cmd[production_cmd.index("-ac") + 1], "2")
-        self.assertNotIn("-an", production_cmd)
+        self.assertEqual(production_cmd[production_cmd.index("-c:a") + 1], "copy")
         self.assertIn("0:a:0", browser_cmd)
-        self.assertIn("-dn", browser_cmd)
-        self.assertEqual(browser_cmd[browser_cmd.index("-c:a") + 1], "copy")
+        self.assertEqual(browser_cmd[browser_cmd.index("-c:a") + 1], "aac")
+        self.assertEqual(browser_cmd[browser_cmd.index("-ac") + 1], "2")
 
     def test_render_encoded_preview_clip_applies_production_opus_before_browser_audio(self) -> None:
         output_path = self.root / "preview-with-audio.mp4"
@@ -16388,22 +16388,12 @@ raise SystemExit(0)
                 },
             )
 
-        self.assertEqual(run_mock.call_count, 3)
-        production_audio_cmd = run_mock.call_args_list[0].args[0]
-        production_preview_cmd = run_mock.call_args_list[1].args[0]
-        browser_preview_cmd = run_mock.call_args_list[2].args[0]
-        self.assertEqual(production_audio_cmd[production_audio_cmd.index("-map") + 1], "0:3")
-        self.assertEqual(production_audio_cmd[production_audio_cmd.index("-c:a") + 1], "libopus")
-        self.assertEqual(production_audio_cmd[production_audio_cmd.index("-b:a") + 1], "256k")
-        self.assertEqual(
-            production_audio_cmd[production_audio_cmd.index("-af") + 1],
-            opus_audio_filter("channelmap=channel_layout=5.1"),
-        )
-        self.assertEqual(production_preview_cmd[production_preview_cmd.index("-map", 1) + 1], "0:v:0")
-        self.assertIn("1:a:0", production_preview_cmd)
-        self.assertEqual(browser_preview_cmd[browser_preview_cmd.index("-c:v") + 1], "libx264")
-        self.assertFalse((self.root / ".preview-with-audio-production-audio.opus").exists())
-        self.assertFalse((self.root / ".preview-with-audio-production-preview.mp4").exists())
+        production_cmd, browser_cmd = [call.args[0] for call in run_mock.call_args_list]
+        self.assertIn("0:3", production_cmd)
+        self.assertEqual(production_cmd[production_cmd.index("-c:a") + 1], "libopus")
+        self.assertEqual(production_cmd[production_cmd.index("-b:a") + 1], "256k")
+        self.assertEqual(production_cmd[production_cmd.index("-af") + 1], opus_audio_filter("channelmap=channel_layout=5.1"))
+        self.assertEqual(browser_cmd[browser_cmd.index("-c:a") + 1], "aac")
 
     def test_resolve_item_paths_use_host_overrides(self) -> None:
         item = {
@@ -17919,8 +17909,9 @@ raise SystemExit(0)
         output_dir = self.root / "review"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        def create_preview_file(*_args: object, output_path: Path, **_kwargs: object) -> None:
+        def create_preview_file(*_args: object, output_path: Path, **_kwargs: object) -> int:
             output_path.write_bytes(b"preview")
+            return 3
 
         with patch("mediaforce.review._render_encoded_preview_clip") as render_mock, patch(
                 "mediaforce.review._encode_preview_clips_remote"
@@ -17940,7 +17931,7 @@ raise SystemExit(0)
             )
         render_mock.assert_called_once()
         remote_mock.assert_not_called()
-        self.assertEqual(len(clips), 1)
+        self.assertEqual(clips[0].production_size_bytes, 3)
 
     def test_encode_preview_clips_remote_copies_results_and_cleans_up(self) -> None:
         output_dir = self.root / "review-remote"
@@ -17966,7 +17957,7 @@ raise SystemExit(0)
             local_path.write_bytes(b"preview")
 
         with patch("mediaforce.review.run_remote_command", side_effect=remote_command_side_effect), patch(
-                "mediaforce.review._render_encoded_preview_clip_remote"
+                "mediaforce.review._render_encoded_preview_clip_remote", return_value=3
         ) as render_remote_mock, patch(
             "mediaforce.review.copy_remote_file_to_local", side_effect=copy_side_effect
         ), patch("mediaforce.review.uuid.uuid4") as uuid_mock:
@@ -17987,7 +17978,7 @@ raise SystemExit(0)
         render_remote_mock.assert_called_once()
         self.assertEqual(remote_calls[0], ["mkdir", "-p", "/tmp/mediaforce-preview-abcdef123456"])
         self.assertEqual(remote_calls[-1], ["rm", "-rf", "/tmp/mediaforce-preview-abcdef123456"])
-        self.assertEqual(len(clips), 1)
+        self.assertEqual(clips[0].production_size_bytes, 3)
         self.assertEqual(clips[0].size_bytes, len(b"preview"))
 
     def test_render_source_review_clips_remote_copies_results_and_cleans_up(self) -> None:
@@ -18290,19 +18281,20 @@ raise SystemExit(0)
         self.assertIn("-svtav1-params", production_cmd)
         self.assertIn("tune=0:film-grain=0", production_cmd)
         self.assertIn("28.25", production_cmd)
-        self.assertEqual(production_cmd[-1], "/tmp/.output-production-preview.mp4")
+        self.assertEqual(production_cmd[-1], "/tmp/.output-production-preview.mkv")
         self.assertEqual(browser_cmd[browser_cmd.index("-c:v") + 1], "libx264")
         self.assertEqual(browser_cmd[-1], "/tmp/output.mp4")
-        self.assertEqual(cleanup_cmd, ["rm", "-f", "/tmp/.output-production-preview.mp4"])
+        self.assertEqual(cleanup_cmd, ["rm", "-f", "/tmp/.output-production-preview.mkv"])
 
-    def test_render_encoded_preview_clip_remote_cleans_up_production_audio(self) -> None:
+    def test_render_encoded_preview_clip_remote_measures_the_production_encode_with_surround_audio(self) -> None:
         with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
                 "mediaforce.review.ffmpeg_hwaccel_input_args", return_value=[]
         ), patch(
             "mediaforce.review.run_remote_command",
-            return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
+            side_effect=[subprocess.CompletedProcess([], 0, "total_size=4312\nprogress=end\n", ""),
+                         subprocess.CompletedProcess([], 0, "", ""), subprocess.CompletedProcess([], 0, "", "")],
         ) as remote_mock:
-            review._render_encoded_preview_clip_remote(
+            size = review._render_encoded_preview_clip_remote(
                 host={"key": "cbusillo@studio", "mode": "ssh"},
                 source_path=Path("/tmp/input.mkv"),
                 remote_output_path=Path("/tmp/output.mp4"),
@@ -18322,24 +18314,13 @@ raise SystemExit(0)
                 },
             )
 
-        self.assertEqual(remote_mock.call_count, 4)
-        production_audio_cmd = remote_mock.call_args_list[0].args[1]
-        production_preview_cmd = remote_mock.call_args_list[1].args[1]
-        browser_preview_cmd = remote_mock.call_args_list[2].args[1]
-        cleanup_cmd = remote_mock.call_args_list[3].args[1]
-        self.assertEqual(
-            production_audio_cmd[production_audio_cmd.index("-af") + 1],
-            opus_audio_filter("channelmap=channel_layout=7.1"),
-        )
-        self.assertIn("1:a:0", production_preview_cmd)
-        self.assertEqual(browser_preview_cmd[browser_preview_cmd.index("-c:v") + 1], "libx264")
-        self.assertIn("/tmp/.output-production-preview.mp4", cleanup_cmd)
-        self.assertIn("/tmp/.output-production-audio.opus", cleanup_cmd)
-        self.assertEqual(cleanup_cmd[:2], ["rm", "-f"])
-        self.assertEqual(remote_mock.call_args_list[3].args[2], 30)
+        production, browser, cleanup = [call.args[1] for call in remote_mock.call_args_list]
+        self.assertEqual(size, 4312)
+        self.assertEqual(production[production.index("-af") + 1], opus_audio_filter("channelmap=channel_layout=7.1"))
+        self.assertEqual(browser[browser.index("-c:a") + 1], "aac")
+        self.assertEqual(cleanup, ["rm", "-f", production[-1]])
 
     def test_render_encoded_preview_clip_remote_preserves_preview_failure_when_cleanup_times_out(self) -> None:
-        success = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr="")
         preview_failure = subprocess.CompletedProcess(
             args=["ssh"], returncode=1, stdout="", stderr="preview failed"
         )
@@ -18348,7 +18329,7 @@ raise SystemExit(0)
                 "mediaforce.review.ffmpeg_hwaccel_input_args", return_value=[]
         ), patch(
             "mediaforce.review.run_remote_command",
-            side_effect=[success, preview_failure, cleanup_timeout],
+            side_effect=[preview_failure, cleanup_timeout],
         ):
             with self.assertRaisesRegex(RuntimeError, "Preview sample encode failed: preview failed"):
                 review._render_encoded_preview_clip_remote(

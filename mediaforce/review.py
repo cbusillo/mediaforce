@@ -54,6 +54,7 @@ class EncodedPreviewClip:
     timestamp_seconds: float
     duration_seconds: float
     size_bytes: int
+    production_size_bytes: int | None = None
 
 
 @dataclass(slots=True)
@@ -417,8 +418,8 @@ def _render_encoded_preview_clip(
         audio_plan: dict[str, Any] | None = None,
         video_filter: str | None = None,
         process_controller: ManagedProcessController | None = None,
-) -> None:
-    _render_encoded_preview_clip_impl(
+) -> int | None:
+    return _render_encoded_preview_clip_impl(
         source_path=source_path,
         source_codec=source_codec,
         output_path=output_path,
@@ -455,8 +456,8 @@ def _render_encoded_preview_clip_remote(
         audio_plan: dict[str, Any] | None = None,
         video_filter: str | None = None,
         process_controller: ManagedProcessController | None = None,
-) -> None:
-    _render_encoded_preview_clip_remote_impl(
+) -> int | None:
+    return _render_encoded_preview_clip_remote_impl(
         host=host,
         process_controller=process_controller,
         source_path=source_path,

@@ -7,8 +7,8 @@ final class SampleTests: XCTestCase {
         """
         {"prefix": "tv/Lucifer/Season 2", "show_prefix": "tv/Lucifer", "show": "Lucifer", "season_folder": "Season 2",
          "season": 2, "state": "\(state)", "action": \(action.map { "\"\($0)\"" } ?? "null"), "failure": null,
-         "moments": [{"at_seconds": 600.0, "original": {"url": "/review-media/Lucifer S2/source.mp4", "size_bytes": 9000000},
-                      "sample": {"url": "/review-media/Lucifer S2/preview.mp4", "size_bytes": 700000}}],
+         "moments": [{"at_seconds": 600.0, "original": {"url": "/review-media/Lucifer S2/source.mp4", "moment_bytes": 9000000},
+                      "sample": {"url": "/review-media/Lucifer S2/preview.mp4", "moment_bytes": 700000}}],
          "episode_bytes": 3853264012, "estimated_episode_bytes": 296440462, "season_bytes": 60000000000,
          "season_episode_count": 16, "goal_bytes": 293736333, "size_status": "over_target", "draft_hash": "draft-1",
          "balance_choices": [{"key": "reference", "label": "Preserve the reference", "detail": "Keep detail within the goal.", "selected": false}, {"key": "balanced", "label": "Balance size and detail", "detail": "Use a balanced sample.", "selected": true}], "size_choices": \(choices)}
@@ -21,13 +21,20 @@ final class SampleTests: XCTestCase {
 
     func testFactsDecodeFromServerShape() throws {
         let facts = try decode(Self.facts())
-        XCTAssertEqual(facts.moments.first?.sample.sizeBytes, 700_000)
+        XCTAssertEqual(facts.moments.first?.sample.momentBytes, 700_000)
         XCTAssertEqual(facts.sizeChoices.map(\.key), ["smaller"])
         XCTAssertEqual(facts.balanceChoices.map(\.label), ["Preserve the reference", "Balance size and detail"])
         XCTAssertEqual(facts.balanceChoices.first(where: \.selected)?.key, "balanced")
         XCTAssertEqual(facts.estimatedSavedBytes, 60_000_000_000 - 296_440_462 * 16)
         XCTAssertFalse(facts.isInProgress)
         XCTAssertTrue(facts.canChooseBalance)
+    }
+
+    func testPlaybackOnlyClipsKeepPlayingWithoutASizeLabel() throws {
+        let old = Self.facts().replacingOccurrences(of: "moment_bytes", with: "size_bytes")
+        let moment = try XCTUnwrap(decode(old).moments.first)
+        XCTAssertNil(Words.clipSize(moment.original))
+        XCTAssertNil(Words.clipSize(moment.sample))
     }
 
     func testAKindsFirstSampleQuestionReadsAsThatQuestionOnTheSeasonsSample() throws {

@@ -1326,6 +1326,7 @@ def _run_sampled_calibration_on_host(
                 "timestamp_seconds": clip.timestamp_seconds,
                 "duration_seconds": clip.duration_seconds,
                 "size_bytes": clip.size_bytes,
+                "production_size_bytes": clip.production_size_bytes,
                 "audio": _review_audio_payload(review_audio_plan, "new"),
             }
             for clip in preview_clips

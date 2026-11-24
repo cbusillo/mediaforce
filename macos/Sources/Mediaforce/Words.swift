@@ -686,8 +686,9 @@ extension Words {
         return "\(name), \(size(choice.targetBytes)) per file"
     }
 
-    static func clipSize(_ clip: SampleFacts.Clip) -> String {
-        "\(size(clip.sizeBytes)) clip"
+    static func clipSize(_ clip: SampleFacts.Clip, estimated: Bool = false) -> String? {
+        guard let bytes = clip.momentBytes, bytes > 0 else { return nil }
+        return estimated ? "about \(size(bytes)) for this clip" : "\(size(bytes)) for this clip"
     }
 
     static func momentTime(_ seconds: Double) -> String {

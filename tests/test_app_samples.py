@@ -97,8 +97,8 @@ def test_facts_offer_only_playable_moments_and_the_sizes_that_can_be_chosen() ->
     assert (facts["show"], facts["season"], facts["state"], facts["action"]) == ("Lucifer", 2, "ready_to_compare", "review_sample")
     assert facts["moments"] == [{
         "at_seconds": 600.0,
-        "original": {"url": "/review-media/a/source.mp4", "size_bytes": 9_000_000},
-        "sample": {"url": "/review-media/a/preview.mp4", "size_bytes": 700_000},
+        "original": {"url": "/review-media/a/source.mp4", "size_bytes": 9_000_000, "moment_bytes": None},
+        "sample": {"url": "/review-media/a/preview.mp4", "size_bytes": 700_000, "moment_bytes": None},
     }]
     assert (facts["episode_bytes"], facts["estimated_episode_bytes"]) == (3_853_264_012, 296_440_462)
     assert (facts["season_bytes"], facts["season_episode_count"], facts["goal_bytes"]) == (60_000_000_000, 16, 293_736_333)
@@ -110,6 +110,17 @@ def test_facts_offer_only_playable_moments_and_the_sizes_that_can_be_chosen() ->
 
     not_playable = _folder(calibration={**_folder()["calibration"], "browser_review_ready": False})
     assert sample_facts(not_playable, _status())["moments"] == []
+
+
+def test_player_sizes_follow_the_saved_encode_and_original_runtime() -> None:
+    folder = _folder()
+    calibration = folder["calibration"]
+    calibration["sample_item"] = {"source_size_bytes": 300_000_000, "duration_seconds": 1200}
+    pair = calibration["review_pairs"][0]
+    pair["preview_clip"]["production_size_bytes"] = 250_000
+    moment = sample_facts(folder, _status())["moments"][0]
+    assert moment["original"]["moment_bytes"] == 2_500_000
+    assert moment["sample"]["moment_bytes"] == 250_000
 
 
 def test_sample_coverage_comes_from_the_reviewed_sample_not_todays_selection() -> None:
