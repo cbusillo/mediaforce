@@ -173,7 +173,7 @@ season. Mediaforce requests a first sample for each unapproved look with
 waiting shows and puts it in Needs you once there is something to watch or
 choose. Cartoons still need a choice for each show. Measured movies tagged Animation in Plex use the cartoon
 look after the next metadata refresh. Other measured movies, including ones without
-genres, keep the live action look. Updating a movie's group preserves saved approvals. VR & 3D has no look until
+genres, keep the live action look. The movie then follows its new look unless it has a folder approval of its own. The settings saved for either look stay as approved. VR & 3D has no look until
 Mediaforce can compress it. A look's approval says whether 4K stays 4K or
 comes down to the tallest picture in Settings. Seasons missing original
 measurements wait for measuring first. When a sample re-encodes the audio,

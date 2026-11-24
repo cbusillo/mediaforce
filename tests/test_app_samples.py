@@ -269,6 +269,20 @@ def test_make_sample_keeps_the_reason_preparation_stopped(blocked: bool) -> None
     assert result.get("message") == reason
 
 
+@pytest.mark.parametrize("action", ["retry_sample", "review_sample"])
+def test_new_sample_uses_the_offered_size_when_an_old_sample_has_no_budget(action: str) -> None:
+    folder = _folder(resolved_operator_intent={}, size_target_analysis={})
+    status = {**_status(action=action), "retryable_sample_job": {"policy": {"video": {"max_height": 720}}}}
+    calls: list[tuple[Any, ...]] = []
+    result = make_sample(folder, status, None, ai_tune=lambda *args: calls.append(args) or {"ok": True},
+                         retry_saved=lambda *_: {"ok": False})
+    assert result["ok"]
+    intent = calls[0][3]
+    assert intent["size_goal"] == folder["size_goal_options"][0]["operator_intent"]["size_goal"]
+    if action == "retry_sample":
+        assert intent["resolution"]["max_height"] == 720
+
+
 def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() -> None:
     calls: list[tuple[Any, ...]] = []
 
