@@ -50,7 +50,7 @@ final class MainWindowModel {
         do {
             let result = try await client.makeSample(prefix, size: size, balance: balance, keepFullHeight: keepFullHeight)
             if result.ok || result.code == "choose_size" || result.code == "choose_balance" { return result }
-            notice = ActionNotice(title: Words.sampleDidNotStart, message: result.message ?? ActionNotice.sampleRefused.message)
+            notice = ActionNotice.sampleRefused.explained(by: result.message)
         } catch let error as URLError where error.code == .timedOut {
             notice = .sampleStartTimedOut
         } catch {

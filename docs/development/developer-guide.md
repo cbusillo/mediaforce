@@ -171,14 +171,15 @@ Approving a look's sample (live action or cartoons) approves that kind of
 content across its shows; "Approve only this season" limits it to one
 season. Mediaforce requests a first sample for each unapproved look with
 waiting shows and puts it in Needs you once there is something to watch or
-choose. Cartoons still need a choice for each show. Movies use the live action
-look, because movie genres are not stored. VR & 3D has no look until
+choose. Cartoons still need a choice for each show. Measured movies tagged Animation in Plex use the cartoon
+look after the next metadata refresh. Other measured movies, including ones without
+genres, keep the live action look. The movie then follows its new look unless it has a folder approval of its own. The settings saved for either look stay as approved. VR & 3D has no look until
 Mediaforce can compress it. A look's approval says whether 4K stays 4K or
 comes down to the tallest picture in Settings. Seasons missing original
 measurements wait for measuring first. When a sample re-encodes the audio,
 the sound is scored too.
 
-Needs you, the kind page and notifications offer to make a sample again when its clips are gone or the sample failed. A sample with a size decision still asks for that choice.
+Needs you, the kind page and notifications offer to make a sample again when its clips are gone or the sample failed. A new sample uses the current size goal if the old sample recorded neither a size nor a requested budget. An ambiguous saved size still needs a choice.
 Make sample shows “Preparing the sample…” while Mediaforce chooses settings and queues the job.
 If preparation stops, the app shows the reason. If the server takes too long to answer,
 the sample page can still show preparation. A second request for the same season reports that preparation is already underway.

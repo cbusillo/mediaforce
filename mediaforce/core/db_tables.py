@@ -264,6 +264,7 @@ plex_item_metadata = Table(
     Column("plex_server_id", Text, nullable=False),
     Column("plex_item_rating_key", Text, nullable=False),
     Column("plex_part_id", Text),
+    Column("plex_genres_json", Text),
     Column("plex_show_rating_key", Text),
     Column("plex_season_index", Integer),
     Column("plex_added_at", Text),

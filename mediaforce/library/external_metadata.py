@@ -41,6 +41,7 @@ class PlexItem:
     part_id: str | None
     part_path: str
     thumb: str | None = None
+    genres: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +163,7 @@ class PlexClient:
             if metadata_type == 4 and season_index is None:
                 raise ProviderHttpError("Plex episode metadata did not include parentIndex")
             added_at = plex_timestamp(metadata.get("addedAt"))
+            genres = tuple(tag for row in _object_list(metadata.get("Genre")) if (tag := str(row.get("tag") or "").strip()))
             for media in _required_object_list(metadata.get("Media"), "Plex item Media"):
                 for part in _required_object_list(media.get("Part"), "Plex item Part"):
                     part_path = str(part.get("file") or "").strip()
@@ -175,6 +177,7 @@ class PlexClient:
                         part_id=str(part.get("id") or "").strip() or None,
                         part_path=part_path,
                         thumb=plex_thumb_path(metadata.get("thumb")),
+                        genres=genres,
                     )
 
     def shows(self) -> Iterator[PlexShow]:
@@ -207,7 +210,7 @@ class PlexClient:
         page_size = 500
         offset = 0
         while True:
-            query: dict[str, object] = {"type": metadata_type, "includeElements": "Guid,Media"}
+            query: dict[str, object] = {"type": metadata_type, "includeElements": "Guid,Media,Genre" if metadata_type == 1 else "Guid,Media"}
             if include_guids:
                 query["includeGuids"] = 1
             payload, response_headers = self._get(

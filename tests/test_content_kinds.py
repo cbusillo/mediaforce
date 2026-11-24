@@ -10,10 +10,10 @@ from sqlalchemy import create_engine, event, select
 from mediaforce import cli
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import library_items, metadata, motion_keep_decisions, series_metadata, source_admissions, source_generations, source_measurements, source_versions, source_transitions, staged_artifacts, target_production_outcomes
+from mediaforce.core.db_tables import library_items, metadata, motion_keep_decisions, plex_item_metadata, series_metadata, source_admissions, source_generations, source_measurements, source_versions, source_transitions, staged_artifacts, target_production_outcomes
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.utils import timestamp
-from mediaforce.library.content_kinds import season_kind, season_kind_report
+from mediaforce.library.content_kinds import season_grouping, season_kind, season_kind_report
 from mediaforce.library.calculation_reuse import LibraryCalculations
 from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, append_measurement, append_version, json_text, \
     load_source_evidence, load_source_evidence_bulk
@@ -69,7 +69,7 @@ def test_every_measured_live_action_season_is_one_look_however_dark_or_repetitiv
                      "tv/Toons/Season 1": ("cartoon", None), "tv/Unknown/Season 1": ("unmeasured", "genres_unknown")}
 
 
-def test_movie_titles_are_live_action_through_the_same_grouping_but_extras_and_vr_never_are(connection: DBClient) -> None:
+def test_movies_without_genres_keep_their_existing_group_but_extras_and_vr_never_join(connection: DBClient) -> None:
     feature = _item(connection, "movies/Heat (1995)/Heat.mkv", status="promoted", codec="av1", current_dark=0.0)
     _admit_historical_original(connection, feature, dark=0.5)
     _item(connection, "movies/Heat (1995)/Heat - 4K.mkv", status="discovered", codec="h264", current_dark=0.5)
@@ -83,12 +83,29 @@ def test_movie_titles_are_live_action_through_the_same_grouping_but_extras_and_v
     report = season_kind_report(connection, library_types={"tv": "tv", "movies": "movie", "other": "other"},
                                 folder_approved=lambda _prefix: False)
 
-    # Movie genres are not stored, so a measured movie is live action and an unmeasured one waits for measuring.
     assert {row["season"]: (row["kind"], row["episodes"], row["waiting_episodes"]) for row in report["seasons"]} == {
         "movies/Heat (1995)": ("live_action", 2, 1), "movies/Solo - Directors Cut.mkv": ("unmeasured", 1, 1),
         "movies/Unseen (2020)": ("unmeasured", 1, 1),
     }
     assert {row["reason"] for row in report["seasons"] if row["kind"] == "unmeasured"} == {"no_measured_original"}
+
+
+def test_movie_genres_move_a_measured_feature_into_cartoons(connection: DBClient) -> None:
+    title = "movies/Feature"
+    item = _item(connection, f"{title}/feature.mkv", status="discovered", codec="h264", current_dark=0.1)
+    _admit_historical_original(connection, item, dark=0.2)
+    libraries = {"movies": "movie"}
+
+    def report_kind() -> str:
+        return season_kind_report(connection, library_types=libraries, folder_approved=lambda _: False)["seasons"][0]["kind"]
+
+    assert report_kind() == "live_action"
+    connection.execute(plex_item_metadata.insert().values(
+        library_item_id=item, plex_server_id="plex", plex_item_rating_key="feature", plex_part_path="feature.mkv",
+        plex_genres_json=json.dumps(["Comedy", "Animation"]), observed_at=timestamp(),
+    ))
+    assert report_kind() == "cartoon"
+    assert season_grouping(connection, title, library_types=libraries).kind == "cartoon"
 
 
 def test_unmeasured_episodes_do_not_vote() -> None:

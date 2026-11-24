@@ -111,15 +111,15 @@ struct SampleChoices {
         return keepFullHeight
     }
 
-    mutating func compressed(_ result: SampleActionResult, facts: SampleFacts?) -> ActionNotice? {
+    mutating func compressed(_ result: SampleActionResult, facts: SampleFacts?, refusal: ActionNotice = .compressionRefused) -> ActionNotice? {
         askingSize = result.needsChoice && facts?.sizeChoices.isEmpty == false
-        return result.ok ? Words.sampleResult(result) : .sampleRefused
+        return result.ok ? Words.sampleResult(result) : refusal.explained(by: result.message)
     }
 
     mutating func made(_ result: SampleActionResult, facts: SampleFacts?) -> ActionNotice? {
         if result.ok { selectedBalance = nil; keepFullHeight = nil }
         askingSize = result.code == "choose_size" && facts?.sizeChoices.isEmpty == false
-        return result.ok || askingSize ? nil : .sampleRefused
+        return result.ok || (askingSize && result.message == nil) ? nil : ActionNotice.sampleRefused.explained(by: result.message)
     }
 }
 

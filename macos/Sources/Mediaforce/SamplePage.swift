@@ -43,7 +43,7 @@ struct SampleWork: View {
     @State private var working = false
     @State private var refreshes = 0
     @State private var approval: SampleApproval?
-    @State private var confirming: String?
+    @State private var confirming: SampleActionResult?
     @State private var choices = SampleChoices()
     @State private var players = ComparePlayers()
 
@@ -129,17 +129,17 @@ struct SampleWork: View {
         .task(id: refreshes) { await watch() }
         .onDisappear { players.pause() }
         .confirmationDialog(
-            confirming.flatMap(Words.sampleConfirmation)?.title ?? "",
+            confirming?.code.flatMap(Words.sampleConfirmation)?.title ?? "",
             isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
             presenting: confirming
-        ) { code in
+        ) { result in
             Button(Words.sampleApproval(scope: approval?.scope ?? "season")) {
-                approval?.confirmed.append(String(code.dropFirst("confirm_".count)))
+                approval?.confirmed.append(String((result.code ?? "").dropFirst("confirm_".count)))
                 approve()
             }
             Button(Words.cancel, role: .cancel) {}
-        } message: { code in
-            Text(Words.sampleConfirmation(code)?.message ?? "")
+        } message: { result in
+            Text(result.message ?? result.code.flatMap(Words.sampleConfirmation)?.message ?? "")
         }
     }
 
@@ -181,18 +181,18 @@ struct SampleWork: View {
         act {
             let result = try await $0.approveSample(prefix, confirm: approval.confirmed, draftHash: approval.reviewedDraftHash, scope: approval.scope)
             if let code = result.code, Words.sampleConfirmation(code) != nil {
-                confirming = code
+                confirming = result
                 return nil
             }
             if result.code == "approval_scope_changed" {
                 self.approval = nil
-                return .approvalScopeChanged
+                return ActionNotice.approvalScopeChanged.explained(by: result.message)
             }
             if result.code == "sample_changed" {
                 self.approval = nil
-                return .sampleChanged
+                return ActionNotice.sampleChanged.explained(by: result.message)
             }
-            return choices.compressed(result, facts: facts)
+            return choices.compressed(result, facts: facts, refusal: .approvalRefused)
         }
     }
 

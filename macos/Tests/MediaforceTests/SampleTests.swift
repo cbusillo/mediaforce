@@ -217,6 +217,16 @@ final class SampleClientTests: XCTestCase {
         XCTAssertEqual(sent["approval_scope"] as? String, "live_action")
     }
 
+    func testSamplePageShowsWhyMakingApprovingOrCompressingStopped() {
+        let reason = "The file is being checked. Try again when the check finishes."
+        var choices = SampleChoices()
+        let refused = SampleActionResult(ok: false, code: "refused", compressing: nil, message: reason, kindCode: nil, reason: nil)
+        XCTAssertEqual(choices.made(refused, facts: nil)?.message, reason)
+        XCTAssertEqual(choices.compressed(refused, facts: nil)?.message, reason)
+        let saved = SampleActionResult(ok: true, code: nil, compressing: false, message: reason, kindCode: nil, reason: nil)
+        XCTAssertEqual(choices.compressed(saved, facts: nil)?.message, reason)
+    }
+
     func testAChangedKindAfterSavingNamesThePartialApprovalEvenIfCompressionStarted() throws {
         for (compressing, reason) in [(true, "free_space_reserve"), (false, "free_space_reserve"), (false, "confirm_compression_goal")] {
             let body = """

@@ -129,14 +129,14 @@ def approve_sample(
         return {"ok": False, "code": "approval_scope_changed"}
     try:
         saved = save_profile(prefix, "high_impact" in confirm, "size_tradeoff" in confirm, reviewed_draft_hash, "")
-    except ReviewedDraftChanged:
-        return {"ok": False, "code": "sample_changed"}
+    except ReviewedDraftChanged as exc:
+        return {"ok": False, "code": "sample_changed", **_client_error_message(exc)}
     except ApprovalNeedsConfirmation as needed:
-        return {"ok": False, "code": f"confirm_{needed.confirm}"}
-    except HTTPException:
-        return REFUSED
+        return {"ok": False, "code": f"confirm_{needed.confirm}", **_client_error_message(needed)}
+    except HTTPException as exc:
+        return {**REFUSED, **_client_error_message(exc)}
     if not saved.get("ok"):
-        return REFUSED
+        return {**REFUSED, **_message(saved.get("message"))}
     if scope != "season" and approve_kind is not None:
         extended = approve_kind(scope, prefix, reviewed_draft_hash)
         if not extended.get("ok"):
@@ -149,11 +149,12 @@ def start_compressing(prefix: str, *, queue_encode: QueueEncodeFn) -> dict[str, 
     try:
         queued = queue_encode(prefix, APPROVED_SAMPLE_NOTES, False, False, "")
     except QueueNeedsChoice as refused:
-        queued = {"code": refused.code}
-    except HTTPException:
-        queued = {}
+        queued = {"code": refused.code, **_client_error_message(refused)}
+    except HTTPException as exc:
+        queued = _client_error_message(exc)
     compressing = bool(queued.get("ok")) or queued.get("code") == "encode_already_active"
-    return {"ok": True, "compressing": compressing, "reason": None if compressing else queued.get("code")}
+    return {"ok": True, "compressing": compressing, "reason": None if compressing else queued.get("code"),
+            **({} if compressing else _message(queued.get("message")))}
 
 
 def make_sample(
@@ -198,13 +199,18 @@ def make_sample(
             note, operator_intent = request
             result = ai_tune(prefix, note, "", operator_intent, "")
     except HTTPException as exc:
-        if 400 <= exc.status_code < 500 and isinstance(exc.detail, str):
-            return {**REFUSED, "message": exc.detail}
-        return REFUSED
+        return {**REFUSED, **_client_error_message(exc)}
     if result.get("ok"):
         return {"ok": True, "code": None}
-    message = result.get("message")
-    return {**REFUSED, "message": message} if isinstance(message, str) and message else REFUSED
+    return {**REFUSED, **_message(result.get("message"))}
+
+
+def _client_error_message(exc: HTTPException) -> dict[str, str]:
+    return _message(exc.detail) if 400 <= exc.status_code < 500 else {}
+
+
+def _message(value: object) -> dict[str, str]:
+    return {"message": value} if isinstance(value, str) and value.strip() else {}
 
 
 def kind_sample_candidates(kinds: Iterable[Mapping[str, Any]], cards: Iterable[Mapping[str, Any]]) -> dict[str, list[str]]:
@@ -304,6 +310,7 @@ def _sample_request(
         retry: dict[str, Any] | None = None, resolution: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any] | None] | str:
     current_intent = _current_operator_intent(folder)
+    remake = remake and (current_intent is not None or _goal_bytes(folder) > 0)
     if size is None and balance is None and remake and (resolution is None or current_intent is None
                                                          or current_intent.get("resolution") == resolution):
         return _measured_request(folder), current_intent
@@ -328,9 +335,15 @@ def _sample_request(
             current = saved.request_payload()
             sample_item = object_dict(folder.get("sample_item")) or object_dict(retry.get("sample_item"))
             resolved = saved.size_goal.resolve(float_value(sample_item.get("duration_seconds")) or None)
-            if resolved.requires_confirmation or saved.resolution.requires_confirmation:
+            if saved.resolution.requires_confirmation:
                 return "choose_size"
-            goal_mb = (resolved.target_size_bytes or 0) / DECIMAL_MEGABYTE_BYTES
+            if saved.size_goal.value_bytes is None and (choice := _size_choice(folder, None)) is not None:
+                current["size_goal"] = choice["operator_intent"]["size_goal"]
+                goal_mb = choice["resolved_size_goal"]["target_size_mb"]
+            elif resolved.requires_confirmation:
+                return "choose_size"
+            else:
+                goal_mb = (resolved.target_size_bytes or 0) / DECIMAL_MEGABYTE_BYTES
         if current is None:
             return "choose_size"
         if balance is None and object_dict(current.get("compression_intent")).get("confirmed") is True:
@@ -344,11 +357,7 @@ def _sample_request(
         elif remake:
             return _measured_request(folder, compression_intent=object_dict(intent.get("compression_intent"))), intent
         return sample_goal_request({"operator_intent": intent, "resolved_size_goal": {"target_size_mb": goal_mb}}), intent
-    choices = _size_choices(folder)
-    if size:
-        choice = next((option for option in choices if option["key"] == size), None)
-    else:
-        choice = next((option for option in choices if not option.get("requires_explicit_selection")), None)
+    choice = _size_choice(folder, size)
     if choice is None:
         return "choose_size"
     if balance_choice is None:
@@ -415,6 +424,13 @@ def _size_choices(folder: Mapping[str, Any]) -> list[dict[str, Any]]:
                 and mode in ("normalized", "absolute")):
             choices.append(option)
     return choices
+
+
+def _size_choice(folder: Mapping[str, Any], size: str | None) -> dict[str, Any] | None:
+    choices = _size_choices(folder)
+    if size:
+        return next((option for option in choices if option["key"] == size), None)
+    return next((option for option in choices if not option.get("requires_explicit_selection")), None)
 
 
 def _effective_balance(balances: list[dict[str, Any]]) -> dict[str, Any] | None:
