@@ -29,7 +29,6 @@ enum Words {
     static func updateFailedBefore(build: String) -> String {
         "Version \(build) didn't start correctly on this Mac, so Mediaforce went back to the earlier version and waits for a newer one."
     }
-    static let home = "Home"
     static let library = "Library"
     static let activity = "Activity"
 
@@ -43,12 +42,12 @@ enum Words {
 
     static func backTitle(_ place: Place) -> String {
         switch place {
-        case .home: home
+        case .library: library
         case .mediaKind(let kind, _): kind == .everything ? library : mediaKind(kind)
         case .activity: activity
         case .needsYou: needsYou
         case .spaceSaved: spaceSaved
-        case .media: library
+        case .media: "Browse all"
         case .kind(let code): kindName(code)
         case .seasonsWithoutKind: seasonsWithoutKindTitle
         case .item(let prefix, _): folderName(prefix)

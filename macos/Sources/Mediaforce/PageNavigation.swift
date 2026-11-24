@@ -1,5 +1,5 @@
 struct PageNavigation {
-    private(set) var place: Place? = .home
+    private(set) var place: Place? = .library
     private var history: [Place] = []
     private var titles: [Place: String] = [:]
 

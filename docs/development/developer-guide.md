@@ -122,9 +122,9 @@ and needs no Screen Recording permission:
   --page needs-you --page 'sample:tv/Show/Season 1'
 ```
 
-Without `--page` it renders the default set. Page names include `home`, `library`,
+Without `--page` it renders the default set. Page names include `library`, `media`,
 `tv`, `movies`, `other` (VR & 3D), `needs-you`, `activity`, `computers`,
-`computer:ADDRESS`, `space-saved`, `media`, `kind:CODE`, `item:PREFIX`,
+`computer:ADDRESS`, `space-saved`, `space-saved-cinema` (alternate design), `kind:CODE`, `item:PREFIX`,
 `sample:PATH`, `settings:libraries`, `settings:compression`,
 `settings:computers`, `settings:metadata` and `menu`. `--server URL`,
 `--width` and `--height` adjust the source and viewport. A page whose data

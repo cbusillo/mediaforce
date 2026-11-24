@@ -76,7 +76,7 @@ final class MenuBarTests: XCTestCase {
         XCTAssertEqual(try facts(work: work(reasons: ["no_computer_ready"], waiting: 2)).statusOpens, .computer(nil))
         XCTAssertNil(try facts(work: work(paused: true, running: 1, seasons: ["tv/ER/Season 1"])).statusOpens)
         XCTAssertNil(try facts(work: work()).statusOpens)
-        XCTAssertEqual(try facts(work: work(checksPaused: true)).statusOpens, .home)
+        XCTAssertEqual(try facts(work: work(checksPaused: true)).statusOpens, .library)
         XCTAssertEqual(try facts(work: work(checksPaused: true, running: 1, seasons: ["tv/ER/Season 1"])).statusOpens,
                        .item("tv/ER/Season 1"))
         XCTAssertNil(try facts(work: work(checksPaused: true, running: 1)).statusOpens)

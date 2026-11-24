@@ -80,12 +80,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let value = response.notification.request.content.userInfo[Place.notificationKey] as? String
         await MainActor.run {
             NSApp.activate()
-            model.placeRequest = PlaceRequest(place: Attention.openingPlace(model.facts, fallback: value.flatMap(Place.init(notificationValue:)) ?? .home))
+            model.placeRequest = PlaceRequest(place: Attention.openingPlace(model.facts, fallback: value.flatMap(Place.init(notificationValue:)) ?? .library))
         }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        model.placeRequest = PlaceRequest(place: Attention.openingPlace(model.facts))
+        model.placeRequest = PlaceRequest(place: .library)
         return true
     }
 

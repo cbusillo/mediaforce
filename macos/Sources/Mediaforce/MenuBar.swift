@@ -23,7 +23,7 @@ struct MenuBarPanel: View {
                     .padding(.vertical, 12)
             }
             Divider().padding(.horizontal, 10).padding(.vertical, 5)
-            Button { open(Attention.openingPlace(model.facts)) } label: { MenuRowLabel(title: Words.openMediaforce) }
+            Button { open(.library) } label: { MenuRowLabel(title: Words.openMediaforce) }
                 .buttonStyle(MenuRowStyle())
             SettingsLink { MenuRowLabel(title: Words.settingsEllipsis) }
                 .buttonStyle(MenuRowStyle())
@@ -190,7 +190,7 @@ extension MainWindowFacts {
         if work.stopReasons.contains("no_computer_ready") { return .computer(nil) }
         if work.runningCount > 0 { return compressingSeason.map { .item($0.prefix) } }
         if work.waitingCount > 0 { return nil }
-        if work.checksPaused { return .home }
+        if work.checksPaused { return .library }
         return nil
     }
 }

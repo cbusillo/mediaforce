@@ -6,7 +6,7 @@ final class PageNavigationTests: XCTestCase {
         let show = Place.item("tv/Example")
         let season = Place.item("tv/Example/Season 2")
         let sample = Place.sample("tv/Example/Season 2")
-        for origin in [Place.home, .mediaKind(.movies), .mediaKind(.other), .media, .spaceSaved, .computer(nil), .computer("mini"),
+        for origin in [Place.library, .mediaKind(.movies), .mediaKind(.other), .media, .spaceSaved, .computer(nil), .computer("mini"),
                        .kind("cartoon"), .seasonsWithoutKind] {
             var navigation = PageNavigation()
             navigation.select(origin)
@@ -30,7 +30,7 @@ final class PageNavigationTests: XCTestCase {
         navigation.open(item)
         navigation.open(item)
         navigation.goBack()
-        XCTAssertEqual(navigation.place, .home)
+        XCTAssertEqual(navigation.place, .library)
         XCTAssertNil(navigation.back)
 
         navigation.open(item)

@@ -1,4 +1,3 @@
-import Charts
 import SwiftUI
 
 struct SavingsHistory: Decodable, Sendable {
@@ -40,77 +39,26 @@ struct SavingsSummary: View {
     let machines: PageFacts<ComputersFacts>
     let posters: PosterStore
     let openItem: (String) -> Void
+    @Environment(\.savingsDesign) private var design
     private var history: SavingsHistory? { facts.spaceSaved.history }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 32) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Saved so far").font(.headline)
-                Text(Words.size(facts.spaceSaved.bytes))
-                    .font(.system(size: 40, weight: .medium, design: .rounded))
-                    .monospacedDigit()
-                Text("Across \(Words.count(facts.spaceSaved.itemCount, "file"))")
-                    .foregroundStyle(.secondary)
+        switch design {
+        case .footprint:
+            SavingsFootprint(facts: facts)
+            if let weeks = history?.weeks { SavingsWeeks(weeks: weeks) }
+            biggestWins
+        case .cinema:
+            HStack(alignment: .center, spacing: 24) {
+                SavingsTicket(facts: facts)
+                if history?.wins.isEmpty == false { biggestWins }
             }
-            .fixedSize()
-            Divider()
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Saved each week").font(.headline)
-                if let weeks = history?.weeks, weeks.contains(where: { $0.bytes != 0 }) {
-                    Chart(weeks) { week in
-                        BarMark(x: .value("Week of", week.label), y: .value("GB saved", Double(week.bytes) / 1e9),
-                                width: .ratio(0.52))
-                            .cornerRadius(3)
-                            .foregroundStyle(Color.teal)
-                            .accessibilityLabel("Week of \(week.label)")
-                            .accessibilityValue(Words.size(week.bytes))
-                    }
-                    .chartYAxis {
-                        AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
-                            AxisGridLine()
-                            AxisValueLabel {
-                                if let gb = value.as(Double.self) { Text("\(gb.formatted()) GB") }
-                            }
-                        }
-                    }
-                    .frame(height: 96)
-                    .help("Weeks begin on Monday at midnight, Greenwich Mean Time.")
-                } else {
-                    Text(history == nil ? "Weekly totals are unavailable." : "No space saved in the past eight weeks.")
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            if let weeks = history?.weeks { SavingsWeeks(weeks: weeks) }
         }
-        .padding(.vertical, 6)
+        if history == nil {
+            Text("Weekly savings and biggest wins are unavailable.").foregroundStyle(.secondary)
+        }
         Divider()
-        if let wins = history?.wins, !wins.isEmpty {
-            VStack(alignment: .leading, spacing: 13) {
-                Text("Biggest wins").font(.title3.weight(.semibold))
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 20, alignment: .leading), count: wins.count), alignment: .leading) {
-                    ForEach(wins) { win in
-                        Button { openItem(win.prefix) } label: {
-                            HStack(spacing: 12) {
-                                MediaPoster(titlePrefix: win.prefix, name: win.title, kind: MediaKind(libraryType: win.mediaType),
-                                            posters: posters, width: 96)
-                                VStack(alignment: .leading, spacing: 6) {
-                                    Text(win.title).font(.headline).lineLimit(3)
-                                    Text("\(Words.size(win.before - win.after)) saved")
-                                        .font(.system(.title3, design: .rounded, weight: .semibold))
-                                    Text("\(Words.size(win.before)) to \(Words.size(win.after))")
-                                        .font(.callout).foregroundStyle(.secondary)
-                                }
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .pointerStyle(.link)
-                        .help("Open \(win.title)")
-                    }
-                }
-            }
-            Divider()
-        }
         HStack(alignment: .top, spacing: 32) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Left to save").font(.title3.weight(.semibold))
@@ -133,16 +81,11 @@ struct SavingsSummary: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Saved by computer").font(.title3.weight(.semibold))
                 if let computers = machines.facts?.computers {
-                    let largest = computers.map(\.done.all.bytesSaved).max() ?? 0
                     ForEach(computers.sorted { $0.done.all.bytesSaved > $1.done.all.bytesSaved }) { machine in
-                        VStack(alignment: .leading, spacing: 5) {
-                            HStack {
-                                Label(machine.name ?? machine.key, systemImage: "desktopcomputer")
-                                Spacer()
-                                Text(Words.size(machine.done.all.bytesSaved)).monospacedDigit()
-                            }
-                            ProgressView(value: Double(max(0, machine.done.all.bytesSaved)), total: Double(max(1, largest)))
-                                .tint(.teal).accessibilityHidden(true)
+                        HStack {
+                            Label(machine.name ?? machine.key, systemImage: "desktopcomputer")
+                            Spacer()
+                            Text(Words.size(machine.done.all.bytesSaved)).monospacedDigit()
                         }
                     }
                     if computers.isEmpty {
@@ -159,6 +102,40 @@ struct SavingsSummary: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .labelStyle(.titleAndIcon)
+    }
+
+    @ViewBuilder
+    private var biggestWins: some View {
+        if let wins = history?.wins, !wins.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Biggest wins").font(.title3.weight(.semibold))
+                HStack(alignment: .top, spacing: 14) {
+                    ForEach(wins) { win in
+                        Button { openItem(win.prefix) } label: {
+                            let layout = design == .cinema ? AnyLayout(VStackLayout(alignment: .leading, spacing: 9))
+                                : AnyLayout(HStackLayout(spacing: 12))
+                            layout {
+                                MediaPoster(titlePrefix: win.prefix, name: win.title, kind: MediaKind(libraryType: win.mediaType),
+                                            posters: posters, width: design == .cinema ? 100 : 54)
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(win.title).font(.headline).lineLimit(2)
+                                    Text("\(Words.size(win.before - win.after)) saved")
+                                        .font(.system(.title3, design: design == .cinema ? .serif : .rounded, weight: .semibold))
+                                    Text("\(Words.size(win.before)) to \(Words.size(win.after))")
+                                        .font(.callout).foregroundStyle(.secondary)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(design == .cinema ? 0 : 10)
+                            .background(.quaternary.opacity(design == .cinema ? 0 : 0.42), in: RoundedRectangle(cornerRadius: 9))
+                        }
+                        .buttonStyle(.plain)
+                        .pointerStyle(.link)
+                        .help("Open \(win.title)")
+                    }
+                }
+            }
+        }
     }
 
     private var finishLine: String {

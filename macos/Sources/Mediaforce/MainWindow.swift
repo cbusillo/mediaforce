@@ -195,7 +195,7 @@ struct PlaceRequest: Equatable {
 }
 
 enum Place: Hashable {
-    case home, needsYou, activity, spaceSaved, media
+    case library, needsYou, activity, spaceSaved, media
     case mediaKind(MediaKind, LibraryStateGroup? = nil)
     // The Computers page, or one computer's page when it names one.
     case computer(String?)
@@ -215,7 +215,7 @@ enum Place: Hashable {
         case .item(let prefix, _): "item:\(prefix)"
         case .computer(let key?): "computer:\(key)"
         case .computer(nil): "computer"
-        case .home: "home"
+        case .library: "library"
         case .needsYou: "needsYou"
         default: "spaceSaved"
         }
@@ -227,7 +227,7 @@ enum Place: Hashable {
         case ("kind", let kind?): self = .kind(kind)
         case ("sample", let prefix?): self = .sample(prefix)
         case ("item", let prefix?): self = .item(prefix)
-        case ("home", nil), ("library", nil): self = .home
+        case ("home", nil), ("library", nil): self = .library
         case ("needsYou", nil): self = .needsYou
         case ("spaceSaved", nil): self = .spaceSaved
         case ("computer", let key?): self = .computer(key)
@@ -361,8 +361,8 @@ struct Sidebar: View {
     @AppStorage("kindsShown") private var kindsShown = true
     @AppStorage("librariesShown") private var librariesShown = true
 
-    /// The places above the Library, in their order.
-    static let top: [Place] = [.home, .needsYou, .activity, .computer(nil), .spaceSaved]
+    /// The places following the Library.
+    static let top: [Place] = [.needsYou, .activity, .computer(nil), .spaceSaved]
 
     /// Each library's own list, under Library; VR & 3D only once it holds something.
     static func libraries(in library: MainWindowFacts.Library) -> [Place] {
@@ -372,9 +372,6 @@ struct Sidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             List(selection: $place) {
-                ForEach(Self.top, id: \.self) { place in
-                    row(place).tag(place)
-                }
                 DisclosureGroup(isExpanded: $librariesShown) {
                     ForEach(Self.libraries(in: facts.library), id: \.self) { place in
                         row(place).tag(place)
@@ -382,7 +379,10 @@ struct Sidebar: View {
                 } label: {
                     Label(Words.library, systemImage: "books.vertical")
                 }
-                .tag(Place.media)
+                .tag(Place.library)
+                ForEach(Self.top, id: \.self) { place in
+                    row(place).tag(place)
+                }
                 if let kinds = model.kinds {
                     DisclosureGroup(isExpanded: $kindsShown) {
                         ForEach(kinds.kinds) { kind in
@@ -400,8 +400,6 @@ struct Sidebar: View {
     @ViewBuilder
     private func row(_ place: Place) -> some View {
         switch place {
-        case .home:
-            Label(Words.home, systemImage: "house")
         case .needsYou:
             SidebarRow(title: Words.needsYou, symbol: "hand.raised", trailing: "\(Attention.waitingOnYou(facts))")
         case .spaceSaved:
@@ -492,9 +490,9 @@ struct MainPage: View {
                              openItem: { open(.item($0)) }, openSample: { open(.sample($0)) },
                              openLeftOut: { open(.seasonsWithoutKind) })
                 } else {
-                    HomePage(model: model, open: open)
+                    LibraryPage(model: model, open: open)
                 }
-            default: HomePage(model: model, open: open)
+            default: LibraryPage(model: model, open: open)
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {

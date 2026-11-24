@@ -50,7 +50,7 @@ struct Attention: Equatable, Sendable {
         waitingNotices(facts) + (facts.originalBackups.count > 0 ? [backupsNotice(facts.originalBackups)] : [])
     }
 
-    static func openingPlace(_ facts: MainWindowFacts?, fallback: Place = .home) -> Place {
+    static func openingPlace(_ facts: MainWindowFacts?, fallback: Place = .library) -> Place {
         guard let facts else { return .needsYou }
         return waitingOnYou(facts) > 0 ? .needsYou : fallback
     }
@@ -73,7 +73,7 @@ struct Attention: Equatable, Sendable {
             id: "finished:\(newlyFinished.count)",
             title: mayHaveMore ? "At least \(newlyFinished.count) \(noun) finished" : "\(newlyFinished.count) \(noun) finished",
             body: "See Finished lately in Mediaforce for what was saved.",
-            opens: .home
+            opens: .library
         )]
     }
 
