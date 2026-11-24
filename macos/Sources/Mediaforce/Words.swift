@@ -483,13 +483,13 @@ extension Words {
         if let code = result.kindCode {
             var notice = ActionNotice.kindNotExtended(code)
             if result.compressing != true {
-                let queue = result.needsChoice ? ActionNotice.compressNeedsChoice : .approvedNotCompressing
+                let queue = (result.needsChoice ? ActionNotice.compressNeedsChoice : .approvedNotCompressing).explained(by: result.message)
                 notice = ActionNotice(title: notice.title, message: notice.message + " " + queue.message)
             }
             return notice
         }
         if result.compressing == true { return nil }
-        return result.needsChoice ? .compressNeedsChoice : .approvedNotCompressing
+        return (result.needsChoice ? ActionNotice.compressNeedsChoice : .approvedNotCompressing).explained(by: result.message)
     }
 
     static let approveSample = "Approve and start compressing"
@@ -729,10 +729,14 @@ extension ActionNotice {
         message: "Mediaforce may still start the sample. Check its progress before trying again."
     )
 
-    static let sampleRefused = ActionNotice(
-        title: "Mediaforce didn't do that",
-        message: "It refused the request. The page shows what Mediaforce reports now."
-    )
+    func explained(by reason: String?) -> ActionNotice {
+        guard let reason, !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return self }
+        return ActionNotice(title: title, message: reason)
+    }
+
+    static let sampleRefused = ActionNotice(title: Words.sampleDidNotStart, message: "Review the sample settings, then try Make sample again.")
+    static let approvalRefused = ActionNotice(title: "The sample wasn’t approved", message: "Review the current sample, then try approving it again.")
+    static let compressionRefused = ActionNotice(title: "Compression didn’t start", message: "Check Activity, then try Start compressing again.")
 
     static let approvedNotCompressing = ActionNotice(
         title: "Compressing didn't start",

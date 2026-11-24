@@ -579,19 +579,13 @@ def size_budget_sample_issue(
     )
     status = str(analysis.get("status") or "").strip().lower()
     if status == "missing_prediction":
-        return "The sampled run did not report a predicted total size for the requested size target."
-    if status == "under_target":
-        return (
-            f"The sampled run predicts {_format_bytes(float(analysis['predicted_total_size_bytes']))}, below the "
-            f"requested {_format_bytes(float(analysis['budget_bytes']))} target band. Run another sample that spends "
-            "the saved bitrate on quality or explicitly approve a smaller-size tradeoff."
-        )
-    if status == "over_target":
-        return (
-            f"The sampled run predicts {_format_bytes(float(analysis['predicted_total_size_bytes']))}, above the "
-            f"requested {_format_bytes(float(analysis['budget_bytes']))} target band. Run another sample that moves "
-            "closer to the requested size or explicitly approve the larger quality tradeoff."
-        )
+        return "The sample has no estimate for the finished file. Make another sample before approving it."
+    if status in {"under_target", "over_target"}:
+        direction = "below" if status == "under_target" else "above"
+        estimate = _format_bytes(float(analysis["predicted_total_size_bytes"]))
+        goal = _format_bytes(float(analysis["budget_bytes"]))
+        return (f"The finished file is estimated at {estimate}, {direction} the requested {goal}. "
+                "Approve this size or make another sample.")
     return None
 
 

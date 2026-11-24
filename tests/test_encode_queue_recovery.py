@@ -3000,7 +3000,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "accepted_at": web_app._now_iso(),
         }
 
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(folder_actions_runtime.QueueNeedsChoice) as raised:
             self._queue_folder_encode(
                 self.config,
                 "tv/show/Season 1",
@@ -3014,7 +3014,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.status_code, 400)
-        self.assertIn("compression goal", str(raised.exception.detail))
+        self.assertEqual(raised.exception.code, "confirm_compression_goal")
 
     def test_quality_policy_large_size_miss_stays_attention_with_analysis(self) -> None:
         source_path = self._create_source_file("episode-large-miss.mkv")
@@ -10057,7 +10057,7 @@ raise SystemExit(0)
             },
         }
 
-        with self.assertRaises(HTTPException) as exc:
+        with self.assertRaises(folder_actions_runtime.ApprovalNeedsConfirmation) as exc:
             folder_actions_runtime.save_profile_action(self.config, "tv/show", now_iso=web_app._now_iso,
                                                        load_sample_item=lambda *_args, **_kwargs: None,
                                                        load_calibration_state=lambda *_args, **_kwargs: dict(
@@ -10070,7 +10070,7 @@ raise SystemExit(0)
                                                        upsert_override=web_app._upsert_override)
 
         self.assertEqual(exc.exception.status_code, 409)
-        self.assertIn("high-impact policy changes", str(exc.exception.detail))
+        self.assertEqual(exc.exception.confirm, "high_impact")
 
     def test_save_profile_action_rejects_stale_high_impact_confirmation_hash(self) -> None:
         calibration_payload: folder_actions_runtime.ActionPayload = {
@@ -10092,7 +10092,7 @@ raise SystemExit(0)
             "draft_hash": "draft-current",
         }
 
-        with self.assertRaises(HTTPException) as exc:
+        with self.assertRaises(folder_actions_runtime.ApprovalNeedsConfirmation) as exc:
             folder_actions_runtime.save_profile_action(self.config, "tv/show", now_iso=web_app._now_iso,
                                                        load_sample_item=lambda *_args, **_kwargs: None,
                                                        load_calibration_state=lambda *_args, **_kwargs: dict(
@@ -10106,7 +10106,7 @@ raise SystemExit(0)
                                                        confirm_high_impact=True, reviewed_draft_hash="draft-old")
 
         self.assertEqual(exc.exception.status_code, 409)
-        self.assertIn("changed after the high-impact review", str(exc.exception.detail))
+        self.assertEqual(exc.exception.confirm, "high_impact")
 
     def test_save_profile_action_prefers_persisted_draft_baseline_for_high_impact_guard(self) -> None:
         calibration_payload: folder_actions_runtime.ActionPayload = {
@@ -10127,7 +10127,7 @@ raise SystemExit(0)
             },
         }
 
-        with self.assertRaises(HTTPException) as exc:
+        with self.assertRaises(folder_actions_runtime.ApprovalNeedsConfirmation) as exc:
             folder_actions_runtime.save_profile_action(self.config, "tv/show", now_iso=web_app._now_iso,
                                                        load_sample_item=lambda *_args, **_kwargs: {
                                                            "resolved_policy": {
@@ -10147,7 +10147,7 @@ raise SystemExit(0)
                                                        upsert_override=web_app._upsert_override)
 
         self.assertEqual(exc.exception.status_code, 409)
-        self.assertIn("high-impact policy changes", str(exc.exception.detail))
+        self.assertEqual(exc.exception.confirm, "high_impact")
 
     def test_save_profile_action_rejects_softened_confirmed_operator_request(self) -> None:
         calibration_payload: folder_actions_runtime.ActionPayload = {
@@ -10355,7 +10355,8 @@ raise SystemExit(0)
             )
 
         self.assertEqual(exc.exception.status_code, 409)
-        self.assertIn("changed after the size tradeoff review", str(exc.exception.detail))
+        self.assertIsInstance(exc.exception, folder_actions_runtime.ApprovalNeedsConfirmation)
+        self.assertEqual(exc.exception.confirm, "size_tradeoff")
         self.assertEqual(saved_payloads, [])
 
     def test_save_profile_action_does_not_override_missing_size_prediction(self) -> None:
@@ -10398,7 +10399,7 @@ raise SystemExit(0)
             )
 
         self.assertEqual(exc.exception.status_code, 409)
-        self.assertIn("did not report a predicted total size", str(exc.exception.detail))
+        self.assertNotIsInstance(exc.exception, folder_actions_runtime.ApprovalNeedsConfirmation)
 
     def test_save_profile_action_allows_under_target_quality_increase_without_tradeoff_confirmation(self) -> None:
         saved_payloads: list[folder_actions_runtime.ActionPayload] = []
@@ -23041,7 +23042,7 @@ raise SystemExit(0)
     def test_queue_folder_encode_blocks_ambiguous_legacy_size_goal(self) -> None:
         saved_overrides: list[dict[str, Any]] = []
 
-        with self.assertRaises(HTTPException) as raised:
+        with self.assertRaises(folder_actions_runtime.QueueNeedsChoice) as raised:
             self._queue_folder_encode(
                 self.config,
                 "tv/show",
@@ -23061,7 +23062,7 @@ raise SystemExit(0)
             )
 
         self.assertEqual(raised.exception.status_code, 400)
-        self.assertIn("runtime-normalized or an absolute", str(raised.exception.detail))
+        self.assertEqual(raised.exception.code, "confirm_legacy_size")
         self.assertEqual(saved_overrides, [])
 
     def test_queue_folder_encode_reports_validate_next_action_when_no_encode_candidates(self) -> None:

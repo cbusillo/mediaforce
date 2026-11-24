@@ -145,8 +145,7 @@ unavailable balance choice, or `refused`.
 
 The sidebar lists Needs you, Activity, Computers and Space saved, then Library
 with TV shows, Movies and VR & 3D (once it holds something), then How it should
-look with the looks: live action, which covers live-action TV and every movie, and
-cartoons. VR & 3D has no look while Mediaforce can't compress it. A look's
+look with the looks: live action and cartoons across TV and movies. VR & 3D has no look while Mediaforce can't compress it. A look's
 approved line offers Bring down to the library's tallest picture or Keep 4K.
 Library itself opens the combined overview; its Browse all opens Media, every
 library in one list.

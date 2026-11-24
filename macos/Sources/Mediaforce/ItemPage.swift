@@ -148,7 +148,7 @@ struct ItemPage: View {
         do {
             let result = try await send(action)
             if !result.ok {
-                notice = ActionNotice(title: Words.workRefused(action), message: result.message ?? ActionNotice.sampleRefused.message)
+                notice = ActionNotice(title: Words.workRefused(action), message: result.message ?? "Check Activity, then try again.")
             }
         } catch {
             notice = .unanswered
@@ -163,7 +163,7 @@ struct ItemPage: View {
             // Started only when it says it is compressing; some reasons need a choice made first.
             let started = try await client.compressSeason(prefix)
             if started.compressing == true { return .done }
-            return .refused((started.needsChoice ? ActionNotice.compressNeedsChoice : .approvedNotCompressing).message)
+            return .refused(started.message ?? (started.needsChoice ? ActionNotice.compressNeedsChoice : .approvedNotCompressing).message)
         case .checkFiles: return try await client.checkFiles(prefix)
         case .replaceOriginals: return try await client.replaceOriginals(prefix)
         case .retryUnfinished: return try await client.retryUnfinished(prefix)

@@ -874,8 +874,7 @@ def queue_folder_encode_action(
             if calibration_intent.size_goal.requires_confirmation:
                 raise QueueNeedsChoice(
                     "confirm_legacy_size",
-                    "Confirm whether the saved legacy size is runtime-normalized or an absolute per-episode "
-                    "target before queueing production.",
+                    "Choose whether the size should follow the file’s length or stay the same for every file.",
                 )
         calibration_sample_item = object_dict(calibration_payload.get("sample_item"))
         frozen_compression_intent = (
@@ -886,7 +885,7 @@ def queue_folder_encode_action(
         if frozen_compression_intent.requires_confirmation:
             raise QueueNeedsChoice(
                 "confirm_compression_goal",
-                "Choose and confirm a compression goal before queueing production.",
+                "Choose how to balance file size and picture quality before starting compression.",
             )
         # The owner's current sound choice and lifecycle win over the sample's snapshot of them.
         production_policy = with_kind_picture_height(
@@ -2753,12 +2752,12 @@ def save_profile_action(
         if not confirm_high_impact:
             raise ApprovalNeedsConfirmation(
                 "high_impact",
-                "This draft includes high-impact policy changes. Review the diff, then confirm approval again.",
+                "This sample changed important picture settings. Watch it and approve it if the picture and sound look right.",
             )
         if reviewed_draft_hash.strip() != current_draft_hash:
             raise ApprovalNeedsConfirmation(
                 "high_impact",
-                "This draft changed after the high-impact review. Review the diff and confirm approval again.",
+                "The picture settings changed after your review. Watch the new sample before approving it.",
             )
     advice_state = object_dict(load_advice_state(config, normalized_prefix))
     operator_request = object_dict(advice_state.get("operator_request"))
@@ -2824,7 +2823,7 @@ def save_profile_action(
         if reviewed_draft_hash.strip() != current_draft_hash:
             raise ApprovalNeedsConfirmation(
                 "size_tradeoff",
-                "This draft changed after the size tradeoff review. Review the result and confirm approval again.",
+                "The size estimate changed after your review. Check the new estimate before approving the sample.",
             )
     latest_failed_sample_job = None
     if load_latest_failed_target_size_job_state is not None:
