@@ -3,6 +3,15 @@ import XCTest
 @testable import Mediaforce
 
 final class SpaceSavedTests: XCTestCase {
+    func testFinishEstimateUsesFourFullWeeksAndSkipsTheWeekStillRunning() throws {
+        let bytes = [10, 10, 10, 10, 1000]
+        let weeks = bytes.enumerated().map { SavingsHistory.Week(start: String($0.offset), bytes: Int64($0.element)) }
+        let history = SavingsHistory(weeks: weeks, wins: [])
+        let now = try XCTUnwrap(ActivityFacts.date("2026-11-24T12:00:00Z"))
+        XCTAssertEqual(history.finish(remaining: 20, at: now), Calendar.current.date(byAdding: .day, value: 14, to: now))
+        XCTAssertNil(history.finish(remaining: nil, at: now))
+    }
+
     func testSeasonsWithBackupsBecomeOneTilePerShow() throws {
         let completed = try JSONDecoder.mediaforce.decode(SpaceSavedFacts.Completed.self, from: Data("""
         {"folders": [

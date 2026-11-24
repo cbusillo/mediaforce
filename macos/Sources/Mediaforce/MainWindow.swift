@@ -242,12 +242,7 @@ struct MainWindow: View {
     static let id = "main"
 
     let model: MainWindowModel
-    @State private var navigation: PageNavigation
-
-    init(model: MainWindowModel, opening: Place = .home) {
-        self.model = model
-        _navigation = State(initialValue: PageNavigation(opening: opening))
-    }
+    @State private var navigation = PageNavigation()
 
     var body: some View {
         Group {

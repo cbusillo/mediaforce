@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import ScreenCaptureKit
 
 struct RenderOptions {
     let output: URL
@@ -159,29 +158,6 @@ enum RenderCommand {
         host.layoutSubtreeIfNeeded()
         try await loads.wait(for: paths)
         host.layoutSubtreeIfNeeded()
-        if page.hasPrefix("window:") {
-            let left = NSScreen.screens.map { $0.frame.minX }.min() ?? 0
-            window.setFrameOrigin(NSPoint(x: left - window.frame.width - 100, y: 0))
-            window.orderBack(nil)
-            window.makeKey()
-            window.displayIfNeeded()
-            let content = try await SCShareableContent.currentProcess
-            guard let ownWindow = content.windows.first(where: { $0.windowID == CGWindowID(window.windowNumber) }) else {
-                throw RenderFailure("The render window was unavailable")
-            }
-            let filter = SCContentFilter(desktopIndependentWindow: ownWindow)
-            let configuration = SCStreamConfiguration()
-            configuration.width = Int(filter.contentRect.width * CGFloat(filter.pointPixelScale))
-            configuration.height = Int(filter.contentRect.height * CGFloat(filter.pointPixelScale))
-            configuration.showsCursor = false
-            configuration.ignoreShadowsSingleWindow = true
-            let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
-            guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
-                throw RenderFailure("Cannot encode window PNG")
-            }
-            try png.write(to: file, options: .atomic)
-            return
-        }
         window.displayIfNeeded()
         guard !window.isVisible else { throw RenderFailure("Render window became visible") }
         let frame = window.contentView!.superview!
@@ -220,8 +196,7 @@ enum RenderCommand {
         }
         let place: Place
         let paths: Set<String>
-        let inWindow = name == "window"
-        switch inWindow ? value : page {
+        switch page {
         case "home": place = .home; paths = libraryPaths
         case "library", "media": place = .media; paths = libraryPaths
         case "tv": place = .mediaKind(.tv); paths = ["/api/app/tv-shows"]
@@ -246,7 +221,6 @@ enum RenderCommand {
             default: throw RenderFailure("Unknown page: \(page)")
             }
         }
-        if inWindow { return (AnyView(MainWindow(model: model, opening: place)), paths) }
         let view = MainPage(place: place, facts: model.facts!, model: model, open: { _ in })
             .toolbar { ToolbarItem(placement: .navigation) { PauseButton(facts: model.facts!, model: model) } }
             .frame(minWidth: RenderOptions.narrowestPage, minHeight: 700)

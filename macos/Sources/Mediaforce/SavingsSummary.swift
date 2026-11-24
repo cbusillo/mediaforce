@@ -74,6 +74,7 @@ struct SavingsSummary: View {
                         }
                     }
                     .frame(height: 96)
+                    .help("Weeks begin on Monday at midnight, Greenwich Mean Time.")
                 } else {
                     Text(history == nil ? "Weekly totals are unavailable." : "No space saved in the past eight weeks.")
                         .foregroundStyle(.secondary)
@@ -144,7 +145,12 @@ struct SavingsSummary: View {
                                 .tint(.teal).accessibilityHidden(true)
                         }
                     }
-                    if computers.isEmpty { Text("No computers listed.").foregroundStyle(.secondary) }
+                    if computers.isEmpty {
+                        Text("No computers listed.").foregroundStyle(.secondary)
+                    } else if computers.reduce(0, { $0 + $1.done.all.bytesSaved }) != facts.spaceSaved.bytes {
+                        Text("These totals cover work recorded for the listed computers.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
                 } else if !machines.refreshFailed {
                     ProgressView().controlSize(.small)
                 }
@@ -159,6 +165,10 @@ struct SavingsSummary: View {
         if listing.loading { return "Reading the libraries…" }
         let estimate = listing.savingsEstimate(for: MediaKind.libraries(in: facts.library))
         if estimate.bytes == 0 && !estimate.partial { return "No more savings expected." }
+        guard estimate.bytes != nil else { return "Waiting for library estimates." }
+        if let weeks = history?.weeks, weeks.count >= 5, weeks.dropLast().suffix(4).allSatisfy({ $0.bytes == 0 }) {
+            return "No space was saved in the last four full weeks."
+        }
         guard let finish = history?.finish(remaining: estimate.bytes, at: ActivityFacts.date(facts.observedAt)) else {
             return "Too soon to estimate a finish date."
         }

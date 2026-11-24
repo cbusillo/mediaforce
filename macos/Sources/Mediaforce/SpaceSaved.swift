@@ -4,7 +4,6 @@ struct SpaceSavedPage: View {
     let facts: MainWindowFacts
     let model: MainWindowModel
     let openItem: (String) -> Void
-    // The whole Cleanup folder, as Delete clears it, not only the backups of seasons listed as finished.
     @State private var listing = MediaListing()
     @State private var machines = PageFacts<ComputersFacts>()
     @State private var cleanup: CleanupFolder?

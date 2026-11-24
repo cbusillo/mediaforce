@@ -1,9 +1,7 @@
 struct PageNavigation {
-    private(set) var place: Place?
+    private(set) var place: Place? = .home
     private var history: [Place] = []
     private var titles: [Place: String] = [:]
-
-    init(opening: Place = .home) { place = opening }
 
     var back: Place? { history.last }
     var backTitle: String? { back.map { titles[$0] ?? Words.backTitle($0) } }
