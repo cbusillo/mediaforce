@@ -5,8 +5,9 @@ struct SavingsHistory: Decodable, Sendable {
         let start: String
         let bytes: Int64
         var id: String { start }
+        var date: Date? { ActivityFacts.date(start + "T12:00:00Z") }
         var label: String {
-            guard let date = ActivityFacts.date(start + "T12:00:00Z") else { return start }
+            guard let date else { return start }
             return date.formatted(Date.FormatStyle(timeZone: .gmt).month(.abbreviated).day())
         }
     }
@@ -20,6 +21,13 @@ struct SavingsHistory: Decodable, Sendable {
         var id: String { prefix }
     }
 
+    struct Published: Decodable, Sendable {
+        let saved: Int64
+        let current: Int64
+        let complete: Bool
+    }
+
+    var publishedSizes: [String: Published]? = nil
     let weeks: [Week]
     let wins: [Win]
 
@@ -38,118 +46,94 @@ struct SavingsSummary: View {
     let listing: MediaListing
     let machines: PageFacts<ComputersFacts>
     let posters: PosterStore
-    let openItem: (String) -> Void
-    @Environment(\.savingsDesign) private var design
-    private var history: SavingsHistory? { facts.spaceSaved.history }
 
     var body: some View {
-        switch design {
-        case .footprint:
-            SavingsFootprint(facts: facts)
-            if let weeks = history?.weeks { SavingsWeeks(weeks: weeks) }
-            biggestWins
-        case .cinema:
-            HStack(alignment: .center, spacing: 24) {
-                SavingsTicket(facts: facts)
-                if history?.wins.isEmpty == false { biggestWins }
+        let saved = facts.spaceSaved.bytes
+        let totals = facts.library
+        let after = totals.tv.totalBytes - totals.tv.originalBytes + totals.movies.totalBytes - totals.movies.originalBytes
+            + totals.other.totalBytes - totals.other.originalBytes
+        VStack(alignment: .leading, spacing: 30) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Saved all time").foregroundStyle(.secondary)
+                Text(Words.size(saved)).font(.system(size: 30, weight: .bold)).monospacedDigit()
+                Text("\(Words.count(facts.spaceSaved.itemCount, "file")) · \(Words.size(after + saved)) before, \(Words.size(after)) after")
+                    .foregroundStyle(.secondary)
+                if let history = facts.spaceSaved.history {
+                    SavingsCurve(history: history, observed: ActivityFacts.date(facts.observedAt) ?? .now).padding(.top, 12)
+                }
             }
-            if let weeks = history?.weeks { SavingsWeeks(weeks: weeks) }
-        }
-        if history == nil {
-            Text("Weekly savings and biggest wins are unavailable.").foregroundStyle(.secondary)
-        }
-        Divider()
-        HStack(alignment: .top, spacing: 32) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Left to save").font(.title3.weight(.semibold))
-                ForEach(MediaKind.libraries(in: facts.library)) { kind in
-                    let estimate = listing.savingsEstimate(for: [kind])
-                    HStack {
-                        Label(Words.mediaKind(kind), systemImage: kind.symbol)
-                        Spacer()
-                        Text(estimate.viewOnly ? Words.libraryState(.cannotCompressYet) : Words.estimatedTotalSavingsValue(estimate.bytes, partial: estimate.partial))
-                            .monospacedDigit()
-                    }
+            if let history = facts.spaceSaved.history, let sizes = history.publishedSizes {
+                let library = SavingsLibrary(rows: listing.rows, sizes: sizes)
+                if !library.groups.isEmpty {
+                    SavingsRing(library: library, today: totals.tv.totalBytes + totals.movies.totalBytes,
+                                posters: posters, leader: history.wins.first?.prefix)
                 }
-                ForEach(listing.unavailable) { kind in
-                    Text(Words.libraryReadFailure(kind, hasPrevious: listing.hasLoaded(kind))).font(.callout)
-                }
-                Text(finishLine).font(.callout).foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Divider()
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Saved by computer").font(.title3.weight(.semibold))
-                if let computers = machines.facts?.computers {
-                    ForEach(computers.sorted { $0.done.all.bytesSaved > $1.done.all.bytesSaved }) { machine in
-                        HStack {
-                            Label(machine.name ?? machine.key, systemImage: "desktopcomputer")
-                            Spacer()
-                            Text(Words.size(machine.done.all.bytesSaved)).monospacedDigit()
-                        }
-                    }
-                    if computers.isEmpty {
-                        Text("No computers listed.").foregroundStyle(.secondary)
-                    } else if computers.reduce(0, { $0 + $1.done.all.bytesSaved }) != facts.spaceSaved.bytes {
-                        Text("These totals cover work recorded for the listed computers.")
-                            .font(.callout).foregroundStyle(.secondary)
-                    }
-                } else if !machines.refreshFailed {
-                    ProgressView().controlSize(.small)
-                }
+                SavingsDetails(history: history, saved: saved, movies: totals.movies, machines: machines.facts?.computers ?? [])
                 if machines.refreshFailed { Text("Computer totals didn’t refresh. Retrying.").foregroundStyle(.secondary) }
+                SavingsMedals(history: history, library: library, saved: saved, remaining: remaining.bytes)
+            } else {
+                Text("Savings history is unavailable.").foregroundStyle(.secondary)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            storage
         }
-        .labelStyle(.titleAndIcon)
+        .font(.system(size: 13))
     }
 
-    @ViewBuilder
-    private var biggestWins: some View {
-        if let wins = history?.wins, !wins.isEmpty {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Biggest wins").font(.title3.weight(.semibold))
-                HStack(alignment: .top, spacing: 14) {
-                    ForEach(wins) { win in
-                        Button { openItem(win.prefix) } label: {
-                            let layout = design == .cinema ? AnyLayout(VStackLayout(alignment: .leading, spacing: 9))
-                                : AnyLayout(HStackLayout(spacing: 12))
-                            layout {
-                                MediaPoster(titlePrefix: win.prefix, name: win.title, kind: MediaKind(libraryType: win.mediaType),
-                                            posters: posters, width: design == .cinema ? 100 : 54)
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text(win.title).font(.headline).lineLimit(2)
-                                    Text("\(Words.size(win.before - win.after)) saved")
-                                        .font(.system(.title3, design: design == .cinema ? .serif : .rounded, weight: .semibold))
-                                    Text("\(Words.size(win.before)) to \(Words.size(win.after))")
-                                        .font(.callout).foregroundStyle(.secondary)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(design == .cinema ? 0 : 10)
-                            .background(.quaternary.opacity(design == .cinema ? 0 : 0.42), in: RoundedRectangle(cornerRadius: 9))
-                        }
-                        .buttonStyle(.plain)
-                        .pointerStyle(.link)
-                        .help("Open \(win.title)")
+    private var remaining: MediaListing.SavingsEstimate { listing.savingsEstimate(for: [.tv, .movies]) }
+
+    private struct Segment: Identifiable {
+        let label: String
+        let bytes: Int64?
+        let color: Color
+        let caption: String
+        let tip: String
+        var id: String { label }
+    }
+
+    private var storage: some View {
+        let saved = facts.spaceSaved.bytes
+        let tv = listing.savingsEstimate(for: [.tv]).bytes
+        let movies = listing.savingsEstimate(for: [.movies]).bytes
+        let total = facts.library.tv.totalBytes + facts.library.movies.totalBytes + saved
+        let rest = max(0, total - saved - (tv ?? 0) - (movies ?? 0))
+        let segments = [
+            Segment(label: "Saved", bytes: saved, color: .green, caption: "Saved \(Words.size(saved))",
+                    tip: "\(Words.size(saved)) already back across \(Words.count(facts.spaceSaved.itemCount, "file"))"),
+            Segment(label: "TV shows to go", bytes: tv, color: .blue, caption: "TV shows \(tv.map(Words.size) ?? "—") to go",
+                    tip: "At least \(tv.map(Words.size) ?? "—") still to get back from \(Words.count(facts.library.tv.showCount, "show"))"),
+            Segment(label: "Movies to go", bytes: movies, color: .purple, caption: "Movies \(movies.map(Words.size) ?? "—") to go",
+                    tip: "At least \(movies.map(Words.size) ?? "—") still to get back from \(Words.count(facts.library.movies.titleCount, "movie"))"),
+            Segment(label: "Compressed size and the rest", bytes: rest, color: .gray.opacity(0.26), caption: "Compressed size and the rest",
+                    tip: "What the library still takes up after compressing")
+        ]
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Left to save").fontWeight(.semibold)
+            Text(finish).foregroundStyle(.secondary)
+            GeometryReader { geo in
+                let sum = segments.reduce(Int64.zero) { $0 + ($1.bytes ?? 0) }
+                HStack(spacing: 0) {
+                    ForEach(segments) { segment in
+                        segment.color.frame(width: geo.size.width * Double(segment.bytes ?? 0) / Double(max(1, sum)))
+                            .help("\(segment.label)\n\(segment.tip)")
+                    }
+                }.clipShape(RoundedRectangle(cornerRadius: 6))
+            }.frame(height: 22)
+            HStack(spacing: 16) {
+                ForEach(segments) { segment in
+                    HStack(spacing: 5) {
+                        Circle().fill(segment.color).frame(width: 9, height: 9)
+                        Text(segment.caption)
                     }
                 }
-            }
+            }.font(.system(size: 12)).foregroundStyle(.secondary)
+            ForEach(listing.unavailable) { kind in Text(Words.libraryReadFailure(kind, hasPrevious: listing.hasLoaded(kind))) }
         }
     }
 
-    private var finishLine: String {
-        if listing.loading { return "Reading the libraries…" }
-        let estimate = listing.savingsEstimate(for: MediaKind.libraries(in: facts.library))
-        if estimate.bytes == 0 && !estimate.partial { return "No more savings expected." }
-        guard estimate.bytes != nil else { return "Waiting for library estimates." }
-        if let weeks = history?.weeks, weeks.count >= 5, weeks.dropLast().suffix(4).allSatisfy({ $0.bytes == 0 }) {
-            return "No space was saved in the last four full weeks."
-        }
-        guard let finish = history?.finish(remaining: estimate.bytes, at: ActivityFacts.date(facts.observedAt)) else {
-            return "Too soon to estimate a finish date."
-        }
-        let month = finish.formatted(.dateTime.month(.wide).year())
-        return estimate.partial ? "At this pace, around \(month) for titles with estimates." : "At this pace, around \(month) to finish."
+    private var finish: String {
+        guard let bytes = remaining.bytes else { return listing.loading ? "Reading the libraries…" : "Waiting for library estimates." }
+        let size = (remaining.partial ? "At least " : "") + Words.size(bytes)
+        guard let date = facts.spaceSaved.history?.finish(remaining: bytes, at: ActivityFacts.date(facts.observedAt)) else { return size }
+        return "\(size) · Estimated finish \(date.formatted(.dateTime.month(.wide).year()))"
     }
 }

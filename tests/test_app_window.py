@@ -230,8 +230,12 @@ def test_weekly_savings_and_title_sizes_include_only_published_files(connection:
     _replaced(connection, "movies/Heat/Heat.mkv", saved=3500, at=NOW)
     _item(connection, "tv/House/Season 2/c.mkv", size=10000)
 
+    _replaced(connection, "tv/Old/Season 3/x.mkv", saved=1000, at="2026-04-04T10:00:00Z")
     history = _payload(connection)["space_saved"]["history"]
+    assert history["published_sizes"]["tv/House/Season 2"] == {"saved": 3000, "current": 12000, "complete": False}
+    assert history["published_sizes"]["movies/Heat"] == {"saved": 3500, "current": 1500, "complete": True}
     weeks = {week["start"]: week["bytes"] for week in history["weeks"]}
+    assert weeks["2026-03-30"] == 1000
     assert weeks["2026-10-05"] == 4000
     assert weeks["2026-10-12"] == 3000
     assert history["wins"][0] == {"prefix": "tv/House", "title": "House", "media_type": "tv",

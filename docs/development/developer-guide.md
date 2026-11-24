@@ -113,6 +113,10 @@ enforcing the picture floor.
 
 ## Mac page screenshots
 
+Space saved reads weekly savings and published sizes from the main window’s refresh.
+A season’s original size is its current size plus the bytes already saved. Selecting a show keeps
+its seasons in view while new files finish. The backup button uses the same confirmation as before.
+
 Render live server data into PNGs, in light and dark, from the app
 executable in a logged-in session. It draws into a window that is never shown
 and needs no Screen Recording permission:
@@ -124,7 +128,7 @@ and needs no Screen Recording permission:
 
 Without `--page` it renders the default set. Page names include `library`, `media`,
 `tv`, `movies`, `other` (VR & 3D), `needs-you`, `activity`, `computers`,
-`computer:ADDRESS`, `space-saved`, `space-saved-cinema` (alternate design), `kind:CODE`, `item:PREFIX`,
+`computer:ADDRESS`, `space-saved`, `kind:CODE`, `item:PREFIX`,
 `sample:PATH`, `settings:libraries`, `settings:compression`,
 `settings:computers`, `settings:metadata` and `menu`. `--server URL`,
 `--width` and `--height` adjust the source and viewport. A page whose data

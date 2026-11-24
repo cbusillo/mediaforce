@@ -221,6 +221,8 @@ struct MediaRow: Identifiable, Sendable {
     let state: LibraryStateGroup
     // Whose poster a row shows when it isn't its own, as a season shows its show's.
     var posterPrefix: String?
+    var seasons: [TVShowsFacts.Season] = []
+    var looseFiles: TVShowsFacts.LooseFiles?
 
     var savedBytes: Int64 { max(saved ?? 0, 0) }
     var estimateKnown: Bool { saved != nil }
@@ -252,7 +254,7 @@ struct MediaRow: Identifiable, Sendable {
         let (shows, films, others) = try await (tv, movies, other)
         let rows = (shows?.shows ?? []).map {
             MediaRow(id: $0.showPrefix, name: $0.show, kind: .tv, detail: Words.count($0.seasonCount, "season"),
-                     bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup)
+                     bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup, seasons: $0.seasons, looseFiles: $0.looseFiles)
         } + (films?.movies ?? []).map {
             MediaRow(id: $0.prefix, name: $0.title, kind: .movies, detail: Words.count($0.fileCount, "file"),
                      bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup)

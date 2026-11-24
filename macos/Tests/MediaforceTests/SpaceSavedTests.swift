@@ -12,6 +12,27 @@ final class SpaceSavedTests: XCTestCase {
         XCTAssertNil(history.finish(remaining: nil, at: now))
     }
 
+    @MainActor
+    func testPublishingAnotherFileUpdatesAnExistingSeasonAndTheCumulativeTotal() throws {
+        let prefix = "tv/Show/Season 3"
+        let season = try JSONDecoder.mediaforce.decode(TVShowsFacts.Season.self, from: Data("""
+        {"prefix":"tv/Show/Season 3","season":3,"episode_count":2,"bytes":100}
+        """.utf8))
+        let row = MediaRow(id: "tv/Show", name: "Show", kind: .tv, detail: "", bytes: 100,
+                           saved: nil, state: .inProgress, seasons: [season])
+        for (saved, complete) in [(Int64(40), false), (70, true)] {
+            let history = SavingsHistory(publishedSizes: [prefix: .init(saved: saved, current: 100 - saved, complete: complete)],
+                                         weeks: [.init(start: "2026-11-23", bytes: saved)], wins: [])
+            let library = SavingsLibrary(rows: [row], sizes: try XCTUnwrap(history.publishedSizes))
+            let slice = try XCTUnwrap(library.shows.first?.slices.first)
+            XCTAssertEqual(slice.id, prefix)
+            XCTAssertEqual(slice.before, 100)
+            XCTAssertEqual(slice.current, 100 - saved)
+            XCTAssertEqual(slice.complete, complete)
+            XCTAssertEqual(SavingsCurve(history: history, observed: .now).points.last?.total, saved)
+        }
+    }
+
     func testSeasonsWithBackupsBecomeOneTilePerShow() throws {
         let completed = try JSONDecoder.mediaforce.decode(SpaceSavedFacts.Completed.self, from: Data("""
         {"folders": [

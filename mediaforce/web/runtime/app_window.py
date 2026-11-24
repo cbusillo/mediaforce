@@ -502,6 +502,22 @@ def _finished_seasons(
     return sorted(finished, key=lambda finished_season: finished_season["finished_at"] or "", reverse=True)
 
 
+def _published_sizes(items: list[_Item], promotions: Mapping[int, _Promotion]) -> dict[str, dict[str, int | bool]]:
+    groups: dict[str, list[_Item]] = defaultdict(list)
+    for item in items:
+        prefix = item.season_prefix or item.title_prefix
+        if prefix is not None and item.kind in {"tv", "movie"}:
+            groups[prefix].append(item)
+    sizes = {}
+    for prefix, files in groups.items():
+        published = [promotions[file.item_id] for file in files if file.promoted and file.item_id in promotions]
+        if published:
+            sizes[prefix] = {"current": sum(file.size_bytes for file in files),
+                             "saved": sum(record.bytes_saved for record in published),
+                             "complete": len(published) == len(files)}
+    return sizes
+
+
 def _space_saved(
         items: list[_Item], promotions: Mapping[int, _Promotion], finished: list[dict[str, Any]], observed_at: datetime,
 ) -> dict[str, Any]:
@@ -520,8 +536,8 @@ def _space_saved(
             continue
         day = (published if published.tzinfo else published.replace(tzinfo=UTC)).astimezone(UTC).date()
         week = day - timedelta(days=day.weekday())
-        if week in weeks and day <= today:
-            weeks[week] += promotion.bytes_saved
+        if day <= today:
+            weeks[week] = weeks.get(week, 0) + promotion.bytes_saved
     wins = []
     for prefix, files in titles.items():
         saved = sum(promotions[file.item_id].bytes_saved for file in files)
@@ -536,7 +552,8 @@ def _space_saved(
         "item_count": len(replaced),
         "episode_count": sum(1 for item in replaced if item.kind == "tv"),
         "season_count": sum(1 for season in finished if season["episode_count"]),
-        "history": {"weeks": [{"start": week.isoformat(), "bytes": size} for week, size in weeks.items()],
+        "history": {"weeks": [{"start": week.isoformat(), "bytes": size} for week, size in sorted(weeks.items())],
+                    "published_sizes": _published_sizes(items, promotions),
                     "wins": wins[:3]},
     }
 

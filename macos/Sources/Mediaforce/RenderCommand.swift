@@ -205,7 +205,7 @@ enum RenderCommand {
         case "needs-you": place = .needsYou; paths = []
         case "activity": place = .activity; paths = ["/api/app/activity"]
         case "computers": place = .computer(nil); paths = ["/api/app/computers"]
-        case "space-saved", "space-saved-cinema": place = .spaceSaved; paths = libraryPaths.union(["/api/completed", "/api/archive-cleanup", "/api/app/computers"])
+        case "space-saved": place = .spaceSaved; paths = libraryPaths.union(["/api/completed", "/api/archive-cleanup", "/api/app/computers"])
         default:
             guard !value.isEmpty else { throw RenderFailure("Unknown page: \(page)") }
             switch name {
@@ -224,7 +224,7 @@ enum RenderCommand {
         let view = MainPage(place: place, facts: model.facts!, model: model, open: { _ in })
             .toolbar { ToolbarItem(placement: .navigation) { PauseButton(facts: model.facts!, model: model) } }
             .frame(minWidth: RenderOptions.narrowestPage, minHeight: 700)
-        return (AnyView(view.environment(\.savingsDesign, page == "space-saved-cinema" ? .cinema : .footprint)), paths)
+        return (AnyView(view), paths)
     }
 
     private static let libraryPaths: Set<String> = ["/api/app/tv-shows", "/api/app/movies", "/api/app/other"]
