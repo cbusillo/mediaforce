@@ -40,6 +40,7 @@ def _item(connection: DBClient, rel_path: str, *, size: int = 1000, status: str 
             parent_dir=str(Path(rel_path).parent),
             file_name=Path(rel_path).name,
             container=".mkv",
+            video_codec="h264",
             size_bytes=size,
             mtime_ns=1,
             fingerprint=f"fp-{rel_path}",
@@ -666,6 +667,19 @@ def test_biggest_not_started_ranks_movies_with_shows_and_excludes_vr(connection:
     assert [(row["show_prefix"], row["bytes"]) for row in rows] == [
         ("movies/Feature", 1100), ("tv/Series", 900),
     ]
+
+
+def test_imported_av1_movie_and_legacy_calibration_do_not_count_as_production_work(connection: DBClient) -> None:
+    imported = _item(connection, "movies/Imported/movie.mkv")
+    connection.execute(library_items.update().where(library_items.c.id == imported).values(video_codec="av1"))
+    sampled = _item(connection, "movies/Sampled/movie.mkv")
+    staging_path = "/staging/_calibration/123456789abc/movie.mkv"
+    connection.execute(item_events.insert().values(
+        library_item_id=sampled, created_at=NOW, event_type="encoding_completed", details_json=json.dumps({"staging_path": staging_path}),
+    ))
+    connection.execute(staged_artifacts.insert().values(library_item_id=sampled, staging_path=staging_path, updated_at=NOW))
+
+    assert [row["show"] for row in _payload(connection)["biggest_not_started"]] == ["Sampled"]
 
 
 def test_finished_lately_includes_replaced_and_kept_non_tv_files_by_date(connection: DBClient) -> None:
