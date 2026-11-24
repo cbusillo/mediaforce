@@ -23,8 +23,7 @@ struct SavingsHistory: Decodable, Sendable {
 
     struct Published: Decodable, Sendable {
         let saved: Int64
-        let current: Int64
-        let complete: Bool
+        let finishedSeason: Bool
     }
 
     var publishedSizes: [String: Published]? = nil
@@ -44,7 +43,7 @@ struct SavingsHistory: Decodable, Sendable {
 struct SavingsSummary: View {
     let facts: MainWindowFacts
     let listing: MediaListing
-    let machines: PageFacts<ComputersFacts>
+    let machines: ComputersStore
     let posters: PosterStore
 
     var body: some View {
@@ -66,11 +65,11 @@ struct SavingsSummary: View {
                 let library = SavingsLibrary(rows: listing.rows, sizes: sizes)
                 if !library.groups.isEmpty {
                     SavingsRing(library: library, today: totals.tv.totalBytes + totals.movies.totalBytes,
-                                posters: posters, leader: history.wins.first?.prefix)
+                                posters: posters)
                 }
                 SavingsDetails(history: history, saved: saved, movies: totals.movies, machines: machines.facts?.computers ?? [])
-                if machines.refreshFailed { Text("Computer totals didn’t refresh. Retrying.").foregroundStyle(.secondary) }
-                SavingsMedals(history: history, library: library, saved: saved, remaining: remaining.bytes)
+                if machines.failed { Text("Computer totals didn’t refresh. Retrying.").foregroundStyle(.secondary) }
+                SavingsMedals(history: history, library: library, saved: saved, remaining: remaining.bytes, partial: remaining.partial)
             } else {
                 Text("Savings history is unavailable.").foregroundStyle(.secondary)
             }
@@ -94,7 +93,8 @@ struct SavingsSummary: View {
         let saved = facts.spaceSaved.bytes
         let tv = listing.savingsEstimate(for: [.tv]).bytes
         let movies = listing.savingsEstimate(for: [.movies]).bytes
-        let total = facts.library.tv.totalBytes + facts.library.movies.totalBytes + saved
+        let compressedOther = facts.library.other.totalBytes - facts.library.other.originalBytes
+        let total = facts.library.tv.totalBytes + facts.library.movies.totalBytes + saved + compressedOther
         let rest = max(0, total - saved - (tv ?? 0) - (movies ?? 0))
         let segments = [
             Segment(label: "Saved", bytes: saved, color: .green, caption: "Saved \(Words.size(saved))",
@@ -130,9 +130,13 @@ struct SavingsSummary: View {
         }
     }
 
+    static func approximateSize(_ bytes: Int64) -> String {
+        bytes >= 1_000_000_000_000 ? "\(Int((Double(bytes) / 1e12).rounded())) TB" : Words.size(bytes)
+    }
+
     private var finish: String {
         guard let bytes = remaining.bytes else { return listing.loading ? "Reading the libraries…" : "Waiting for library estimates." }
-        let size = (remaining.partial ? "At least " : "") + Words.size(bytes)
+        let size = (remaining.partial ? "At least " : "") + Self.approximateSize(bytes)
         guard let date = facts.spaceSaved.history?.finish(remaining: bytes, at: ActivityFacts.date(facts.observedAt)) else { return size }
         return "\(size) · Estimated finish \(date.formatted(.dateTime.month(.wide).year()))"
     }

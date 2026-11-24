@@ -502,22 +502,6 @@ def _finished_seasons(
     return sorted(finished, key=lambda finished_season: finished_season["finished_at"] or "", reverse=True)
 
 
-def _published_sizes(items: list[_Item], promotions: Mapping[int, _Promotion]) -> dict[str, dict[str, int | bool]]:
-    groups: dict[str, list[_Item]] = defaultdict(list)
-    for item in items:
-        prefix = item.season_prefix or item.title_prefix
-        if prefix is not None and item.kind in {"tv", "movie"}:
-            groups[prefix].append(item)
-    sizes = {}
-    for prefix, files in groups.items():
-        published = [promotions[file.item_id] for file in files if file.promoted and file.item_id in promotions]
-        if published:
-            sizes[prefix] = {"current": sum(file.size_bytes for file in files),
-                             "saved": sum(record.bytes_saved for record in published),
-                             "complete": len(published) == len(files)}
-    return sizes
-
-
 def _space_saved(
         items: list[_Item], promotions: Mapping[int, _Promotion], finished: list[dict[str, Any]], observed_at: datetime,
 ) -> dict[str, Any]:
@@ -526,8 +510,13 @@ def _space_saved(
     monday = today - timedelta(days=today.weekday())
     weeks = {monday - timedelta(weeks=offset): 0 for offset in reversed(range(8))}
     titles: dict[str, list[_Item]] = defaultdict(list)
+    saved_by_folder: dict[str, int] = defaultdict(int)
+    finished_seasons = {season["prefix"] for season in finished}
     for item in replaced:
         promotion = promotions[item.item_id]
+        folder = item.season_prefix or item.title_prefix
+        if folder is not None and item.kind in {"tv", "movie"}:
+            saved_by_folder[folder] += promotion.bytes_saved
         if prefix := item.title_prefix:
             titles[prefix].append(item)
         try:
@@ -553,7 +542,8 @@ def _space_saved(
         "episode_count": sum(1 for item in replaced if item.kind == "tv"),
         "season_count": sum(1 for season in finished if season["episode_count"]),
         "history": {"weeks": [{"start": week.isoformat(), "bytes": size} for week, size in sorted(weeks.items())],
-                    "published_sizes": _published_sizes(items, promotions),
+                    "published_sizes": {prefix: {"saved": saved, "finished_season": prefix in finished_seasons}
+                                        for prefix, saved in saved_by_folder.items()},
                     "wins": wins[:3]},
     }
 

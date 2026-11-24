@@ -39,6 +39,10 @@ private struct RingSector {
             }
             for slice in group.slices where slice.before > 0 {
                 let width = Double(slice.before) / total * 2 * .pi
+                if !zoomed && width < 0.002 {
+                    angle += width
+                    continue
+                }
                 let gap = min(zoomed ? 0.006 : 0.002, width / 4)
                 let inner = zoomed ? 120.0 : 200.0
                 let ratio = min(1, max(0, Double(slice.current) / Double(slice.before)))
@@ -101,7 +105,6 @@ struct SavingsRing: View {
     let library: SavingsLibrary
     let today: Int64
     let posters: PosterStore
-    let leader: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var zoom: String?
     @State private var pointer: CGPoint?
@@ -111,7 +114,7 @@ struct SavingsRing: View {
         let selected = library.shows.first { $0.id == zoom }
         let sectors = RingSector.sectors(selected.map { [$0] } ?? library.groups, zoomed: selected != nil)
         GeometryReader { geometry in
-            let side = min(560, geometry.size.width - 328)
+            let side = max(1, min(560, geometry.size.width - 328))
             let hovered = pointer.flatMap { hit($0, side: side, sectors: sectors) }
             let group = selected ?? library.groups.first { $0.id == hovered?.group }
             HStack(spacing: 28) {
@@ -139,7 +142,7 @@ struct SavingsRing: View {
                 }
                 .frame(width: side, height: side)
                 .frame(maxWidth: .infinity)
-                legend(group ?? library.groups.first { $0.id == leader })
+                legend(group ?? library.shows.max { $0.saved < $1.saved })
                     .frame(width: 300, alignment: .leading)
             }
         }

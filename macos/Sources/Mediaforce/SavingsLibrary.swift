@@ -7,14 +7,6 @@ struct SavingsSlice: Identifiable {
     let saved: Int64
     let complete: Bool
     var before: Int64 { current + saved }
-
-    init(id: String, name: String, bytes: Int64, size: SavingsHistory.Published?) {
-        self.id = id
-        self.name = name
-        current = size?.current ?? bytes
-        saved = size?.saved ?? 0
-        complete = size?.complete == true
-    }
 }
 
 struct SavingsGroup: Identifiable {
@@ -43,13 +35,15 @@ struct SavingsLibrary {
         for row in rows {
             switch row.kind {
             case .movies:
-                movies.append(SavingsSlice(id: row.id, name: row.name, bytes: row.bytes, size: sizes[row.id]))
+                movies.append(SavingsSlice(id: row.id, name: row.name, current: row.bytes, saved: sizes[row.id]?.saved ?? 0, complete: row.isFinished))
             case .tv:
                 var slices = row.seasons.map {
-                    SavingsSlice(id: $0.prefix, name: $0.folder, bytes: $0.bytes, size: sizes[$0.prefix])
+                    SavingsSlice(id: $0.prefix, name: $0.folder, current: $0.bytes,
+                                 saved: sizes[$0.prefix]?.saved ?? 0, complete: sizes[$0.prefix]?.finishedSeason == true)
                 }
                 if let loose = row.looseFiles {
-                    slices.append(SavingsSlice(id: row.id, name: "Files outside seasons", bytes: loose.bytes, size: sizes[row.id]))
+                    slices.append(SavingsSlice(id: row.id, name: "Files outside seasons", current: loose.bytes,
+                                              saved: sizes[row.id]?.saved ?? 0, complete: false))
                 }
                 shows.append(SavingsGroup(id: row.id, name: row.name, slices: slices))
             default: continue
@@ -61,8 +55,8 @@ struct SavingsLibrary {
         let rest = shows.dropFirst(groups.count)
         if !rest.isEmpty {
             let slices = rest.map {
-                SavingsSlice(id: $0.id, name: $0.name, bytes: $0.current,
-                             size: .init(saved: $0.saved, current: $0.current, complete: $0.finished == $0.slices.count))
+                SavingsSlice(id: $0.id, name: $0.name, current: $0.current, saved: $0.saved,
+                             complete: $0.finished == $0.slices.count)
             }
             groups.append(SavingsGroup(id: "more", name: "\(rest.count) more shows", slices: slices, unit: "show"))
         }

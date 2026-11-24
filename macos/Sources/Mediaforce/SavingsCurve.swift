@@ -10,6 +10,7 @@ struct SavingsCurve: View {
     }
 
     let points: [Point]
+    @State private var pointer: CGPoint?
     @State private var hovered: Date?
 
     init(history: SavingsHistory, observed: Date) {
@@ -56,14 +57,20 @@ struct SavingsCurve: View {
                     Rectangle().fill(.clear).contentShape(Rectangle())
                         .onContinuousHover { phase in
                             if case .active(let location) = phase {
+                                pointer = location
                                 hovered = proxy.value(atX: location.x - bounds.minX, as: Date.self)
-                            } else { hovered = nil }
+                            } else { pointer = nil; hovered = nil }
                         }
-                    if let point, let x = proxy.position(forX: point.date) {
+                    if points.count > 9, let date = points.compactMap(\.week).suffix(8).first?.date,
+                       let x = proxy.position(forX: date) {
+                        Text(date.formatted(.dateTime.month(.wide))).font(.caption2).foregroundStyle(.tertiary)
+                            .position(x: bounds.minX + x, y: bounds.maxY - 5).allowsHitTesting(false)
+                    }
+                    if let point, let pointer {
                         SavingsTip(title: point.week.map { "Week of " + $0.label } ?? point.date.formatted(.dateTime.month().day()),
                                    detail: point.week.map { "\(Words.size(point.total)) saved in total · \(Words.size($0.bytes)) that week" }
                                        ?? (point.total == 0 ? "Mediaforce started" : "\(Words.size(point.total)) saved in total"))
-                            .fixedSize().position(x: min(bounds.width - 130, max(130, x)), y: bounds.midY)
+                            .fixedSize().position(x: min(bounds.width - 140, max(140, pointer.x + 60)), y: min(bounds.height - 20, pointer.y + 32))
                     }
                 }
             }
@@ -72,11 +79,6 @@ struct SavingsCurve: View {
             if let start = points.first {
                 Text(start.date.formatted(.dateTime.month(.wide))).font(.caption2).foregroundStyle(.tertiary)
                     .allowsHitTesting(false)
-            }
-        }
-        .overlay(alignment: .bottom) {
-            if points.count > 9, let date = points.suffix(8).first?.date {
-                Text(date.formatted(.dateTime.month(.wide))).font(.caption2).foregroundStyle(.tertiary).allowsHitTesting(false)
             }
         }
         .frame(height: 120)

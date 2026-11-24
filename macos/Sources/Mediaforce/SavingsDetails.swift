@@ -12,7 +12,7 @@ struct SavingsDetails: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Details").fontWeight(.semibold)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 14)], spacing: 14) {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible())], spacing: 14) {
                 card("Best week", .orange, best.map { Words.size($0.bytes) } ?? "—", best.map { "Week of " + $0.label } ?? "") {
                     HStack(spacing: 0) {
                         ForEach(history.weeks.suffix(8)) { week in
@@ -83,7 +83,7 @@ struct SavingsDetails: View {
                 Text(value).font(.system(size: 17, weight: .semibold))
                 Text(detail).foregroundStyle(.secondary)
             }.frame(maxWidth: .infinity, alignment: .leading)
-            graphic().frame(width: 140)
+            graphic().frame(width: 150)
         }
         .padding(.horizontal, 14).frame(minHeight: 90)
         .background(Color.gray.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
@@ -95,6 +95,7 @@ struct SavingsMedals: View {
     let library: SavingsLibrary
     let saved: Int64
     let remaining: Int64?
+    let partial: Bool
 
     private func passed(_ threshold: Int64) -> SavingsHistory.Week? {
         var sum: Int64 = 0
@@ -105,10 +106,13 @@ struct SavingsMedals: View {
         let best = history.weeks.max { $0.bytes < $1.bytes }
         let full = library.shows.filter { $0.finished == $0.slices.count && $0.saved > 0 }.max { $0.saved < $1.saved }
         let leader = library.shows.max { $0.saved < $1.saved }
-        let half = remaining.map { max(0, ($0 - saved) / 2) }
+        let half = remaining.flatMap { bytes -> Int64? in
+            if partial && bytes <= saved { return nil }
+            return max(0, (bytes - saved) / 2)
+        }
         VStack(alignment: .leading, spacing: 12) {
             Text("Milestones").fontWeight(.semibold)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 96, maximum: 104), spacing: 18, alignment: .top)], alignment: .leading, spacing: 12) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 104, maximum: 104), spacing: 18, alignment: .top)], alignment: .leading, spacing: 12) {
                 threshold(2_000_000_000_000)
                 let weekEarned = (best?.bytes ?? 0) >= 500_000_000_000
                 medal("500 GB in a week", weekEarned ? best?.label ?? "" : "Not yet", "bolt", .orange, weekEarned,
@@ -120,7 +124,7 @@ struct SavingsMedals: View {
                 medal("Half a terabyte", earned ? (leader?.name ?? "") + " alone" : "Not yet", "star", .purple, earned,
                       leader.map { "\($0.name) has given back \(Words.size($0.saved)) so far, with \($0.slices.count - $0.finished) seasons still to go." } ?? "Not yet.")
                 threshold(3_000_000_000_000)
-                let left = half.map { $0 > 0 ? "About \(Words.size($0)) to go" : "Half saved" } ?? "—"
+                let left = half.map { $0 > 0 ? "About \(SavingsSummary.approximateSize($0)) to go" : "Half saved" } ?? "—"
                 medal("Halfway", left, "circle.lefthalf.filled", .green, half == 0, "Halfway through what can be saved. \(left)")
             }
         }

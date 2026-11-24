@@ -156,7 +156,6 @@ final class MediaListing {
     struct SavingsEstimate {
         let bytes: Int64?
         let partial: Bool
-        let viewOnly: Bool
     }
 
     func savingsEstimate(for kinds: [MediaKind]) -> SavingsEstimate {
@@ -165,8 +164,7 @@ final class MediaListing {
         let partial = selected.count < kinds.count || unavailable.contains(where: kinds.contains)
             || selected.contains(where: \.truncated) || rows.contains { !$0.estimateKnown }
         let sum = rows.reduce(Int64.zero) { $0 + $1.savedBytes }
-        return SavingsEstimate(bytes: sum > 0 || !partial ? sum : nil, partial: partial,
-                               viewOnly: !partial && rows.isEmpty && selected.contains { !$0.rows.isEmpty })
+        return SavingsEstimate(bytes: sum > 0 || !partial ? sum : nil, partial: partial)
     }
 
     var estimateIsPartial: Bool { savingsEstimate(for: expected).partial }
@@ -223,6 +221,7 @@ struct MediaRow: Identifiable, Sendable {
     var posterPrefix: String?
     var seasons: [TVShowsFacts.Season] = []
     var looseFiles: TVShowsFacts.LooseFiles?
+    var isFinished = false
 
     var savedBytes: Int64 { max(saved ?? 0, 0) }
     var estimateKnown: Bool { saved != nil }
@@ -257,7 +256,7 @@ struct MediaRow: Identifiable, Sendable {
                      bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup, seasons: $0.seasons, looseFiles: $0.looseFiles)
         } + (films?.movies ?? []).map {
             MediaRow(id: $0.prefix, name: $0.title, kind: .movies, detail: Words.count($0.fileCount, "file"),
-                     bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup)
+                     bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup, isFinished: $0.state == "finished")
         } + (others?.items ?? []).map {
             MediaRow(id: $0.prefix, name: $0.title, kind: .other, detail: Words.count($0.fileCount, "file"),
                      bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup)

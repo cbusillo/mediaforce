@@ -111,11 +111,13 @@ guardrails. `video.max_crf` is the starting search range;
 size-directed tests may search up to `video.target_search_max_crf` while still
 enforcing the picture floor.
 
-## Mac page screenshots
+## Space saved
 
 Space saved reads weekly savings and published sizes from the main window’s refresh.
 A season’s original size is its current size plus the bytes already saved. Selecting a show keeps
 its seasons in view while new files finish. The backup button uses the same confirmation as before.
+
+## Mac page screenshots
 
 Render live server data into PNGs, in light and dark, from the app
 executable in a logged-in session. It draws into a window that is never shown

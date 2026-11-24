@@ -5,7 +5,7 @@ struct SpaceSavedPage: View {
     let model: MainWindowModel
     let openItem: (String) -> Void
     @State private var listing = MediaListing()
-    @State private var machines = PageFacts<ComputersFacts>()
+    @State private var machines = ComputersStore()
     @State private var cleanup: CleanupFolder?
     @State private var shows: [SpaceSavedFacts.Show]?
     @State private var refreshFailed = false
@@ -21,7 +21,6 @@ struct SpaceSavedPage: View {
                     .padding(.horizontal, -34)
             }
             SavingsSummary(facts: facts, listing: listing, machines: machines, posters: model.posters)
-            Text("Original backups").fontWeight(.semibold)
             if let cleanup {
                 DeleteBackups(status: BackupsStatus(cleanup: cleanup, asking: asking), model: model) {
                     Task { await deleteBackups() }
@@ -37,17 +36,7 @@ struct SpaceSavedPage: View {
             }
         }
         .task { await listing.watch(model.client, kind: .everything) }
-        .task {
-            while !Task.isCancelled {
-                do {
-                    machines.facts = try await model.client.computers()
-                    machines.refreshFailed = false
-                } catch {
-                    machines.refreshFailed = true
-                }
-                try? await Task.sleep(for: MainWindowModel.refreshInterval)
-            }
-        }
+        .task { await machines.watch(model.client) }
         .task { await watch() }
         .task(id: deleting) { await followDeletion() }
     }
@@ -272,7 +261,7 @@ struct BackupsStatus {
     var deleting: Bool { asking || cleanup.deletion?.state == .running }
     var canDelete: Bool { !deleting && cleanup.fileCount > 0 }
     // The Delete button stays in place while deleting, unpressable, so the row doesn't jump.
-    var showsDelete: Bool { deleting || cleanup.fileCount > 0 }
+    var showsDelete: Bool { deleting || cleanup.waitingReason == nil }
 
     var progress: Double? {
         guard deleting, let deletion = cleanup.deletion, let total = deletion.totalCount, total > 0 else { return nil }
@@ -283,16 +272,11 @@ struct BackupsStatus {
         if deleting { return Words.deletingBackups(cleanup.deletion) }
         if let reason = cleanup.waitingReason { return reason }
         if cleanup.fileCount > 0 { return Words.deleteBackupsLine(cleanup.fileCount, cleanup.totalSizeBytes) }
-        if let deletion = cleanup.deletion, deletion.state == .finished { return Words.backupDeletionResult(deletion) }
-        return Words.noBackupsWaiting
-    }
-
-    var summary: String {
-        if !deleting, cleanup.waitingReason == nil, cleanup.fileCount == 0,
-           let deletion = cleanup.deletion, deletion.state == .finished, deletion.skippedFiles?.isEmpty != false {
+        if let deletion = cleanup.deletion, deletion.state == .finished {
+            if deletion.skippedFiles?.isEmpty == false { return Words.backupDeletionResult(deletion) }
             return "None waiting · \(deletion.deletedCount) deleted, \(Words.size(deletion.freedBytes))"
         }
-        return line
+        return "None waiting"
     }
 
     /// How the last deletion ended, when the line above doesn't already say it.
@@ -320,12 +304,13 @@ struct DeleteBackups: View {
                 if status.deleting {
                     ProgressView().controlSize(.small)
                 }
-                Text(status.summary)
-                    .monospacedDigit()
-                    .foregroundStyle(status.showsDelete ? .primary : .secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Original backups").fontWeight(.semibold)
+                    Text(status.line).monospacedDigit().foregroundStyle(.secondary)
+                }
                 Spacer()
-                if status.showsDelete || (status.cleanup.waitingReason == nil && !status.deleting) {
-                    Button("Delete Original Backups…") { Task { await askFirst() } }
+                if status.showsDelete {
+                    Button(Words.deleteBackups) { Task { await askFirst() } }
                         .buttonStyle(.bordered)
                         .disabled(!status.canDelete)
                         .help(Words.deleteBackupsHelp)

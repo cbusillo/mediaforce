@@ -547,7 +547,6 @@ extension Words {
     static func showOnly(_ group: LibraryStateGroup) -> String {
         "Show only \(libraryState(group).lowercased())"
     }
-    static let noBackupsWaiting = "No original backups are waiting."
     static let deleteBackups = "Delete Original Backups…"
     static let deleteAllBackups = "Delete all original backups"
     static let deleteBackupsQuestion = "Delete everything in the Cleanup folder?"
