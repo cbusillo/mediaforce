@@ -40,7 +40,7 @@ struct SampleFacts: Decodable, Sendable {
 
     struct Clip: Decodable, Sendable, Hashable {
         let url: String
-        let sizeBytes: Int64
+        let momentBytes: Int64?
     }
 
     struct SizeChoice: Decodable, Sendable, Identifiable {

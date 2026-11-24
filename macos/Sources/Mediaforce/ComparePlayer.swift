@@ -162,7 +162,7 @@ struct ComparePlayer: View {
     private var clipNames: PictureNames {
         guard case .clips(let clips) = moments, clips.indices.contains(clip) else { return names }
         return PictureNames(original: names.original, compressed: names.compressed,
-                            originalDetail: Words.clipSize(clips[clip].original),
+                            originalDetail: Words.clipSize(clips[clip].original, estimated: true),
                             compressedDetail: Words.clipSize(clips[clip].sample))
     }
 
