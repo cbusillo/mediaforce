@@ -18,7 +18,7 @@ struct MediaPage: View {
     var body: some View {
         let rows = listing.hasLoaded ? listed(listing.rows) : []
         let visible = visibleRows(rows)
-        PageFrame(title: onlySeasons == nil ? (kind == .everything ? Words.media : Words.mediaKind(kind)) : Words.seasonsWithoutKindTitle,
+        PageFrame(title: onlySeasons == nil ? (kind == .everything ? Words.library : Words.mediaKind(kind)) : Words.seasonsWithoutKindTitle,
                   subtitle: listing.hasLoaded ? Words.shown(visible.count, of: rows.count, onlySeasons == nil ? "item" : "season") : "",
                   scrolls: view != .table) {
             if onlySeasons == nil, kind != .everything, let facts = model.facts {
@@ -151,19 +151,24 @@ final class MediaListing {
     }
 
     // What Mediaforce can't compress yet saves nothing and needs no estimate.
-    private var compressible: [MediaRow] { rows.filter { $0.state != .cannotCompressYet } }
-    var canCompressAny: Bool { !compressible.isEmpty || !hasLoaded }
+    var canCompressAny: Bool { rows.contains { $0.state != .cannotCompressYet } || !hasLoaded }
 
-    var estimateIsPartial: Bool {
-        expected.contains { snapshots[$0] == nil } || !unavailable.isEmpty || truncated || compressible.contains { !$0.estimateKnown }
+    struct SavingsEstimate {
+        let bytes: Int64?
+        let partial: Bool
     }
 
-    /// The estimates of what these libraries can still save, or nil while nothing known adds to it.
-    var estimatedSavedBytes: Int64? {
-        let total = compressible.filter(\.estimateKnown).reduce(0) { $0 + $1.savedBytes }
-        guard total > 0 || !estimateIsPartial else { return nil }
-        return total
+    func savingsEstimate(for kinds: [MediaKind]) -> SavingsEstimate {
+        let selected = kinds.compactMap { snapshots[$0] }
+        let rows = selected.flatMap(\.rows).filter { $0.state != .cannotCompressYet }
+        let partial = selected.count < kinds.count || unavailable.contains(where: kinds.contains)
+            || selected.contains(where: \.truncated) || rows.contains { !$0.estimateKnown }
+        let sum = rows.reduce(Int64.zero) { $0 + $1.savedBytes }
+        return SavingsEstimate(bytes: sum > 0 || !partial ? sum : nil, partial: partial)
     }
+
+    var estimateIsPartial: Bool { savingsEstimate(for: expected).partial }
+    var estimatedSavedBytes: Int64? { savingsEstimate(for: expected).bytes }
 
     func estimatedTotalSavedBytes(savedSoFar: Int64) -> Int64? {
         estimatedSavedBytes.map { savedSoFar + $0 }
@@ -214,6 +219,9 @@ struct MediaRow: Identifiable, Sendable {
     let state: LibraryStateGroup
     // Whose poster a row shows when it isn't its own, as a season shows its show's.
     var posterPrefix: String?
+    var seasons: [TVShowsFacts.Season] = []
+    var looseFiles: TVShowsFacts.LooseFiles?
+    var isFinished = false
 
     var savedBytes: Int64 { max(saved ?? 0, 0) }
     var estimateKnown: Bool { saved != nil }
@@ -245,10 +253,10 @@ struct MediaRow: Identifiable, Sendable {
         let (shows, films, others) = try await (tv, movies, other)
         let rows = (shows?.shows ?? []).map {
             MediaRow(id: $0.showPrefix, name: $0.show, kind: .tv, detail: Words.count($0.seasonCount, "season"),
-                     bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup)
+                     bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup, seasons: $0.seasons, looseFiles: $0.looseFiles)
         } + (films?.movies ?? []).map {
             MediaRow(id: $0.prefix, name: $0.title, kind: .movies, detail: Words.count($0.fileCount, "file"),
-                     bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup)
+                     bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup, isFinished: $0.state == "finished")
         } + (others?.items ?? []).map {
             MediaRow(id: $0.prefix, name: $0.title, kind: .other, detail: Words.count($0.fileCount, "file"),
                      bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup)

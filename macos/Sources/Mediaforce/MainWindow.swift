@@ -227,7 +227,7 @@ enum Place: Hashable {
         case ("kind", let kind?): self = .kind(kind)
         case ("sample", let prefix?): self = .sample(prefix)
         case ("item", let prefix?): self = .item(prefix)
-        case ("library", nil): self = .library
+        case ("home", nil), ("library", nil): self = .library
         case ("needsYou", nil): self = .needsYou
         case ("spaceSaved", nil): self = .spaceSaved
         case ("computer", let key?): self = .computer(key)
@@ -361,7 +361,7 @@ struct Sidebar: View {
     @AppStorage("kindsShown") private var kindsShown = true
     @AppStorage("librariesShown") private var librariesShown = true
 
-    /// The places above the Library, in their order.
+    /// The places following the Library.
     static let top: [Place] = [.needsYou, .activity, .computer(nil), .spaceSaved]
 
     /// Each library's own list, under Library; VR & 3D only once it holds something.
@@ -372,9 +372,6 @@ struct Sidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             List(selection: $place) {
-                ForEach(Self.top, id: \.self) { place in
-                    row(place).tag(place)
-                }
                 DisclosureGroup(isExpanded: $librariesShown) {
                     ForEach(Self.libraries(in: facts.library), id: \.self) { place in
                         row(place).tag(place)
@@ -383,6 +380,9 @@ struct Sidebar: View {
                     Label(Words.library, systemImage: "books.vertical")
                 }
                 .tag(Place.library)
+                ForEach(Self.top, id: \.self) { place in
+                    row(place).tag(place)
+                }
                 if let kinds = model.kinds {
                     DisclosureGroup(isExpanded: $kindsShown) {
                         ForEach(kinds.kinds) { kind in

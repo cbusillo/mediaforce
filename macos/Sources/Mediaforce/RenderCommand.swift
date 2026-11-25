@@ -84,7 +84,7 @@ actor RenderLoads {
 
 @MainActor
 enum RenderCommand {
-    static let mainPages = ["library", "tv", "movies", "other", "needs-you", "activity", "computers", "space-saved", "media",
+    static let mainPages = ["library", "tv", "movies", "other", "needs-you", "activity", "computers", "space-saved",
                             "settings:libraries", "settings:compression", "settings:computers", "settings:metadata"]
 
     @discardableResult
@@ -197,15 +197,15 @@ enum RenderCommand {
         let place: Place
         let paths: Set<String>
         switch page {
-        case "library": place = .library; paths = libraryPaths
+        case "library", "home": place = .library; paths = libraryPaths
+        case "media": place = .media; paths = libraryPaths
         case "tv": place = .mediaKind(.tv); paths = ["/api/app/tv-shows"]
         case "movies": place = .mediaKind(.movies); paths = ["/api/app/movies"]
         case "other": place = .mediaKind(.other); paths = ["/api/app/other"]
         case "needs-you": place = .needsYou; paths = []
         case "activity": place = .activity; paths = ["/api/app/activity"]
         case "computers": place = .computer(nil); paths = ["/api/app/computers"]
-        case "space-saved": place = .spaceSaved; paths = ["/api/completed", "/api/archive-cleanup"]
-        case "media": place = .media; paths = libraryPaths
+        case "space-saved": place = .spaceSaved; paths = libraryPaths.union(["/api/completed", "/api/archive-cleanup", "/api/app/computers"])
         default:
             guard !value.isEmpty else { throw RenderFailure("Unknown page: \(page)") }
             switch name {

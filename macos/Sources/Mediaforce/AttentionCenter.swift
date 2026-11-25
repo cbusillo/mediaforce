@@ -85,7 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        model.placeRequest = PlaceRequest(place: Attention.openingPlace(model.facts))
+        model.placeRequest = PlaceRequest(place: .library)
         return true
     }
 

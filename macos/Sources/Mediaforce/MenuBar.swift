@@ -23,7 +23,7 @@ struct MenuBarPanel: View {
                     .padding(.vertical, 12)
             }
             Divider().padding(.horizontal, 10).padding(.vertical, 5)
-            Button { open(Attention.openingPlace(model.facts)) } label: { MenuRowLabel(title: Words.openMediaforce) }
+            Button { open(.library) } label: { MenuRowLabel(title: Words.openMediaforce) }
                 .buttonStyle(MenuRowStyle())
             SettingsLink { MenuRowLabel(title: Words.settingsEllipsis) }
                 .buttonStyle(MenuRowStyle())

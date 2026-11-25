@@ -43,11 +43,11 @@ enum Words {
     static func backTitle(_ place: Place) -> String {
         switch place {
         case .library: library
-        case .mediaKind(let kind, _): kind == .everything ? media : mediaKind(kind)
+        case .mediaKind(let kind, _): kind == .everything ? library : mediaKind(kind)
         case .activity: activity
         case .needsYou: needsYou
         case .spaceSaved: spaceSaved
-        case .media: media
+        case .media: "Browse all"
         case .kind(let code): kindName(code)
         case .seasonsWithoutKind: seasonsWithoutKindTitle
         case .item(let prefix, _): folderName(prefix)
@@ -547,7 +547,6 @@ extension Words {
     static func showOnly(_ group: LibraryStateGroup) -> String {
         "Show only \(libraryState(group).lowercased())"
     }
-    static let noBackupsWaiting = "No original backups are waiting."
     static let deleteBackups = "Delete Original Backups…"
     static let deleteAllBackups = "Delete all original backups"
     static let deleteBackupsQuestion = "Delete everything in the Cleanup folder?"
@@ -572,15 +571,6 @@ extension Words {
 
     static func showBackups(_ seasons: Int, _ bytes: Int64) -> String {
         "\(count(seasons, "season")), \(size(bytes)) of backups"
-    }
-
-    static func storageCompressed(_ bytes: Int64) -> String { "Compressed, \(size(bytes))" }
-    static func storageStillOriginal(_ bytes: Int64) -> String { "Still original, \(size(bytes))" }
-    static func storageSaved(_ bytes: Int64) -> String { "Space saved, \(size(bytes))" }
-    static func storageBackups(_ bytes: Int64) -> String { "Backups, \(size(bytes))" }
-
-    static func libraryWasAndIs(_ was: Int64, _ now: Int64) -> String {
-        "The library was \(size(was)) and is \(size(now)) now."
     }
 
     static func deleteBackupsLine(_ count: Int, _ bytes: Int64) -> String {
@@ -1652,7 +1642,6 @@ extension Words {
 }
 
 extension Words {
-    static let media = "Media"
     static let seasonsHeading = "Seasons"
     static let viewLabel = "View"
     static let tableView = "Show as a table"
