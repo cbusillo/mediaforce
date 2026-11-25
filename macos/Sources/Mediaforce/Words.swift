@@ -46,7 +46,7 @@ enum Words {
         case .mediaKind(let kind, _): kind == .everything ? library : mediaKind(kind)
         case .activity: activity
         case .needsYou: needsYou
-        case .spaceSaved: spaceSaved
+        case .spaceSaved, .originalBackups: spaceSaved
         case .media: "Browse all"
         case .kind(let code): kindName(code)
         case .seasonsWithoutKind: seasonsWithoutKindTitle

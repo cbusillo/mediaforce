@@ -30,6 +30,24 @@ struct SavingsLibrary {
     let shows: [SavingsGroup]
     let groups: [SavingsGroup]
 
+    init(folders: [String: SavingsHistory.Folder], sizes: [String: SavingsHistory.Published]) {
+        let slices = Dictionary(grouping: folders, by: { $0.value.show }).mapValues { entries in
+            entries.map { prefix, folder in
+                SavingsSlice(id: prefix, name: folder.name, current: folder.bytes, saved: sizes[prefix]?.saved ?? 0, complete: folder.finished)
+            }
+        }
+        let shows = slices.compactMap { prefix, seasons -> SavingsGroup? in
+            guard let prefix else { return nil }
+            let sorted = seasons.sorted {
+                if $0.id == prefix || $1.id == prefix { return $1.id == prefix && $0.id != prefix }
+                return $0.id.localizedStandardCompare($1.id) == .orderedAscending
+            }
+            return SavingsGroup(id: prefix, name: Words.lastFolder(prefix), slices: sorted)
+        }
+        let movies = (slices[nil] ?? []).sorted { $0.current == $1.current ? $0.id < $1.id : $0.current > $1.current }
+        self.init(shows: shows, movies: movies, sizes: sizes)
+    }
+
     init(rows: [MediaRow], sizes: [String: SavingsHistory.Published]) {
         var shows: [SavingsGroup] = []
         var movies: [SavingsSlice] = []
@@ -50,7 +68,11 @@ struct SavingsLibrary {
             default: continue
             }
         }
-        shows = shows.filter { $0.before > 0 }.sorted { $0.before == $1.before ? $0.id < $1.id : $0.before > $1.before }
+        self.init(shows: shows, movies: movies, sizes: sizes)
+    }
+
+    private init(shows: [SavingsGroup], movies: [SavingsSlice], sizes: [String: SavingsHistory.Published]) {
+        let shows = shows.filter { $0.before > 0 }.sorted { $0.before == $1.before ? $0.id < $1.id : $0.before > $1.before }
         self.shows = shows
         var groups = Array(shows.prefix(36))
         let rest = shows.dropFirst(groups.count)

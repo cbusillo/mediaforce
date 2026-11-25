@@ -232,8 +232,8 @@ extension NeedsYouItem {
             return NeedsYouItem(id: notice.id, title: Words.originalBackups, context: Words.count(backups.count, "file"),
                                 bytes: backups.bytes, picture: .symbol("archivebox"),
                                 asks: [NeedsYouAsk(line: Words.backupsAsk,
-                                                   answers: [NeedsYouAnswer(title: Words.reviewAndDelete, action: .open(.spaceSaved))])],
-                                opens: .spaceSaved)
+                                                   answers: [NeedsYouAnswer(title: Words.reviewAndDelete, action: .open(.originalBackups))])],
+                                opens: .originalBackups)
         }
         return NeedsYouItem(id: notice.id, title: notice.title, picture: .symbol("questionmark.circle"),
                             asks: [NeedsYouAsk(line: notice.body, answers: notice.opens.map { [NeedsYouAnswer(title: Words.openItem, action: .open($0))] } ?? [])])
