@@ -151,6 +151,25 @@ def test_library_totals_count_present_files_and_bytes_still_original(connection:
     assert library["other"] == {"item_count": 1, "total_bytes": 7, "original_bytes": 7}
 
 
+def test_ring_includes_original_and_published_files_without_the_library_lists(connection: DBClient) -> None:
+    _item(connection, "tv/House/Season 2/original.mkv", size=250)
+    _replaced(connection, "tv/House/Season 2/replaced.mkv", saved=4000, at=NOW)
+    _item(connection, "tv/House/pilot.mkv", size=50)
+    _item(connection, "tv/House/missing.mkv", missing=True)
+    _replaced(connection, "movies/Heat/Heat.mkv", saved=3500, at=NOW)
+    _item(connection, "other/Concert/part.mkv", size=100)
+    path = "movies/Unchanged/film.mkv"
+    _keep_original(connection, _item(connection, path), path, at=NOW)
+
+    folders = _payload(connection)["space_saved"]["history"]["ring_folders"]
+    assert folders == {
+        "tv/House/Season 2": {"bytes": 1250, "show": "tv/House", "name": "Season 2", "finished": False},
+        "tv/House": {"bytes": 50, "show": "tv/House", "name": "Files outside seasons", "finished": False},
+        "movies/Heat": {"bytes": 1500, "show": None, "name": "Heat", "finished": True},
+        "movies/Unchanged": {"bytes": 1000, "show": None, "name": "Unchanged", "finished": False},
+    }
+
+
 def test_tv_shows_list_every_show_the_sidebar_counts(connection: DBClient) -> None:
     _item(connection, "tv/ER/Season 1/e1.mkv", size=1000)
     _replaced(connection, "tv/House/Season 1/e1.mkv", saved=4000, at=NOW)
@@ -220,6 +239,7 @@ def test_season_kept_entirely_original_is_finished_without_counting_as_space_sav
     assert [season["prefix"] for season in payload["recently_finished_seasons"]] == [
         "tv/Lucifer/Season 2", "tv/Lucifer/Season 1",
     ]
+    assert not payload["space_saved"]["history"]["ring_folders"]["tv/Lucifer/Season 2"]["finished"]
     kept_season = payload["recently_finished_seasons"][0]
     assert (kept_season["episode_count"], kept_season["kept_original_count"], kept_season["bytes_saved"]) == (0, 2, 0)
     assert kept_season["finished_at"] == "2026-10-23T03:00:00+00:00"

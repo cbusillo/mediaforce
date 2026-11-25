@@ -117,49 +117,29 @@ struct SavingsRing: View {
     let library: SavingsLibrary
     let today: Int64
     let posters: PosterStore
+    let loading: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var zoom: String?
-    @State private var pointer: CGPoint?
+    @State private var pointer: (point: CGPoint, side: CGFloat)?
     @State private var progress = 0.0
 
     var body: some View {
         let selected = library.shows.first { $0.id == zoom }
         let sectors = RingSector.sectors(selected.map { [$0] } ?? library.groups, zoomed: selected != nil)
-        GeometryReader { geometry in
-            let side = max(1, min(560, geometry.size.width - 328))
-            let hovered = pointer.flatMap { hit($0, side: side, sectors: sectors) }
-            let group = selected ?? library.groups.first { $0.id == hovered?.group }
-            HStack(spacing: 28) {
-                ZStack {
-                    RingDrawing(sectors: sectors, highlighted: hovered?.group, progress: progress)
-                        .contentShape(Rectangle())
-                        .onContinuousHover { phase in
-                            if case .active(let location) = phase { pointer = location } else { pointer = nil }
-                        }
-                        .onTapGesture { location in
-                            if selected == nil, let hit = hit(location, side: side, sectors: sectors),
-                               library.shows.contains(where: { $0.id == hit.group }) {
-                                pointer = nil
-                                zoom = hit.group
-                            }
-                        }
-                    center(group, zoomed: selected != nil)
-                    if let pointer, let slice = hovered?.slice, let group {
-                        let sizes = slice.saved > 0 ? "\(Words.size(slice.before)) → \(Words.size(slice.current))"
-                            : "\(Words.size(slice.current)), still original"
-                        let percent = selected != nil && slice.saved > 0 ? " · \(Int((100 * Double(slice.saved) / Double(slice.before)).rounded()))% smaller" : ""
-                        SavingsTip(title: "\(group.name), \(slice.name)", detail: sizes + percent)
-                            .fixedSize().position(x: min(side - 115, max(115, pointer.x + 70)), y: min(side - 26, pointer.y + 33))
+        let hovered = pointer.flatMap { hit($0.point, side: $0.side, sectors: sectors) }
+        let group = selected ?? library.groups.first { $0.id == hovered?.group }
+        HStack(spacing: 28) {
+            Color.clear.aspectRatio(1, contentMode: .fit)
+                .overlay {
+                    GeometryReader { geometry in
+                        chart(side: geometry.size.width, sectors: sectors, hovered: hovered, group: group, zoomed: selected != nil)
                     }
                 }
-                .frame(width: side, height: side)
+                .frame(maxWidth: 560)
                 .frame(maxWidth: .infinity)
-                legend(group ?? library.shows.max { $0.saved < $1.saved })
-                    .frame(width: 300, alignment: .leading)
-            }
+            legend(group ?? library.shows.max { $0.saved < $1.saved })
+                .frame(width: 300, alignment: .leading)
         }
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
-        .frame(height: min(560, max(1, width - 328)))
         .task(id: zoom) {
             progress = reduceMotion ? 1 : 0
             guard !reduceMotion else { return }
@@ -175,7 +155,34 @@ struct SavingsRing: View {
         }
     }
 
-    @State private var width: CGFloat = 840
+    private func chart(side: CGFloat, sectors: [RingSector], hovered: RingSector?, group: SavingsGroup?, zoomed: Bool) -> some View {
+        ZStack {
+            RingDrawing(sectors: sectors, highlighted: hovered?.group, progress: progress)
+                .contentShape(Rectangle())
+                .onContinuousHover { phase in
+                    if case .active(let location) = phase { pointer = (location, side) } else { pointer = nil }
+                }
+                .onTapGesture { location in
+                    if !zoomed, let hit = hit(location, side: side, sectors: sectors),
+                       library.shows.contains(where: { $0.id == hit.group }) {
+                        pointer = nil
+                        zoom = hit.group
+                    }
+                }
+            if sectors.isEmpty {
+                Circle().strokeBorder(.quaternary, lineWidth: side * 0.14).padding(side * 0.035)
+            }
+            center(group, zoomed: zoomed)
+            if let point = pointer?.point, let slice = hovered?.slice, let group {
+                let sizes = slice.saved > 0 ? "\(Words.size(slice.before)) → \(Words.size(slice.current))"
+                    : "\(Words.size(slice.current)), still original"
+                let percent = zoomed && slice.saved > 0 ? " · \(Int((100 * Double(slice.saved) / Double(slice.before)).rounded()))% smaller" : ""
+                SavingsTip(title: "\(group.name), \(slice.name)", detail: sizes + percent)
+                    .fixedSize().position(x: min(side - 115, max(115, point.x + 70)), y: min(side - 26, point.y + 33))
+            }
+        }
+        .frame(width: side, height: side)
+    }
 
     private func hit(_ point: CGPoint, side: CGFloat, sectors: [RingSector]) -> RingSector? {
         let dx = 620 * (point.x / side - 0.5)
@@ -197,6 +204,8 @@ struct SavingsRing: View {
                 if zoomed {
                     Button("All shows") { pointer = nil; zoom = nil }.controlSize(.small)
                 }
+            } else if loading {
+                Text("Reading the library…").font(.caption).foregroundStyle(.secondary)
             } else {
                 Text(Words.size(today)).font(.system(size: 20, weight: .semibold))
                 Text("TV and movies today").font(.caption).foregroundStyle(.secondary)

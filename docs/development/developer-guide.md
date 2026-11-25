@@ -113,9 +113,10 @@ enforcing the picture floor.
 
 ## Space saved
 
-Space saved reads weekly savings and published sizes from the main window’s refresh.
+Space saved draws the ring from the current folder sizes and published savings already in the main window.
 A season’s original size is its current size plus the bytes already saved. Selecting a show keeps
-its seasons in view while new files finish. The backup button uses the same confirmation as before.
+its seasons in view while new files finish. Waiting original backups have a pink segment in Left to save.
+Review and delete in Needs you reveals the Original backups section. Deletion still requires confirmation.
 
 ## Mac page screenshots
 

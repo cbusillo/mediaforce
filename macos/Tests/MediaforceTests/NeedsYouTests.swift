@@ -73,6 +73,16 @@ final class NeedsYouTests: XCTestCase {
         XCTAssertEqual(item.motionFiles.map(\.id), [1, 2])
     }
 
+    func testBackupsRowAndItsButtonOpenTheCleanupSection() throws {
+        let row = try XCTUnwrap(NeedsYouItem.items(try facts(), kinds: nil).first { $0.id == Attention.backupsNoticeID })
+        let destination = try XCTUnwrap(row.opens)
+        XCTAssertEqual(destination, .originalBackups)
+        guard case .open(let buttonDestination) = row.asks.first?.answers.first?.action else {
+            return XCTFail("Missing backup review button")
+        }
+        XCTAssertEqual(buttonDestination, destination)
+    }
+
     func testTheOneTimeSoundQuestionCountsOnceAndOffersBothAnswers() throws {
         let before = try facts(askGenreSound: true)
         let after = try facts()

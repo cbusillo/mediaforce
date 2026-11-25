@@ -195,7 +195,7 @@ struct PlaceRequest: Equatable {
 }
 
 enum Place: Hashable {
-    case library, needsYou, activity, spaceSaved, media
+    case library, needsYou, activity, spaceSaved, originalBackups, media
     case mediaKind(MediaKind, LibraryStateGroup? = nil)
     // The Computers page, or one computer's page when it names one.
     case computer(String?)
@@ -248,7 +248,8 @@ struct MainWindow: View {
         Group {
             if let facts = model.facts {
                 NavigationSplitView {
-                    Sidebar(place: Binding(get: { navigation.place }, set: { navigation.select($0) }), facts: facts, model: model)
+                    Sidebar(place: Binding(get: { navigation.place == .originalBackups ? .spaceSaved : navigation.place },
+                                           set: { navigation.select($0) }), facts: facts, model: model)
                         .navigationSplitViewColumnWidth(214)
                 } detail: {
                     MainPage(place: navigation.place, facts: facts, model: model, open: { navigation.open($0) },
@@ -463,10 +464,8 @@ struct MainPage: View {
                 ActivityPage(facts: facts, model: model, open: open)
             case .needsYou:
                 NeedsYouPage(facts: facts, posters: model.posters, model: model, open: open)
-            case .spaceSaved:
-                SpaceSavedPage(facts: facts, model: model) { open(.item($0)) }
-                    // Deleting backups changes what the page shows, so it reads its facts again at once.
-                    .id(facts.originalBackups.count)
+            case .spaceSaved, .originalBackups:
+                SpaceSavedPage(facts: facts, model: model, revealBackups: place == .originalBackups) { open(.item($0)) }
             // A new page for each prefix, so none shows the last one's name or facts while its own loads.
             case .sample(let prefix):
                 SamplePage(prefix: prefix, model: model, openItem: { open(.item($0)) },
