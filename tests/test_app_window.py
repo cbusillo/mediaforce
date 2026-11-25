@@ -227,7 +227,8 @@ def test_season_kept_entirely_original_is_finished_without_counting_as_space_sav
 
 def test_weekly_savings_and_title_sizes_include_only_published_files(connection: DBClient) -> None:
     _replaced(connection, "tv/House/Season 1/a.mkv", saved=4000, at="2026-10-11T23:59:00Z")
-    _replaced(connection, "tv/House/Season 2/b.mkv", saved=3000, at="2026-10-12T00:00:00Z")
+    original_size = 5000
+    _replaced(connection, "tv/House/Season 2/b.mkv", saved=3000, original_size=original_size, at="2026-10-12T00:00:00Z")
     _replaced(connection, "movies/Heat/Heat.mkv", saved=3500, at=NOW)
     _item(connection, "tv/House/Season 2/c.mkv", size=10000)
 
@@ -235,8 +236,8 @@ def test_weekly_savings_and_title_sizes_include_only_published_files(connection:
     connection.execute(update(library_items).where(library_items.c.id == restored).values(status="discovered"))
     _replaced(connection, "tv/Old/Season 3/x.mkv", saved=1000, at="2026-04-04T10:00:00Z")
     history = _payload(connection)["space_saved"]["history"]
-    assert history["published_sizes"]["tv/House/Season 2"] == {"saved": 3000, "finished_season": False}
-    assert history["published_sizes"]["movies/Heat"] == {"saved": 3500, "finished_season": False}
+    assert history["published_sizes"]["tv/House/Season 2"] == {"saved": 3000, "compressed_before": original_size, "finished_season": False}
+    assert history["published_sizes"]["movies/Heat"] == {"saved": 3500, "compressed_before": 5000, "finished_season": False}
     weeks = {week["start"]: week["bytes"] for week in history["weeks"]}
     assert weeks["2026-03-30"] == 1000
     assert weeks["2026-10-05"] == 4000

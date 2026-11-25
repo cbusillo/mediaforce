@@ -14,6 +14,7 @@ struct SavingsGroup: Identifiable {
     let name: String
     let slices: [SavingsSlice]
     var unit = "season"
+    var groupedCompressedBytes: Int64?
     var isShow: Bool { unit == "season" }
     var current: Int64 { slices.reduce(0) { $0 + $1.current } }
     var before: Int64 { slices.reduce(0) { $0 + $1.before } }
@@ -58,7 +59,11 @@ struct SavingsLibrary {
                 SavingsSlice(id: $0.id, name: $0.name, current: $0.current, saved: $0.saved,
                              complete: $0.finished == $0.slices.count)
             }
-            groups.append(SavingsGroup(id: "more", name: "\(rest.count) more shows", slices: slices, unit: "show"))
+            let compressed = rest.reduce(Int64.zero) { total, show in
+                total + show.slices.reduce(0) { $0 + (sizes[$1.id]?.compressedBefore ?? $1.saved) }
+            }
+            groups.append(SavingsGroup(id: "more", name: "\(rest.count) more shows", slices: slices, unit: "show",
+                                       groupedCompressedBytes: compressed))
         }
         if !movies.isEmpty {
             groups.append(SavingsGroup(id: "movies", name: "Movies", slices: movies, unit: "movie"))

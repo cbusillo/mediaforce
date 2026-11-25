@@ -32,7 +32,19 @@ private struct RingSector {
         for group in groups {
             let span = Double(group.before) / total * 2 * .pi
             let gap = min(0.004, span / 4)
-            if !zoomed {
+            if !zoomed, let compressed = group.groupedCompressedBytes {
+                let start = angle + gap
+                let end = angle + span - gap
+                let split = start + (end - start) * min(1, max(0, Double(compressed) / Double(group.before)))
+                if split > start {
+                    result.append(Self(group: group.id, slice: nil, start: start, end: split,
+                                       inner: 120, outer: 196, color: .green, label: nil))
+                }
+                if end > split {
+                    result.append(Self(group: group.id, slice: nil, start: split, end: end,
+                                       inner: 120, outer: 196, color: .gray.opacity(0.38), label: nil))
+                }
+            } else if !zoomed {
                 let tint: Color = group.saved > 0 ? .green.opacity(group.saved * 2 > group.before ? 1 : 0.7) : .gray.opacity(0.38)
                 result.append(Self(group: group.id, slice: nil, start: angle + gap, end: angle + span - gap,
                                    inner: 120, outer: 196, color: tint.opacity(group.isShow ? 1 : 0.75), label: nil))

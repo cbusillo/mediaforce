@@ -510,13 +510,15 @@ def _space_saved(
     monday = today - timedelta(days=today.weekday())
     weeks = {monday - timedelta(weeks=offset): 0 for offset in reversed(range(8))}
     titles: dict[str, list[_Item]] = defaultdict(list)
-    saved_by_folder: dict[str, int] = defaultdict(int)
+    published_sizes: dict[str, dict[str, int | bool]] = {}
     finished_seasons = {season["prefix"] for season in finished}
     for item in replaced:
         promotion = promotions[item.item_id]
         folder = item.season_prefix or item.title_prefix
         if folder is not None and item.kind in {"tv", "movie"}:
-            saved_by_folder[folder] += promotion.bytes_saved
+            sizes = published_sizes.setdefault(folder, {"saved": 0, "compressed_before": 0, "finished_season": folder in finished_seasons})
+            sizes["saved"] += promotion.bytes_saved
+            sizes["compressed_before"] += item.size_bytes + promotion.bytes_saved
         if prefix := item.title_prefix:
             titles[prefix].append(item)
         try:
@@ -542,8 +544,7 @@ def _space_saved(
         "episode_count": sum(1 for item in replaced if item.kind == "tv"),
         "season_count": sum(1 for season in finished if season["episode_count"]),
         "history": {"weeks": [{"start": week.isoformat(), "bytes": size} for week, size in sorted(weeks.items())],
-                    "published_sizes": {prefix: {"saved": saved, "finished_season": prefix in finished_seasons}
-                                        for prefix, saved in saved_by_folder.items()},
+                    "published_sizes": published_sizes,
                     "wins": wins[:3]},
     }
 

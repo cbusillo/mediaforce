@@ -24,6 +24,7 @@ struct SavingsHistory: Decodable, Sendable {
     struct Published: Decodable, Sendable {
         let saved: Int64
         let finishedSeason: Bool
+        let compressedBefore: Int64?
     }
 
     var publishedSizes: [String: Published]? = nil

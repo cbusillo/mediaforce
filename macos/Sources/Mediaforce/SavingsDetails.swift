@@ -52,7 +52,7 @@ struct SavingsDetails: View {
                 let sorted = machines.filter { $0.done.all.bytesSaved > 0 }.sorted { $0.done.all.bytesSaved > $1.done.all.bytesSaved }
                 let top = sorted.first
                 card("By computer", .blue, top.map { Words.size($0.done.all.bytesSaved) } ?? "—",
-                     top.map { "\($0.name ?? $0.key), \(percent($0.done.all.bytesSaved))% of the total" } ?? "") {
+                     top.map(computerDetail) ?? "") {
                     GeometryReader { geo in
                         let sum = sorted.reduce(Int64.zero) { $0 + $1.done.all.bytesSaved }
                         HStack(spacing: 0) {
@@ -61,13 +61,22 @@ struct SavingsDetails: View {
                                 Capsule().fill(.blue.opacity(machine.id == top?.id ? 1 : 0.35))
                                     .padding(.horizontal, 1.5)
                                     .frame(width: geo.size.width * Double(bytes) / Double(max(1, sum)), height: 14)
-                                    .help("\(machine.name ?? machine.key)\n\(Words.size(bytes)) saved · \(percent(bytes))% of the total")
+                                    .help(computerHelp(machine))
                             }
                         }
                     }.frame(height: 14)
                 }
             }
         }
+    }
+
+    func computerDetail(_ machine: ComputersFacts.Machine) -> String {
+        "\(machine.name ?? machine.key), \(percent(machine.done.all.bytesSaved))% of the total"
+    }
+
+    func computerHelp(_ machine: ComputersFacts.Machine) -> String {
+        let bytes = machine.done.all.bytesSaved
+        return "\(machine.name ?? machine.key)\n\(Words.size(bytes)) saved · \(percent(bytes))% of the total"
     }
 
     private func percent(_ bytes: Int64) -> Int { Int((100 * Double(bytes) / Double(max(saved, 1))).rounded()) }

@@ -240,6 +240,15 @@ final class MainWindowModelTests: XCTestCase {
         super.tearDown()
     }
 
+    func testSavingsCardShowsTheNameSuppliedForTheComputer() throws {
+        let name = "Upstairs encoder"
+        let machine = try ComputerFixTests.machine(#"{"name":"\#(name)"}"#)
+        let details = SavingsDetails(history: SavingsHistory(weeks: [], wins: []), saved: machine.done.all.bytesSaved,
+                                     movies: .init(titleCount: 0, totalBytes: 0, originalBytes: 0), machines: [machine])
+        XCTAssertTrue(details.computerDetail(machine).hasPrefix(name))
+        XCTAssertEqual(details.computerHelp(machine).components(separatedBy: .newlines).first, name)
+    }
+
     func testRefreshUpdatesTheTotalAndSeasonForTheSameOpenLibrary() async throws {
         let model = model { _ in (200, Data(MainWindowTests.facts.utf8)) }
         await model.refresh()

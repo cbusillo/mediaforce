@@ -49,7 +49,19 @@ struct SavingsCurve: View {
                 PointMark(x: .value("Week", point.date), y: .value("Saved", point.total)).foregroundStyle(.green)
             }
         }
-        .chartXAxis(.hidden).chartYAxis(.hidden)
+        .chartXAxis {
+            if let start = points.first?.date {
+                let recent = points.count > 9 ? points.compactMap(\.week).suffix(8).first?.date : nil
+                AxisMarks(values: [start, recent].compactMap { $0 }) { value in
+                    if let date = value.as(Date.self) {
+                        AxisValueLabel(anchor: date == start ? .topLeading : .top) {
+                            Text(date.formatted(.dateTime.month(.wide))).font(.caption2)
+                        }
+                    }
+                }
+            }
+        }
+        .chartYAxis(.hidden)
         .chartOverlay { proxy in
             GeometryReader { geometry in
                 if let plot = proxy.plotFrame {
@@ -61,11 +73,6 @@ struct SavingsCurve: View {
                                 hovered = proxy.value(atX: location.x - bounds.minX, as: Date.self)
                             } else { pointer = nil; hovered = nil }
                         }
-                    if points.count > 9, let date = points.compactMap(\.week).suffix(8).first?.date,
-                       let x = proxy.position(forX: date) {
-                        Text(date.formatted(.dateTime.month(.wide))).font(.caption2).foregroundStyle(.tertiary)
-                            .position(x: bounds.minX + x, y: bounds.maxY - 5).allowsHitTesting(false)
-                    }
                     if let point, let pointer {
                         SavingsTip(title: point.week.map { "Week of " + $0.label } ?? point.date.formatted(.dateTime.month().day()),
                                    detail: point.week.map { "\(Words.size(point.total)) saved in total · \(Words.size($0.bytes)) that week" }
@@ -73,12 +80,6 @@ struct SavingsCurve: View {
                             .fixedSize().position(x: min(bounds.width - 140, max(140, pointer.x + 60)), y: min(bounds.height - 20, pointer.y + 32))
                     }
                 }
-            }
-        }
-        .overlay(alignment: .bottomLeading) {
-            if let start = points.first {
-                Text(start.date.formatted(.dateTime.month(.wide))).font(.caption2).foregroundStyle(.tertiary)
-                    .allowsHitTesting(false)
             }
         }
         .frame(height: 120)
