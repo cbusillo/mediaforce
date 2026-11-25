@@ -16,7 +16,7 @@ struct KindPage: View {
     @State private var asking = false
 
     var body: some View {
-        let setting = kind.settings.first { $0.show == chosen } ?? kind.firstSetting
+        let setting = kind.settings.first { $0.show == chosen } ?? kind.firstSetting ?? kind.sampleSetting
         let offering = kind.approval == nil && chosen == nil && kind.showsSampleFirst
         let offer: ((KindsFacts.Show) -> Void)? = offering && kind.offersSample && !asking ? { show in if let season = show.sampleSeason { makeSample(season) } } : nil
         let showSample: (() -> Void)? = chosen != nil || (kind.approval == nil && !kind.showsSampleFirst) ? { selectSample() } : nil

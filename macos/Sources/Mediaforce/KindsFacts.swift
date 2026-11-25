@@ -57,6 +57,7 @@ struct KindsFacts: Decodable, Sendable, Equatable {
             if let approval {
                 return settings.first { $0.fromPrefix == approval.fromPrefix } ?? approval.setting
             }
+            guard selectedSizeMb == nil else { return nil }
             return sampleSetting ?? settings.first { $0.libraryItemId != nil } ?? settings.first
         }
     }
