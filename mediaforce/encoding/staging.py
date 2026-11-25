@@ -719,7 +719,7 @@ def promote_one_item(
     if redo_prefix is not None:
         from mediaforce.web.runtime.season_redo import approved_redo_item
 
-        saved = approved_redo_item(config, redo_prefix, stage_row)
+        saved = approved_redo_item(config, str(redo_prefix), stage_row)
         if saved is None:
             raise PromotionWaiting("This episode needs a checked replacement made under the approved cartoon look.")
         item = saved
@@ -854,7 +854,7 @@ def promote_one_item(
             )
         )
         if prefix := item.get("redo_season"):
-            finish_redo_file(connection, prefix, int(item["library_item_id"]))
+            finish_redo_file(connection, str(prefix), int(item["library_item_id"]))
         append_target_production_outcome(
             connection, prepared=target_outcome, promoted_at=now,
             promoted_path=str(destination_path), promoted_content_fingerprint=promoted_content_fingerprint,

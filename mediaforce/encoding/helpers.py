@@ -63,7 +63,7 @@ def resolve_item_source_path(
         host_media_access_for_host: Callable[[dict[str, Any] | None], str],
 ) -> Path:
     if backup := item.get("redo_backup"):
-        return config.archive_root / backup
+        return config.archive_root / str(backup)
     if host_media_access_for_host(host) == "stream":
         return _controller_item_source_path(item)
     mapped_path = _mapped_item_source_path(config, item, host=host)

@@ -29,8 +29,9 @@ def archive_season_paths(connection: DBClient, root: Path) -> set[Path]:
     for prefix, pending in connection.execute(select(season_redos.c.prefix, season_redos.c.remaining_json)):
         paths.add((root / prefix).resolve())
         for prior in json.loads(pending or "{}").values():
-            if original := (prior or {}).get("stage", {}).get("archived_source_path"):
-                paths.add(Path(original).resolve())
+            original = (prior or {}).get("stage", {}).get("archived_source_path")
+            if original:
+                paths.add(Path(str(original)).resolve())
     return paths
 
 
@@ -40,7 +41,7 @@ def finish_redo_file(connection: DBClient, prefix: str, item_id: int, *, keep_cu
     ).scalar_one_or_none()
     if row is None:
         return
-    remaining = json.loads(row)
+    remaining = json.loads(str(row))
     if str(item_id) not in remaining:
         return
     prior = remaining.pop(str(item_id))

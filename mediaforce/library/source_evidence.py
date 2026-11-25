@@ -296,7 +296,7 @@ def record_generated_output(connection: DBClient, item_id: int, *, identity: Map
     if backup := operation_key.get("original_backup"):
         original = archived_version(connection, item_id, str(backup))
         if original is None:
-            observed = observe_file(Path(backup), full_digest=True)
+            observed = observe_file(Path(str(backup)), full_digest=True)
             if observed["sample_fingerprint"] != operation_key["original_fingerprint"]:
                 raise RuntimeError("Original backup no longer matches the encode input")
             before = append_version(connection, generation_id=generation, role="input", identity=observed,

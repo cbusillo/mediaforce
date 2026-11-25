@@ -823,8 +823,10 @@ def queue_folder_encode_action(
                 connection.execute(delete(season_redos).where(season_redos.c.prefix == normalized_prefix))
                 return {"ok": True, "message": "The season has no more episodes to redo."}
 
+            approved_look = approval.calibration
+
             def load_redo_approval(_config: MediaforceConfig, prefix: str) -> ActionPayload | None:
-                return approval.calibration if prefix == normalized_prefix else None
+                return approved_look if prefix == normalized_prefix else None
             load_calibration_state = load_redo_approval
         elif redo and redo["state"] in {"stopped", "running"}:
             return {"ok": False, "message": "This season is reserved for its cartoon redo."}
@@ -1250,7 +1252,8 @@ def queue_folder_encode_action(
             archived_items, missing_originals = archived_redo_items(connection, preflight_config, normalized_prefix,
                                                                {key: value for key, value in remaining.items() if int(key) in only_item_ids})
             for key in only_item_ids:
-                if prior := remaining.get(str(key)):
+                prior = remaining.get(str(key))
+                if isinstance(prior, dict):
                     prior.pop("reason", None)
             for file in missing_originals:
                 if file.code == "original_unavailable":

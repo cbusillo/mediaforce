@@ -62,7 +62,7 @@ def run_approval(connection: DBClient, config: MediaforceConfig, item: Mapping[s
         season_redos.c.state == "running", season_redos.c.prefix == "/".join(Path(rel_path).parts[:3]),
     )).scalar_one_or_none()
     if prefix:
-        return cartoon_redo_approval(config, prefix)
+        return cartoon_redo_approval(config, str(prefix))
     return effective_production_approval(config, rel_path, load)
 
 
@@ -107,7 +107,7 @@ def stop_redo_season(config: MediaforceConfig, prefix: str) -> dict[str, Any]:
 
 
 def remaining_redo_files(connection: DBClient, prefix: str, redo: DBRow) -> dict[str, Any]:
-    saved = json.loads(redo["remaining_json"]) if redo["remaining_json"] is not None else None
+    saved: dict[str, Any] = json.loads(redo["remaining_json"] or "{}")
     rows = connection.execute(
         select(library_items.c.id, library_items.c.fingerprint, staged_artifacts)
         .outerjoin(staged_artifacts, staged_artifacts.c.library_item_id == library_items.c.id)
@@ -120,9 +120,9 @@ def remaining_redo_files(connection: DBClient, prefix: str, redo: DBRow) -> dict
     remaining = {}
     for row in rows:
         key = str(row["id"])
-        if saved is not None and key not in saved:
+        if redo["remaining_json"] is not None and key not in saved:
             continue
-        prior = saved.get(key) if saved else None
+        prior = saved.get(key)
         if not (prior or {}).get("stage") and row["promoted_at"]:
             prior = {"stage": {col.name: row[col] for col in staged_artifacts.c}, "fingerprint": row["fingerprint"]}
         remaining[key] = prior
@@ -196,13 +196,13 @@ def keep_unavailable_redo(config: MediaforceConfig, prefix: str, item_id: int) -
     with open_db(config.paths.db_path) as connection:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         saved = connection.execute(select(season_redos.c.remaining_json).where(season_redos.c.prefix == prefix)).scalar_one_or_none()
-        prior = json.loads(saved).get(str(item_id)) if saved else None
-        if not prior or not prior.get("reason"):
+        prior = json.loads(str(saved or "{}")).get(str(item_id), {})
+        if not isinstance(prior, dict) or not prior.get("reason"):
             return {"ok": False, "message": "This episode is no longer waiting for that choice."}
         rel_path = connection.execute(select(library_items.c.rel_path).where(library_items.c.id == item_id)).scalar_one_or_none()
-        if rel_path is None or not rel_path.startswith(prefix + "/"):
+        if not str(rel_path or "").startswith(prefix + "/"):
             return {"ok": False, "message": "This episode is no longer in this season."}
-        if load_active_encode_jobs_for_prefix(connection, rel_path):
+        if load_active_encode_jobs_for_prefix(connection, str(rel_path)):
             return {"ok": False, "message": "A file is still being worked on. Let it finish first."}
         current = connection.execute(
             select(staged_artifacts.c.promoted_at).where(staged_artifacts.c.library_item_id == item_id)

@@ -32,7 +32,7 @@ def upgrade() -> None:
         if len(parts) == 3 and (
             identified
             or (
-                re.fullmatch(r"Futurama(?: \(1999\))?(?: [\[{](?:tvdb|tmdb)[^\]}]*[\]}])?", parts[1], re.I)
+                re.fullmatch(r"Futurama(?: \(1999\))?(?: (?:\[(?:tvdb|tmdb)[^]]*]|\{(?:tvdb|tmdb)[^}]*}))?", parts[1], re.I)
                 and re.fullmatch(r"Season\s*0*6", parts[2], re.I)
             )
         ):
