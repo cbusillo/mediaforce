@@ -28,10 +28,10 @@ struct SpaceSavedPage: View {
                     SavingsSummary(facts: facts, listing: listing, machines: machines, posters: model.posters,
                                    backupBytes: backupFolder.totalSizeBytes)
                     VStack(alignment: .leading, spacing: 18) {
-                        DeleteBackups(status: BackupsStatus(cleanup: backupFolder, asking: asking), model: model) {
+                        DeleteBackups(status: BackupsStatus(cleanup: backupFolder, asking: asking), model: model,
+                                      readNotice: cleanupReadNotice) {
                             Task { await deleteBackups() }
                         }
-                        .disabled(cleanup == nil)
                         .padding(8)
                         .background(highlighted ? Color.accentColor.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 8))
                         .padding(.horizontal, -8)
@@ -62,6 +62,11 @@ struct SpaceSavedPage: View {
 
     private var backupFolder: CleanupFolder {
         cleanup ?? CleanupFolder(fileCount: facts.originalBackups.count, totalSizeBytes: facts.originalBackups.bytes)
+    }
+
+    private var cleanupReadNotice: String? {
+        guard cleanup == nil else { return nil }
+        return refreshFailed ? "Couldn’t read the Cleanup folder. Retrying…" : "Reading the Cleanup folder…"
     }
 
     private var deleting: Bool {
@@ -317,6 +322,7 @@ struct BackupsStatus {
 struct DeleteBackups: View {
     let status: BackupsStatus
     let model: MainWindowModel
+    let readNotice: String?
     let delete: () -> Void
     @State private var folder: CleanupFolder?
     @State private var confirming = false
@@ -329,13 +335,13 @@ struct DeleteBackups: View {
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Original backups").fontWeight(.semibold)
-                    Text(status.line).monospacedDigit().foregroundStyle(.secondary)
+                    Text(readNotice ?? status.line).monospacedDigit().foregroundStyle(.secondary)
                 }
                 Spacer()
                 if status.showsDelete {
                     Button(Words.deleteBackups) { Task { await askFirst() } }
                         .buttonStyle(.bordered)
-                        .disabled(!status.canDelete)
+                        .disabled(readNotice != nil || !status.canDelete)
                         .help(Words.deleteBackupsHelp)
                 }
             }

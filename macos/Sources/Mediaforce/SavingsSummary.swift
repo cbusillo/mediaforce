@@ -107,8 +107,9 @@ struct SavingsSummary: View {
         let rest = max(0, total - saved - (tv ?? 0) - (movies ?? 0))
         let reclaimed = max(0, saved - backupBytes)
         var segments = [
-            Segment(label: "Saved", bytes: reclaimed, color: .green, caption: "Saved \(Words.size(reclaimed))",
-                    tip: "\(Words.size(reclaimed)) back after accounting for original backups"),
+            Segment(label: "Space back", bytes: reclaimed, color: .green,
+                    caption: backupBytes > 0 ? "Space back \(Words.size(reclaimed))" : "Saved \(Words.size(saved))",
+                    tip: "\(Words.size(saved)) saved by compression, with \(Words.size(backupBytes)) still in original backups"),
             Segment(label: "TV shows to go", bytes: tv, color: .blue, caption: "TV shows \(tv.map(Words.size) ?? "—") to go",
                     tip: "At least \(tv.map(Words.size) ?? "—") still to get back from \(Words.count(facts.library.tv.showCount, "show"))"),
             Segment(label: "Movies to go", bytes: movies, color: .purple, caption: "Movies \(movies.map(Words.size) ?? "—") to go",
@@ -130,7 +131,8 @@ struct SavingsSummary: View {
             Text(finish).foregroundStyle(.secondary)
             GeometryReader { geo in
                 let sum = segments.reduce(Int64.zero) { $0 + ($1.bytes ?? 0) }
-                let backupWidth = backupBytes > 0 ? max(12, geo.size.width * Double(backupBytes) / Double(max(1, sum))) : 0
+                let share = geo.size.width * Double(backupBytes) / Double(max(1, sum))
+                let backupWidth = backupBytes > 0 ? min(geo.size.width, max(12, share)) : 0
                 HStack(spacing: 0) {
                     ForEach(segments) { segment in
                         let width = segment.label == Words.originalBackups ? backupWidth :

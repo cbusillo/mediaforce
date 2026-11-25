@@ -17,6 +17,11 @@ final class SpaceSavedTests: XCTestCase {
         XCTAssertEqual(backup.bytes, 500)
         XCTAssertTrue(backup.tip.contains(Words.size(500)))
         XCTAssertFalse(cleared.contains { $0.label == Words.originalBackups })
+        let largerBackup = facts.spaceSaved.bytes + 500
+        let beforeFirstCleanup = segments(largerBackup)
+        XCTAssertEqual(beforeFirstCleanup.first?.bytes, 0)
+        XCTAssertEqual(beforeFirstCleanup.first { $0.label == Words.originalBackups }?.bytes, largerBackup)
+        XCTAssertEqual(beforeFirstCleanup.last?.bytes, cleared.last?.bytes)
         XCTAssertEqual(waiting.compactMap(\.bytes).reduce(0, +), cleared.compactMap(\.bytes).reduce(0, +))
     }
 

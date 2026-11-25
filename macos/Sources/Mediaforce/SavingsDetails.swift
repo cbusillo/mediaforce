@@ -159,7 +159,7 @@ struct SavingsMedals: View {
                 .overlay { Image(systemName: symbol).font(.system(size: 27)).foregroundStyle(earned ? .white : .gray) }
                 .frame(width: 64, height: 64)
             Text(title).fontWeight(.semibold)
-            Text(subtitle).foregroundStyle(.secondary)
+            Text(subtitle).foregroundStyle(.secondary).lineLimit(2...)
         }
         .frame(maxWidth: .infinity).multilineTextAlignment(.center).font(.system(size: 12)).help("\(title)\n\(tip)")
     }

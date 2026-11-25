@@ -158,12 +158,15 @@ def test_ring_includes_original_and_published_files_without_the_library_lists(co
     _item(connection, "tv/House/missing.mkv", missing=True)
     _replaced(connection, "movies/Heat/Heat.mkv", saved=3500, at=NOW)
     _item(connection, "other/Concert/part.mkv", size=100)
+    path = "movies/Unchanged/film.mkv"
+    _keep_original(connection, _item(connection, path), path, at=NOW)
 
     folders = _payload(connection)["space_saved"]["history"]["ring_folders"]
     assert folders == {
         "tv/House/Season 2": {"bytes": 1250, "show": "tv/House", "name": "Season 2", "finished": False},
         "tv/House": {"bytes": 50, "show": "tv/House", "name": "Files outside seasons", "finished": False},
         "movies/Heat": {"bytes": 1500, "show": None, "name": "Heat", "finished": True},
+        "movies/Unchanged": {"bytes": 1000, "show": None, "name": "Unchanged", "finished": False},
     }
 
 

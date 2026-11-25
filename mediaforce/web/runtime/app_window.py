@@ -519,11 +519,14 @@ def _ring_folders(items: list[_Item], finished_seasons: set[str], kept: Mapping[
     for prefix, files in folders.items():
         first = files[0]
         name = first.parts[2] if first.season_prefix else "Files outside seasons"
+        finished = prefix in finished_seasons
+        if first.kind == "movie":
+            finished = any(item.promoted for item in files) and all(item.promoted or item.item_id in kept for item in files)
         result[prefix] = {
             "bytes": sum(item.size_bytes for item in files),
             "show": first.show_prefix,
             "name": name if first.show_prefix else first.title,
-            "finished": prefix in finished_seasons if first.show_prefix else all(item.promoted or item.item_id in kept for item in files),
+            "finished": finished,
         }
     return result
 
