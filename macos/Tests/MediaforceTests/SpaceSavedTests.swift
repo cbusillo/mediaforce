@@ -14,6 +14,9 @@ final class SpaceSavedTests: XCTestCase {
         let waiting = segments(500)
         let cleared = segments(0)
         let backup = try XCTUnwrap(waiting.first { $0.label == Words.originalBackups })
+        for segment in waiting {
+            if let bytes = segment.bytes { XCTAssertTrue(segment.caption.contains(Words.size(bytes)), segment.caption) }
+        }
         XCTAssertEqual(backup.bytes, 500)
         XCTAssertTrue(backup.tip.contains(Words.size(500)))
         XCTAssertFalse(cleared.contains { $0.label == Words.originalBackups })

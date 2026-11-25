@@ -188,7 +188,7 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
         case "/api/app/main-window": Self.busierDay
         case "/api/app/kinds": """
             {"kinds": [{"kind": "cartoon", "one_time": true, "seasons": 1, "waiting_bytes": 1000,
-                        "shows": [], "settings": [], "approval": null, "sample_season": null},
+                        "shows": [], "settings": [], "season_approved_shows": ["movies/Orbit (2026)"], "approval": null, "sample_season": null},
                        {"kind": "live_action", "one_time": false, "seasons": 41, "waiting_bytes": 684000000000,
                         "shows": [{"prefix": "tv/Futurama", "seasons": 7, "waiting_bytes": 90000000000, "sample_season": "tv/Futurama/Season 5"},
                                   {"prefix": "tv/Lucifer", "seasons": 6, "waiting_bytes": 200000000000, "sample_season": "tv/Lucifer/Season 2"},
@@ -204,7 +204,7 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
                         "episode_count": 16, "bytes": 60000000000, "needs_you": true, "state": "ready_to_compare"}]}]}
             """
         case "/api/app/movies": """
-            {"movies": [{"prefix": "movies/Example", "title": "Example", "file_count": 1, "bytes": 1000, "estimated_saved_bytes": 600, "state": "ready"}]}
+            {"movies": [{"prefix": "movies/Example", "title": "Example", "file_count": 1, "bytes": 10000000000, "estimated_saved_bytes": 6000000000, "state": "ready"}]}
             """
         case "/api/app/other": """
             {"items": [{"prefix": "other/Example", "title": "Example", "file_count": 1, "bytes": 1000, "estimated_saved_bytes": 400, "state": "ready"}], "truncated": false}
@@ -212,7 +212,7 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
         case "/api/app/computers": ComputerFixTests.payload
         case "/api/app/activity": ActivityTests.payload
         case "/api/completed": "{\"folders\": []}"
-        case "/api/archive-cleanup": "{\"file_count\": 0, \"total_size_bytes\": 0}"
+        case "/api/archive-cleanup": "{\"file_count\": 12, \"total_size_bytes\": 53000000000}"
         case "/api/app/settings/library": SettingsTests.serverFacts
         case "/api/app/settings/computers": SettingsTests.computerFacts
         case "/api/app/settings/metadata": SettingsTests.metadataFacts
@@ -242,6 +242,11 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
                                       "sample_status": "completed", "sample_ready": true, "one_time": false,
                                       "settings_available": false, "sample_start_prefix": NSNull()]]
         facts["work"] = work
+        facts["library"] = [
+            "tv": ["show_count": 1, "season_count": 1, "episode_count": 16, "total_bytes": 60000000000, "original_bytes": 60000000000],
+            "movies": ["title_count": 1, "total_bytes": 10000000000, "original_bytes": 10000000000],
+            "other": ["item_count": 1, "total_bytes": 1000, "original_bytes": 1000]
+        ]
         facts["computers"] = [
             ["key": "mini", "name": "M1 mini", "platform": "macos", "state": "not_ready", "needs_you": false, "running_count": 0],
             ["key": "studio", "name": "M4 Studio", "platform": "macos", "state": "busy", "needs_you": false, "running_count": 1]

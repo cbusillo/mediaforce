@@ -45,6 +45,17 @@ final class KindsTests: XCTestCase {
         XCTAssertFalse(try facts().kinds[0].shows.contains(where: \.isMovie))
     }
 
+    func testAnIndividuallyApprovedMovieNeverDescribesASeason() throws {
+        var kind = try facts().kinds[0]
+        let movie = KindsFacts.Show(prefix: "movies/Orbit (2026)", seasons: 1, waitingBytes: 8_000_000, sampleSeason: nil)
+        XCTAssertEqual(kind.titleDetail(waiting: movie), Words.size(movie.waitingBytes))
+        kind.seasonApprovedShows = [movie.prefix]
+        for detail in [kind.titleDetail(waiting: movie), kind.titleDetail(waiting: nil)] {
+            XCTAssertNotEqual(detail, Words.size(movie.waitingBytes))
+            XCTAssertFalse(detail.localizedCaseInsensitiveContains("season"))
+        }
+    }
+
     func testTheNewestSamplesSettingComesBeforeAnOlderWatchableShow() throws {
         let older = try facts().kinds[0].settings[0]
         let latest = KindsFacts.Setting(show: "tv/The Blacklist", fromPrefix: "tv/The Blacklist/Season 10",
