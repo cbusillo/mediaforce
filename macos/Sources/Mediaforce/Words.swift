@@ -1668,6 +1668,12 @@ extension Words {
     static let keepFourK = "Keep 4K"
     static func bringDownTo(_ height: Int) -> String { "Bring down to \(height)p" }
     static let approvedShow = "Approved"
+    static let ownSampleApproved = "Own sample approved"
+
+    static func kindTitleDetail(_ show: KindsFacts.Show, approvedShows: [String]?) -> String {
+        guard approvedShows?.contains(show.prefix) == true else { return size(show.waitingBytes) }
+        return show.isMovie ? ownSampleApproved : "Has season approval"
+    }
     // Stopping removes the shared setting, so each show of the kind goes back to its own sample.
     static let stopUsingKind = "Decide Each Title Separately"
     static let kindRefusedTitle = "Mediaforce didn't use that setting"

@@ -115,7 +115,7 @@ enforcing the picture floor.
 
 Space saved draws the ring from the current folder sizes and published savings already in the main window.
 A season’s original size is its current size plus the bytes already saved. Selecting a show keeps
-its seasons in view while new files finish. Left to save labels each segment with its size. Pink shows waiting original backups. Gray shows the space left after subtracting estimated TV and movie savings.
+its seasons in view while new files finish. Left to save labels each segment with its size. Pink shows waiting original backups. Gray shows how much space TV shows, movies and compressed VR & 3D files still use after estimated savings.
 Review and delete in Needs you reveals the Original backups section. Deletion still requires confirmation.
 
 ## Mac page screenshots

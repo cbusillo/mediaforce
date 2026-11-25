@@ -27,11 +27,6 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         var sampleStatus: String? = nil
         var id: String { kind }
 
-        func titleDetail(waiting show: Show?) -> String {
-            if let show, seasonApprovedShows?.contains(show.prefix) != true { return Words.size(show.waitingBytes) }
-            return "Own sample approved"
-        }
-
         var firstSampleShow: Show? { shows.first { $0.sampleSeason != nil } }
         var sampleInProgress: Bool? = nil
 
