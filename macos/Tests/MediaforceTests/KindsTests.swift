@@ -72,6 +72,15 @@ final class KindsTests: XCTestCase {
         XCTAssertFalse(unrelated.offersSample)
     }
 
+    func testAnUndecidedCartoonLookKeepsItsApprovalBesideTheSampleAndGroupSize() throws {
+        let setting = try facts().kinds[0].settings[0]
+        let cartoon = KindsFacts.Kind(kind: "cartoon", oneTime: false, seasons: 1, waitingBytes: 1000,
+                                      shows: [], settings: [setting], approval: nil, sampleSeason: setting.fromPrefix,
+                                      selectedSizeMb: setting.sizeGoalMb)
+        XCTAssertNil(cartoon.firstSetting)
+        XCTAssertEqual(cartoon.sampleSetting, setting)
+    }
+
     func testTheApprovedKindCarriesItsOwnSavedSampleClips() throws {
         let decided = try facts(approval: """
         {"from_prefix": "tv/Raising Hope/Season 2", "approved_at": "now", "library_item_id": null,

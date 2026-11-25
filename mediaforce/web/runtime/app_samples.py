@@ -10,7 +10,7 @@ from mediaforce.library.representatives import sample_coverage_summary
 from mediaforce.reviewing.clips import review_file_from_url
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.tuning.compression_intent import compression_intent_from_payload, compression_intent_options
-from mediaforce.tuning.size_goals import DECIMAL_MEGABYTE_BYTES, measured_followup_request, sample_goal_request, \
+from mediaforce.tuning.size_goals import DECIMAL_MEGABYTE_BYTES, guided_size_goal_options, measured_followup_request, sample_goal_request, \
     with_compression_intent, operator_intent_from_policy
 from mediaforce.web.runtime.app_window import file_identity, season_identity
 from mediaforce.web.runtime.folder_actions import APPROVED_SAMPLE_NOTES, ApprovalNeedsConfirmation, QueueNeedsChoice, \
@@ -166,6 +166,7 @@ def make_sample(
         ai_tune: AiTuneFn,
         retry_saved: RetrySampleFn,
         keep_full_height: bool | None = None,
+        group_size_mb: float | None = None,
 ) -> dict[str, Any]:
     """Make the sample again: retry the saved request, or ask for a new one at the chosen or current size.
 
@@ -174,6 +175,15 @@ def make_sample(
     """
     prefix = str(folder["prefix"])
     action = object_dict(status.get("page_state")).get("primary_action")
+    if group_size_mb is not None:
+        policy = object_dict(folder.get("policy"))
+        video = {**object_dict(policy.get("video")), "size_goal_mode": "normalized", "target_runtime_minutes": 45,
+                 "target_size_mb": group_size_mb, "target_size_bytes": round(group_size_mb * DECIMAL_MEGABYTE_BYTES)}
+        folder = {**folder, "size_goal_options": guided_size_goal_options(
+            video, item_runtime_seconds=float_value(object_dict(folder.get("sample_item")).get("duration_seconds")),
+            default_video_policy=video, audio_policy=object_dict(policy.get("audio")), subtitle_policy=object_dict(policy.get("subtitle")),
+        )}
+        size = "recommended"
     if size is None and action == "choose_size":
         return {"ok": False, "code": "choose_size"}
     result: Mapping[str, Any] = {}
@@ -213,6 +223,11 @@ def _message(value: object) -> dict[str, str]:
     return {"message": value} if isinstance(value, str) and value.strip() else {}
 
 
+def _can_prepare_group_sample(kind: Mapping[str, Any], state: Mapping[str, Any]) -> bool:
+    return (state.get("key") in {"needs_test", "waiting_for_kind"}
+            or kind.get("selected_size_mb") is not None and state.get("key") == "ready_to_compare")
+
+
 def kind_sample_candidates(kinds: Iterable[Mapping[str, Any]], cards: Iterable[Mapping[str, Any]]) -> dict[str, list[str]]:
     states = {str(card["prefix"]): object_dict(card.get("page_state")) for card in cards}
     groups: dict[str, list[str]] = {}
@@ -221,7 +236,7 @@ def kind_sample_candidates(kinds: Iterable[Mapping[str, Any]], cards: Iterable[M
                 or (kind.get("settings") and not kind.get("one_time"))):
             continue
         candidates = [str(show["sample_season"]) for show in object_list(kind.get("shows"))
-                      if states.get(str(show["sample_season"]), {}).get("key") in {"needs_test", "waiting_for_kind"}]
+                      if show.get("sample_season") and _can_prepare_group_sample(kind, states.get(str(show["sample_season"]), {}))]
         groups[str(kind["kind"])] = candidates
     return groups
 
@@ -237,22 +252,24 @@ def prepare_waiting_samples(
         load_payloads: Callable[[str], tuple[dict[str, Any], dict[str, Any]] | None],
         failed_in_a_row: Callable[[str], int],
         make: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]],
+        make_group: Callable[[str, Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] | None = None,
         previous: Mapping[str, SampleStartWait] | None = None,
 ) -> dict[str, SampleStartWait]:
     cards = list(cards)
+    groups = {str(group["kind"]): group for group in kinds}
     for season in samples_to_remake(cards, failed_in_a_row):
         payloads = load_payloads(season)
         if payloads is not None and samples_to_remake([{**payloads[1], "prefix": season}], failed_in_a_row):
             make(*payloads)
     waits: dict[str, SampleStartWait] = {}
-    for kind, candidates in kind_sample_candidates(kinds, cards).items():
+    for kind, candidates in kind_sample_candidates(groups.values(), cards).items():
         wait = None
         started = False
         for season in candidates:
             payloads = load_payloads(season)
-            if payloads is None or object_dict(payloads[1].get("page_state")).get("key") not in {"needs_test", "waiting_for_kind"}:
+            if payloads is None or not _can_prepare_group_sample(groups[kind], object_dict(payloads[1].get("page_state"))):
                 continue
-            result = make(*payloads)
+            result = make_group(kind, *payloads) if make_group else make(*payloads)
             if result.get("ok") or result.get("code") == SamplePreparations.already_preparing:
                 started = True
                 break

@@ -20,13 +20,19 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         let approval: Approval?
         // The season whose sample is being made or waits to be watched; nil when none is.
         let sampleSeason: String?
+        var seasonApprovedShows: [String]? = nil
+        var selectedSizeMb: Double? = nil
+        var sizeOptionsMb: [Double]? = nil
         var sampleReady: Bool? = nil
         var sampleStatus: String? = nil
         var id: String { kind }
 
+        var firstSampleShow: Show? { shows.first { $0.sampleSeason != nil } }
+        var sampleInProgress: Bool? = nil
+
         var reviewSeason: String? { sampleStatus == "choose_another_show" ? nil : sampleSeason }
         var sampleShow: String? { reviewSeason?.split(separator: "/").prefix(2).joined(separator: "/") }
-        var showsSampleFirst: Bool { oneTime || settings.isEmpty || sampleSetting != nil }
+        var showsSampleFirst: Bool { selectedSizeMb != nil || oneTime || settings.isEmpty || sampleSetting != nil }
 
         var sampleButtonTitle: String? {
             if let approval { return approval.sampleMoments?.isEmpty == false ? Words.watchApprovedSample : nil }
@@ -51,6 +57,7 @@ struct KindsFacts: Decodable, Sendable, Equatable {
             if let approval {
                 return settings.first { $0.fromPrefix == approval.fromPrefix } ?? approval.setting
             }
+            guard selectedSizeMb == nil else { return nil }
             return sampleSetting ?? settings.first { $0.libraryItemId != nil } ?? settings.first
         }
     }
@@ -60,7 +67,7 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         let seasons: Int
         let waitingBytes: Int64
         // Its biggest waiting season of the kind, where a sample for the show is made.
-        let sampleSeason: String
+        let sampleSeason: String?
         var id: String { prefix }
         var name: String { String(prefix.split(separator: "/").last ?? "") }
         // A movie title is listed beside the shows its look covers.
@@ -106,6 +113,7 @@ struct KindsFacts: Decodable, Sendable, Equatable {
 struct KindActionResult: Decodable, Sendable {
     let ok: Bool
     let code: String?
+    var message: String? = nil
 }
 
 extension MediaforceClient {
@@ -120,6 +128,14 @@ extension MediaforceClient {
         try await kindAction(kind, "approve", body: ["from_prefix": prefix])
     }
 
+    func chooseKindSize(_ kind: String, megabytes: Double) async throws -> KindActionResult {
+        try await kindAction(kind, "size", body: ["size_mb": megabytes])
+    }
+
+    func makeKindSample(_ kind: String, prefix: String) async throws -> KindActionResult {
+        try await kindAction(kind, "sample", body: ["prefix": prefix], timeout: Self.samplePreparationTimeout)
+    }
+
     func stopKind(_ kind: String) async throws -> KindActionResult {
         try await kindAction(kind, "stop", body: [String: String]())
     }
@@ -129,8 +145,9 @@ extension MediaforceClient {
         try await kindAction(kind, "picture", body: ["keep_full_height": keepFullHeight])
     }
 
-    private func kindAction(_ kind: String, _ action: String, body: some Encodable) async throws -> KindActionResult {
+    private func kindAction(_ kind: String, _ action: String, body: some Encodable, timeout: TimeInterval? = nil) async throws -> KindActionResult {
         var request = URLRequest(url: baseURL.appending(path: "api/app/kinds").appending(path: kind).appending(path: action))
+        if let timeout { request.timeoutInterval = timeout }
         request.httpMethod = "POST"
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

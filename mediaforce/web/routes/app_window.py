@@ -28,6 +28,8 @@ def register_app_window_routes(
         kinds_payload: Callable[[], dict[str, Any]] | None = None,
         approve_kind_action: Callable[[str, str], dict[str, Any]] | None = None,
         stop_kind_action: Callable[[str], dict[str, Any]] | None = None,
+        kind_size_action: Callable[[str, float], bool] | None = None,
+        kind_sample_action: Callable[[str, str], dict[str, Any]] | None = None,
         kind_picture_action: Callable[[str, bool], dict[str, Any]] | None = None,
 ) -> None:
 
@@ -99,6 +101,24 @@ def register_app_window_routes(
         @app.post("/api/app/kinds/{kind}/stop")
         def api_app_kind_stop(kind: str) -> JSONResponse:
             return JSONResponse(stop_kind(kind))
+
+    if kind_size_action is not None:
+        choose_size = kind_size_action
+
+        @app.post("/api/app/kinds/{kind}/size")
+        async def api_app_kind_size(kind: str, request: Request) -> JSONResponse:
+            size = (await request_body(request)).get("size_mb")
+            ok = isinstance(size, (int, float)) and await run_in_threadpool(choose_size, kind, size)
+            return JSONResponse({"ok": ok}, status_code=200 if ok else 409)
+
+    if kind_sample_action is not None:
+        make_group_sample = kind_sample_action
+
+        @app.post("/api/app/kinds/{kind}/sample")
+        async def api_app_kind_sample(kind: str, request: Request) -> JSONResponse:
+            prefix = str((await request_body(request)).get("prefix") or "")
+            result = await run_in_threadpool(make_group_sample, kind, prefix)
+            return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     if kind_picture_action is not None:
         choose_picture = kind_picture_action

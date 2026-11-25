@@ -131,7 +131,7 @@ from mediaforce.web.runtime.archive_cleanup import BackupDeletion
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
 from mediaforce.web.runtime.folder_state import state_slug
 from mediaforce.web.runtime.kind_approvals import KindAwareLoader, SeasonKinds, approve_kind_action, \
-    background_queue_blocker, choose_kind_picture_height, kind_snapshot, kinds_payload, migrate_kind_approvals, next_kind_season, next_approved_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
+    CARTOON, choose_kind_size, selected_cartoon_size, background_queue_blocker, choose_kind_picture_height, kind_snapshot, kinds_payload, migrate_kind_approvals, next_kind_season, next_approved_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
 from mediaforce.web.runtime import FolderCard, cached_host_statuses, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
     archive_cleanup_summary, clear_archive_cleanup_action, \
@@ -1909,14 +1909,29 @@ def create_app(
 
     def _prepare_sample(
             folder: Mapping[str, Any], status: Mapping[str, Any], size: str | None = None,
-            balance: str | None = None, keep_full_height: bool | None = None,
+            balance: str | None = None, keep_full_height: bool | None = None, *, group_size_mb: float | None = None,
     ) -> dict[str, Any]:
         result = sample_preparations.run(str(folder["prefix"]), lambda: make_sample(
             folder, status, size, balance, ai_tune=_folder_ai_tune_action, retry_saved=_folder_ai_tune_confirm_action,
-            keep_full_height=keep_full_height,
+            keep_full_height=keep_full_height, group_size_mb=group_size_mb,
         ))
         LOGGER.info("Making the sample for %s: %s", folder["prefix"], result.get("message") or result.get("code") or result["ok"])
         return result
+
+    def _prepare_group_sample(kind: str, folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[str, Any]:
+        if kind == CARTOON and effective_production_approval(config, str(folder["prefix"]), _load_calibration_state) is not None:
+            return {"ok": False, "code": "approval_scope_changed"}
+        return _prepare_sample(folder, status, group_size_mb=selected_cartoon_size(config) if kind == CARTOON else None)
+
+    def _make_kind_sample(kind: str, prefix: str) -> dict[str, Any]:
+        offered = {show["sample_season"] for entry in _kinds_payload()["kinds"] if entry["kind"] == kind and not entry["approval"]
+                   for show in entry["shows"]}
+        if not prefix or prefix not in offered:
+            return {"ok": False, "code": "approval_scope_changed"}
+        payloads = _season_payloads(prefix)
+        if payloads is None:
+            return {"ok": False, "code": "refused"}
+        return _prepare_group_sample(kind, *payloads)
 
     def _remake_waiting_samples() -> None:
         nonlocal sample_start_waits
@@ -1924,7 +1939,7 @@ def create_app(
             cards = [asdict(card) for card in _list_library_detail_cards(config, connection)]
 
         sample_start_waits = prepare_waiting_samples(cards, _kinds_payload()["kinds"], load_payloads=_season_payloads,
-                                                     failed_in_a_row=_sample_failures_in_a_row, make=_prepare_sample, previous=sample_start_waits)
+                                                     failed_in_a_row=_sample_failures_in_a_row, make=_prepare_sample, make_group=_prepare_group_sample, previous=sample_start_waits)
 
     def _sample_failures_in_a_row(season: str) -> int:
         with open_db(config.paths.db_path) as connection:
@@ -2366,6 +2381,8 @@ def create_app(
         kinds_payload=_kinds_payload,
         approve_kind_action=_approve_app_kind,
         stop_kind_action=lambda kind: {"ok": True, "stopped": stop_kind_approval(config, kind)},
+        kind_size_action=lambda kind, size: choose_kind_size(config, kind, size),
+        kind_sample_action=_make_kind_sample,
         kind_picture_action=lambda kind, keep: {"ok": choose_kind_picture_height(config, kind, keep_full_height=keep)},
     )
     register_child_recovery_routes(app, recover_children_action=_recover_children_action)
