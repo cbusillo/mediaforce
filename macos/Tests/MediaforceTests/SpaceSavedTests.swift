@@ -3,6 +3,23 @@ import XCTest
 @testable import Mediaforce
 
 final class SpaceSavedTests: XCTestCase {
+    func testGroupedInnerRingCountsOnlyPublishedFilesAtTheirOriginalSize() throws {
+        let compressedShow = "tv/Small"
+        let original: Int64 = 80
+        let rows = (0..<60).map { index in
+            let id = index == 0 ? compressedShow : "tv/Show \(index)"
+            let bytes: Int64 = index == 0 ? 200 : 1000
+            return MediaRow(id: id, name: id, kind: .tv, detail: "", bytes: bytes, saved: nil, state: .inProgress,
+                            looseFiles: .init(state: "", episodeCount: 2, bytes: bytes))
+        }
+        let library = SavingsLibrary(rows: rows, sizes: [compressedShow: .init(saved: 60, finishedSeason: false, compressedBefore: original)])
+        let group = try XCTUnwrap(library.groups.first { $0.slices.contains { $0.id == compressedShow } && !$0.isShow })
+        let inner = RingSector.sectors(library.groups, zoomed: false).filter { $0.group == group.id && $0.slice == nil }
+        let green = try XCTUnwrap(inner.first { $0.color == .green })
+        let totalAngle = inner.reduce(0) { $0 + $1.end - $1.start }
+        XCTAssertEqual((green.end - green.start) / totalAngle, Double(original) / Double(group.before), accuracy: 1e-10)
+    }
+
     func testFinishEstimateUsesFourFullWeeksAndSkipsTheWeekStillRunning() throws {
         let bytes = [10, 10, 10, 10, 1000]
         let weeks = bytes.enumerated().map { SavingsHistory.Week(start: String($0.offset), bytes: Int64($0.element)) }

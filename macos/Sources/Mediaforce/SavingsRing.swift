@@ -1,6 +1,6 @@
 import SwiftUI
 
-private struct RingSector {
+struct RingSector {
     let group: String
     let slice: SavingsSlice?
     let start: Double
