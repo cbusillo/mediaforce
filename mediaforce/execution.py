@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from mediaforce.library.season_redo import backup_encode_host
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
@@ -216,6 +217,8 @@ def encode_one_item(
         encode_context: dict[str, Any] | None = None,
 ) -> EncodeResult:
     connection.commit()
+    if host:
+        host = backup_encode_host(host, [item])
     with delivery_lock(config.paths.db_path, int(item["library_item_id"])):
         with _staged_encode_host(config, item, host, process_controller, progress_callback) as encode_host:
             return _encode_one_item_on_host(

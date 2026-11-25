@@ -191,7 +191,7 @@ class StagedIntegrityTests(unittest.TestCase):
             item_id = self._insert_item(connection, rel_path, status="validated")
             stage = self._write_stage(rel_path, b"staged")
             self._insert_artifact(connection, item_id, stage, passed=True)
-        kept_original = self.root / "staging" / "_replaced" / rel_path
+        kept_original = self.root / "staging" / "_replaced" / "previously-published.mkv"
         kept_original.parent.mkdir(parents=True)
         kept_original.write_bytes(b"original")
 

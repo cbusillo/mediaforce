@@ -1155,8 +1155,8 @@ def encode_one_item(
         profile={"video_codec": staged_probe.video_codec, "width": staged_probe.width, "height": staged_probe.height},
         operation_key={"manifest_run_id": manifest["run_id"], "item_index": index,
                        "encode_job_id": staged_values["encode_job_id"], "encode_origin": staged_values["encode_origin"],
-                       "input_sample": item.get("content_version_fingerprint"),
-                       "input_size_bytes": item.get("redo_library_size", source_size_bytes), "source_revision": item.get("source_revision"),
+                       "input_sample": item.get("redo_library_sample", item.get("content_version_fingerprint")),
+                       "input_size_bytes": item.get("redo_library_size", source_size_bytes), "source_revision": item.get("redo_library_revision", item.get("source_revision")),
                        **({"original_backup": str(config.archive_root / item["redo_backup"]),
                            "original_fingerprint": item["redo_original_fingerprint"]} if item.get("redo_backup") else {})}, recorded_at=now,
     )

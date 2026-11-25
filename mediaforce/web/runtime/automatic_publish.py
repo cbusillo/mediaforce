@@ -297,7 +297,7 @@ def _publish_file(
         )
         return
     reasons = []
-    approval = run_approval(config, item, load_calibration_state)
+    approval = run_approval(connection, config, item, load_calibration_state)
     approval_matches = production_approval_matches(approval, manifest, item)
     if not approval_matches:
         reasons.append(
@@ -381,7 +381,7 @@ def _publish_file(
     connection.commit()
     if stop_event is not None and stop_event.is_set():
         return
-    approval = run_approval(config, item, load_calibration_state)
+    approval = run_approval(connection, config, item, load_calibration_state)
     if not production_approval_matches(approval, manifest, item):
         _record_wait(
             connection,

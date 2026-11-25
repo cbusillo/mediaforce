@@ -36,6 +36,7 @@ from mediaforce.web.runtime.audio_preset_runtime import show_audio_preset_payloa
     tv_show_prefix
 from mediaforce.web.runtime.automatic_publish import publish_checked_files_once
 from mediaforce.core.db import DBClient, open_db, open_readonly_db
+from mediaforce.core.db_tables import season_redos
 from mediaforce.core.db_tables import calibration_jobs as calibration_jobs_table
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import library_items
@@ -127,7 +128,7 @@ from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, SamplePrepar
     prepare_waiting_samples, samples_to_remake, start_compressing, with_first_sample_question
 from mediaforce.web.runtime.app_window import app_window_payload, library_file_sample_cards, movies_payload, other_media_payload, tv_shows_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
-from mediaforce.web.runtime.season_redo import stop_redo_season
+from mediaforce.web.runtime.season_redo import cartoon_redo_approval, keep_unavailable_redo, stop_redo_season
 from mediaforce.web.runtime.archive_cleanup import BackupDeletion
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
 from mediaforce.web.runtime.folder_state import state_slug
@@ -1845,10 +1846,8 @@ def create_app(
         )
 
     def _held_files_current_approval(prefix: str) -> str | None:
-        _approval_prefix, calibration = production_calibration(config, prefix, _load_calibration_state)
-        if calibration is None or not _review_gate(calibration).get("can_confirm_full"):
-            return None
-        return production_approval_identity(object_dict(calibration))
+        calibration = _current_remake_calibration(prefix)
+        return production_approval_identity(calibration) if calibration is not None else None
 
     def _queue_held_files(group: ClearedHoldGroup) -> ActionPayload:
         try:
@@ -1860,6 +1859,7 @@ def create_app(
                 override_older_seasons=group.mode == HOLD_MODE_OLDER_SEASONS,
                 older_seasons_confirmed=group.mode == HOLD_MODE_OLDER_SEASONS,
                 only_library_item_ids=group.library_item_ids,
+                expected_approval_contract=_remake_current_approval(group.prefix),
             )
         except HTTPException as exc:
             return {"ok": False, "code": HOLD_REFUSED, "message": str(exc.detail)}
@@ -2021,11 +2021,17 @@ def create_app(
             ),
         )
 
+    def _current_remake_calibration(prefix: str) -> ActionPayload | None:
+        with open_readonly_db(config.paths.db_path) as connection:
+            redoing = connection.execute(select(season_redos.c.state).where(season_redos.c.prefix == prefix)).scalar_one_or_none()
+        if redoing == "running":
+            look = cartoon_redo_approval(config, prefix)
+            return look.calibration if look else None
+        _, calibration = production_calibration(config, prefix, _load_calibration_state)
+        return object_dict(calibration) if calibration and _review_gate(calibration).get("can_confirm_full") else None
+
     def _remake_current_approval(prefix: str) -> ActionPayload | None:
-        _approval_prefix, calibration = production_calibration(config, prefix, _load_calibration_state)
-        if calibration is None or not _review_gate(calibration).get("can_confirm_full"):
-            return None
-        return production_approval_contract(object_dict(calibration))
+        return production_approval_contract(_current_remake_calibration(prefix) or {})
 
     def _decide_size_held_action(
             normalized_prefix: str, library_item_id: int | Collection[int], keep: bool,
@@ -2321,6 +2327,7 @@ def create_app(
         undo_motion_keep_action=_undo_motion_keep_action,
         put_original_back_action=_put_original_back_action,
         queue_folder_encode_action=_queue_folder_encode_action,
+        keep_redo_copy=lambda prefix, item_id: keep_unavailable_redo(config, prefix, item_id),
         stop_season=lambda prefix: stop_redo_season(config, prefix),
         redo_season=lambda prefix: _queue_encode_action(prefix, "", False, season_redo=True),
         validate_folder_outputs_action=_validate_folder_outputs_action,

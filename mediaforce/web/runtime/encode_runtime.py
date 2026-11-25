@@ -41,6 +41,7 @@ from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
+from mediaforce.library.season_redo import backup_encode_host
 from mediaforce.core.db_tables import season_redos
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, RUNNABLE_ENCODE_JOB_KINDS, ensure_queue_state, \
     encode_run_manifest_files, encode_run_manifest_indexes, list_child_encode_jobs, load_encode_job, load_queue_state, persisted_encode_host_payload, save_encode_job, save_queue_state
@@ -4783,6 +4784,7 @@ def load_next_runnable_encode_job(
             connection,
             _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache),
         )
+        host_payload = backup_encode_host(host_payload, reserve_items)
         waiting_reason = reserve_waiting_reason(reserve_items, host_payload)
         if waiting_reason is not None:
             if str(job.get("waiting_reason") or "") != waiting_reason:

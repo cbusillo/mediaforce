@@ -806,16 +806,22 @@ def queue_folder_encode_action(
         )
         redo = connection.execute(select(season_redos).where(season_redos.c.prefix == normalized_prefix)).mappings().first()
         remaining: dict[str, Any] = {}
+        retry_redo = bool(only_library_item_ids is not None and expected_approval_contract is not None and redo and redo["state"] == "running")
+        season_redo = season_redo or retry_redo
         if season_redo:
             if scope.kind != "tv_season" or not redo or redo["state"] not in {"stopped", "running"}:
                 return {"ok": False, "message": "Stop this season before starting its redo."}
             approval = cartoon_redo_approval(config, normalized_prefix)
             if not approval:
-                return {"ok": False, "message": "Waiting for approval of the cartoon look."}
-            if load_active_encode_jobs_for_prefix(connection, normalized_prefix):
+                return {"ok": False, "code": "cartoon_approval_needed", "message": "Waiting for approval of the cartoon look."}
+            if not retry_redo and load_active_encode_jobs_for_prefix(connection, normalized_prefix):
                 return {"ok": False, "message": "Files are still running. Let them finish or stop them in Activity."}
             remaining = remaining_redo_files(connection, normalized_prefix, redo)
-            only_library_item_ids = {int(key) for key in remaining}
+            requested = {int(key) for key in remaining}
+            only_library_item_ids = requested if only_library_item_ids is None else requested.intersection(only_library_item_ids)
+            if not remaining:
+                connection.execute(delete(season_redos).where(season_redos.c.prefix == normalized_prefix))
+                return {"ok": True, "message": "The season has no more episodes to redo."}
 
             def load_redo_approval(_config: MediaforceConfig, prefix: str) -> ActionPayload | None:
                 return approval.calibration if prefix == normalized_prefix else None
@@ -959,7 +965,9 @@ def queue_folder_encode_action(
         unconfirmed_stops = _unconfirmed_stop_holds(connection, config, scope)
         if joining_held_files:
             # Held files join as their own run beside the scope's running one, minus any it is making.
-            busy_item_ids = active_encode_library_item_ids(connection, normalized_prefix)
+            parent_ids = [job["job_id"] for job in load_active_encode_jobs_for_prefix(connection, normalized_prefix)
+                          if job["job_kind"] == "folder" and list_child_encode_jobs(connection, job["job_id"])] if retry_redo else []
+            busy_item_ids = active_encode_library_item_ids(connection, normalized_prefix, exclude_job_ids=parent_ids)
             if busy_item_ids is None or not only_item_ids - busy_item_ids:
                 return {
                     "ok": False,
@@ -1239,10 +1247,20 @@ def queue_folder_encode_action(
             if preview_transaction is not None:
                 preview_transaction.rollback()
         if season_redo:
-            archived_items, missing_originals = archived_redo_items(connection, preflight_config, normalized_prefix, remaining)
-            archived_ids = {int(key) for key, original in remaining.items() if original is not None}
+            archived_items, missing_originals = archived_redo_items(connection, preflight_config, normalized_prefix,
+                                                               {key: value for key, value in remaining.items() if int(key) in only_item_ids})
+            for key in only_item_ids:
+                if prior := remaining.get(str(key)):
+                    prior.pop("reason", None)
+            for file in missing_originals:
+                if file.code == "original_unavailable":
+                    remaining[str(file.library_item_id)]["reason"] = file.reason
+            archived_ids = {int(key) for key, original in remaining.items() if original and original.get("stage")}
             manifest["items"] = [item for item in manifest["items"] if item["library_item_id"] not in archived_ids] + archived_items
-            left_out = [file for file in left_out if file.library_item_id not in archived_ids] + missing_originals
+            left_out = [file for file in left_out if file.library_item_id not in archived_ids or file.code != "target_size_infeasible"] + missing_originals
+            if not retry_redo:
+                connection.execute(update(season_redos).where(season_redos.c.prefix == normalized_prefix)
+                                   .values(state="running", remaining_json=json.dumps(remaining)))
             for item in manifest["items"]:
                 item["redo_season"] = normalized_prefix
         else:
@@ -1436,9 +1454,6 @@ def queue_folder_encode_action(
             manifest_path = write_manifest(connection, refreshed_config, manifest)
         if not joining_held_files:
             clear_terminal_encode_jobs_for_prefix_fn(connection, normalized_prefix, unconfirmed_stops.job_ids)
-        if season_redo:
-            connection.execute(update(season_redos).where(season_redos.c.prefix == normalized_prefix)
-                               .values(state="running", remaining_json=json.dumps(remaining)))
         created_at = now_iso()
         parent_job_id = uuid.uuid4().hex[:12]
         queue_job: JobPayload = {
@@ -2008,7 +2023,7 @@ def _approved_staged_items(
             waiting["season_policy_provenance_missing"] += 1
             continue
         manifest, manifest_item = run_item
-        approval = run_approval(config, {**item, **manifest_item}, load)
+        approval = run_approval(connection, config, {**item, **manifest_item}, load)
         if production_approval_matches(approval, manifest, manifest_item):
             approved.append({**item, **manifest_item} if manifest_item.get("redo_season") else item)
         else:

@@ -85,6 +85,9 @@ struct ItemPage: View {
                                             Button("Stop this season") { Task { await changeRedo(stop: true) } }
                                             Text("Queued episodes will stop. Running episodes can finish.")
                                                 .foregroundStyle(.secondary)
+                                        } else if redo.active == true {
+                                            Text("Redoing this season. Each current episode stays in place until its replacement passes.")
+                                                .foregroundStyle(.secondary)
                                         } else {
                                             Button("Redo at the cartoon look") { Task { await changeRedo(stop: false) } }
                                                 .disabled(!redo.approved)
@@ -94,6 +97,14 @@ struct ItemPage: View {
                                         }
                                     }
                                     .disabled(working)
+                                    ForEach(facts.files.filter { $0.redoWait != nil }) { file in
+                                        VStack(alignment: .leading) {
+                                            Text(file.name).bold()
+                                            Text(file.redoWait ?? "").foregroundStyle(.secondary)
+                                            Button("Keep current episode") { Task { await keepCurrent(file) } }
+                                                .disabled(working)
+                                        }
+                                    }
                                 }
                                 if facts.domain == "movie", let work,
                                    work.state == "waiting_for_measurement" || work.state == "waiting_for_kind" ||
@@ -162,12 +173,23 @@ struct ItemPage: View {
         }
     }
 
+    private func keepCurrent(_ file: ItemFacts.File) async {
+        working = true
+        defer { working = false }
+        do {
+            let result = try await model.client.keepCurrentEpisode(prefix, file: file)
+            if !result.ok { notice = ActionNotice(title: title, message: result.message ?? ActionNotice.unanswered.message) }
+        } catch { notice = .unanswered }
+        await refresh()
+    }
+
     private func changeRedo(stop: Bool) async {
         working = true
         defer { working = false }
         do {
             let result = try await model.client.changeSeasonRedo(prefix, stop: stop)
-            if !result.ok { notice = ActionNotice(title: title, message: result.message ?? ActionNotice.unanswered.message) }
+            if let message = result.message { notice = ActionNotice(title: title, message: message) }
+            else if !result.ok { notice = .unanswered }
         } catch { notice = .unanswered }
         await refresh()
     }
