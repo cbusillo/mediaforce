@@ -64,7 +64,6 @@ def season_kind(measured: Sequence[bool], *, animated: bool | None) -> SeasonGro
 
     if not count:
         return grouping("unmeasured", "no_measured_original")
-    # Cartoons stay one-time Director choices, so they never fall into live action.
     if animated:
         return grouping("cartoon")
     if animated is None:

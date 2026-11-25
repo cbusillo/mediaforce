@@ -36,6 +36,7 @@ struct SampleWork: View {
     let model: MainWindowModel
     @Binding var facts: SampleFacts?
     var namesSeason = false
+    var allowsSeasonChanges = true
     let openItem: (String) -> Void
     // After an action, what else the page around it reads again.
     var acted: () async -> Void = {}
@@ -72,7 +73,7 @@ struct SampleWork: View {
                             .controlSize(.small)
                     }
                     SampleActions(
-                        facts: facts, working: working, approve: { startApproval(scope: $0) }, make: { make(size: $0) },
+                        facts: facts, working: working, allowsSeasonChanges: allowsSeasonChanges, approve: { startApproval(scope: $0) }, make: { make(size: $0) },
                         compress: compress, openItem: { openItem(prefix) }
                     )
                 }
@@ -80,7 +81,7 @@ struct SampleWork: View {
                     Text(failure)
                         .foregroundStyle(.secondary)
                 }
-                if facts.actions.contains(.chooseSize) || (choices.askingSize && !facts.sizeChoices.isEmpty) {
+                if allowsSeasonChanges, facts.actions.contains(.chooseSize) || (choices.askingSize && !facts.sizeChoices.isEmpty) {
                     SizeChoices(facts: facts, working: working) { make(size: $0) }
                 }
                 SampleFactsGrid(facts: facts)
@@ -89,7 +90,7 @@ struct SampleWork: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if (facts.canChooseBalance || choices.askingSize) && !facts.balanceChoices.isEmpty {
+                if allowsSeasonChanges, (facts.canChooseBalance || choices.askingSize) && !facts.balanceChoices.isEmpty {
                     Picker(Words.sampleBalance, selection: Binding(
                         get: {
                             choices.selectedBalance ?? facts.balanceChoices.first(where: \.selected)?.key
@@ -107,7 +108,7 @@ struct SampleWork: View {
                     .disabled(working)
                     .fixedSize(horizontal: false, vertical: true)
                 }
-                if (facts.canChooseBalance || choices.askingSize), let picture = facts.picture {
+                if allowsSeasonChanges, (facts.canChooseBalance || choices.askingSize), let picture = facts.picture {
                     Picker(Words.fourK, selection: Binding(
                         get: { choices.keepFullHeight ?? picture.keepsFullHeight },
                         set: { choices.keepFullHeight = $0 }
@@ -133,7 +134,7 @@ struct SampleWork: View {
             isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
             presenting: confirming
         ) { result in
-            Button(Words.sampleApproval(scope: approval?.scope ?? "season")) {
+            Button(facts?.approvalTitle(approval?.scope ?? "season") ?? "Approve sample") {
                 approval?.confirmed.append(String((result.code ?? "").dropFirst("confirm_".count)))
                 approve()
             }
@@ -245,6 +246,14 @@ struct SampleFactsGrid: View {
     }
 }
 
+private extension SampleFacts {
+    var scopeName: String { season == nil ? "this title" : "this season" }
+
+    func approvalTitle(_ scope: String) -> String {
+        scope == "season" ? "Approve for \(scopeName) and start compressing" : "Approve for all \(Words.kindName(scope).lowercased())"
+    }
+}
+
 /// The sizes to choose from when the sample can't be made until one is chosen.
 struct SizeChoices: View {
     let facts: SampleFacts
@@ -253,11 +262,11 @@ struct SizeChoices: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(Words.chooseSizeHeadline)
+            Text("Choose a size for \(facts.scopeName)")
                 .font(.headline)
             HStack(spacing: 10) {
                 ForEach(facts.sizeChoices) { choice in
-                    Button(Words.sizeChoice(choice)) { make(choice.key) }
+                    Button("\(Words.sizeChoice(choice)) for \(facts.scopeName)") { make(choice.key) }
                 }
             }
         }
@@ -269,6 +278,7 @@ struct SizeChoices: View {
 struct SampleActions: View {
     let facts: SampleFacts
     let working: Bool
+    var allowsSeasonChanges = true
     let approve: (String) -> Void
     let make: (String?) -> Void
     let compress: () -> Void
@@ -278,10 +288,10 @@ struct SampleActions: View {
         let actions = facts.actions
         HStack(spacing: 10) {
             if actions.contains(.approve) {
-                Button(Words.sampleApproval(scope: facts.approvalKind ?? "season")) { approve(facts.approvalKind ?? "season") }
+                Button(facts.approvalTitle(facts.approvalKind ?? "season")) { approve(facts.approvalKind ?? "season") }
                     .buttonStyle(.borderedProminent)
                 if facts.approvalKind != nil {
-                    Button(Words.approveOnlySeason) { approve("season") }
+                    Button("Approve for \(facts.scopeName) only") { approve("season") }
                 }
             }
             if actions.contains(.startCompressing) {
@@ -293,17 +303,17 @@ struct SampleActions: View {
                 Button(Words.workAction(next), action: openItem)
                     .buttonStyle(.borderedProminent)
             }
-            if actions.contains(.makeSample) {
+            if allowsSeasonChanges && actions.contains(.makeSample) {
                 Button(Words.makeSample) { make(nil) }
                     .buttonStyle(.borderedProminent)
             }
-            if actions.contains(.makeAgain) {
+            if allowsSeasonChanges && actions.contains(.makeAgain) {
                 Button(Words.makeSampleAgain) { make(nil) }
             }
-            if actions.contains(.tryAnotherSize) {
-                Menu(Words.tryAnotherSize) {
+            if allowsSeasonChanges && actions.contains(.tryAnotherSize) {
+                Menu("Try another size for \(facts.scopeName)") {
                     ForEach(facts.sizeChoices) { choice in
-                        Button(Words.sizeChoice(choice)) { make(choice.key) }
+                        Button("\(Words.sizeChoice(choice)) for \(facts.scopeName)") { make(choice.key) }
                     }
                 }
             }

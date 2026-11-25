@@ -16,22 +16,38 @@ struct KindPage: View {
     @State private var asking = false
 
     var body: some View {
-        let setting = kind.settings.first { $0.show == chosen } ?? kind.firstSetting
+        let setting = kind.settings.first { $0.show == chosen } ?? kind.firstSetting ?? kind.sampleSetting
         let offering = kind.approval == nil && chosen == nil && kind.showsSampleFirst
-        let offer: ((KindsFacts.Show) -> Void)? = offering && kind.offersSample && !asking ? { makeSample($0.sampleSeason) } : nil
+        let offer: ((KindsFacts.Show) -> Void)? = offering && kind.offersSample && !asking ? { show in if let season = show.sampleSeason { makeSample(season) } } : nil
         let showSample: (() -> Void)? = chosen != nil || (kind.approval == nil && !kind.showsSampleFirst) ? { selectSample() } : nil
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                if kind.shows.isEmpty && kind.settings.isEmpty && kind.approval == nil && kind.reviewSeason == nil {
+                if let size = kind.selectedSizeMb, let options = kind.sizeOptionsMb, kind.approval == nil {
+                    Picker("Size for all cartoons per 45 minutes", selection: Binding(
+                        get: { size },
+                        set: { value in groupAction(refusal: ActionNotice(title: "Size for all cartoons was not saved",
+                                                                          message: "Check the current size and try again.")) {
+                            try await $0.chooseKindSize(kind.kind, megabytes: value)
+                        } }
+                    )) {
+                        ForEach(options, id: \.self) { value in
+                            Text("\(value.formatted()) MB").tag(value)
+                        }
+                    }
+                    .fixedSize()
+                    .disabled(asking || kind.sampleInProgress == true)
+                }
+                if kind.shows.isEmpty && kind.settings.isEmpty && kind.seasonApprovedShows?.isEmpty != false && kind.approval == nil && kind.reviewSeason == nil {
                     Text(Words.kindEmpty(kind.kind)).foregroundStyle(.secondary)
-                } else if offering, let season = kind.reviewSeason {
-                    SampleWork(prefix: season, model: model, facts: $sample, namesSeason: true, openItem: openItem)
+                } else if offering, let season = kind.reviewSeason,
+                          kind.selectedSizeMb == nil || !Words.sampleNeedsRemaking(kind.sampleStatus) {
+                    SampleWork(prefix: season, model: model, facts: $sample, namesSeason: true, allowsSeasonChanges: kind.selectedSizeMb == nil, openItem: openItem)
                         .id(season)
-                } else if offering, let biggest = kind.shows.first {
+                } else if offering, let biggest = kind.firstSampleShow, let season = biggest.sampleSeason {
                     if asking {
                         ProgressView(Words.preparingSample).controlSize(.small)
                     }
-                    Button(Words.makeSampleOf(biggest.name)) { makeSample(biggest.sampleSeason) }
+                    Button(Words.makeSampleOf(biggest.name)) { makeSample(season) }
                         .buttonStyle(.borderedProminent)
                         .disabled(asking)
                 } else if kind.approval != nil, chosen == nil {
@@ -90,13 +106,29 @@ struct KindPage: View {
         else { openSample(season) }
     }
 
-    /// Asks for the show's sample at its own size goal. A refusal opens the season's sample page, which says what the
-    /// sample needs first.
     private func makeSample(_ prefix: String) {
+        if kind.selectedSizeMb != nil {
+            groupAction(refusal: .sampleRefused) { try await $0.makeKindSample(kind.kind, prefix: prefix) }
+        } else {
+            asking = true
+            Task {
+                if await model.makeSample(prefix)?.ok != true { openSample(prefix) }
+                await model.refreshKinds()
+                asking = false
+            }
+        }
+    }
+
+    private func groupAction(refusal: ActionNotice, _ action: @escaping @MainActor (MediaforceClient) async throws -> KindActionResult) {
         asking = true
         Task {
-            if await model.makeSample(prefix)?.ok != true {
-                openSample(prefix)
+            do {
+                let result = try await action(model.client)
+                if !result.ok, result.code != "already_preparing" {
+                    model.notice = refusal.explained(by: result.message)
+                }
+            } catch {
+                model.notice = .unanswered
             }
             await model.refreshKinds()
             asking = false
@@ -135,7 +167,7 @@ struct KindDecision: View {
                     }
                     .fixedSize()
                 }
-                Button(Words.stopUsingKind) { act { try await $0.stopKind(kind.kind) } }
+                Button(kind.kind == "cartoon" ? "Stop using for all cartoons" : Words.stopUsingKind) { act { try await $0.stopKind(kind.kind) } }
             } else if let setting {
                 Button(Words.showSetting(setting.name, setting)) { openItem(setting.show) }
                     .buttonStyle(QuietLinkStyle(primary: true))
@@ -220,16 +252,19 @@ struct KindShows: View {
                             watchable ? choose(setting.show) : open(setting.show)
                         }
                     }
+                    ForEach((kind.seasonApprovedShows ?? []).filter { prefix in !kind.shows.contains { $0.prefix == prefix } }, id: \.self) { prefix in
+                        tile(prefix, name: Words.lastFolder(prefix), detail: "Has season approval", watchable: false) { open(prefix) }
+                    }
                     ForEach(kind.shows.filter { show in !kind.settings.contains { $0.show == show.prefix } }) { show in
                         VStack(alignment: .leading, spacing: 2) {
-                            tile(show.prefix, name: show.name, detail: Words.size(show.waitingBytes), watchable: false) { open(show.prefix) }
-                            if let offer {
+                            tile(show.prefix, name: show.name, detail: kind.seasonApprovedShows?.contains(show.prefix) == true ? "Has season approval" : Words.size(show.waitingBytes), watchable: false) { open(show.prefix) }
+                            if let offer, show.sampleSeason != nil {
                                 Button(Words.makeASample) { offer(show) }
                                     .buttonStyle(QuietLinkStyle())
                                     .font(.caption)
                                     .help(Words.makeSampleOf(show.name))
-                                    .opacity(show.sampleSeason == kind.reviewSeason || (kind.reviewSeason == nil && show == kind.shows.first) ? 0 : 1)
-                                    .disabled(show.sampleSeason == kind.reviewSeason || (kind.reviewSeason == nil && show == kind.shows.first))
+                                    .opacity(show.sampleSeason == kind.reviewSeason || (kind.reviewSeason == nil && show == kind.firstSampleShow) ? 0 : 1)
+                                    .disabled(show.sampleSeason == kind.reviewSeason || (kind.reviewSeason == nil && show == kind.firstSampleShow))
                             }
                         }
                     }
