@@ -70,10 +70,30 @@ struct ItemPage: View {
                                 HStack(alignment: .top) {
                                     ItemHeader(facts: facts, poster: facts.showPrefix.flatMap(model.posters.image(for:)), openShow: openItem)
                                     if let work {
-                                        WorkActions(actions: facts.workActions(work.actions), working: working) { action in
+                                        let actions = facts.workActions(work.actions).filter {
+                                            facts.seasonRedo == nil || ($0 != .startCompressing && $0 != .retryUnfinished)
+                                        }
+                                        WorkActions(actions: actions, working: working) { action in
                                             perform(action, facts, scroll: scroll)
                                         }
                                     }
+                                }
+                                if let redo = facts.seasonRedo {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Text("Original backups are kept until this season’s redo finishes.")
+                                        if redo.state == "marked" {
+                                            Button("Stop this season") { Task { await changeRedo(stop: true) } }
+                                            Text("Queued episodes will stop. Running episodes can finish.")
+                                                .foregroundStyle(.secondary)
+                                        } else {
+                                            Button("Redo at the cartoon look") { Task { await changeRedo(stop: false) } }
+                                                .disabled(!redo.approved)
+                                            Text(redo.approved ? "Each episode keeps its current copy until the new one passes its checks." :
+                                                    "Waiting for approval of the cartoon look.")
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .disabled(working)
                                 }
                                 if facts.domain == "movie", let work,
                                    work.state == "waiting_for_measurement" || work.state == "waiting_for_kind" ||
@@ -140,6 +160,16 @@ struct ItemPage: View {
             selected = facts.waiting.first?.id
             scroll.scrollTo(SampleFacts.Action.reviewFiles, anchor: .top)
         }
+    }
+
+    private func changeRedo(stop: Bool) async {
+        working = true
+        defer { working = false }
+        do {
+            let result = try await model.client.changeSeasonRedo(prefix, stop: stop)
+            if !result.ok { notice = ActionNotice(title: title, message: result.message ?? ActionNotice.unanswered.message) }
+        } catch { notice = .unanswered }
+        await refresh()
     }
 
     private func run(_ action: WorkAction) async {

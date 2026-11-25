@@ -127,6 +127,7 @@ from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, SamplePrepar
     prepare_waiting_samples, samples_to_remake, start_compressing, with_first_sample_question
 from mediaforce.web.runtime.app_window import app_window_payload, library_file_sample_cards, movies_payload, other_media_payload, tv_shows_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
+from mediaforce.web.runtime.season_redo import stop_redo_season
 from mediaforce.web.runtime.archive_cleanup import BackupDeletion
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
 from mediaforce.web.runtime.folder_state import state_slug
@@ -1799,6 +1800,7 @@ def create_app(
             scope_membership_token: str = "",
             only_library_item_ids: Collection[int] | None = None,
             expected_approval_contract: ActionPayload | None = None,
+            season_redo: bool = False,
             admission_blocker: Callable[[DBClient, MediaforceConfig], ActionPayload | None] | None = None,
             release_hold: bool = False,
     ) -> ActionPayload:
@@ -1813,6 +1815,7 @@ def create_app(
             older_seasons_confirmed=older_seasons_confirmed,
             only_library_item_ids=only_library_item_ids,
             expected_approval_contract=expected_approval_contract,
+            season_redo=season_redo,
             release_hold=release_hold,
             now_iso=_now_iso,
             load_job_state=_load_job_state,
@@ -2318,6 +2321,8 @@ def create_app(
         undo_motion_keep_action=_undo_motion_keep_action,
         put_original_back_action=_put_original_back_action,
         queue_folder_encode_action=_queue_folder_encode_action,
+        stop_season=lambda prefix: stop_redo_season(config, prefix),
+        redo_season=lambda prefix: _queue_encode_action(prefix, "", False, season_redo=True),
         validate_folder_outputs_action=_validate_folder_outputs_action,
         promote_folder_outputs_action=_promote_folder_outputs_action,
         decide_size_held_action=_decide_size_held_action,

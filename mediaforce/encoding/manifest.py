@@ -11,6 +11,7 @@ from sqlalchemy import update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.media_storage import probe_media_path
+from mediaforce.library.season_redo import verify_redo_input
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.hosts.config import execution_mode_for_host, host_media_access_for_host
 from mediaforce.hosts.transport import EncodeConnectionLostError, ssh_connection_dropped
@@ -383,6 +384,9 @@ def encode_one_item(
         )
     except OSError:
         pass
+    if item.get("redo_backup"):
+        verify_redo_input(config, item, input_path=source_path)
+        current_source_fingerprint = item["redo_cadence_fingerprint"]
     if cadence_decision is not None:
         try:
             cadence_filter(
@@ -1092,6 +1096,8 @@ def encode_one_item(
         item, source_path, quality_metric=quality_result.metric,
         host=host, process_controller=process_controller,
     )
+    if item.get("redo_backup"):
+        verify_redo_input(config, item, input_path=source_path)
     target_lineage_json = completed_target_lineage(
         item=item, manifest_run_id=manifest["run_id"], index=index,
         before=lineage_identity_before, after=lineage_identity_after,
@@ -1150,7 +1156,9 @@ def encode_one_item(
         operation_key={"manifest_run_id": manifest["run_id"], "item_index": index,
                        "encode_job_id": staged_values["encode_job_id"], "encode_origin": staged_values["encode_origin"],
                        "input_sample": item.get("content_version_fingerprint"),
-                       "input_size_bytes": source_size_bytes, "source_revision": item.get("source_revision")}, recorded_at=now,
+                       "input_size_bytes": item.get("redo_library_size", source_size_bytes), "source_revision": item.get("source_revision"),
+                       **({"original_backup": str(config.archive_root / item["redo_backup"]),
+                           "original_fingerprint": item["redo_original_fingerprint"]} if item.get("redo_backup") else {})}, recorded_at=now,
     )
     connection.execute(
         sqlite_insert(staged_artifacts)

@@ -27,6 +27,8 @@ from mediaforce.library.staged_validation import staged_validation_outcome
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.web.runtime.app_window import season_identity
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
+from mediaforce.core.db_tables import season_redos
+from mediaforce.web.runtime.season_redo import cartoon_redo_approval
 from mediaforce.web.runtime.kind_approvals import movie_queue_facts
 from mediaforce.web.runtime.production_approval import LoadCalibrationState
 from mediaforce.web.runtime.episode_progress import load_season_episode_progress
@@ -83,6 +85,7 @@ def item_payload(
                 staged_artifacts.c.validation_json,
             ).where(staged_artifacts.c.library_item_id.in_(ids))).mappings()
         }
+        redo = connection.execute(select(season_redos.c.state).where(season_redos.c.prefix == scope.prefix)).scalar_one_or_none()
         kept = {
             int(item_id): str(reason)
             for item_id, reason in connection.execute(
@@ -134,6 +137,7 @@ def item_payload(
         })
     files.sort(key=lambda row: (row["episode"] is None, row["season"] or 0, row["episode"] or 0, row["name"]))
     return {
+        "season_redo": ({"state": redo, "approved": cartoon_redo_approval(config, scope.prefix) is not None} if redo else None),
         "prefix": scope.prefix,
         "domain": scope.domain,
         "kind": scope.kind,

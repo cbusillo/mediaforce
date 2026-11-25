@@ -1630,3 +1630,56 @@ def test_an_install_hold_keeps_every_library_change_waiting(config: MediaforceCo
     assert Path(published["source_path"]).read_bytes() == b"av1"
     record.unlink()
     assert clear_archive_cleanup_action(config)["removed_count"] == len(backups)
+
+
+def test_cleanup_keeps_marked_season_backups_including_later_publications(config: MediaforceConfig) -> None:
+    from mediaforce.core.db_tables import season_redos
+    from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary
+
+    season = "tv/Futurama/Season 6"
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(season_redos.insert().values(prefix=season, state="marked"))
+    _, first, _ = _stage(config, f"{season}/one.mkv")
+    _, later, _ = _stage(config, f"{season}/two.mkv")
+    _, other, _ = _stage(config, "tv/Futurama/Season 60/one.mkv")
+    _run(config)
+    assert archive_cleanup_summary(config)["file_count"] == 1
+    assert clear_archive_cleanup_action(config)["removed_count"] == 1
+    assert not (config.archive_root / other["rel_path"]).exists()
+    for episode in (first, later):
+        assert (config.archive_root / episode["rel_path"]).read_bytes() == b"original media file"
+
+
+@pytest.mark.parametrize("passes", [False, True])
+def test_redo_only_replaces_the_current_copy_after_validation(config: MediaforceConfig, passes: bool) -> None:
+    from mediaforce.core.db_tables import season_redos
+    from mediaforce.core.utils import content_version_fingerprint
+    from mediaforce.execution import promote_one_item, validate_one_item
+
+    prefix = "tv/Futurama/Season 6"
+    item_id, item, staged = _stage(config, f"{prefix}/episode.mkv")
+    _run(config)
+    current = Path(item["source_path"])
+    original = config.archive_root / item["rel_path"]
+    previous = current.read_bytes()
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(season_redos.insert().values(prefix=prefix, state="running",
+                           remaining_json=json.dumps({str(item_id): {}})))
+        item.update(redo_backup=item["rel_path"], redo_original_path=str(current), redo_season=prefix,
+                    redo_original_fingerprint=content_version_fingerprint(original, original.stat()))
+        staged.write_bytes(b"v2" if passes else b"larger than the original input file")
+        connection.execute(staged_artifacts.update().where(staged_artifacts.c.library_item_id == item_id).values(
+            promoted_at=None, validated_at=None, validation_json="{}", staging_size_bytes=staged.stat().st_size))
+        with patch("mediaforce.execution.probe_media", return_value=_probe()):
+            assert validate_one_item(connection, config, item)["passed"] is passes
+            if passes:
+                promote_one_item(connection, config, item, force=False)
+            else:
+                with pytest.raises(RuntimeError, match="must be validated"):
+                    promote_one_item(connection, config, item, force=True)
+    assert current.read_bytes() == (b"v2" if passes else previous)
+    assert original.read_bytes() == b"original media file"
+    if passes:
+        assert previous in [path.read_bytes() for path in original.parent.iterdir() if path != original]
+    with open_db(config.paths.db_path) as connection:
+        assert (connection.execute(select(season_redos.c.state)).first() is None) is passes

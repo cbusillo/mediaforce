@@ -11,6 +11,7 @@ from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import library_items, staged_artifacts
 from mediaforce.encoding.delivery_lock import archive_activity
 from mediaforce.encoding.staging import safe_unlink
+from mediaforce.library.season_redo import archive_season_paths, redo_item_ids
 from mediaforce.ops.runtime_install import update_hold_reason
 from mediaforce.encoding.source_publication import commit_archive_removal, pending_archive_paths, prepare_archive_removal, reconcile_archive_removals
 from mediaforce.web.settings_runtime import settings_archive_root
@@ -21,7 +22,10 @@ def archive_cleanup_summary(config: MediaforceConfig, *, transcode_root: str | N
     file_count = 0
     total_size_bytes = 0
     try:
-        for _path, size in _archive_files(archive_root):
+        protected = recovery_archive_paths(config, archive_root) if archive_root else set()
+        for path, size in _archive_files(archive_root):
+            if archive_path_needs_recovery(path, protected):
+                continue
             file_count += 1
             total_size_bytes += size
     except OSError as error:
@@ -191,7 +195,7 @@ def _clear_archive_cleanup_action(
     return {
         "ok": True,
         "message": f"Deleted {removed_count} original backup{'s' if removed_count != 1 else ''}."
-                   + (" Kept originals needed by unpublished files. Inspect and restore those files before cleanup."
+                   + (" Kept originals needed for recovery or a season redo. Inspect and restore any unpublished files that need recovery."
                       if preserved_count else ""),
         "preserved_count": preserved_count,
         "removed_count": removed_count,
@@ -215,13 +219,15 @@ def recovery_archive_paths(config: MediaforceConfig, archive_root: Path) -> set[
     if not config.paths.db_path.is_file():
         return set()
     with open_db(config.paths.db_path) as connection:
+        redo_ids = redo_item_ids(connection)
+        seasons = archive_season_paths(connection, archive_root)
         rows = connection.execute(
             select(library_items.c.rel_path, staged_artifacts.c.archived_source_path)
             .join(staged_artifacts, library_items.c.id == staged_artifacts.c.library_item_id)
-            .where(staged_artifacts.c.promoted_at.is_(None))
+            .where(staged_artifacts.c.promoted_at.is_(None) | library_items.c.id.in_(redo_ids))
         ).mappings().all()
         pending = pending_archive_paths(connection)
-    return pending | {path for row in rows for path in (
+    return pending | seasons | {path for row in rows for path in (
         (archive_root / str(row["rel_path"])).resolve(),
         *((Path(str(row["archived_source_path"])).resolve(),) if row["archived_source_path"] else ()),
     )}
@@ -229,7 +235,7 @@ def recovery_archive_paths(config: MediaforceConfig, archive_root: Path) -> set[
 
 def archive_path_needs_recovery(path: Path, protected: set[Path]) -> bool:
     resolved = path.resolve()
-    return resolved in protected or any(
+    return resolved in protected or not protected.isdisjoint(resolved.parents) or any(
         resolved.parent == original.parent
         and resolved.name.startswith(f".{original.name}.promotion-backup-")
         for original in protected

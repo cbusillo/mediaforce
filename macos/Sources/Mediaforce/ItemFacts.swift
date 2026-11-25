@@ -14,6 +14,12 @@ struct ItemFacts: Decodable, Sendable {
     let sound: Sound?
     let stillAiring: StillAiring?
     let movieQueue: MovieQueue?
+    var seasonRedo: SeasonRedo?
+
+    struct SeasonRedo: Decodable, Sendable {
+        let state: String
+        let approved: Bool
+    }
 
     struct MovieQueue: Decodable, Sendable {
         let waits: [String]
@@ -243,6 +249,10 @@ extension MediaforceClient {
     /// The Director's confirmed release of one held file: it is cleaned up and tried again like any retry.
     func releaseHold(_ file: ItemFacts.File) async throws -> ItemActionResult {
         try await folderAction(file.relPath, "queue-encode", body: ["release_hold": true, "bypass_schedule": false])
+    }
+
+    func changeSeasonRedo(_ prefix: String, stop: Bool) async throws -> ItemActionResult {
+        try await folderAction(prefix, stop ? "stop-season" : "redo-season", body: [:])
     }
 
     func retryUnfinished(_ prefix: String) async throws -> ItemActionResult {

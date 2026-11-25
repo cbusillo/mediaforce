@@ -62,6 +62,9 @@ def resolve_item_source_path(
         host: dict[str, Any] | None = None,
         host_media_access_for_host: Callable[[dict[str, Any] | None], str],
 ) -> Path:
+    if backup := item.get("redo_backup"):
+        root = config.archive_root if host_media_access_for_host(host) == "stream" else config.archive_root_for_host(host)
+        return root / backup
     if host_media_access_for_host(host) == "stream":
         return _controller_item_source_path(item)
     mapped_path = _mapped_item_source_path(config, item, host=host)
@@ -77,7 +80,7 @@ def resolve_item_quality_source_path(
         host: dict[str, Any] | None = None,
         host_media_access_for_host: Callable[[dict[str, Any] | None], str],
 ) -> Path:
-    if host_media_access_for_host(host) != "stream":
+    if item.get("redo_backup") or host_media_access_for_host(host) != "stream":
         return resolve_item_source_path(
             config,
             item,

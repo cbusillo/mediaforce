@@ -40,6 +40,8 @@ def register_folder_routes(
     save_series_lifecycle_action: Callable[[str, str], dict[str, Any]],
     save_audio_preset_action: Callable[[str, str], dict[str, Any]],
     decide_genre_sound: Callable[[bool], dict[str, Any]],
+    stop_season: Callable[[str], dict[str, Any]] | None = None,
+    redo_season: Callable[[str], dict[str, Any]] | None = None,
     queue_folder_encode_action: Callable[[str, str, bool, bool, str, bool], dict[str, Any]],
     validate_folder_outputs_action: Callable[[str, str], dict[str, Any]],
     promote_folder_outputs_action: Callable[[str, str], dict[str, Any]],
@@ -76,6 +78,19 @@ def register_folder_routes(
             raise HTTPException(status_code=400, detail="Choose Yes or No.")
         result = await run_in_threadpool(decide_genre_sound, enabled)
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+    if stop_season is not None and redo_season is not None:
+        stop, redo = stop_season, redo_season
+
+        @app.post("/api/folders/{prefix:path}/stop-season")
+        def api_stop_season(prefix: str) -> JSONResponse:
+            result = stop(prefix.strip("/"))
+            return JSONResponse(result, status_code=200 if result["ok"] else 409)
+
+        @app.post("/api/folders/{prefix:path}/redo-season")
+        def api_redo_season(prefix: str) -> JSONResponse:
+            result = redo(prefix.strip("/"))
+            return JSONResponse(result, status_code=200 if result["ok"] else 409)
 
     @app.post("/api/folders/{prefix:path}/queue-encode")
     async def api_folder_queue_encode(prefix: str, request: Request) -> JSONResponse:
