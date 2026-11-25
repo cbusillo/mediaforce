@@ -294,6 +294,20 @@ def test_new_sample_uses_the_offered_size_when_an_old_sample_has_no_budget(actio
         assert intent["resolution"]["max_height"] == 720
 
 
+def test_new_group_size_resamples_the_preferred_cartoon_before_another_show() -> None:
+    fut = "tv/Futurama/Season 7"
+    other = "tv/Another show/Season 1"
+    cards: list[dict[str, Any]] = [{"prefix": fut, "page_state": {"key": "ready_to_compare"}},
+             {"prefix": other, "page_state": {"key": "needs_test"}}]
+    group = {"kind": "cartoon", "selected_size_mb": 225, "shows": [{"sample_season": fut}, {"sample_season": other}]}
+    states = {card["prefix"]: card for card in cards}
+    prepared = []
+    prepare_waiting_samples(cards, [group], load_payloads=lambda prefix: ({"prefix": prefix}, states[prefix]),
+                            failed_in_a_row=lambda _: 0, make=lambda *_: pytest.fail("used season settings"),
+                            make_group=lambda kind, folder, _: prepared.append((kind, folder["prefix"])) or {"ok": True})
+    assert prepared == [("cartoon", fut)]
+
+
 def test_group_sample_replaces_the_seasons_old_budget_with_its_normalized_goal() -> None:
     folder = _folder(sample_item={"duration_seconds": 1350})
     calls: list[tuple[Any, ...]] = []

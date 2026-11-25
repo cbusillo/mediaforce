@@ -686,7 +686,7 @@ def test_only_a_folders_own_approval_sampled_on_that_kind_extends_to_it(tmp_path
     show_on_toon = {"tv/Show": _approved_on(config, f"{toon_season}/e01.mkv")}
     assert extend(LIVE_ACTION, live_season, show_on_toon)["code"] == SOURCE_KIND_DIFFERS_CODE
     assert extend(LIVE_ACTION, OTHER_SEASON, toon_sample)["code"] == SOURCE_KIND_DIFFERS_CODE
-    assert extend("cartoon", OTHER_SEASON, toon_sample)["code"] == "group_size_changed"
+    assert extend("cartoon", OTHER_SEASON, toon_sample)["code"] == "sample_changed"
     assert extend(LIVE_ACTION, APPROVED_SEASON, {APPROVED_SEASON: _approved_on(config, None)})["code"] == SOURCE_KIND_DIFFERS_CODE
     assert load_kind_approval(config, LIVE_ACTION) is None
     assert extend(LIVE_ACTION, f"{APPROVED_SEASON}/e01.mkv", live_sample)["ok"]
@@ -1904,6 +1904,24 @@ def test_failed_season_is_excluded_from_group_sample_and_new_sample_choices(tmp_
     source = _approved_on(config, f"{APPROVED_SEASON}/e00.mkv", size_mb=150)
     assert approve_kind(config, "cartoon", APPROVED_SEASON, source, approved_at="2026-11-25T15:00:00Z")["ok"]
     assert effective_production_approval(config, EPISODE, load) is None
+
+
+@pytest.mark.parametrize("has_draft", [True, False])
+def test_snapshot_and_queue_preserve_live_action_coverage_after_an_old_failed_sample(tmp_path: Path, has_draft: bool) -> None:
+    config = _config(tmp_path)
+    _finished_sample(config, SEASON)
+    assert approve_kind(config, LIVE_ACTION, APPROVED_SEASON, _approved(config), approved_at="2026-11-25T15:00:00Z")["ok"]
+    folders = {SEASON: _review_ready()} if has_draft else {}
+    load = _loader(folders, {SEASON: LIVE_ACTION})
+    with open_db(config.paths.db_path) as connection:
+        _completed_and_waiting_seasons(connection)
+        connection.execute(calibration_jobs.update().values(status="failed"))
+        connection.commit()
+        with kind_snapshot(connection, config, load):
+            displayed = effective_production_approval(config, EPISODE, load)
+        queued = effective_production_approval(config, EPISODE, load)
+    assert displayed is not None and displayed.kind == LIVE_ACTION
+    assert queued == displayed
 
 
 def test_futuramas_passing_sample_at_the_selected_size_leads_other_cartoons(tmp_path: Path) -> None:

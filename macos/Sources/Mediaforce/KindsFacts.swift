@@ -20,11 +20,15 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         let approval: Approval?
         // The season whose sample is being made or waits to be watched; nil when none is.
         let sampleSeason: String?
+        var seasonApprovedShows: [String]? = nil
         var selectedSizeMb: Double? = nil
         var sizeOptionsMb: [Double]? = nil
         var sampleReady: Bool? = nil
         var sampleStatus: String? = nil
         var id: String { kind }
+
+        var firstSampleShow: Show? { shows.first { $0.sampleSeason != nil } }
+        var sampleInProgress: Bool? = nil
 
         var reviewSeason: String? { sampleStatus == "choose_another_show" ? nil : sampleSeason }
         var sampleShow: String? { reviewSeason?.split(separator: "/").prefix(2).joined(separator: "/") }
@@ -108,6 +112,7 @@ struct KindsFacts: Decodable, Sendable, Equatable {
 struct KindActionResult: Decodable, Sendable {
     let ok: Bool
     let code: String?
+    var message: String? = nil
 }
 
 extension MediaforceClient {
@@ -139,9 +144,9 @@ extension MediaforceClient {
         try await kindAction(kind, "picture", body: ["keep_full_height": keepFullHeight])
     }
 
-    private func kindAction(_ kind: String, _ action: String, body: some Encodable, timeout: TimeInterval = Self.factsTimeout) async throws -> KindActionResult {
+    private func kindAction(_ kind: String, _ action: String, body: some Encodable, timeout: TimeInterval? = nil) async throws -> KindActionResult {
         var request = URLRequest(url: baseURL.appending(path: "api/app/kinds").appending(path: kind).appending(path: action))
-        request.timeoutInterval = timeout
+        if let timeout { request.timeoutInterval = timeout }
         request.httpMethod = "POST"
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

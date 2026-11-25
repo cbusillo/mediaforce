@@ -34,7 +34,7 @@ from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES, derive_item_workflow_state
 from mediaforce.library.content_kinds import look_group, season_grouping, season_kind_report
-from mediaforce.tuning.calibration_jobs import load_latest_sample_job, load_latest_jobs_for_prefixes
+from mediaforce.tuning.calibration_jobs import load_latest_job, load_latest_sample_job, load_latest_jobs_for_prefixes
 from mediaforce.tuning.size_goals import tallest_picture
 from mediaforce.web.runtime.app_samples import sample_moments
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
@@ -118,7 +118,7 @@ def approve_kind(
         saved[KEEP_FULL_HEIGHT_FIELD] = True
     with _group_choice_lock:
         if not _matches_group_size(config, kind, production_approval_contract(payload)):
-            return {"ok": False, "code": "group_size_changed"}
+            return {"ok": False, "code": "sample_changed"}
         _save_kind_approval(config, kind, {**saved, "kind": kind, "from_prefix": from_prefix, "kind_approved_at": approved_at})
     return {"ok": True, "kind": kind, "from_prefix": from_prefix}
 
@@ -239,7 +239,7 @@ class KindAwareLoader:
             boundaries = {}
             for kind in pending:
                 settings = _lent_settings(config, kind, contents.approvals, contents.episodes,
-                                          object_dict(contents.report.get("kinds_by_season")))
+                                          object_dict(contents.report.get("kinds_by_season")), contents.failed_seasons)
                 if settings:
                     boundaries[kind] = object_dict(load(config, settings[0]["from_prefix"])).get("accepted_at")
                 else:
@@ -250,7 +250,7 @@ class KindAwareLoader:
                                         if not finished or _sample_covers_kind(config, kind, load(config, prefix), self._kind_of) else None)
             jobs = load_latest_jobs_for_prefixes(connection, [row["season"] for row in rows])
         waits.update({row["season"]: SampleWait(kind=row["kind"]) for row in rows
-                      if row["kind"] in boundaries and row["season"] not in contents.failed_seasons
+                      if row["kind"] in boundaries and (row["kind"] != CARTOON or row["season"] not in contents.failed_seasons)
                       and sample_allows_kind(config, row["season"], load, jobs.get(row["season"]), boundaries[row["kind"]])
                       and effective_production_approval(config, row["season"], load) is None})
         return waits
@@ -273,14 +273,14 @@ class KindAwareLoader:
             return None
         approval = EffectiveApproval(season, calibration, production_approval_contract(calibration), kind=kind)
         has_folder = any(load(config, prefix) is not None for prefix in approval_prefixes(rel_path))
-        if contents and season in contents.failed_seasons:
+        if kind == CARTOON and contents and season in contents.failed_seasons:
             return None
         if has_folder or (kind == CARTOON and contents is None and config.paths.db_path.exists()):
             if has_folder and (not approval.current or not config.paths.db_path.exists()):
                 return None
             with open_readonly_db(config.paths.db_path) as connection:
-                job = load_latest_sample_job(connection, season)
-            if (job and job.get("status") in SAMPLE_FAILED_STATUSES
+                job = load_latest_sample_job(connection, season) if kind == CARTOON else load_latest_job(connection, season)
+            if (kind == CARTOON and job and job.get("status") in SAMPLE_FAILED_STATUSES
                     or not sample_allows_kind(config, rel_path, load, job, calibration.get("kind_approved_at"))):
                 return None
         return approval
@@ -596,7 +596,7 @@ def _lent_settings(
         config: MediaforceConfig, kind: str,
         approvals: Mapping[str, list[_ShowApproval]],
         episodes: Mapping[str, list[tuple[str, int]]],
-        kinds_by_season: Mapping[str, str],
+        kinds_by_season: Mapping[str, str], failed_seasons: set[str],
 ) -> list[dict[str, Any]]:
     """Each show approved on a season of this kind, once, with an episode made under its approval to watch when one
     is kept; shows with an episode come first. A kind one approval covers lists only approvals that can extend to it."""
@@ -606,7 +606,7 @@ def _lent_settings(
             {"show": show, "from_prefix": entry.approval.prefix, **_size_goal_facts(entry.approval),
              "library_item_id": _episode_made_under(episodes[show], entry.seasons)}
             for entry in found
-            if kinds_by_season.get(entry.sample_season) == kind
+            if kinds_by_season.get(entry.sample_season) == kind and entry.sample_season not in failed_seasons
             and _extension_refusal(entry.approval) is None and _matches_group_size(config, kind, entry.approval.contract)
         ]
         if candidates:
@@ -673,8 +673,7 @@ def _kind_contents(connection: DBClient, config: MediaforceConfig, load_calibrat
                                           if (season := look_group(library_types, path)) is not None})
     failed = {job["prefix"] for job in samples if job.get("status") in SAMPLE_FAILED_STATUSES}
     approvals_by_show = {show: found for show, files in episodes.items()
-                         if (found := [entry for entry in _show_approvals(config, library_types, show, files, folders_only)
-                                       if entry.sample_season not in failed])}
+                         if (found := _show_approvals(config, library_types, show, files, folders_only))}
     report = _kind_report(
         connection, config, folders_only,
         sample_seasons={entry.sample_season for found in approvals_by_show.values() for entry in found}
@@ -751,7 +750,7 @@ def kinds_payload(
             "waiting_bytes": int(object_dict(totals.get(kind)).get("waiting_bytes") or 0),
             "shows": [{"prefix": prefix, **values} for prefix, values in
                       sorted(shows[kind].items(), key=lambda entry: (kind == CARTOON and entry[0].split("/")[-1].casefold() != "futurama", -entry[1]["waiting_bytes"], entry[0]))],
-            "settings": _lent_settings(config, kind, approvals_by_show, episodes, kinds_by_season),
+            "settings": _lent_settings(config, kind, approvals_by_show, episodes, kinds_by_season, contents.failed_seasons),
             "approval": approvals[kind],
             "sample_season": _approved_sample_season(config, kind) or object_dict(contents.samples.get(kind)).get("prefix"),
             "sample_status": object_dict(contents.samples.get(kind)).get("status") or "not_started",
@@ -765,6 +764,11 @@ def kinds_payload(
     }
     for entry in payload["kinds"]:
         season = entry["sample_season"]
+        if entry["kind"] == CARTOON:
+            entry["sample_in_progress"] = entry["sample_status"] in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES
+            offered = {setting["show"] for setting in entry["settings"]}
+            entry["season_approved_shows"] = sorted(show for show, found in approvals_by_show.items() if show not in offered
+                                                   and any(kinds_by_season.get(item.sample_season) == CARTOON for item in found))
         entry["sample_ready"] = False
         if season and entry["sample_status"] in {"pending_review", "completed"}:
             calibration = contents.load_calibration(config, season)
@@ -839,7 +843,7 @@ def approve_kind_action(
         return {"ok": False, "code": NO_FOLDER_APPROVAL_CODE}
     if reviewed_draft_hash is not None and approval.calibration.get("accepted_draft_hash") != reviewed_draft_hash:
         return {"ok": False, "code": "sample_changed"}
-    if config.paths.db_path.exists():
+    if kind == CARTOON and config.paths.db_path.exists():
         source_file = str(object_dict(approval.calibration.get("sample_item")).get("rel_path") or "")
         source_season = season_prefix_of(config, source_file)
         if source_season:

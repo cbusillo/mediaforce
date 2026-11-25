@@ -223,6 +223,11 @@ def _message(value: object) -> dict[str, str]:
     return {"message": value} if isinstance(value, str) and value.strip() else {}
 
 
+def _can_prepare_group_sample(kind: Mapping[str, Any], state: Mapping[str, Any]) -> bool:
+    return (state.get("key") in {"needs_test", "waiting_for_kind"}
+            or kind.get("selected_size_mb") is not None and state.get("key") == "ready_to_compare")
+
+
 def kind_sample_candidates(kinds: Iterable[Mapping[str, Any]], cards: Iterable[Mapping[str, Any]]) -> dict[str, list[str]]:
     states = {str(card["prefix"]): object_dict(card.get("page_state")) for card in cards}
     groups: dict[str, list[str]] = {}
@@ -231,7 +236,7 @@ def kind_sample_candidates(kinds: Iterable[Mapping[str, Any]], cards: Iterable[M
                 or (kind.get("settings") and not kind.get("one_time"))):
             continue
         candidates = [str(show["sample_season"]) for show in object_list(kind.get("shows"))
-                      if states.get(str(show["sample_season"]), {}).get("key") in {"needs_test", "waiting_for_kind"}]
+                      if show.get("sample_season") and _can_prepare_group_sample(kind, states.get(str(show["sample_season"]), {}))]
         groups[str(kind["kind"])] = candidates
     return groups
 
@@ -251,17 +256,18 @@ def prepare_waiting_samples(
         previous: Mapping[str, SampleStartWait] | None = None,
 ) -> dict[str, SampleStartWait]:
     cards = list(cards)
+    groups = {str(group["kind"]): group for group in kinds}
     for season in samples_to_remake(cards, failed_in_a_row):
         payloads = load_payloads(season)
         if payloads is not None and samples_to_remake([{**payloads[1], "prefix": season}], failed_in_a_row):
             make(*payloads)
     waits: dict[str, SampleStartWait] = {}
-    for kind, candidates in kind_sample_candidates(kinds, cards).items():
+    for kind, candidates in kind_sample_candidates(groups.values(), cards).items():
         wait = None
         started = False
         for season in candidates:
             payloads = load_payloads(season)
-            if payloads is None or object_dict(payloads[1].get("page_state")).get("key") not in {"needs_test", "waiting_for_kind"}:
+            if payloads is None or not _can_prepare_group_sample(groups[kind], object_dict(payloads[1].get("page_state"))):
                 continue
             result = make_group(kind, *payloads) if make_group else make(*payloads)
             if result.get("ok") or result.get("code") == SamplePreparations.already_preparing:
