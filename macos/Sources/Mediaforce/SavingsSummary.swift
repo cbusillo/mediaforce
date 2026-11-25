@@ -93,9 +93,9 @@ struct SavingsSummary: View {
         let label: String
         let bytes: Int64?
         let color: Color
-        let caption: String
         let tip: String
         var id: String { label }
+        var caption: String { "\(label) \(bytes.map(Words.size) ?? "—")" }
     }
 
     var segments: [Segment] {
@@ -103,24 +103,23 @@ struct SavingsSummary: View {
         let tv = listing.savingsEstimate(for: [.tv]).bytes
         let movies = listing.savingsEstimate(for: [.movies]).bytes
         let compressedOther = facts.library.other.totalBytes - facts.library.other.originalBytes
-        let total = facts.library.tv.totalBytes + facts.library.movies.totalBytes + saved + compressedOther
-        let rest = max(0, total - saved - (tv ?? 0) - (movies ?? 0))
+        let current = facts.library.tv.totalBytes + facts.library.movies.totalBytes + compressedOther
+        let kept = max(0, current - (tv ?? 0) - (movies ?? 0))
         let reclaimed = max(0, saved - backupBytes)
         var segments = [
-            Segment(label: "Space back", bytes: reclaimed, color: .green,
-                    caption: backupBytes > 0 ? "Space back \(Words.size(reclaimed))" : "Saved \(Words.size(saved))",
+            Segment(label: backupBytes > 0 ? "Space back" : "Saved", bytes: reclaimed, color: .green,
                     tip: "\(Words.size(saved)) saved by compression, with \(Words.size(backupBytes)) still in original backups"),
-            Segment(label: "TV shows to go", bytes: tv, color: .blue, caption: "TV shows \(tv.map(Words.size) ?? "—") to go",
+            Segment(label: "TV shows to go", bytes: tv, color: .blue,
                     tip: "At least \(tv.map(Words.size) ?? "—") still to get back from \(Words.count(facts.library.tv.showCount, "show"))"),
-            Segment(label: "Movies to go", bytes: movies, color: .purple, caption: "Movies \(movies.map(Words.size) ?? "—") to go",
+            Segment(label: "Movies to go", bytes: movies, color: .purple,
                     tip: "At least \(movies.map(Words.size) ?? "—") still to get back from \(Words.count(facts.library.movies.titleCount, "movie"))")
         ]
         if backupBytes > 0 {
             segments.append(Segment(label: Words.originalBackups, bytes: backupBytes, color: Color(nsColor: .systemPink),
-                                    caption: Words.originalBackups, tip: "\(Words.size(backupBytes)) waiting to be deleted"))
+                                    tip: "\(Words.size(backupBytes)) waiting to be deleted"))
         }
-        segments.append(Segment(label: "Compressed size and the rest", bytes: rest, color: .gray.opacity(0.26), caption: "Compressed size and the rest",
-                                tip: "What the library still takes up after compressing"))
+        segments.append(Segment(label: "After estimated savings", bytes: kept, color: .gray.opacity(0.26),
+                                tip: "TV shows, movies and compressed VR & 3D files, less the savings estimated so far"))
         return segments
     }
 

@@ -253,11 +253,11 @@ struct KindShows: View {
                         }
                     }
                     ForEach((kind.seasonApprovedShows ?? []).filter { prefix in !kind.shows.contains { $0.prefix == prefix } }, id: \.self) { prefix in
-                        tile(prefix, name: Words.lastFolder(prefix), detail: "Has season approval", watchable: false) { open(prefix) }
+                        tile(prefix, name: Words.lastFolder(prefix), detail: Words.ownSampleApproved, watchable: false) { open(prefix) }
                     }
                     ForEach(kind.shows.filter { show in !kind.settings.contains { $0.show == show.prefix } }) { show in
                         VStack(alignment: .leading, spacing: 2) {
-                            tile(show.prefix, name: show.name, detail: kind.seasonApprovedShows?.contains(show.prefix) == true ? "Has season approval" : Words.size(show.waitingBytes), watchable: false) { open(show.prefix) }
+                            tile(show.prefix, name: show.name, detail: Words.kindTitleDetail(show, approvedShows: kind.seasonApprovedShows), watchable: false) { open(show.prefix) }
                             if let offer, show.sampleSeason != nil {
                                 Button(Words.makeASample) { offer(show) }
                                     .buttonStyle(QuietLinkStyle())

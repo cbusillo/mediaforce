@@ -4,16 +4,27 @@ import XCTest
 
 final class SpaceSavedTests: XCTestCase {
     @MainActor
-    func testWaitingBackupsTakeTheirOwnShareOfTheBarUntilDeleted() throws {
-        let facts = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(MainWindowTests.facts.utf8))
-        let model = MainWindowModel(client: MediaforceClient(baseURL: URL(filePath: "/fixture")))
+    func testWaitingBackupsTakeTheirOwnShareOfTheBarUntilDeleted() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [RenderFixtureServer.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let client = MediaforceClient(baseURL: URL(string: "https://mediaforce.invalid")!, session: session)
+        let model = MainWindowModel(client: client)
+        let facts = try await client.facts()
+        let listing = MediaListing()
+        await listing.refresh(client, kind: .everything)
         func segments(_ bytes: Int64) -> [SavingsSummary.Segment] {
-            SavingsSummary(facts: facts, listing: MediaListing(), machines: ComputersStore(), posters: model.posters,
+            SavingsSummary(facts: facts, listing: listing, machines: ComputersStore(), posters: model.posters,
                            backupBytes: bytes).segments
         }
         let waiting = segments(500)
         let cleared = segments(0)
         let backup = try XCTUnwrap(waiting.first { $0.label == Words.originalBackups })
+        for segment in waiting {
+            let bytes = try XCTUnwrap(segment.bytes, segment.label)
+            XCTAssertTrue(segment.caption.contains(Words.size(bytes)), segment.caption)
+        }
         XCTAssertEqual(backup.bytes, 500)
         XCTAssertTrue(backup.tip.contains(Words.size(500)))
         XCTAssertFalse(cleared.contains { $0.label == Words.originalBackups })
