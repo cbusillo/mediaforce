@@ -3,6 +3,32 @@ import XCTest
 @testable import Mediaforce
 
 final class SpaceSavedTests: XCTestCase {
+    func testGroupedInnerRingCountsOnlyPublishedFilesAtTheirOriginalSize() throws {
+        let compressedShow = "tv/Small"
+        let original: Int64 = 80
+        let rows = (0..<60).map { index in
+            let id = index == 0 ? compressedShow : "tv/Show \(index)"
+            let bytes: Int64 = index == 0 ? 200 : 1000
+            return MediaRow(id: id, name: id, kind: .tv, detail: "", bytes: bytes, saved: nil, state: .inProgress,
+                            looseFiles: .init(state: "", episodeCount: 2, bytes: bytes))
+        }
+        let library = SavingsLibrary(rows: rows, sizes: [compressedShow: .init(saved: 60, finishedSeason: false, compressedBefore: original)])
+        let group = try XCTUnwrap(library.groups.first { $0.slices.contains { $0.id == compressedShow } && !$0.isShow })
+        let inner = RingSector.sectors(library.groups, zoomed: false).filter { $0.group == group.id && $0.slice == nil }
+        let green = try XCTUnwrap(inner.first { $0.color == .green })
+        let totalAngle = inner.reduce(0) { $0 + $1.end - $1.start }
+        XCTAssertEqual((green.end - green.start) / totalAngle, Double(original) / Double(group.before), accuracy: 1e-10)
+    }
+
+    func testFinishEstimateUsesFourFullWeeksAndSkipsTheWeekStillRunning() throws {
+        let bytes = [10, 10, 10, 10, 1000]
+        let weeks = bytes.enumerated().map { SavingsHistory.Week(start: String($0.offset), bytes: Int64($0.element)) }
+        let history = SavingsHistory(weeks: weeks, wins: [])
+        let now = try XCTUnwrap(ActivityFacts.date("2026-11-24T12:00:00Z"))
+        XCTAssertEqual(history.finish(remaining: 20, at: now), Calendar.current.date(byAdding: .day, value: 14, to: now))
+        XCTAssertNil(history.finish(remaining: nil, at: now))
+    }
+
     func testSeasonsWithBackupsBecomeOneTilePerShow() throws {
         let completed = try JSONDecoder.mediaforce.decode(SpaceSavedFacts.Completed.self, from: Data("""
         {"folders": [
@@ -63,8 +89,9 @@ final class SpaceSavedTests: XCTestCase {
         """)
         let status = BackupsStatus(cleanup: folder, asking: false)
         XCTAssertFalse(status.deleting)
-        XCTAssertFalse(status.showsDelete)
-        XCTAssertEqual(status.line, "Deleted 34 original backups, \(Words.size(143000000000)) back.")
+        XCTAssertTrue(status.showsDelete)
+        XCTAssertFalse(status.canDelete)
+        XCTAssertEqual(status.line, "None waiting · 34 deleted, \(Words.size(143000000000))")
         XCTAssertNil(status.outcome)
     }
 

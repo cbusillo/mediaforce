@@ -196,9 +196,10 @@ def test_season_is_finished_only_when_every_file_is_replaced_or_kept(connection:
     [finished] = payload["recently_finished_seasons"]
     assert (finished["prefix"], finished["season"], finished["episode_count"]) == ("tv/Futurama/Season 3", 3, 2)
     assert finished["bytes_saved"] == 300
+    assert payload["space_saved"]["history"]["published_sizes"][finished["prefix"]]["finished_season"]
     assert finished["kept_original_count"] == 1
     assert finished["finished_at"] == "2026-10-22T02:00:00+00:00"
-    assert payload["space_saved"] == {"bytes": 1349, "item_count": 4, "episode_count": 4, "season_count": 1}
+    assert {key: value for key, value in payload["space_saved"].items() if key != "history"} == {"bytes": 1349, "item_count": 4, "episode_count": 4, "season_count": 1}
     assert payload["kept_original"]["kept_item_count"] == 1
     assert payload["kept_original"]["kept"] == [
         {**_identity("tv/Futurama/Season 3"), "reason": "motion_mixed", "item_count": 1},
@@ -222,7 +223,28 @@ def test_season_kept_entirely_original_is_finished_without_counting_as_space_sav
     kept_season = payload["recently_finished_seasons"][0]
     assert (kept_season["episode_count"], kept_season["kept_original_count"], kept_season["bytes_saved"]) == (0, 2, 0)
     assert kept_season["finished_at"] == "2026-10-23T03:00:00+00:00"
-    assert payload["space_saved"] == {"bytes": 700, "item_count": 1, "episode_count": 1, "season_count": 1}
+    assert {key: value for key, value in payload["space_saved"].items() if key != "history"} == {"bytes": 700, "item_count": 1, "episode_count": 1, "season_count": 1}
+
+
+def test_weekly_savings_and_title_sizes_include_only_published_files(connection: DBClient) -> None:
+    _replaced(connection, "tv/House/Season 1/a.mkv", saved=4000, at="2026-10-11T23:59:00Z")
+    original_size = 5000
+    _replaced(connection, "tv/House/Season 2/b.mkv", saved=3000, original_size=original_size, at="2026-10-12T00:00:00Z")
+    _replaced(connection, "movies/Heat/Heat.mkv", saved=3500, at=NOW)
+    _item(connection, "tv/House/Season 2/c.mkv", size=10000)
+
+    restored = _replaced(connection, "tv/House/Season 2/restored.mkv", saved=1000, at=NOW)
+    connection.execute(update(library_items).where(library_items.c.id == restored).values(status="discovered"))
+    _replaced(connection, "tv/Old/Season 3/x.mkv", saved=1000, at="2026-04-04T10:00:00Z")
+    history = _payload(connection)["space_saved"]["history"]
+    assert history["published_sizes"]["tv/House/Season 2"] == {"saved": 3000, "compressed_before": original_size, "finished_season": False}
+    assert history["published_sizes"]["movies/Heat"] == {"saved": 3500, "compressed_before": 5000, "finished_season": False}
+    weeks = {week["start"]: week["bytes"] for week in history["weeks"]}
+    assert weeks["2026-03-30"] == 1000
+    assert weeks["2026-10-05"] == 4000
+    assert weeks["2026-10-12"] == 3000
+    assert history["wins"][0] == {"prefix": "tv/House", "title": "House", "media_type": "tv",
+                                  "before": 10000, "after": 3000}
 
 
 def _identity(prefix: str) -> dict[str, Any]:

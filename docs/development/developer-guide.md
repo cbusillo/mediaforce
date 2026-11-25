@@ -111,6 +111,12 @@ guardrails. `video.max_crf` is the starting search range;
 size-directed tests may search up to `video.target_search_max_crf` while still
 enforcing the picture floor.
 
+## Space saved
+
+Space saved reads weekly savings and published sizes from the main window’s refresh.
+A season’s original size is its current size plus the bytes already saved. Selecting a show keeps
+its seasons in view while new files finish. The backup button uses the same confirmation as before.
+
 ## Mac page screenshots
 
 Render live server data into PNGs, in light and dark, from the app
@@ -122,9 +128,9 @@ and needs no Screen Recording permission:
   --page needs-you --page 'sample:tv/Show/Season 1'
 ```
 
-Without `--page` it renders the default set. Page names include `library`,
+Without `--page` it renders the default set. Page names include `library`, `media`,
 `tv`, `movies`, `other` (VR & 3D), `needs-you`, `activity`, `computers`,
-`computer:ADDRESS`, `space-saved`, `media`, `kind:CODE`, `item:PREFIX`,
+`computer:ADDRESS`, `space-saved`, `kind:CODE`, `item:PREFIX`,
 `sample:PATH`, `settings:libraries`, `settings:compression`,
 `settings:computers`, `settings:metadata` and `menu`. `--server URL`,
 `--width` and `--height` adjust the source and viewport. A page whose data

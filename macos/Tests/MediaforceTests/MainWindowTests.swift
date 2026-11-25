@@ -240,6 +240,44 @@ final class MainWindowModelTests: XCTestCase {
         super.tearDown()
     }
 
+    func testSavingsCardShowsTheNameSuppliedForTheComputer() throws {
+        let name = "Upstairs encoder"
+        let machine = try ComputerFixTests.machine(#"{"name":"\#(name)"}"#)
+        let details = SavingsDetails(history: SavingsHistory(weeks: [], wins: []), saved: machine.done.all.bytesSaved,
+                                     movies: .init(titleCount: 0, totalBytes: 0, originalBytes: 0), machines: [machine])
+        XCTAssertTrue(details.computerDetail(machine).hasPrefix(name))
+        XCTAssertEqual(details.computerHelp(machine).components(separatedBy: .newlines).first, name)
+    }
+
+    func testRefreshUpdatesTheTotalAndSeasonForTheSameOpenLibrary() async throws {
+        let model = model { _ in (200, Data(MainWindowTests.facts.utf8)) }
+        await model.refresh()
+        let season = try JSONDecoder.mediaforce.decode(TVShowsFacts.Season.self, from: Data("""
+        {"prefix":"tv/Show/Season 3","season":3,"episode_count":2,"bytes":30}
+        """.utf8))
+        let row = MediaRow(id: "tv/Show", name: "Show", kind: .tv, detail: "", bytes: 30, saved: nil,
+                           state: .inProgress, seasons: [season])
+        var payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(MainWindowTests.facts.utf8)) as? [String: Any])
+        for (saved, complete) in [(40, false), (70, true)] {
+            payload["space_saved"] = ["bytes": saved, "item_count": 2, "episode_count": 2, "season_count": complete ? 1 : 0,
+                                      "history": ["weeks": [["start": "2026-10-19", "bytes": saved]], "wins": [],
+                                                  "published_sizes": [season.prefix: ["saved": saved, "finished_season": complete]]]]
+            let answer = try JSONSerialization.data(withJSONObject: payload)
+            StubServer.respond = { request in
+                StubServer.body = answer
+                return HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            }
+            await model.refresh()
+            let facts = try XCTUnwrap(model.facts)
+            let history = try XCTUnwrap(facts.spaceSaved.history)
+            let library = SavingsLibrary(rows: [row], sizes: try XCTUnwrap(history.publishedSizes))
+            let show = try XCTUnwrap(library.shows.first { $0.id == row.id })
+            XCTAssertEqual(show.saved, Int64(saved))
+            XCTAssertEqual(show.finished, complete ? 1 : 0)
+            XCTAssertEqual(SavingsCurve(history: history, observed: .now).points.last?.total, facts.spaceSaved.bytes)
+        }
+    }
+
     func testFactsMakeTheServerReachableAndReachTheListener() async {
         var heard: MainWindowFacts?
         let model = model { _ in (200, Data(MainWindowTests.facts.utf8)) }

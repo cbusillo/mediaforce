@@ -41,6 +41,7 @@ final class PageNavigationTests: XCTestCase {
         XCTAssertEqual(navigation.place, .spaceSaved)
     }
 
+    @MainActor
     func testEveryNotificationAboutAComputerOpensAPlaceTheSidebarShows() throws {
         let library = try JSONDecoder.mediaforce.decode(MainWindowFacts.Library.self, from: Data("""
         {"tv": {"show_count": 1, "season_count": 1, "episode_count": 1, "total_bytes": 1, "original_bytes": 1},

@@ -110,6 +110,9 @@ struct FinishedShelf: View {
                                 headline: Words.finishedSaved(item),
                                 detail: item.season.map { "Season \($0)" } ?? item.show
                             )
+                            Text(item.show)
+                                .font(.caption.weight(.semibold)).lineLimit(1)
+                                .frame(width: 84, alignment: .leading)
                             Text(Words.day(item.finishedAt))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -131,9 +134,7 @@ struct SampleShelf: View {
     let openSample: (String) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Approved samples")
-                .font(.headline)
+        DisclosureGroup("Approved samples (\(samples.approvedNotStarted.count.formatted()))") {
             ScrollView(.horizontal) {
                 LazyHStack(alignment: .top, spacing: 10) {
                     ForEach(Array(samples.approvedNotStarted.enumerated()), id: \.element.id) { index, sample in
