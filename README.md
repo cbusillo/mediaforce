@@ -15,8 +15,8 @@ some shows need more, and your results will vary.
 ## What it does
 
 - **Looks.** You decide once how each kind of content should look, by
-  watching a short sample side by side with the original. One look covers
-  live action, movies included; cartoons are approved one show at a time. Each file is
+  watching a short sample side by side with the original. Live action and cartoons each have a shared look.
+  You can also approve a sample for just its season. Each file is
   then encoded to fit that look and measured before it is published.
 - **Checked, one file at a time.** Every episode or movie is encoded, checked
   and published on its own. A problem with one file stays with that file;
@@ -125,7 +125,7 @@ signed app that starts at login and updates itself, use the download above.
 ## Honest limits
 
 - **It is built for one library.** Mediaforce is the maintainer's own tool,
-  tuned to the maintainer's taste: about 300 MB for a 45-minute 1080p episode, and 4K
+  tuned to the maintainer's taste: about 300 MB for 45 minutes of live action or 150 MB for cartoons, and 4K
   brought down to 1080p unless a look says to keep it. Change the size goal
   and tallest picture in Settings if you want bigger files.
 - **It is early.** Setup needs Terminal, and screens and settings still
@@ -133,8 +133,7 @@ signed app that starts at login and updates itself, use the download above.
 - **It replaces your files.** Originals are kept until you approve cleanup,
   but keep your own backup too.
 - **It does not** compress VR and 3D video yet (those files are listed and
-  left alone), give cartoons one shared look (each cartoon show is approved on
-  its own), tell animated movies from live action, run on Windows, or
+  left alone), tell animated movies from live action, run on Windows, or
   download, rename or organize media.
 
 ## For developers

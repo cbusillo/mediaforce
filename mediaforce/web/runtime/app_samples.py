@@ -10,7 +10,7 @@ from mediaforce.library.representatives import sample_coverage_summary
 from mediaforce.reviewing.clips import review_file_from_url
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.tuning.compression_intent import compression_intent_from_payload, compression_intent_options
-from mediaforce.tuning.size_goals import DECIMAL_MEGABYTE_BYTES, measured_followup_request, sample_goal_request, \
+from mediaforce.tuning.size_goals import DECIMAL_MEGABYTE_BYTES, guided_size_goal_options, measured_followup_request, sample_goal_request, \
     with_compression_intent, operator_intent_from_policy
 from mediaforce.web.runtime.app_window import file_identity, season_identity
 from mediaforce.web.runtime.folder_actions import APPROVED_SAMPLE_NOTES, ApprovalNeedsConfirmation, QueueNeedsChoice, \
@@ -166,6 +166,7 @@ def make_sample(
         ai_tune: AiTuneFn,
         retry_saved: RetrySampleFn,
         keep_full_height: bool | None = None,
+        group_size_mb: float | None = None,
 ) -> dict[str, Any]:
     """Make the sample again: retry the saved request, or ask for a new one at the chosen or current size.
 
@@ -174,6 +175,15 @@ def make_sample(
     """
     prefix = str(folder["prefix"])
     action = object_dict(status.get("page_state")).get("primary_action")
+    if group_size_mb is not None:
+        policy = object_dict(folder.get("policy"))
+        video = {**object_dict(policy.get("video")), "size_goal_mode": "normalized", "target_runtime_minutes": 45,
+                 "target_size_mb": group_size_mb, "target_size_bytes": round(group_size_mb * DECIMAL_MEGABYTE_BYTES)}
+        folder = {**folder, "size_goal_options": guided_size_goal_options(
+            video, item_runtime_seconds=float_value(object_dict(folder.get("sample_item")).get("duration_seconds")),
+            default_video_policy=video, audio_policy=object_dict(policy.get("audio")), subtitle_policy=object_dict(policy.get("subtitle")),
+        )}
+        size = "recommended"
     if size is None and action == "choose_size":
         return {"ok": False, "code": "choose_size"}
     result: Mapping[str, Any] = {}
@@ -237,6 +247,7 @@ def prepare_waiting_samples(
         load_payloads: Callable[[str], tuple[dict[str, Any], dict[str, Any]] | None],
         failed_in_a_row: Callable[[str], int],
         make: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]],
+        make_group: Callable[[str, Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] | None = None,
         previous: Mapping[str, SampleStartWait] | None = None,
 ) -> dict[str, SampleStartWait]:
     cards = list(cards)
@@ -252,7 +263,7 @@ def prepare_waiting_samples(
             payloads = load_payloads(season)
             if payloads is None or object_dict(payloads[1].get("page_state")).get("key") not in {"needs_test", "waiting_for_kind"}:
                 continue
-            result = make(*payloads)
+            result = make_group(kind, *payloads) if make_group else make(*payloads)
             if result.get("ok") or result.get("code") == SamplePreparations.already_preparing:
                 started = True
                 break

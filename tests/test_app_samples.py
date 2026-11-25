@@ -294,6 +294,18 @@ def test_new_sample_uses_the_offered_size_when_an_old_sample_has_no_budget(actio
         assert intent["resolution"]["max_height"] == 720
 
 
+def test_group_sample_replaces_the_seasons_old_budget_with_its_normalized_goal() -> None:
+    folder = _folder(sample_item={"duration_seconds": 1350})
+    calls: list[tuple[Any, ...]] = []
+    result = make_sample(folder, _status(action="retry_sample"), None, group_size_mb=150,
+                         ai_tune=lambda *args: calls.append(args) or {"ok": True},
+                         retry_saved=lambda *_: pytest.fail("retried the season's old budget"))
+    assert result["ok"]
+    goal = calls[0][3]["size_goal"]
+    assert (goal["mode"], goal["value_mb"], goal["reference_runtime_minutes"]) == ("normalized", 150, 45)
+    assert "75 MB" in calls[0][1]
+
+
 def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() -> None:
     calls: list[tuple[Any, ...]] = []
 

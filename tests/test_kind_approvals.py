@@ -38,7 +38,7 @@ from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash, review_gate
 from mediaforce.web.runtime.kind_approvals import APPROVABLE_KINDS, APPROVAL_NOT_CURRENT_CODE, KIND_IS_ONE_TIME_CODE, \
     KIND_QUEUE_WAITS_CODE, KIND_RETRY_SECONDS, SIZE_GOAL_NOT_SCALABLE_CODE, KindAwareLoader, KindSeason, SeasonKinds, \
-    NO_FOLDER_APPROVAL_CODE, SOURCE_KIND_DIFFERS_CODE, approve_kind, approve_kind_action, background_queue_blocker, choose_kind_picture_height, kind_snapshot, kinds_payload, load_kind_approval, \
+    NO_FOLDER_APPROVAL_CODE, SOURCE_KIND_DIFFERS_CODE, approve_kind, approve_kind_action, background_queue_blocker, choose_kind_picture_height, choose_kind_size, kind_snapshot, kinds_payload, load_kind_approval, \
     migrate_kind_approvals, movie_queue_facts, next_kind_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
 from mediaforce.web.runtime.page_state import PageStateFacts, PageStateSources, card_page_states, decide_page_state
 from mediaforce.web.runtime.folder_cards import list_folder_cards
@@ -70,7 +70,7 @@ def _finished_sample(config: MediaforceConfig, prefix: str, at: str = "2026-10-2
         connection.commit()
 
 
-def _approved(config: MediaforceConfig, *, size_mode: str = "normalized", job_id: str = "sample-job") -> dict[str, Any]:
+def _approved(config: MediaforceConfig, *, size_mode: str = "normalized", size_mb: float = 300.0, job_id: str = "sample-job") -> dict[str, Any]:
     policy = config.resolve_policy(APPROVED_SEASON)
     policy["video"].update({"compression_intent_schema_version": 1, "compression_intent": "balanced",
                             "compression_intent_source": "test", "compression_intent_confirmed": True})
@@ -78,7 +78,7 @@ def _approved(config: MediaforceConfig, *, size_mode: str = "normalized", job_id
         "mode": "sample", "job_id": job_id, "accepted_sample_job_id": "sample-job",
         "accepted_at": "2026-10-25T12:00:00+00:00", "policy": policy,
         "sample_item": {"resolved_policy": policy, "resolved_operator_intent": {"request": {
-            "compression_intent": "balanced", "size_goal": {"mode": size_mode, "value_mb": 300.0}}}},
+            "compression_intent": "balanced", "size_goal": {"mode": size_mode, "value_mb": size_mb, "reference_runtime_minutes": 45.0}}}},
     }
     calibration["accepted_policy_hash"] = calibration_policy_hash(calibration)
     return calibration
@@ -96,7 +96,7 @@ def _loader(folders: dict[str, dict[str, Any]], kinds: dict[str, str], asked: li
 def test_only_a_current_live_action_approval_per_45_minutes_can_cover_a_kind(tmp_path: Path) -> None:
     config = _config(tmp_path)
 
-    assert approve_kind(config, "cartoon", APPROVED_SEASON, _approved(config), approved_at="now")["code"] == KIND_IS_ONE_TIME_CODE
+    assert approve_kind(config, "unmeasured", APPROVED_SEASON, _approved(config), approved_at="now")["code"] == KIND_IS_ONE_TIME_CODE
     assert approve_kind(config, LIVE_ACTION, APPROVED_SEASON, _approved(config, job_id="resampled"),
                         approved_at="now")["code"] == APPROVAL_NOT_CURRENT_CODE
     assert approve_kind(config, LIVE_ACTION, APPROVED_SEASON, _approved(config, size_mode="absolute"),
@@ -560,7 +560,7 @@ def test_the_kinds_facts_say_what_each_kind_covers_and_how_it_is_decided(tmp_pat
     assert kinds[LIVE_ACTION]["settings"] == []
     assert kinds[LIVE_ACTION]["approval"] == {"from_prefix": APPROVED_SEASON, "approved_at": "2026-10-26T01:00:00+00:00",
                                          "keep_full_height": False, "size_goal_mode": "normalized", "size_goal_mb": 300.0, "library_item_id": None, "sample_moments": []}
-    assert kinds["cartoon"]["approval"] is None and kinds["cartoon"]["one_time"]
+    assert kinds["cartoon"]["approval"] is None and not kinds["cartoon"]["one_time"]
     assert facts["unmeasured_seasons"] == 1
     assert facts["left_out"] == [{"season": "tv/Fresh/Season 1", "kind": "unmeasured", "waiting_bytes": 1000}]
 
@@ -600,7 +600,6 @@ def test_a_kind_offers_each_shows_biggest_season_to_sample_and_names_the_one_bei
         sample_job("tv/Crime/Season 2", "pending_review", "2026-10-26T03:00:00+00:00")
         sample_job("tv/Drama/Season 2", "running", "2026-10-26T04:00:00+00:00")
         making = kind_facts()
-        # A sample that stopped stays on the page until it is made again, so its trouble and choices show.
         sample_job("tv/Drama/Season 2", "failed", "2026-10-26T05:00:00+00:00")
         failed = kind_facts()
     engine.dispose()
@@ -609,7 +608,7 @@ def test_a_kind_offers_each_shows_biggest_season_to_sample_and_names_the_one_bei
         ("tv/Drama", "tv/Drama/Season 2"), ("tv/Crime", "tv/Crime/Season 1")]
     assert before["sample_season"] is None
     assert settled["sample_season"] == "tv/Drama/Season 1"
-    assert making["sample_season"] == "tv/Drama/Season 2" and failed["sample_season"] == "tv/Drama/Season 2"
+    assert making["sample_season"] == failed["sample_season"] == settled["sample_season"]
 
 
 def _keep_original_backup(connection: Any, item_id: int) -> None:
@@ -664,8 +663,8 @@ def test_an_approved_show_of_the_kind_lends_its_setting_with_an_episode_to_watch
     assert not_lent[LIVE_ACTION]["settings"] == []
 
 
-def _approved_on(config: MediaforceConfig, sample_path: str | None) -> dict[str, Any]:
-    calibration = _approved(config)
+def _approved_on(config: MediaforceConfig, sample_path: str | None, *, size_mb: float = 300.0) -> dict[str, Any]:
+    calibration = _approved(config, size_mb=size_mb)
     if sample_path is not None:
         calibration["sample_item"]["rel_path"] = sample_path
     return calibration
@@ -687,7 +686,7 @@ def test_only_a_folders_own_approval_sampled_on_that_kind_extends_to_it(tmp_path
     show_on_toon = {"tv/Show": _approved_on(config, f"{toon_season}/e01.mkv")}
     assert extend(LIVE_ACTION, live_season, show_on_toon)["code"] == SOURCE_KIND_DIFFERS_CODE
     assert extend(LIVE_ACTION, OTHER_SEASON, toon_sample)["code"] == SOURCE_KIND_DIFFERS_CODE
-    assert extend("cartoon", OTHER_SEASON, toon_sample)["code"] == KIND_IS_ONE_TIME_CODE
+    assert extend("cartoon", OTHER_SEASON, toon_sample)["code"] == "group_size_changed"
     assert extend(LIVE_ACTION, APPROVED_SEASON, {APPROVED_SEASON: _approved_on(config, None)})["code"] == SOURCE_KIND_DIFFERS_CODE
     assert load_kind_approval(config, LIVE_ACTION) is None
     assert extend(LIVE_ACTION, f"{APPROVED_SEASON}/e01.mkv", live_sample)["ok"]
@@ -1111,7 +1110,7 @@ def test_legacy_or_malformed_item_identity_uses_its_recorded_path(tmp_path: Path
 
 
 def _approve_stale_kind(config: MediaforceConfig, kind: str) -> None:
-    approve_kind(config, kind, APPROVED_SEASON, _approved(config), approved_at="now")
+    approve_kind(config, kind, APPROVED_SEASON, _approved(config, size_mb=150 if kind == "cartoon" else 300), approved_at="now")
     path = config.paths.web_state_dir / "kinds" / f"{kind}.json"
     saved_kind = json.loads(path.read_text())
     saved_kind["accepted_policy_hash"] = "a different policy"
@@ -1126,7 +1125,7 @@ def test_old_samples_follow_a_reusable_kind_while_its_newest_sample_stays_visibl
     config = _config(tmp_path)
     if stale_kind and kind in APPROVABLE_KINDS:
         _approve_stale_kind(config, kind)
-    folders = {season: _review_ready(sample_item=_approved_on(config, f"{season}/e00.mkv")["sample_item"])
+    folders = {season: _review_ready(sample_item=_approved_on(config, f"{season}/e00.mkv", size_mb=150 if kind == "cartoon" else 300)["sample_item"])
                for season in [SEASON, OTHER_SEASON]}
     load = _loader(folders, {SEASON: kind, OTHER_SEASON: kind})
     sources = PageStateSources(load, lambda *_args: {})
@@ -1506,14 +1505,14 @@ def test_finished_seasons_newer_sample_stays_with_its_kind_and_reaches_attention
         connection.commit()
         kinds = kinds_payload(connection, config, load_calibration_state=load)["kinds"]
     darker = next(kind for kind in kinds if kind["kind"] == LIVE_ACTION)
-    assert darker["sample_season"] == APPROVED_SEASON
+    assert darker["sample_season"] == (SEASON if sample_status == "failed" and not kind_approved else APPROVED_SEASON)
     assert darker["needs_you"] == (not kind_approved)
     assert darker["sample_ready"] == (not kind_approved and sample_status in {"pending_review", "completed"})
     if not kind_approved and sample_status == "failed":
         folders[APPROVED_SEASON]["accepted_at"] = "2026-10-30T00:00:00+00:00"
         with open_db(config.paths.db_path) as connection:
             settled = next(row for row in kinds_payload(connection, config, load_calibration_state=load)["kinds"] if row["kind"] == LIVE_ACTION)
-        assert settled["sample_ready"] and settled["sample_status"] == "completed"
+        assert settled["sample_season"] == SEASON
     if not kind_approved and sample_status == "completed":
         folders[APPROVED_SEASON]["review_pairs"] = []
         with open_db(config.paths.db_path) as connection:
@@ -1622,8 +1621,8 @@ def test_unapproved_kind_is_visible_before_and_after_its_sample(tmp_path: Path, 
         connection.commit()
         kinds = kinds_payload(connection, config, load_calibration_state=load)["kinds"]
     darker = next(kind for kind in kinds if kind["kind"] == LIVE_ACTION)
-    assert darker["needs_you"]
-    assert darker["sample_status"] == (sample_status or "not_started")
+    assert darker["needs_you"] == (sample_status != "failed")
+    assert darker["sample_status"] == ("not_started" if sample_status in {None, "failed"} else sample_status)
     assert not next(kind for kind in kinds if kind["kind"] == "cartoon")["needs_you"]
 
 
@@ -1654,10 +1653,10 @@ def test_measuring_outside_the_pipeline_names_the_reason_and_next_action(
 
 
 @pytest.mark.parametrize("approval_scope", [APPROVED_SEASON, "tv/Drama"])
-def test_one_time_kind_moves_on_from_an_approved_show_sample(tmp_path: Path, approval_scope: str) -> None:
+def test_cartoon_kind_can_reuse_a_matching_approved_show_sample(tmp_path: Path, approval_scope: str) -> None:
     kind = "cartoon"
     config = _config(tmp_path)
-    calibration = _review_ready(**_approved_on(config, f"{APPROVED_SEASON}/e00.mkv"))
+    calibration = _review_ready(**_approved_on(config, f"{APPROVED_SEASON}/e00.mkv", size_mb=150))
     folders = {APPROVED_SEASON: {key: value for key, value in calibration.items() if not key.startswith("accepted_")}}
     load = _loader(folders, {APPROVED_SEASON: kind, SEASON: kind})
     _finished_sample(config, APPROVED_SEASON)
@@ -1674,14 +1673,14 @@ def test_one_time_kind_moves_on_from_an_approved_show_sample(tmp_path: Path, app
         connection.execute(calibration_jobs.update().values(status="completed"))
         connection.commit()
         after = next(row for row in kinds_payload(connection, config, load_calibration_state=load)["kinds"] if row["kind"] == kind)
-    assert after["needs_you"] and not after["sample_ready"]
-    assert after["sample_season"] is None
+    assert after["needs_you"] and after["sample_ready"] == (approval_scope == APPROVED_SEASON)
+    assert after["sample_season"] == APPROVED_SEASON
     assert after["shows"][0]["sample_season"] == SEASON
-    assert kind_sample_candidates([after], [{"prefix": SEASON, "page_state": {"key": "needs_test"}}]) == {kind: [SEASON]}
+    assert kind_sample_candidates([after], [{"prefix": SEASON, "page_state": {"key": "needs_test"}}]) == {}
 
 
 @pytest.mark.parametrize("status", ["queued", "running", "retry_backoff", "failed", "stopped"])
-def test_a_new_sample_without_a_finished_draft_keeps_older_kind_samples_quiet(tmp_path: Path, status: str) -> None:
+def test_a_passed_representative_stays_available_while_another_season_needs_work(tmp_path: Path, status: str) -> None:
     config = _config(tmp_path)
     folders = {SEASON: _review_ready(sample_item=_approved_on(config, EPISODE)["sample_item"])}
     load = _loader(folders, {SEASON: LIVE_ACTION, APPROVED_SEASON: LIVE_ACTION})
@@ -1692,7 +1691,7 @@ def test_a_new_sample_without_a_finished_draft_keeps_older_kind_samples_quiet(tm
         connection.execute(calibration_jobs.update().where(calibration_jobs.c.prefix == APPROVED_SEASON).values(status=status))
         connection.commit()
         state = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))[SEASON]
-    assert state["key"] == "waiting_for_kind" and not state["needs_you"]
+    assert state["key"] == "ready_to_compare" and state["needs_you"]
 
 
 @pytest.mark.parametrize("status", ["discovered", "promoted"])
@@ -1873,3 +1872,66 @@ def test_queued_files_cover_only_open_slots_in_libraries_the_computer_can_compre
     with open_db(config.paths.db_path) as connection:
         assert background_queue_blocker(connection, config, SEASON, library_item_ids=following.files, computers=computers)
     assert _next(config, load, computers=computers) is None
+
+def test_cartoon_look_covers_another_season_and_keeps_its_source_approval(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    source = _approved_on(config, f"{APPROVED_SEASON}/episode.mkv", size_mb=150)
+    folders = {APPROVED_SEASON: source}
+    load = _loader(folders, {APPROVED_SEASON: "cartoon", SEASON: "cartoon"})
+    result = approve_kind_action(config, "cartoon", APPROVED_SEASON, load_calibration_state=load,
+                                 kind_of=lambda *_: "cartoon", approved_at="now")
+    assert result["ok"]
+    other = effective_production_approval(config, EPISODE, load)
+    own = effective_production_approval(config, APPROVED_SEASON, load)
+    assert other is not None and other.kind == "cartoon"
+    assert own is not None and own.calibration == source
+
+
+def test_failed_season_is_excluded_from_group_sample_and_new_sample_choices(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _finished_sample(config, SEASON)
+    with open_db(config.paths.db_path) as connection:
+        _completed_and_waiting_seasons(connection)
+        connection.execute(calibration_jobs.update().values(status="failed"))
+        connection.execute(series_metadata.update().values(tmdb_genres_json='["Animation"]'))
+        connection.commit()
+        cartoons = next(row for row in kinds_payload(connection, config, load_calibration_state=lambda *_: None)["kinds"]
+                        if row["kind"] == "cartoon")
+    assert cartoons["sample_season"] is None
+    assert all(show["sample_season"] != SEASON for show in cartoons["shows"])
+    load = _loader({}, {SEASON: "cartoon"})
+    assert SEASON not in load.sample_waits(config)
+    source = _approved_on(config, f"{APPROVED_SEASON}/e00.mkv", size_mb=150)
+    assert approve_kind(config, "cartoon", APPROVED_SEASON, source, approved_at="2026-11-25T15:00:00Z")["ok"]
+    assert effective_production_approval(config, EPISODE, load) is None
+
+
+def test_futuramas_passing_sample_at_the_selected_size_leads_other_cartoons(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    futurama = "tv/Futurama/Season 7"
+    pony = "tv/My Little Pony/Season 2"
+    folders = {}
+    for season, day in [(futurama, "24"), (pony, "25")]:
+        episode = f"{season}/e01.mkv"
+        folders[season] = _review_ready(**_approved_on(config, episode, size_mb=150))
+        _finished_sample(config, season, f"2026-11-{day}T15:00:00Z")
+        with open_db(config.paths.db_path) as connection:
+            published = _content_item(connection, episode, status="promoted", codec="av1", current_dark=0)
+            _admit_historical_original(connection, published, dark=0.5)
+            connection.execute(series_metadata.insert().values(series_prefix=season.rsplit("/", 1)[0],
+                                                               tmdb_genres_json='["Animation"]', updated_at="now"))
+            connection.commit()
+    with open_db(config.paths.db_path) as connection:
+        kind = next(row for row in kinds_payload(connection, config, load_calibration_state=_loader(folders, {}))["kinds"]
+                    if row["kind"] == "cartoon")
+    assert kind["sample_season"] == futurama and kind["sample_ready"]
+
+
+def test_cartoons_page_remembers_its_size_without_approving_a_season(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    assert choose_kind_size(config, "cartoon", 225)
+    with open_db(config.paths.db_path) as connection:
+        cartoons = next(row for row in kinds_payload(connection, _config(tmp_path), load_calibration_state=lambda *_: None)["kinds"]
+                        if row["kind"] == "cartoon")
+    assert cartoons["selected_size_mb"] == 225
+    assert cartoons["approval"] is None

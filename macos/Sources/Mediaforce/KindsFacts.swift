@@ -20,13 +20,15 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         let approval: Approval?
         // The season whose sample is being made or waits to be watched; nil when none is.
         let sampleSeason: String?
+        var selectedSizeMb: Double? = nil
+        var sizeOptionsMb: [Double]? = nil
         var sampleReady: Bool? = nil
         var sampleStatus: String? = nil
         var id: String { kind }
 
         var reviewSeason: String? { sampleStatus == "choose_another_show" ? nil : sampleSeason }
         var sampleShow: String? { reviewSeason?.split(separator: "/").prefix(2).joined(separator: "/") }
-        var showsSampleFirst: Bool { oneTime || settings.isEmpty || sampleSetting != nil }
+        var showsSampleFirst: Bool { selectedSizeMb != nil || oneTime || settings.isEmpty || sampleSetting != nil }
 
         var sampleButtonTitle: String? {
             if let approval { return approval.sampleMoments?.isEmpty == false ? Words.watchApprovedSample : nil }
@@ -60,7 +62,7 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         let seasons: Int
         let waitingBytes: Int64
         // Its biggest waiting season of the kind, where a sample for the show is made.
-        let sampleSeason: String
+        let sampleSeason: String?
         var id: String { prefix }
         var name: String { String(prefix.split(separator: "/").last ?? "") }
         // A movie title is listed beside the shows its look covers.
@@ -120,6 +122,14 @@ extension MediaforceClient {
         try await kindAction(kind, "approve", body: ["from_prefix": prefix])
     }
 
+    func chooseKindSize(_ kind: String, megabytes: Double) async throws -> KindActionResult {
+        try await kindAction(kind, "size", body: ["size_mb": megabytes])
+    }
+
+    func makeKindSample(_ kind: String, prefix: String) async throws -> KindActionResult {
+        try await kindAction(kind, "sample", body: ["prefix": prefix], timeout: Self.samplePreparationTimeout)
+    }
+
     func stopKind(_ kind: String) async throws -> KindActionResult {
         try await kindAction(kind, "stop", body: [String: String]())
     }
@@ -129,8 +139,9 @@ extension MediaforceClient {
         try await kindAction(kind, "picture", body: ["keep_full_height": keepFullHeight])
     }
 
-    private func kindAction(_ kind: String, _ action: String, body: some Encodable) async throws -> KindActionResult {
+    private func kindAction(_ kind: String, _ action: String, body: some Encodable, timeout: TimeInterval = Self.factsTimeout) async throws -> KindActionResult {
         var request = URLRequest(url: baseURL.appending(path: "api/app/kinds").appending(path: kind).appending(path: action))
+        request.timeoutInterval = timeout
         request.httpMethod = "POST"
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
