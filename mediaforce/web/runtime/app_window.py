@@ -158,7 +158,7 @@ def app_window_payload(
             ],
         },
         "library": _library_totals(items),
-        "space_saved": _space_saved(items, promotions, finished, observed_at),
+        "space_saved": _space_saved(items, promotions, finished, observed_at, kept),
         "recently_finished_seasons": finished[:RECENT_SEASON_LIMIT],
         "recently_finished": _recently_finished(items, finished, promotions, kept),
         "biggest_not_started": _biggest_not_started(
@@ -508,8 +508,28 @@ def _finished_seasons(
     return sorted(finished, key=lambda finished_season: finished_season["finished_at"] or "", reverse=True)
 
 
+def _ring_folders(items: list[_Item], finished_seasons: set[str], kept: Mapping[int, Any]) -> dict[str, dict[str, Any]]:
+    folders: dict[str, list[_Item]] = defaultdict(list)
+    for item in items:
+        prefix = item.season_prefix or item.title_prefix
+        if prefix and item.kind in {"movie", "tv"}:
+            folders[prefix].append(item)
+
+    result = {}
+    for prefix, files in folders.items():
+        first = files[0]
+        name = first.parts[2] if first.season_prefix else "Files outside seasons"
+        result[prefix] = {
+            "bytes": sum(item.size_bytes for item in files),
+            "show": first.show_prefix,
+            "name": name if first.show_prefix else first.title,
+            "finished": prefix in finished_seasons if first.show_prefix else all(item.promoted or item.item_id in kept for item in files),
+        }
+    return result
+
+
 def _space_saved(
-        items: list[_Item], promotions: Mapping[int, _Promotion], finished: list[dict[str, Any]], observed_at: datetime,
+        items: list[_Item], promotions: Mapping[int, _Promotion], finished: list[dict[str, Any]], observed_at: datetime, kept: Mapping[int, Any],
 ) -> dict[str, Any]:
     replaced = [item for item in items if item.promoted and item.item_id in promotions]
     today = observed_at.astimezone(UTC).date()
@@ -517,7 +537,7 @@ def _space_saved(
     weeks = {monday - timedelta(weeks=offset): 0 for offset in reversed(range(8))}
     titles: dict[str, list[_Item]] = defaultdict(list)
     published_sizes: dict[str, dict[str, int | bool]] = {}
-    finished_seasons = {season["prefix"] for season in finished}
+    finished_seasons = {season["prefix"] for season in finished if season["episode_count"]}
     for item in replaced:
         promotion = promotions[item.item_id]
         folder = item.season_prefix or item.title_prefix
@@ -550,7 +570,7 @@ def _space_saved(
         "episode_count": sum(1 for item in replaced if item.kind == "tv"),
         "season_count": sum(1 for season in finished if season["episode_count"]),
         "history": {"weeks": [{"start": week.isoformat(), "bytes": size} for week, size in sorted(weeks.items())],
-                    "published_sizes": published_sizes,
+                    "published_sizes": published_sizes, "ring_folders": _ring_folders(items, finished_seasons, kept),
                     "wins": wins[:3]},
     }
 

@@ -27,6 +27,14 @@ struct SavingsHistory: Decodable, Sendable {
         let compressedBefore: Int64?
     }
 
+    struct Folder: Decodable, Sendable {
+        let bytes: Int64
+        let show: String?
+        let name: String
+        let finished: Bool
+    }
+
+    var ringFolders: [String: Folder]? = nil
     var publishedSizes: [String: Published]? = nil
     let weeks: [Week]
     let wins: [Win]
@@ -46,6 +54,7 @@ struct SavingsSummary: View {
     let listing: MediaListing
     let machines: ComputersStore
     let posters: PosterStore
+    let backupBytes: Int64
 
     var body: some View {
         let saved = facts.spaceSaved.bytes
@@ -63,11 +72,10 @@ struct SavingsSummary: View {
                 }
             }
             if let history = facts.spaceSaved.history, let sizes = history.publishedSizes {
-                let library = SavingsLibrary(rows: listing.rows, sizes: sizes)
-                if !library.groups.isEmpty {
-                    SavingsRing(library: library, today: totals.tv.totalBytes + totals.movies.totalBytes,
-                                posters: posters)
-                }
+                let library = history.ringFolders.map { SavingsLibrary(folders: $0, sizes: sizes) }
+                    ?? SavingsLibrary(rows: listing.rows, sizes: sizes)
+                SavingsRing(library: library, today: totals.tv.totalBytes + totals.movies.totalBytes, posters: posters,
+                            loading: history.ringFolders == nil && listing.loading)
                 SavingsDetails(history: history, saved: saved, movies: totals.movies, machines: machines.facts?.computers ?? [])
                 if machines.failed { Text("Computer totals didn’t refresh. Retrying.").foregroundStyle(.secondary) }
                 SavingsMedals(history: history, library: library, saved: saved, remaining: remaining.bytes, partial: remaining.partial)
@@ -81,7 +89,7 @@ struct SavingsSummary: View {
 
     private var remaining: MediaListing.SavingsEstimate { listing.savingsEstimate(for: [.tv, .movies]) }
 
-    private struct Segment: Identifiable {
+    struct Segment: Identifiable {
         let label: String
         let bytes: Int64?
         let color: Color
@@ -90,31 +98,44 @@ struct SavingsSummary: View {
         var id: String { label }
     }
 
-    private var storage: some View {
+    var segments: [Segment] {
         let saved = facts.spaceSaved.bytes
         let tv = listing.savingsEstimate(for: [.tv]).bytes
         let movies = listing.savingsEstimate(for: [.movies]).bytes
         let compressedOther = facts.library.other.totalBytes - facts.library.other.originalBytes
         let total = facts.library.tv.totalBytes + facts.library.movies.totalBytes + saved + compressedOther
         let rest = max(0, total - saved - (tv ?? 0) - (movies ?? 0))
-        let segments = [
-            Segment(label: "Saved", bytes: saved, color: .green, caption: "Saved \(Words.size(saved))",
-                    tip: "\(Words.size(saved)) already back across \(Words.count(facts.spaceSaved.itemCount, "file"))"),
+        let reclaimed = max(0, saved - backupBytes)
+        var segments = [
+            Segment(label: "Saved", bytes: reclaimed, color: .green, caption: "Saved \(Words.size(reclaimed))",
+                    tip: "\(Words.size(reclaimed)) back after accounting for original backups"),
             Segment(label: "TV shows to go", bytes: tv, color: .blue, caption: "TV shows \(tv.map(Words.size) ?? "—") to go",
                     tip: "At least \(tv.map(Words.size) ?? "—") still to get back from \(Words.count(facts.library.tv.showCount, "show"))"),
             Segment(label: "Movies to go", bytes: movies, color: .purple, caption: "Movies \(movies.map(Words.size) ?? "—") to go",
-                    tip: "At least \(movies.map(Words.size) ?? "—") still to get back from \(Words.count(facts.library.movies.titleCount, "movie"))"),
-            Segment(label: "Compressed size and the rest", bytes: rest, color: .gray.opacity(0.26), caption: "Compressed size and the rest",
-                    tip: "What the library still takes up after compressing")
+                    tip: "At least \(movies.map(Words.size) ?? "—") still to get back from \(Words.count(facts.library.movies.titleCount, "movie"))")
         ]
+        if backupBytes > 0 {
+            segments.append(Segment(label: Words.originalBackups, bytes: backupBytes, color: Color(nsColor: .systemPink),
+                                    caption: Words.originalBackups, tip: "\(Words.size(backupBytes)) waiting to be deleted"))
+        }
+        segments.append(Segment(label: "Compressed size and the rest", bytes: rest, color: .gray.opacity(0.26), caption: "Compressed size and the rest",
+                                tip: "What the library still takes up after compressing"))
+        return segments
+    }
+
+    private var storage: some View {
+        let segments = segments
         return VStack(alignment: .leading, spacing: 8) {
             Text("Left to save").fontWeight(.semibold)
             Text(finish).foregroundStyle(.secondary)
             GeometryReader { geo in
                 let sum = segments.reduce(Int64.zero) { $0 + ($1.bytes ?? 0) }
+                let backupWidth = backupBytes > 0 ? max(12, geo.size.width * Double(backupBytes) / Double(max(1, sum))) : 0
                 HStack(spacing: 0) {
                     ForEach(segments) { segment in
-                        segment.color.frame(width: geo.size.width * Double(segment.bytes ?? 0) / Double(max(1, sum)))
+                        let width = segment.label == Words.originalBackups ? backupWidth :
+                            (geo.size.width - backupWidth) * Double(segment.bytes ?? 0) / Double(max(1, sum - backupBytes))
+                        segment.color.frame(width: width)
                             .help("\(segment.label)\n\(segment.tip)")
                     }
                 }.clipShape(RoundedRectangle(cornerRadius: 6))
@@ -125,6 +146,7 @@ struct SavingsSummary: View {
                         Circle().fill(segment.color).frame(width: 9, height: 9)
                         Text(segment.caption)
                     }
+                    .help(segment.tip)
                 }
             }.font(.system(size: 12)).foregroundStyle(.secondary)
             ForEach(listing.unavailable) { kind in Text(Words.libraryReadFailure(kind, hasPrevious: listing.hasLoaded(kind))) }

@@ -3,6 +3,23 @@ import XCTest
 @testable import Mediaforce
 
 final class SpaceSavedTests: XCTestCase {
+    @MainActor
+    func testWaitingBackupsTakeTheirOwnShareOfTheBarUntilDeleted() throws {
+        let facts = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(MainWindowTests.facts.utf8))
+        let model = MainWindowModel(client: MediaforceClient(baseURL: URL(filePath: "/fixture")))
+        func segments(_ bytes: Int64) -> [SavingsSummary.Segment] {
+            SavingsSummary(facts: facts, listing: MediaListing(), machines: ComputersStore(), posters: model.posters,
+                           backupBytes: bytes).segments
+        }
+        let waiting = segments(500)
+        let cleared = segments(0)
+        let backup = try XCTUnwrap(waiting.first { $0.label == Words.originalBackups })
+        XCTAssertEqual(backup.bytes, 500)
+        XCTAssertTrue(backup.tip.contains(Words.size(500)))
+        XCTAssertFalse(cleared.contains { $0.label == Words.originalBackups })
+        XCTAssertEqual(waiting.compactMap(\.bytes).reduce(0, +), cleared.compactMap(\.bytes).reduce(0, +))
+    }
+
     func testGroupedInnerRingCountsOnlyPublishedFilesAtTheirOriginalSize() throws {
         let compressedShow = "tv/Small"
         let original: Int64 = 80

@@ -3,7 +3,10 @@ import SwiftUI
 struct SpaceSavedPage: View {
     let facts: MainWindowFacts
     let model: MainWindowModel
+    let revealBackups: Bool
     let openItem: (String) -> Void
+    @State private var highlighted = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var listing = MediaListing()
     @State private var machines = ComputersStore()
     @State private var cleanup: CleanupFolder?
@@ -15,30 +18,50 @@ struct SpaceSavedPage: View {
     static let deletionCheckInterval: Duration = .seconds(1)
 
     var body: some View {
-        PageFrame(title: Words.spaceSaved) {
-            if refreshFailed {
-                StaleNotice(connection: .failing, lastHeard: lastHeard)
-                    .padding(.horizontal, -34)
-            }
-            SavingsSummary(facts: facts, listing: listing, machines: machines, posters: model.posters)
-            if let cleanup {
-                DeleteBackups(status: BackupsStatus(cleanup: cleanup, asking: asking), model: model) {
-                    Task { await deleteBackups() }
+        GeometryReader { viewport in
+            ScrollViewReader { scroll in
+                PageFrame(title: Words.spaceSaved) {
+                    if refreshFailed {
+                        StaleNotice(connection: .failing, lastHeard: lastHeard)
+                            .padding(.horizontal, -34)
+                    }
+                    SavingsSummary(facts: facts, listing: listing, machines: machines, posters: model.posters,
+                                   backupBytes: backupFolder.totalSizeBytes)
+                    VStack(alignment: .leading, spacing: 18) {
+                        DeleteBackups(status: BackupsStatus(cleanup: backupFolder, asking: asking), model: model) {
+                            Task { await deleteBackups() }
+                        }
+                        .disabled(cleanup == nil)
+                        .padding(8)
+                        .background(highlighted ? Color.accentColor.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 8))
+                        .padding(.horizontal, -8)
+                        .id(Place.originalBackups)
+                        if let shows, !shows.isEmpty {
+                            CompareEpisodes(shows: shows, model: model, openItem: openItem)
+                                .padding(.top, 8)
+                        } else if shows == nil && !refreshFailed {
+                            ProgressView().frame(maxWidth: 760, minHeight: 200)
+                        }
+                    }
+                    .frame(minHeight: revealBackups ? viewport.size.height : nil, alignment: .topLeading)
                 }
-            }
-            if let shows {
-                if !shows.isEmpty {
-                    CompareEpisodes(shows: shows, model: model, openItem: openItem)
-                        .padding(.top, 8)
+                .task(id: revealBackups) {
+                    guard revealBackups else { highlighted = false; return }
+                    scroll.scrollTo(Place.originalBackups, anchor: .top)
+                    highlighted = true
+                    do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                    withAnimation(reduceMotion ? nil : .easeOut) { highlighted = false }
                 }
-            } else if !refreshFailed {
-                ProgressView().frame(maxWidth: 760, minHeight: 200)
             }
         }
         .task { await listing.watch(model.client, kind: .everything) }
         .task { await machines.watch(model.client) }
-        .task { await watch() }
+        .task(id: facts.originalBackups.count) { await watch() }
         .task(id: deleting) { await followDeletion() }
+    }
+
+    private var backupFolder: CleanupFolder {
+        cleanup ?? CleanupFolder(fileCount: facts.originalBackups.count, totalSizeBytes: facts.originalBackups.bytes)
     }
 
     private var deleting: Bool {
