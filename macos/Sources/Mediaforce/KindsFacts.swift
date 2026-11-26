@@ -68,11 +68,15 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         let source: String
         let kbps: Double?
         let look: String
+        let error: String?
+        let originalMissing: Bool?
         let chosen: Bool
         let moment: SampleFacts.Moment?
         var id: String { prefix }
         var name: String { prefix.split(separator: "/").dropFirst().joined(separator: " · ") }
         var explanation: String {
+            if error != nil { return "The short test needs another try" }
+            if originalMissing == true { return "Waiting for the original file" }
             if kbps == nil { return "Waiting for a short test" }
             if chosen { return look == "cartoon" ? "You chose the cartoon look" : "You chose the live action look" }
             switch look {

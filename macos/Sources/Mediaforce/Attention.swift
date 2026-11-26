@@ -118,9 +118,10 @@ struct Attention: Equatable, Sendable {
                                    body: preview.problem ?? preview.waiting ?? "Review the exact file list and confirm it in Mediaforce.",
                                    opens: .needsYou, notifies: !waitingOnly)
         }
-        let choices = facts.work.animationChoices.map { prefix in
-            AttentionNotice(id: "animation:\(prefix)", title: prefix.split(separator: "/").dropFirst().joined(separator: " · "),
-                            body: "Compare a short sample and choose its look.", opens: .kind("cartoon"))
+        let choices = facts.work.animationChoices.map { question in
+            let prefix = question.prefix
+            return AttentionNotice(id: "animation:\(prefix)", title: prefix.split(separator: "/").dropFirst().joined(separator: " · "),
+                            body: question.failed ? "Open Cartoons to retry this title’s short test." : "Compare a short sample and choose its look.", opens: .kind("cartoon"))
         }
         var notices = kinds + samples + seasons + computers + originals + choices
         if facts.work.needsGenreSoundDecision {

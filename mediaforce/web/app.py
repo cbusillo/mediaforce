@@ -1876,10 +1876,17 @@ def create_app(
     sample_start_waits: dict[str, SampleStartWait] = {}
 
     def _animation_choice(prefix: str, source: str, look: str) -> bool:
-        from mediaforce.library.content_kinds import choose_animation_look
+        from mediaforce.library.content_kinds import choose_animation_look, retry_animation_probe
+        from mediaforce.library.evidence_queue import EvidenceQueueConflict
 
         with open_db(config.paths.db_path) as connection:
-            return choose_animation_look(connection, prefix, source, look)
+            if look == "retry":
+                try:
+                    return retry_animation_probe(connection, config, prefix, source)
+                except EvidenceQueueConflict:
+                    return False
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            return choose_animation_look(connection, prefix, source, look, library_types=config.library_type_map)
 
     def _kinds_payload() -> dict[str, Any]:
         with open_readonly_db(config.paths.db_path) as connection, library_calculations.request(connection):

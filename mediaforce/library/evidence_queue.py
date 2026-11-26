@@ -756,6 +756,7 @@ def next_evidence_work_query(batch_id: str, now_iso: str, *, excluded_media_root
     )
     running = library_item_evidence_state.alias("running_items")
     running_items = select(running.c.library_item_id).where(running.c.work_status == "running")
+    query = query.where(or_(library_item_evidence_state.c.evidence_kind != ANIMATION_PROBE, ~running_items.exists()))
     if allowed_running_item is not None:
         running_items = running_items.where(running.c.library_item_id != allowed_running_item)
     query = query.where(library_item_evidence_state.c.library_item_id.not_in(running_items))

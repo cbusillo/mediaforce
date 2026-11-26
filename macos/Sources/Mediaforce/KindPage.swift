@@ -320,7 +320,7 @@ private struct AnimationResults: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Animation looks").font(.headline)
-            ForEach(titles) { title in
+            ForEach(titles.sorted { ($0.moment != nil || $0.error != nil) && ($1.moment == nil && $1.error == nil) }) { title in
                 Divider()
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
@@ -328,7 +328,9 @@ private struct AnimationResults: View {
                         Text(title.explanation).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    if title.moment != nil {
+                    if let error = title.error {
+                        Button("Retry test") { choose(title, look: "retry") }.help(error).disabled(saving)
+                    } else if title.moment != nil {
                         Button("Compare") { reviewing = title.id }
                     }
                 }
@@ -344,6 +346,7 @@ private struct AnimationResults: View {
                 }
             }
         }
+        .onDisappear { players.pause() }
     }
 
     private func choose(_ title: KindsFacts.AnimationTitle, look: String) {

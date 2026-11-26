@@ -122,9 +122,9 @@ def _in_folder(prefix: str) -> tuple[Any, Any]:
 def _present_items(connection: DBClient, season_prefix: str | None = None) -> Sequence[Mapping[str, Any]]:
     query = select(
         library_items.c.id, library_items.c.rel_path, library_items.c.media_root, library_items.c.status, library_items.c.video_codec,
-        library_items.c.size_bytes, func.coalesce(library_items.c.content_version_fingerprint, library_items.c.fingerprint).label("source"),
+        library_items.c.source_path, source_versions.c.role, library_items.c.size_bytes, func.coalesce(library_items.c.content_version_fingerprint, library_items.c.fingerprint).label("source"),
         plex_item_metadata.c.plex_genres_json,
-    ).outerjoin(plex_item_metadata, plex_item_metadata.c.library_item_id == library_items.c.id).where(library_items.c.missing_since.is_(None))
+    ).select_from(library_items).outerjoin(source_versions, source_versions.c.version_id == library_items.c.active_source_version_id).outerjoin(plex_item_metadata, plex_item_metadata.c.library_item_id == library_items.c.id).where(library_items.c.missing_since.is_(None))
     if season_prefix is not None:
         # A movie that sits directly in its library is its own title.
         query = query.where(or_(library_items.c.rel_path == season_prefix, and_(*_in_folder(season_prefix))))
@@ -193,6 +193,9 @@ class AnimationTitle:
     source: str
     kbps: float | None
     choice: str | None
+    catalog_source: str
+    original_path: str | None
+    error: str | None = None
     moment: dict[str, Any] | None = None
 
     @property
@@ -200,25 +203,43 @@ class AnimationTitle:
         return "unmeasured" if self.kbps is None else animation_look(self.kbps, self.choice)
 
     def payload(self) -> dict[str, Any]:
-        return {"prefix": self.prefix, "source": self.source, "kbps": self.kbps, "look": self.look, "chosen": self.choice is not None,
-                "moment": self.moment if self.look == "unmeasured" else None}
+        return {"prefix": self.prefix, "source": self.source, "kbps": self.kbps, "look": self.look, "chosen": self.choice is not None, "error": self.error,
+                "moment": self.moment if self.look == "unmeasured" else None, "original_missing": self.original_path is None and self.kbps is None}
 
 
 def _animation_titles(connection: DBClient, seasons: Mapping[str, list[Mapping[str, Any]]], series_of: Mapping[str, str],
-                      genres: Mapping[str, bool | None], *, prefix: str | None = None) -> dict[str, AnimationTitle]:
+                      genres: Mapping[str, bool | None], *, prefix: str | None = None,
+                      known_sources: Mapping[int, SourceEvidence] | None = None) -> dict[str, AnimationTitle]:
     query = select(animation_sorts)
     saved = {row.title: row for row in connection.execute(query if prefix is None else query.where(animation_sorts.c.title == prefix))}
+    animated = {title: episodes for title, episodes in seasons.items() if title in saved or _animated(episodes, series_of.get(title), genres)}
+    published = [int(item["id"]) for episodes in animated.values() for item in episodes if item["status"] == "promoted" or item["role"] == "output"]
+    originals = dict(known_sources or {})
+    if missing := set(published).difference(originals):
+        originals.update(load_source_evidence_bulk(connection, missing))
+    failures = {row.library_item_id: row for row in connection.execute(select(library_item_evidence_state.c.library_item_id,
+        library_item_evidence_state.c.work_source_fingerprint, library_item_evidence_state.c.last_error).where(
+        library_item_evidence_state.c.evidence_kind == ANIMATION_PROBE, library_item_evidence_state.c.work_status == "failed"))}
     titles = {}
-    for title, episodes in seasons.items():
+    for title, episodes in animated.items():
         record = saved.get(title)
-        if record is None and not _animated(episodes, series_of.get(title), genres):
-            continue
-        item = min(episodes, key=lambda episode: (record is None or episode["id"] != record.item_id,
-                                                   not _waiting(episode), str(episode["rel_path"])))
-        source = str(item["source"] or "")
-        current = record is not None and record.item_id == item["id"] and record.source == source
-        titles[title] = AnimationTitle(title, int(item["id"]), source, record.kbps if current else None, record.choice if current else None,
-                                       json.loads(record.moment_json) if current and record.moment_json else None)
+        candidates = []
+        for item in episodes:
+            original = originals.get(int(item["id"]))
+            catalog_source = str(item["source"] or "")
+            if item["status"] == "promoted" or item["role"] == "output":
+                source = str(original.profile.get("content_version_fingerprint") or "") if original else ""
+                path = original.source_path if original and original.availability == "available" else None
+            else:
+                source, path = catalog_source, item["source_path"]
+            current = record if record is not None and record.item_id == item["id"] and record.source == source else None
+            failure = failures.get(int(item["id"]))
+            error = failure.last_error if failure and failure.work_source_fingerprint == catalog_source and current else None
+            candidate = AnimationTitle(title, int(item["id"]), source, current.kbps if current is not None else None, current.choice if current is not None else None,
+                                       catalog_source, path, error, json.loads(current.moment_json) if current is not None and current.moment_json else None)
+            candidates.append((candidate, str(item["rel_path"])))
+        titles[title] = min(candidates, key=lambda pair: (pair[0].kbps is None, pair[0].original_path is None,
+                                                          record is None or pair[0].item_id != record.item_id, pair[1]))[0]
     return titles
 
 
@@ -235,15 +256,19 @@ def queue_animation_probes(connection: DBClient, config: MediaforceConfig, *, li
     count = 0
     for title in _animation_titles(connection, seasons, shows, _series_animation(connection)).values():
         root = title.prefix.partition("/")[0]
-        if title.kbps is not None or not title.source or root not in config.source_root_map or queued.get(title.item_id) == title.source:
+        if title.kbps is not None or not title.original_path or not title.source or root not in config.source_root_map or queued.get(title.item_id) == title.catalog_source:
             continue
         with connection.begin_nested():
             values = {"item_id": title.item_id, "source": title.source, "kbps": None, "choice": None, "moment_json": None}
             statement = sqlite_insert(animation_sorts).values(title=title.prefix, **values)
-            connection.execute(statement.on_conflict_do_update(index_elements=[animation_sorts.c.title], set_=values))
+            connection.execute(statement.on_conflict_do_update(index_elements=[animation_sorts.c.title], set_=values,
+                where=or_(animation_sorts.c.source != title.source, animation_sorts.c.item_id != title.item_id)))
+            if connection.execute(select(animation_sorts.c.kbps).where(animation_sorts.c.title == title.prefix)).scalar_one() is not None:
+                continue
             connection.execute(sqlite_insert(library_item_evidence_state).values(
                 library_item_id=title.item_id, evidence_kind=ANIMATION_PROBE, state="analysis_required", policy_hash=ANIMATION_PROBE,
-                updated_at=timestamp()).on_conflict_do_nothing())
+                updated_at=timestamp()).on_conflict_do_update(index_elements=[library_item_evidence_state.c.library_item_id, library_item_evidence_state.c.evidence_kind],
+                                                      set_={"state": "analysis_required"}))
             result = queue_decision_evidence_work(connection, config, root, library_item_ids=[title.item_id], evidence_kind=ANIMATION_PROBE,
                                                   work_reason=ANIMATION_PROBE, priority=100, manage_transaction=False)
             count += result["prepared_count"]
@@ -252,13 +277,27 @@ def queue_animation_probes(connection: DBClient, config: MediaforceConfig, *, li
     return count
 
 
-def choose_animation_look(connection: DBClient, title: str, source: str, look: str) -> bool:
+def current_animation_title(connection: DBClient, prefix: str, library_types: Mapping[str, str]) -> AnimationTitle | None:
+    seasons, shows = _seasons(_present_items(connection, prefix), library_types)
+    series = shows.get(prefix)
+    return _animation_titles(connection, seasons, shows, _series_animation(connection, series) if series else {}, prefix=prefix).get(prefix)
+
+
+def retry_animation_probe(connection: DBClient, config: MediaforceConfig, prefix: str, source: str) -> bool:
+    from mediaforce.library.evidence_queue import queue_decision_evidence_work
+
+    title = current_animation_title(connection, prefix, config.library_type_map)
+    if not title or not title.error or title.source != source or not title.original_path:
+        return False
+    return bool(queue_decision_evidence_work(connection, config, prefix, library_item_ids=[title.item_id], evidence_kind=ANIMATION_PROBE,
+                                          work_reason=ANIMATION_PROBE, priority=100, restart_terminal=True)["prepared_count"])
+
+
+def choose_animation_look(connection: DBClient, title: str, source: str, look: str, *, library_types: Mapping[str, str]) -> bool:
     if look not in {"cartoon", "live_action"}:
         return False
-    record = connection.execute(select(animation_sorts).join(library_items, library_items.c.id == animation_sorts.c.item_id).where(
-        animation_sorts.c.title == title, animation_sorts.c.source == source, library_items.c.missing_since.is_(None),
-        func.coalesce(library_items.c.content_version_fingerprint, library_items.c.fingerprint) == source)).first()
-    if record is None or record.kbps is None or animation_look(record.kbps) != "unmeasured":
+    record = current_animation_title(connection, title, library_types)
+    if record is None or record.source != source or record.kbps is None or animation_look(record.kbps) != "unmeasured":
         return False
     if record.choice is not None:
         return record.choice == look
@@ -285,7 +324,7 @@ def season_grouping(
     measured = _measured_originals(episodes, admitted, evidence_by_item)
     series = series_of.get(season_prefix)
     genres = _series_animation(connection, series) if series else {}
-    sorts = _animation_titles(connection, seasons, series_of, genres, prefix=season_prefix)
+    sorts = _animation_titles(connection, seasons, series_of, genres, prefix=season_prefix, known_sources=evidence_by_item)
     return season_kind(measured, animated=_animated(episodes, series, genres), sort=sorts.get(season_prefix))
 
 
@@ -352,24 +391,26 @@ def season_kind_report(
     confirmations = _original_confirmation_inputs(connection)
 
     animation = _series_animation(connection)
-    sorts = _animation_titles(connection, seasons, series_of, animation)
-
-    def measure() -> tuple[dict[str, list[str]], dict[str, SeasonGrouping]]:
+    def measure() -> tuple[dict[str, list[str]], dict[str, SeasonGrouping], dict[str, AnimationTitle]]:
         admitted = _admitted_item_ids(connection)
         context = load_source_evidence_context(connection)
         evidence = load_source_evidence_bulk(
             connection, (int(item["id"]) for prefix in measured_seasons for item in seasons[prefix] if int(item["id"]) in admitted),
             context=context,
         )
+        animation_titles = _animation_titles(connection, seasons, series_of, animation, known_sources=evidence)
         measured_groupings = {prefix: season_kind(_measured_originals(seasons[prefix], admitted, evidence),
-                                         animated=_animated(seasons[prefix], series_of.get(prefix), animation), sort=sorts.get(prefix)) for prefix in measured_seasons}
+                                         animated=_animated(seasons[prefix], series_of.get(prefix), animation), sort=animation_titles.get(prefix)) for prefix in measured_seasons}
         reasons = {prefix: _measurement_reasons(waiting_by_season[prefix], evidence, {}, measurement_roots)
                    for prefix, measured_grouping in measured_groupings.items() if measured_grouping.reason == "no_measured_original"}
-        return reasons, measured_groupings
+        return reasons, measured_groupings, animation_titles
 
-    reasons_by_season, groupings = reuse_library_calculation(
+    reasons_by_season, groupings, sorts = reuse_library_calculation(
         connection, "season_measurements",
-        (select(library_items.c.id, library_items.c.rel_path, library_items.c.media_root, library_items.c.video_codec,
+        (select(library_item_evidence_state.c.library_item_id, library_item_evidence_state.c.work_source_fingerprint,
+                library_item_evidence_state.c.last_error).where(library_item_evidence_state.c.evidence_kind == ANIMATION_PROBE,
+                                                               library_item_evidence_state.c.work_status == "failed"),
+         select(library_items.c.id, library_items.c.rel_path, library_items.c.media_root, library_items.c.video_codec,
                 library_items.c.size_bytes, library_items.c.status, library_items.c.active_source_version_id,
                 library_items.c.content_version_fingerprint, library_items.c.fingerprint, library_items.c.missing_since),
          *(select(table) for table in (source_versions, source_admissions, source_measurements, source_transitions, source_moves,

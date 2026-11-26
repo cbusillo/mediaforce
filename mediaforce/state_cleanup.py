@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import open_db, open_readonly_db
@@ -98,8 +99,8 @@ def _purge_due_transient_artifacts(config: MediaforceConfig) -> bool:
     process_snapshot = _cleanup_process_snapshot(config)
     try:
         kind_review_paths = _retained_kind_review_paths(config)
-    except RuntimeProtectionError as exc:
-        LOGGER.warning("%s", exc)
+    except (RuntimeProtectionError, SQLAlchemyError, OSError, ValueError) as exc:
+        LOGGER.warning("Review cleanup skipped: %s", exc)
     else:
         _prune_children(config.paths.review_dir, cutoff, protected_paths=kind_review_paths)
     for staging_root in staging_roots:

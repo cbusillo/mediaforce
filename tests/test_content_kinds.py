@@ -13,7 +13,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import animation_sorts, library_items, metadata, motion_keep_decisions, plex_item_metadata, series_metadata, source_admissions, source_generations, source_measurements, source_versions, source_transitions, staged_artifacts, target_production_outcomes
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.utils import timestamp
-from mediaforce.library.content_kinds import SeasonGrouping, season_grouping, season_kind, season_kind_report
+from mediaforce.library.content_kinds import current_animation_title, SeasonGrouping, season_grouping, season_kind, season_kind_report
 from mediaforce.library.calculation_reuse import LibraryCalculations
 from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, append_measurement, append_version, json_text, \
     load_source_evidence, load_source_evidence_bulk
@@ -117,10 +117,10 @@ def test_unmeasured_episodes_do_not_vote() -> None:
 
 
 def _save_probe(connection: DBClient, title: str, kbps: float) -> None:
-    item = connection.execute(select(library_items.c.id, library_items.c.content_version_fingerprint)
-        .where(library_items.c.parent_dir == title).order_by(library_items.c.id)).first()
-    assert item is not None
-    connection.execute(animation_sorts.insert().values(title=title, item_id=item.id, source=item.content_version_fingerprint, kbps=kbps))
+    root = title.partition("/")[0]
+    candidate = current_animation_title(connection, title, {root: "movie" if root == "movies" else "tv"})
+    assert candidate is not None
+    connection.execute(animation_sorts.insert().values(title=title, item_id=candidate.item_id, source=candidate.source, kbps=kbps))
 
 
 def _item(connection: DBClient, rel_path: str, *, status: str, codec: str, current_dark: float) -> int:
@@ -446,11 +446,30 @@ def test_animation_choice_is_kept_for_its_source_and_ignored_after_replacement(c
     def grouping() -> SeasonGrouping:
         return season_grouping(connection, title, library_types={"movies": "movie"})
 
+    libraries = {"movies": "movie"}
     source = connection.execute(select(animation_sorts.c.source)).scalar_one()
     assert grouping().reason == "animation_look_needed"
-    assert choose_animation_look(connection, title, source, "live_action")
+    assert choose_animation_look(connection, title, source, "live_action", library_types=libraries)
     assert grouping().kind == "live_action"
-    assert not choose_animation_look(connection, title, source, "cartoon")
+    assert not choose_animation_look(connection, title, source, "cartoon", library_types=libraries)
     connection.execute(library_items.update().where(library_items.c.id == item).values(content_version_fingerprint="replacement"))
     assert grouping().kind == "unmeasured"
-    assert not choose_animation_look(connection, title, source, "cartoon")
+    assert not choose_animation_look(connection, title, source, "cartoon", library_types=libraries)
+
+
+def test_publishing_the_representative_keeps_its_original_sort_and_answer(connection: DBClient) -> None:
+    from mediaforce.library.animation_probe import CUTOFF_KBPS
+    from mediaforce.library.content_kinds import choose_animation_look
+
+    title = "tv/Animation/Season 1"
+    library_types = {"tv": "tv"}
+    item = _item(connection, f"{title}/E1.mkv", status="discovered", codec="h264", current_dark=0.2)
+    connection.execute(series_metadata.insert().values(series_prefix="tv/Animation", tmdb_genres_json='["Animation"]', updated_at=timestamp()))
+    connection.execute(library_items.update().where(library_items.c.id == item).values(content_version_fingerprint=f"original-{item}"))
+    _save_probe(connection, title, CUTOFF_KBPS)
+    assert choose_animation_look(connection, title, f"original-{item}", "live_action", library_types=library_types)
+    _admit_historical_original(connection, item, dark=0.2)
+    connection.execute(library_items.update().where(library_items.c.id == item).values(status="promoted", video_codec="av1"))
+    current = current_animation_title(connection, title, library_types)
+    assert current is not None and current.original_path is None
+    assert current.look == "live_action" and current.choice == "live_action"

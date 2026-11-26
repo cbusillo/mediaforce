@@ -1,17 +1,16 @@
 import math
-from collections.abc import Callable
 import tempfile
 import uuid
-from statistics import quantiles
+from statistics import median
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from mediaforce.core.binaries import ffmpeg_binary, ffprobe_binary
+from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.process_control import ManagedProcessController, run_command
 from mediaforce.encoding.remote_media import RemoteMediaCommands
 from mediaforce.remote import copy_remote_file_to_local
 from mediaforce.encoding.ffmpeg import ffmpeg_hwaccel_input_args
-from mediaforce.reviewing.helpers import default_timestamps, format_crf, spaced_complexity_timestamps
+from mediaforce.reviewing.helpers import default_timestamps, format_crf, fingerprint_review_moments
 from mediaforce.reviewing.renderers import preview_render_command, browser_preview_proxy_command, source_review_clip_command
 
 ANIMATION_PROBE = "animation_bitrate"
@@ -32,19 +31,19 @@ def animation_look(kbps: float, choice: str | None = None) -> Literal["cartoon",
     return "unmeasured"
 
 
-def animation_moments(path: Path, duration: float, run: Callable[[list[str]], str], probe_binary: str) -> list[float]:
-    defaults = default_timestamps(duration, CLIP_SECONDS)
-    if duration < CLIP_SECONDS * 12:
-        return defaults
-    intervals = ",".join(f"{duration * (.06 + .83 * index / 23):.3f}%+{CLIP_SECONDS + 2}" for index in range(24))
-    packets = run(["nice", "-n", "19", probe_binary, "-v", "error", "-select_streams", "V:0", "-read_intervals", intervals,
-                   "-show_entries", "packet=pts_time,size", "-of", "csv=p=0", str(path)])
-    moments = spaced_complexity_timestamps(packets, duration, CLIP_SECONDS)
-    return moments if len(moments) == 3 else defaults
+def animation_moments(duration: float, fingerprint: dict[str, Any] | None) -> list[float]:
+    selected = [moment.timestamp_seconds for moment in fingerprint_review_moments(duration, CLIP_SECONDS,
+                media_fingerprint=fingerprint, media_fingerprint_decision=None)]
+    for start in default_timestamps(duration, CLIP_SECONDS):
+        if len(selected) >= 3:
+            break
+        if not selected or all(abs(start - existing) >= min(CLIP_SECONDS, duration / 5) for existing in selected):
+            selected.append(start)
+    return sorted(selected)
 
 
 def probe_animation(path: Path, duration: float, *, review_dir: Path, process_controller: ManagedProcessController | None,
-                    command_runner: RemoteMediaCommands | None) -> dict[str, object]:
+                    command_runner: RemoteMediaCommands | None, fingerprint: dict[str, Any] | None = None) -> dict[str, object]:
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError("The animation has no readable duration.")
     seconds = min(duration, CLIP_SECONDS)
@@ -59,7 +58,7 @@ def probe_animation(path: Path, duration: float, *, review_dir: Path, process_co
             result = run_command(command, timeout=600, check=True, capture_output=True, text=True, process_controller=process_controller)
         return result.stdout
 
-    starts = animation_moments(path, duration, run, "ffprobe" if command_runner else ffprobe_binary())
+    starts = animation_moments(duration, fingerprint)
     review_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=review_dir) as scratch:
         local = Path(scratch)
@@ -70,16 +69,18 @@ def probe_animation(path: Path, duration: float, *, review_dir: Path, process_co
         try:
             rates = []
             for start, encoded in zip(starts, clips, strict=True):
-                command = preview_render_command(source_path=path, source_codec=None, output_path=encoded,
+                encode_command = preview_render_command(source_path=path, source_codec=None, output_path=encoded,
                     clip_time=start, duration_seconds=seconds, encoder="libsvtav1", pixel_format="yuv420p10le", preset=4, crf=48,
-                    svt_params=["tune=0", "film-grain=8", "film-grain-denoise=0", "lp=2"], audio_plan=None, video_filter=None,
+                    svt_params=["tune=0", "film-grain=8", "film-grain-denoise=0", "lp=2"], audio_plan=None,
+                    video_filter="scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos",
                     ffmpeg_binary=binary, ffmpeg_hwaccel_input_args=ffmpeg_hwaccel_input_args, format_crf=format_crf)
-                progress = dict(line.split("=", 1) for line in run(["nice", "-n", "19", *command]).splitlines() if "=" in line)
+                progress = dict(line.split("=", 1) for line in run(["nice", "-n", "19", *encode_command]).splitlines() if "=" in line)
                 size = int(progress.get("total_size", "0"))
-                if progress.get("progress") != "end" or size <= 0 or int(progress.get("frame", "0")) <= 0:
+                elapsed = int(progress.get("out_time_us", "0")) / 1_000_000
+                if progress.get("progress") != "end" or size <= 0 or int(progress.get("frame", "0")) <= 0 or elapsed < seconds - 0.25:
                     raise ValueError("The animation sample did not finish.")
                 rates.append(size * 8 / seconds / 1000)
-            kbps = quantiles(rates, n=10, method="inclusive")[-1] if len(rates) > 1 else rates[0]
+            kbps = median(rates)
             hardest = rates.index(max(rates))
             encoded, compare_at = clips[hardest], starts[hardest]
             if animation_look(kbps) != "unmeasured":

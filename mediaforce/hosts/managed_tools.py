@@ -18,7 +18,7 @@ from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import calibration_jobs, encode_jobs
 from mediaforce.encoding.duration_estimate import host_identity_tokens
 from mediaforce.hosts import tool_versions
-from mediaforce.hosts.config import remote_shell_path_export_line
+from mediaforce.hosts.config import host_targets_current_machine, remote_shell_path_export_line
 from mediaforce.hosts.transport import keep_awake_while_running
 from mediaforce.hosts.types import HostSetupResult, HostStatus, VMAF_SELF_TEST_ARGS
 
@@ -157,13 +157,15 @@ _UPDATE_RESULTS: dict[tuple[Path, str], _UpdateAttempt] = {}
 _UPDATING = "Updating and checking media tools."
 
 
-def host_is_busy(config: MediaforceConfig, host: dict[str, object]) -> bool:
+def host_is_busy(config: MediaforceConfig, host: dict[str, object], *, local: bool = False) -> bool:
     tokens = host_identity_tokens(host)
     with open_db(config.paths.db_path) as connection:
         for table in (calibration_jobs, encode_jobs):
             jobs = connection.execute(select(table.c.host_json).where(table.c.status.in_(("starting", "running")))).scalars()
             for value in jobs:
                 assigned = json.loads(value or "{}")
+                if local and (not assigned or assigned.get("mode") == "local" or host_targets_current_machine(assigned)):
+                    return True
                 if tokens & host_identity_tokens(assigned):
                     return True
     return False

@@ -129,6 +129,7 @@ def probe_evidence(
         hardware_decoding: bool = True,
         probe_payload: dict[str, object] | None = None,
         review_dir: Path | None = None,
+        fingerprint: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Measure one kind of evidence; with a command runner, every command runs on that encode computer."""
     payload = probe_payload if probe_payload is not None else probe_evidence_source(
@@ -140,7 +141,7 @@ def probe_evidence(
     if evidence_kind == ANIMATION_PROBE:
         if review_dir is None:
             raise ValueError("An animation check needs a review directory.")
-        return probe_animation(path, duration_seconds or 0.0, review_dir=review_dir, process_controller=process_controller, command_runner=command_runner)
+        return probe_animation(path, duration_seconds or 0.0, review_dir=review_dir, fingerprint=fingerprint, process_controller=process_controller, command_runner=command_runner)
     if evidence_kind == CADENCE_EVIDENCE_KIND:
         return analyze_cadence(
             path,
