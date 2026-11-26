@@ -389,6 +389,10 @@ def _check(validation: dict[str, Any], passed: bool, message: str) -> None:
     validation["passed"] = validation["passed"] and passed
 
 
+def stereo_opus_bitrate_bps(audio_policy: dict[str, Any]) -> int:
+    return _parse_bitrate_text(planned_opus_bitrate({"channels": 2}, audio_policy))
+
+
 def _parse_bitrate_text(value: str) -> int:
     stripped = value.strip().lower()
     if stripped.endswith("k"):

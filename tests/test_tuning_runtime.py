@@ -4560,7 +4560,8 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(request["budget_label"], "300 MB per episode")
         self.assertEqual(request["scale_height"], 0)
         self.assertEqual(request["applied_policy"]["video"]["max_height"], 0)
-        self.assertAlmostEqual(request["estimated_video_bitrate_kbps"], 493.0, places=1)
+        totals = request["stream_budget_ledger"]["totals"]
+        self.assertEqual(request["estimated_video_bitrate_kbps"], round(totals["remaining_video_bitrate_bps"] / 1000, 1))
 
     def test_operator_requested_experiment_uses_current_policy_for_av1_budget_feasibility(self) -> None:
         request = _operator_requested_experiment(
@@ -4894,7 +4895,8 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(saved_jobs[0]["sample_item"]["media_root"], "tv")
         queued_ledger = saved_jobs[0]["sample_item"]["stream_budget_ledger"]
         self.assertEqual(queued_ledger["totals"]["total_target_bytes"], 225_000_000)
-        self.assertEqual(queued_ledger["totals"]["remaining_video_bytes"], 217_000_000)
+        totals = queued_ledger["totals"]
+        self.assertEqual(totals["remaining_video_bytes"], 225_000_000 - totals["non_video_bytes"])
         self.assertEqual(queued_ledger["feasibility"]["status"], "requires_measurement")
         self.assertEqual(
             saved_jobs[0]["sample_item"]["resolved_policy"],
@@ -8016,7 +8018,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 "source_size_bytes": 8_000_000_000,
                 "duration_seconds": 88 * 60,
                 "video_bitrate": 8_000_000,
-                "audio_summary": [],
+                "audio_summary": [{"index": 1, "codec_name": "aac", "size_bytes": 200_000_000}],
                 "subtitle_summary": [],
             },
             current_policy={
@@ -8027,7 +8029,11 @@ class TuningRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(request["request_type"], "combined_experiment")
-        self.assertEqual(request["budget_bytes"], 586_666_667)
+        self.assertEqual(request["budget_bytes"], request["stream_budget_ledger"]["totals"]["total_target_bytes"])
+        file_goal = request["size_goal"]
+        reference_bytes = round(file_goal["reference_size_mb"] * 1_000_000 * 88 / file_goal["reference_runtime_minutes"])
+        self.assertGreater(request["budget_bytes"], reference_bytes)
+        self.assertEqual(request["size_goal"]["target_size_bytes"], request["budget_bytes"])
         self.assertEqual(
             request["quality_risk_tags"],
             ["motion_breakup", "audio_quality_layout"],
@@ -8943,7 +8949,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 "rel_path": "tv/Suits/Season 5/Suits.S05E01.mkv",
                 "source_size_bytes": 4_815_446_620,
                 "duration_seconds": 2700.0,
-                "audio_summary": [],
+                "audio_summary": [{"index": 1, "codec_name": "aac", "size_bytes": 180_000_000}],
                 "resolved_policy": {},
             },
             current_policy={
@@ -8967,7 +8973,8 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(decision_defaults["decision_model"], "size_first_review")
         self.assertEqual(decision_defaults["quality_engine"], "ab_av1_fast_sample")
         self.assertEqual(decision_defaults["target_size_bytes"], 300_000_000)
-        self.assertEqual(decision_defaults["sample_target_size_bytes"], 300_000_000)
+        self.assertEqual(decision_defaults["sample_target_size_bytes"], toolbelt["stream_budget_ledger"]["totals"]["total_target_bytes"])
+        self.assertGreater(decision_defaults["sample_target_size_bytes"], decision_defaults["target_size_bytes"])
         self.assertEqual(decision_defaults["max_height"], 1080)
 
     def test_planned_audio_review_context_uses_planner_primary_audio_track(self) -> None:

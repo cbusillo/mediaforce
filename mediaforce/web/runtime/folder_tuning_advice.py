@@ -511,14 +511,17 @@ def size_budget_request(
     stream_budget_payload = None
     feasibility = "requires_measurement"
     requires_confirmation = False
+    goal = resolved_size_goal or size_goal.resolve(duration_seconds)
+    goal_payload = goal.to_payload()
     if effective_sample_item is not None:
-        goal = resolved_size_goal or size_goal.resolve(duration_seconds)
         stream_budget = resolve_stream_budget_ledger(
             effective_sample_item,
             resolved_size_goal=goal,
             prefer_persisted=False,
         )
         stream_budget_payload = stream_budget.to_payload()
+        goal_payload = stream_budget.size_goal
+        budget_bytes = stream_budget.total_target_bytes or budget_bytes
         estimated_audio_bytes = stream_budget.audio_bytes
         estimated_video_bitrate_kbps = (
             round(stream_budget.remaining_video_bitrate_bps / 1000.0, 1)
@@ -546,7 +549,6 @@ def size_budget_request(
             object_dict(object_dict(effective_sample_item.get("resolved_policy")).get("audio")),
             budget_bytes=budget_bytes,
         )
-    resolved_goal = resolved_size_goal or size_goal.resolve(duration_seconds)
     return {
         "source": "operator_note",
         "operator_note_parse": parsed_note,
@@ -560,10 +562,10 @@ def size_budget_request(
         "estimated_video_bitrate_kbps": estimated_video_bitrate_kbps,
         "target_video_bitrate_kbps": estimated_video_bitrate_kbps,
         "target_encoded_percent": target_encoded_percent,
-        "target_tolerance_percent": size_goal.sample_projection_tolerance_percent,
-        "sample_projection_tolerance_percent": size_goal.sample_projection_tolerance_percent,
-        "final_output_tolerance_percent": size_goal.final_output_tolerance_percent,
-        "size_goal": resolved_goal.to_payload(),
+        "target_tolerance_percent": goal_payload["sample_projection_tolerance_percent"],
+        "sample_projection_tolerance_percent": goal_payload["sample_projection_tolerance_percent"],
+        "final_output_tolerance_percent": goal_payload["final_output_tolerance_percent"],
+        "size_goal": goal_payload,
         "stream_budget_ledger": stream_budget_payload,
         "hard_size_cap": hard_size_cap,
         "measured_size_followup": measured_size_followup,
@@ -785,17 +787,7 @@ def operator_request_from_intent(
     )
     if size_request is None:
         raise ValueError("The selected size could not be converted into a test budget.")
-    size_request.update(
-        {
-            "budget_bytes": resolved_size_goal.target_size_bytes,
-            "budget_label": _resolved_size_goal_label(intent.size_goal, resolved_size_goal.target_size_bytes),
-            "size_goal": resolved_size_goal.to_payload(),
-            "target_tolerance_percent": intent.size_goal.sample_projection_tolerance_percent,
-            "sample_projection_tolerance_percent": intent.size_goal.sample_projection_tolerance_percent,
-            "final_output_tolerance_percent": intent.size_goal.final_output_tolerance_percent,
-            "applied_policy": intent.size_goal.policy_fragment(item_runtime_seconds=duration_seconds),
-        }
-    )
+    size_request["budget_label"] = _resolved_size_goal_label(intent.size_goal, size_request["size_goal"])
     scale_request = {
         "source": "guided_workflow",
         "operator_note_parse": parsed_note,
@@ -881,12 +873,14 @@ def _positive_float_value(value: Any) -> float | None:
     return parsed if parsed > 0 else None
 
 
-def _resolved_size_goal_label(size_goal: SizeGoalIntent, target_size_bytes: int) -> str:
-    target_mb = bytes_to_megabytes(target_size_bytes) or 0
+def _resolved_size_goal_label(size_goal: SizeGoalIntent, file_goal: dict[str, Any]) -> str:
+    target_mb = float_value(file_goal.get("target_size_mb"))
     if size_goal.mode == "normalized" and size_goal.reference_runtime_seconds is not None:
         reference_mb = bytes_to_megabytes(size_goal.value_bytes) or 0
         reference_minutes = size_goal.reference_runtime_seconds / 60.0
-        return f"about {target_mb:.0f} MB for this episode ({reference_mb:g} MB / {reference_minutes:g} min)"
+        extra_mb = bytes_to_megabytes(int_value(file_goal.get("normalized_track_extra_bytes")))
+        sound = f" plus {extra_mb:.1f} MB for the kept tracks" if extra_mb else ""
+        return f"about {target_mb:.0f} MB for this episode ({reference_mb:g} MB / {reference_minutes:g} min{sound})"
     return f"{target_mb:g} MB per episode"
 
 

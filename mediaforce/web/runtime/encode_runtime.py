@@ -87,7 +87,7 @@ from mediaforce.tuning.compression_intent import (
 )
 from mediaforce.tuning.size_goals import SizeGoalIntent, size_goal_from_policy
 from mediaforce.tuning.stream_budget import StreamBudgetIdentityError, StreamBudgetInfeasibleError, \
-    resolve_stream_budget_ledger
+    item_output_size_goal, resolve_stream_budget_ledger
 from mediaforce.remote import HostReadinessError, execution_mode_for_host, host_media_access_for_host, run_remote_command
 from mediaforce.web.runtime.encode_scheduler import COMPUTER_WORK_WINDOW_WAITING_REASON, HOST_WINDOW_IMPOSSIBLE_MARKER, \
     HOST_WINDOW_TOO_SHORT_REASON, SCHEDULE_CLOSE_WAITING_REASON
@@ -2618,8 +2618,8 @@ def _encode_failure_analysis(
     final_size_analysis = (
         None if QUALITY_SAFE_BRACKET_MISS_RE.search(error_message) else _final_size_failure_analysis(error_message)
     )
+    valid_indexes = [index for index in indexes if 0 <= index < len(manifest_items)]
     if final_size_analysis is not None:
-        valid_indexes = [index for index in indexes if 0 <= index < len(manifest_items)]
         if len(valid_indexes) != 1:
             return {
                 **final_size_analysis,
@@ -2636,11 +2636,9 @@ def _encode_failure_analysis(
             }
         )
         return _aggregate_quality_failure_analysis(indexes, [final_size_analysis])
-    floor_analysis = _quality_floor_conflict_analysis(error_message) or _quality_safe_bracket_miss_analysis(
-        error_message
-    )
+    file_goal = item_output_size_goal(manifest_items[valid_indexes[0]]) if len(valid_indexes) == 1 else {}
+    floor_analysis = _quality_floor_conflict_analysis(error_message, file_goal) or _quality_safe_bracket_miss_analysis(error_message)
     if floor_analysis is not None:
-        valid_indexes = [index for index in indexes if 0 <= index < len(manifest_items)]
         if len(valid_indexes) != 1:
             return None
         index = valid_indexes[0]
@@ -2707,7 +2705,7 @@ def _final_size_failure_analysis(error_message: str) -> dict[str, Any] | None:
     }
 
 
-def _quality_floor_conflict_analysis(error_message: str) -> dict[str, Any] | None:
+def _quality_floor_conflict_analysis(error_message: str, file_goal: dict[str, Any]) -> dict[str, Any] | None:
     """The search measured that every size inside the goal breaks the quality floor.
 
     The intent contract lets that measurement authorize a bounded, item-local size exception, so the
@@ -2720,7 +2718,8 @@ def _quality_floor_conflict_analysis(error_message: str) -> dict[str, Any] | Non
     best = int(match.group("best"))
     if target <= 0 or best <= target:
         return None
-    within_bound = best <= target * QUALITY_FLOOR_EXCEPTION_MAX_GROWTH
+    extra = int_value(file_goal.get("normalized_track_extra_bytes")) if file_goal.get("mode") == "normalized" else 0
+    within_bound = best - extra <= (target - extra) * QUALITY_FLOOR_EXCEPTION_MAX_GROWTH
     return {
         "kind": "quality_floor_size_conflict",
         "reason": match.group("reason"),

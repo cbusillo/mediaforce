@@ -282,10 +282,15 @@ class SizeGoalTests(unittest.TestCase):
         self.assertEqual(resolved["sample_projection_tolerance_percent"], 10.0)
         self.assertEqual(resolved["final_output_tolerance_percent"], 5.0)
         ledger = item["stream_budget_ledger"]
-        self.assertEqual(ledger["totals"]["total_target_bytes"], 586_666_667)
-        self.assertEqual(ledger["totals"]["remaining_video_bytes"], 454_080_000)
-        self.assertTrue(ledger["ledger_id"].startswith("sb1_"))
-        self.assertTrue(ledger["stream_plan"]["plan_id"].startswith("sp1_"))
+        totals = ledger["totals"]
+        self.assertGreater(totals["total_target_bytes"], resolved["target_size_bytes"])
+        self.assertEqual(totals["remaining_video_bytes"] + totals["non_video_bytes"], totals["total_target_bytes"])
+        recommended, *_ = guided_size_goal_options(
+            self.default_video, item_runtime_seconds=item["duration_seconds"], default_video_policy=self.default_video,
+            normalized_track_extra_bytes=ledger["size_goal"]["normalized_track_extra_bytes"],
+        )
+        self.assertEqual(recommended["resolved_size_goal"]["target_size_bytes"], totals["total_target_bytes"])
+        self.assertEqual(recommended["operator_intent"]["size_goal"]["value_mb"], resolved["reference_size_mb"])
 
     def _config_with_override(self, video_override: dict[str, object]) -> MediaforceConfig:
         paths = ConfigPaths(

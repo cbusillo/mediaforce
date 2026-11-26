@@ -5,12 +5,13 @@ from typing import Any, Literal, Mapping
 
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
-from mediaforce.encoding.streams import PlannedStream, ProductionStreamPlan, resolve_stream_plan
+from mediaforce.encoding.streams import PlannedStream, ProductionStreamPlan, resolve_stream_plan, stereo_opus_bitrate_bps
 from mediaforce.tuning.size_goals import ResolvedSizeGoal, operator_intent_from_policy
 
 
 STREAM_BUDGET_SCHEMA_VERSION = 1
-DEFAULT_CONTAINER_OVERHEAD_BYTES = 4_000_000
+MIN_CONTAINER_BYTES = 64 * 1024
+CONTAINER_BYTES_PER_SECOND = 512
 DEFAULT_TEXT_SUBTITLE_BYTES = 128 * 1024
 DEFAULT_IMAGE_SUBTITLE_BYTES = 4 * 1024 * 1024
 DEFAULT_UNKNOWN_ATTACHMENT_BYTES = 4_000_000
@@ -377,16 +378,19 @@ def build_stream_budget_ledger(
 ) -> StreamBudgetLedger:
     item_payload = object_dict(item)
     duration_seconds = _positive_float(item_payload.get("duration_seconds"))
-    total_target_bytes = resolved_size_goal.target_size_bytes
     entries = [_entry_for_stream(stream, duration_seconds) for stream in stream_plan.streams]
     if stream_plan.copy_unknown_attachments:
         entries.append(_unknown_attachments_entry())
-    entries.append(_container_entry(total_target_bytes))
+    entries.append(_container_entry(duration_seconds))
 
     audio_bytes = _category_total(entries, "audio")
     subtitle_bytes = _category_total(entries, "subtitle")
     attachment_bytes = _category_total(entries, "attachment")
     container_bytes = _category_total(entries, "container")
+    policy = object_dict(item_payload.get("resolved_policy"))
+    track_extra_bytes = _normalized_track_extra_bytes(audio_bytes, subtitle_bytes, duration_seconds, object_dict(policy.get("audio")))
+    resolved_size_goal = resolved_size_goal.with_track_extra(track_extra_bytes)
+    total_target_bytes = resolved_size_goal.target_size_bytes
     non_video_bytes = _known_total(entries)
     minimum_non_video_bytes = sum(entry.lower_bound_bytes or 0 for entry in entries)
     maximum_non_video_bytes = _upper_total(entries)
@@ -399,7 +403,7 @@ def build_stream_budget_ledger(
 
     source_size_bytes = _positive_int(item_payload.get("source_size_bytes", item_payload.get("size_bytes")))
     source_video_bitrate_bps = _positive_int(item_payload.get("video_bitrate"))
-    video_policy = object_dict(object_dict(item_payload.get("resolved_policy")).get("video"))
+    video_policy = object_dict(policy.get("video"))
     source_cap_percent = _positive_float(video_policy.get("max_encoded_percent"))
     source_cap_total_bytes = _percent_bytes(source_size_bytes, source_cap_percent)
     source_cap_video_bytes = (
@@ -427,6 +431,8 @@ def build_stream_budget_ledger(
     confidence = _aggregate_confidence(entries)
     requires_measurement = feasibility_status == "requires_measurement"
     size_goal_payload = resolved_size_goal.to_payload()
+    if track_extra_bytes:
+        size_goal_payload["normalized_track_extra_bytes"] = track_extra_bytes
     identity_payload = {
         "schema_version": STREAM_BUDGET_SCHEMA_VERSION,
         "source": {
@@ -438,7 +444,7 @@ def build_stream_budget_ledger(
             "source_video_bitrate_bps": source_video_bitrate_bps,
             "duration_seconds": duration_seconds,
         },
-        "policy_hash": stable_policy_hash(object_dict(item_payload.get("resolved_policy"))),
+        "policy_hash": stable_policy_hash(policy),
         "size_goal": size_goal_payload,
         "stream_plan": stream_plan.to_payload(),
         "entries": [entry.to_payload() for entry in entries],
@@ -747,9 +753,23 @@ def _unknown_attachments_entry() -> StreamBudgetEntry:
     )
 
 
-def _container_entry(total_target_bytes: int | None) -> StreamBudgetEntry:
-    percent_reserve = _ceiling_fraction(total_target_bytes, 100) if total_target_bytes is not None else 0
-    budget_bytes = max(DEFAULT_CONTAINER_OVERHEAD_BYTES, percent_reserve)
+def _normalized_track_extra_bytes(
+        audio_bytes: int | None, subtitle_bytes: int | None, duration_seconds: float | None, audio_policy: dict[str, Any],
+) -> int:
+    if audio_bytes is None or subtitle_bytes is None or duration_seconds is None or not (audio_bytes or subtitle_bytes):
+        return 0
+    stereo_bytes = _bytes_for_bitrate(stereo_opus_bitrate_bps(audio_policy), duration_seconds)
+    assert stereo_bytes is not None
+    return max(0, audio_bytes + subtitle_bytes - stereo_bytes)
+
+
+def item_output_size_goal(item: Mapping[str, Any]) -> dict[str, Any]:
+    ledger = object_dict(item.get("stream_budget_ledger"))
+    return object_dict(ledger.get("size_goal")) or object_dict(object_dict(item.get("resolved_operator_intent")).get("size_goal"))
+
+
+def _container_entry(duration_seconds: float | None) -> StreamBudgetEntry:
+    budget_bytes = max(MIN_CONTAINER_BYTES, round(CONTAINER_BYTES_PER_SECOND * (duration_seconds or 0)))
     return StreamBudgetEntry(
         category="container",
         source_index=None,
@@ -760,10 +780,10 @@ def _container_entry(total_target_bytes: int | None) -> StreamBudgetEntry:
         lower_bound_bytes=0,
         upper_bound_bytes=budget_bytes,
         bitrate_bps=None,
-        provenance="fallback_max_4mb_or_1_percent_of_target",
+        provenance="runtime_container_allowance",
         confidence="low",
         requires_measurement=False,
-        rationale="Container overhead is not measured yet, so the ledger reserves the greater of 4 MB or 1% of target bytes.",
+        rationale="The container allowance covers a small header and grows with the running time.",
     )
 
 
@@ -967,10 +987,6 @@ def _percent_of_source(
     value = Decimal(value_bytes) * Decimal(100) / Decimal(source_size_bytes)
     rounding = ROUND_FLOOR if floor else ROUND_HALF_UP
     return float(value.quantize(Decimal("0.000001"), rounding=rounding))
-
-
-def _ceiling_fraction(value: int, divisor: int) -> int:
-    return (value + divisor - 1) // divisor
 
 
 def _optional_text(value: object) -> str | None:

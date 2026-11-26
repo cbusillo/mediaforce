@@ -82,6 +82,8 @@ class TargetSizeSearchTests(unittest.TestCase):
         ledger = self._ledger(
             target_bytes=140_000_000, source_size_bytes=1_000_000_000, final_tolerance_percent=10.0,
         )
+        assert ledger.non_video_bytes is not None
+        overhead = ledger.non_video_bytes
         measured: list[int] = []
         progress: list[tuple[int, int]] = []
 
@@ -89,10 +91,10 @@ class TargetSizeSearchTests(unittest.TestCase):
             crf_int = int(crf)
             measured.append(crf_int)
             predicted_video_bytes = {
-                35: 146_000_000,
-                36: 126_000_000,
-                37: 116_000_000,
-            }[crf_int]
+                35: 150_000_000,
+                36: 130_000_000,
+                37: 120_000_000,
+            }[crf_int] - overhead
             score = {35: 90.0, 36: 86.0, 37: 79.0}[crf_int]
             return SampleEncodeResult(
                 "VMAF",
@@ -606,9 +608,11 @@ class TargetSizeSearchTests(unittest.TestCase):
         trace = result.target_size_trace or {}
         self.assertEqual(trace["status"], "selected")
         self.assertEqual(trace["target"]["total_target_bytes"], 300_000_000)
-        self.assertEqual(trace["selected_candidate"]["sampled_clip_bytes"], 2_600_000)
-        self.assertEqual(trace["selected_candidate"]["predicted_video_bytes"], 272_000_000)
-        self.assertEqual(trace["selected_candidate"]["predicted_whole_episode_bytes"], 276_000_000)
+        selected = object_dict(trace["selected_candidate"])
+        self.assertEqual(selected["sampled_clip_bytes"], 2_600_000)
+        self.assertEqual(selected["predicted_video_bytes"], 272_000_000)
+        assert ledger.non_video_bytes is not None
+        self.assertEqual(selected["predicted_whole_episode_bytes"], 272_000_000 + ledger.non_video_bytes)
         self.assertEqual(trace["transform_plan"]["cadence_transform"], "none")
 
     def test_quality_floor_conflict_reports_target_best_reachable_and_floor(self) -> None:
@@ -648,7 +652,8 @@ class TargetSizeSearchTests(unittest.TestCase):
         trace = context.exception.trace
         self.assertEqual(trace["target"]["total_target_bytes"], 300_000_000)
         self.assertEqual(trace["quality_floor"]["minimum"], 80.0)
-        self.assertEqual(trace["best_reachable_candidate"]["predicted_whole_episode_bytes"], 332_000_000)
+        assert ledger.non_video_bytes is not None
+        self.assertEqual(trace["best_reachable_candidate"]["predicted_whole_episode_bytes"], 328_000_000 + ledger.non_video_bytes)
         self.assertIn("quality floor", str(context.exception).lower())
 
     def test_source_cap_below_target_band_reports_bound_exhaustion_without_sampling(self) -> None:
@@ -776,7 +781,7 @@ class TargetSizeSearchTests(unittest.TestCase):
         self.assertFalse(context.exception.trace["crf_bounds"]["range_expanded"])
 
     def test_arithmetic_impossible_budget_reports_structured_infeasibility(self) -> None:
-        ledger = self._ledger(target_bytes=3_000_000, source_size_bytes=1_000_000_000)
+        ledger = self._ledger(target_bytes=1, source_size_bytes=1_000_000_000)
         with self.assertRaises(TargetSizeSearchError) as context:
             search_target_size(
                 Path("/tmp/source.mkv"),

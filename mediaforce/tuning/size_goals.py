@@ -171,6 +171,22 @@ class ResolvedSizeGoal:
     def requires_confirmation(self) -> bool:
         return self.intent.requires_confirmation or self.status != "resolved"
 
+    def with_track_extra(self, extra_bytes: int) -> "ResolvedSizeGoal":
+        if self.intent.mode != "normalized" or self.target_size_bytes is None or extra_bytes <= 0:
+            return self
+        file_target = self.target_size_bytes + extra_bytes
+        reference_share = self.target_size_bytes / file_target
+        return replace(
+            self,
+            target_size_bytes=file_target,
+            intent=replace(
+                self.intent,
+                sample_projection_tolerance_percent=self.intent.sample_projection_tolerance_percent * reference_share,
+                final_output_tolerance_percent=self.intent.final_output_tolerance_percent * reference_share,
+            ),
+            rationale=f"{self.rationale} The kept sound and subtitles add {extra_bytes / DECIMAL_MEGABYTE_BYTES:.1f} MB.",
+        )
+
     def _bounds(self, tolerance_percent: float) -> tuple[int | None, int | None]:
         if self.target_size_bytes is None:
             return None, None
@@ -567,6 +583,7 @@ def guided_size_goal_options(
         default_video_policy: dict[str, Any],
         audio_policy: dict[str, Any] | None = None,
         subtitle_policy: dict[str, Any] | None = None,
+        normalized_track_extra_bytes: int = 0,
         requested_budget_bytes: int | None = None,
         fallback_size_policy: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
@@ -585,6 +602,7 @@ def guided_size_goal_options(
             video_policy=video_policy,
             default_video_policy=default_video_policy,
             item_runtime_seconds=item_runtime_seconds,
+            normalized_track_extra_bytes=normalized_track_extra_bytes,
             audio_policy=audio_policy,
             subtitle_policy=subtitle_policy,
         )
@@ -619,7 +637,7 @@ def guided_size_goal_options(
             quality=context_intent.quality,
             streams=context_intent.streams,
         )
-        option_goal = option_intent.resolve(item_runtime_seconds)
+        option_goal = option_intent.resolve(item_runtime_seconds).with_track_extra(normalized_track_extra_bytes)
         options.append(
             {
                 "key": key,
@@ -639,6 +657,7 @@ def _legacy_confirmation_options(
         video_policy: dict[str, Any],
         default_video_policy: dict[str, Any],
         item_runtime_seconds: float | None,
+        normalized_track_extra_bytes: int,
         audio_policy: dict[str, Any] | None,
         subtitle_policy: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
@@ -693,7 +712,7 @@ def _legacy_confirmation_options(
             quality=context_intent.quality,
             streams=context_intent.streams,
         )
-        resolved_goal = confirmed_goal.resolve(item_runtime_seconds)
+        resolved_goal = confirmed_goal.resolve(item_runtime_seconds).with_track_extra(normalized_track_extra_bytes)
         options.append(
             {
                 "key": key,

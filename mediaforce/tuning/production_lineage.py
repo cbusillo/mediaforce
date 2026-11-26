@@ -31,6 +31,7 @@ from mediaforce.tuning.content_intent_observations import (
     content_intent_stream_plan_id,
 )
 from mediaforce.tuning.target_default_context import current_target_boundary
+from mediaforce.tuning.stream_budget import item_output_size_goal
 
 LOGGER = logging.getLogger(__name__)
 LINEAGE_SCHEMA_VERSION = 1
@@ -75,9 +76,7 @@ def production_item_identity(item: Mapping[str, Any]) -> dict[str, Any]:
         "stream_ledger_hash": stable_json_hash(
             object_dict(item.get("stream_budget_ledger"))
         ),
-        "size_goal": object_dict(
-            object_dict(item.get("resolved_operator_intent")).get("size_goal")
-        ),
+        "size_goal": item_output_size_goal(item),
     }
 
 

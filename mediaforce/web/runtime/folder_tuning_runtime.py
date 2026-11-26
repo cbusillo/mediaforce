@@ -97,13 +97,6 @@ def build_tuning_runtime_toolbelt(
 ) -> dict[str, Any]:
     sample_plan_item = dict(sample_item)
     sample_plan_item["resolved_policy"] = current_policy
-    try:
-        stream_budget = resolve_stream_budget_ledger(sample_plan_item, prefer_persisted=False)
-        sample_plan_item["stream_budget_ledger"] = stream_budget.to_payload()
-        item_plan = describe_item_plan(sample_plan_item)
-    except (KeyError, TypeError, ValueError):
-        stream_budget = None
-        item_plan = {}
     sample_result = object_dict(object_dict(calibration).get("sample_result"))
     video_policy = object_dict(current_policy.get("video"))
     target_size_mb = float_value(video_policy.get("target_size_mb"))
@@ -116,6 +109,13 @@ def build_tuning_runtime_toolbelt(
         subtitle_policy=object_dict(current_policy.get("subtitle")),
     )
     resolved_size_goal = operator_intent.size_goal.resolve(sample_duration_seconds or None)
+    try:
+        stream_budget = resolve_stream_budget_ledger(sample_plan_item, resolved_size_goal=resolved_size_goal, prefer_persisted=False)
+        sample_plan_item["stream_budget_ledger"] = stream_budget.to_payload()
+        item_plan = describe_item_plan(sample_plan_item)
+    except (KeyError, TypeError, ValueError):
+        stream_budget = None
+        item_plan = {}
     target_size_bytes = resolved_size_goal.target_size_bytes
     toolbelt = {
         "allowed_policy_keys": deps.tuning_policy_key_paths(current_policy),
@@ -128,7 +128,7 @@ def build_tuning_runtime_toolbelt(
             "target_runtime_minutes": target_runtime_minutes or None,
             "target_size_bytes": target_size_bytes,
             "sample_runtime_seconds": sample_duration_seconds or None,
-            "sample_target_size_bytes": target_size_bytes,
+            "sample_target_size_bytes": stream_budget.total_target_bytes if stream_budget else target_size_bytes,
             "operator_intent": operator_intent.to_payload(item_runtime_seconds=sample_duration_seconds or None),
             "stream_budget_ledger_id": stream_budget.ledger_id if stream_budget is not None else None,
             "max_height": video_policy.get("max_height"),

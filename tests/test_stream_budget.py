@@ -143,23 +143,38 @@ class StreamBudgetTests(unittest.TestCase):
         self.assertEqual(ledger.feasibility_status, "arithmetically_infeasible")
         self.assertTrue(ledger.arithmetic_infeasible)
 
-    def test_container_reservation_can_make_budget_infeasible(self) -> None:
-        ledger = self._ledger(
-            target_bytes=3_000_000,
-            audio={
-                "index": 1,
-                "codec_name": "aac",
-                "channels": 2,
-                "language": "eng",
-                "default": 1,
-                "size_bytes": 1,
-            },
-            duration_seconds=1.0,
-        )
+    def test_large_copied_soundtrack_keeps_the_stereo_looks_picture_budget(self) -> None:
+        item = self._item(audio={"index": 1, "codec_name": "aac", "size_bytes": 173_000_000}, duration_seconds=2700)
+        goal = SizeGoalIntent("normalized", 150_000_000, 2700, 10, 5, "test").resolve(2700)
+        copied = resolve_stream_budget_ledger(item, resolved_size_goal=goal)
+        item["audio_summary"] = [{"index": 1, "codec_name": "eac3", "channels": 2}]
+        stereo = resolve_stream_budget_ledger(item, resolved_size_goal=goal)
 
-        self.assertEqual(ledger.container_bytes, 4_000_000)
-        self.assertEqual(ledger.remaining_video_bytes, -1_000_001)
-        self.assertEqual(ledger.feasibility_status, "arithmetically_infeasible")
+        self.assertGreater(stereo.remaining_video_bytes, 0)
+        self.assertEqual(copied.remaining_video_bytes, stereo.remaining_video_bytes)
+        self.assertEqual(copied.stream_plan.audio_streams[0].action, "copy")
+        self.assertIsNone(stream_budget_projection_blocker(copied))
+        assert copied.remaining_video_bytes is not None and copied.non_video_bytes is not None and stereo.non_video_bytes is not None
+        self.assertEqual(copied.total_target_bytes, copied.remaining_video_bytes + copied.non_video_bytes)
+        self.assertEqual(copied.size_goal["target_size_bytes"], copied.total_target_bytes)
+        for bound in ("sample_lower_bound_bytes", "sample_upper_bound_bytes", "final_lower_bound_bytes", "final_upper_bound_bytes"):
+            self.assertAlmostEqual(
+                copied.size_goal[bound] - copied.non_video_bytes, stereo.size_goal[bound] - stereo.non_video_bytes, delta=1,
+            )
+        self.assertEqual(copied.source_cap_total_bytes, stereo.source_cap_total_bytes)
+
+    def test_container_reserve_scales_with_runtime_above_a_small_floor(self) -> None:
+        audio = {"index": 1, "codec_name": "aac", "size_bytes": 1}
+        floor, short, episode, movie = [
+            self._ledger(audio=audio, duration_seconds=seconds).container_bytes for seconds in (1, 2, 1320, 5400)
+        ]
+
+        assert floor is not None and short is not None and episode is not None and movie is not None
+        self.assertGreater(floor, 0)
+        self.assertEqual(floor, short)
+        self.assertLess(floor, episode)
+        self.assertLess(episode, 1_000_000)
+        self.assertGreater(movie, episode)
 
     def test_small_positive_budget_remains_measurable_without_source_ratio_judgment(self) -> None:
         ledger = self._ledger(
@@ -196,7 +211,7 @@ class StreamBudgetTests(unittest.TestCase):
         self.assertIsNone(ledger.remaining_video_bitrate_bps)
         self.assertEqual(ledger.feasibility_status, "requires_measurement")
 
-    def test_decimal_target_bytes_and_container_percent_are_exact(self) -> None:
+    def test_absolute_target_includes_copied_audio_and_container_bytes(self) -> None:
         target_bytes = megabytes_to_bytes(600.000001)
         ledger = self._ledger(
             target_bytes=target_bytes,
@@ -212,8 +227,8 @@ class StreamBudgetTests(unittest.TestCase):
 
         self.assertEqual(target_bytes, 600_000_001)
         self.assertEqual(ledger.total_target_bytes, 600_000_001)
-        self.assertEqual(ledger.container_bytes, 6_000_001)
-        self.assertEqual(ledger.remaining_video_bytes, 584_000_000)
+        assert ledger.audio_bytes is not None and ledger.container_bytes is not None
+        self.assertEqual(ledger.remaining_video_bytes, target_bytes - ledger.audio_bytes - ledger.container_bytes)
 
     def test_source_relative_cap_subtracts_non_video_before_search(self) -> None:
         ledger = self._ledger(
@@ -229,8 +244,10 @@ class StreamBudgetTests(unittest.TestCase):
         )
 
         self.assertEqual(ledger.source_cap_total_bytes, 800_000_000)
-        self.assertEqual(ledger.source_cap_video_bytes, 696_000_000)
-        self.assertEqual(ledger.source_cap_video_percent, 69.6)
+        assert ledger.source_cap_total_bytes is not None and ledger.non_video_bytes is not None
+        assert ledger.source_cap_video_bytes is not None
+        self.assertEqual(ledger.source_cap_video_bytes, ledger.source_cap_total_bytes - ledger.non_video_bytes)
+        self.assertEqual(ledger.source_cap_video_percent, ledger.source_cap_video_bytes / 10_000_000)
 
     def test_projection_blocks_target_band_above_source_cap(self) -> None:
         ledger = self._ledger(

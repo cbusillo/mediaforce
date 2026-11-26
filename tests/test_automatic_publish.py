@@ -1130,8 +1130,14 @@ def test_encoder_size_miss_with_another_failure_stays_failed(config: MediaforceC
     assert _status(config, item_id) == "encoded"
 
 
-def test_encoder_copy_inside_its_size_band_publishes_without_a_question(config: MediaforceConfig) -> None:
-    item_id, item = _encoder_size_record(config, "tv/Show/Season 1/fits.mkv", lower=1, upper=100)
+def test_copy_inside_the_file_band_with_its_retained_tracks_publishes(config: MediaforceConfig) -> None:
+    item_id, item = _encoder_size_record(config, "tv/Show/Season 1/fits.mkv", lower=1, upper=3)
+    item["stream_budget_ledger"] = {"size_goal": item["resolved_operator_intent"]["size_goal"]}
+    item["resolved_operator_intent"] = {
+        "size_goal": {"target_size_bytes": 1, "final_lower_bound_bytes": 1, "final_upper_bound_bytes": 2}
+    }
+    manifest = config.paths.project_root / f"manifest-{item_id}.json"
+    manifest.write_text(json.dumps({"run_id": f"run-{item_id}", "items": [item]}), encoding="utf-8")
     _run(config)
     assert _status(config, item_id) == "promoted"
     assert Path(item["source_path"]).read_bytes() == b"av1"
