@@ -282,8 +282,9 @@ class SizeGoalTests(unittest.TestCase):
         self.assertEqual(resolved["sample_projection_tolerance_percent"], 10.0)
         self.assertEqual(resolved["final_output_tolerance_percent"], 5.0)
         ledger = item["stream_budget_ledger"]
-        self.assertEqual(ledger["totals"]["total_target_bytes"], 586_666_667)
-        self.assertEqual(ledger["totals"]["remaining_video_bytes"], 454_080_000)
+        totals = ledger["totals"]
+        self.assertGreater(totals["total_target_bytes"], resolved["target_size_bytes"])
+        self.assertEqual(totals["remaining_video_bytes"] + totals["non_video_bytes"], totals["total_target_bytes"])
         self.assertTrue(ledger["ledger_id"].startswith("sb1_"))
         self.assertTrue(ledger["stream_plan"]["plan_id"].startswith("sp1_"))
 

@@ -109,7 +109,7 @@ def test_encode_reserve_uses_approved_target_with_overhead(tmp_path: Path) -> No
     source.parent.mkdir()
     source.write_bytes(b"x" * 100)
     item = _item(source)
-    item["stream_budget_ledger"] = {"total_target_bytes": 50}
+    item["stream_budget_ledger"] = {"totals": {"total_target_bytes": 50}}
 
     result = encode_reserve_preflight(
         cast(MediaforceConfig, config),

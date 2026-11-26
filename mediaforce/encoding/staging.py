@@ -37,6 +37,7 @@ from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.tuning.compression_intent import compression_intent_from_item
 from mediaforce.tuning.production_lineage import validated_target_identity
 from mediaforce.tuning.production_outcomes import append_target_production_outcome, prepare_target_production_outcome
+from mediaforce.tuning.stream_budget import item_output_size_goal
 
 LOGGER = logging.getLogger(__name__)
 
@@ -383,7 +384,7 @@ def validate_one_item(
     if require_size_reduction:
         check(validation, staged_size_bytes < source_size_bytes, "staged file is smaller than source")
 
-    resolved_size_goal = object_dict(object_dict(item.get("resolved_operator_intent")).get("size_goal"))
+    resolved_size_goal = item_output_size_goal(item)
     final_lower_bound_bytes = int_value(resolved_size_goal.get("final_lower_bound_bytes"))
     final_upper_bound_bytes = int_value(resolved_size_goal.get("final_upper_bound_bytes"))
     # The encoder's size miss is the size result and is carried on every later check; only the owner's keep clears it.

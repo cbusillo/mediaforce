@@ -15,6 +15,7 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict
 from mediaforce.encoding.helpers import resolve_item_source_path, resolve_item_staging_path
 from mediaforce.hosts.config import execution_mode_for_host, host_media_access_for_host
 from mediaforce.remote import run_remote_command
+from mediaforce.tuning.stream_budget import item_output_size_goal
 
 GIBIBYTE = 1024 ** 3
 REMOTE_DISK_USAGE_TIMEOUT_SECONDS = 10
@@ -454,10 +455,10 @@ def _source_size_bytes(item: dict[str, Any]) -> int:
 
 def _planned_output_bytes(item: dict[str, Any], policy: FreeSpaceReservePolicy) -> int:
     stream_budget = object_dict(item.get("stream_budget_ledger"))
-    target_bytes = int_value(stream_budget.get("total_target_bytes"))
+    totals = object_dict(stream_budget.get("totals")) or stream_budget
+    target_bytes = int_value(totals.get("total_target_bytes"))
     if target_bytes <= 0:
-        operator_intent = object_dict(item.get("resolved_operator_intent"))
-        size_goal = object_dict(operator_intent.get("size_goal"))
+        size_goal = item_output_size_goal(item)
         target_bytes = int_value(size_goal.get("target_size_bytes"))
     if target_bytes <= 0:
         resolved_policy = object_dict(item.get("resolved_policy"))

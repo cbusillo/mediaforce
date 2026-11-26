@@ -70,9 +70,14 @@ measured review instead of being treated as impossible.
 
 ## Target-size search
 
-The first representative sample is seeded from the approved whole-episode size
-goal after the ledger subtracts production audio, subtitle, attachment, and
-container bytes. The search records a typed trace containing:
+For a runtime-based look, the reference size includes one stereo Opus track at
+the configured rate. When the selected sound and subtitles need more than that
+allowance, the extra bytes shift the file target and both size bands by the
+same amount. The permitted variation in picture bytes stays the same. The original-size cap
+still covers the whole file. An absolute per-file goal includes every track.
+
+The first representative sample uses the file target less all selected streams
+and the container allowance. The search records a typed trace containing:
 
 - sampled clip bytes when the sample engine reports them
 - predicted whole-episode video bytes
@@ -167,8 +172,7 @@ duration or target evidence still fails closed.
 
 ## Fallbacks and migration
 
-When container overhead is not measured, reserve the greater of 4,000,000
-bytes or one percent of the total target. Unknown copied stream sizes use
+The container allowance grows by 512 bytes per second, with a 64 KiB floor. Unknown copied stream sizes use
 explicit bounded fallbacks and keep `requires_measurement` visible.
 
 Legacy manifests without a ledger remain runnable through the compatibility
