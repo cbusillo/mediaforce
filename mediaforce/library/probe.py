@@ -3,12 +3,13 @@ import signal
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from mediaforce.core.binaries import ffprobe_binary
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.process_control import ManagedProcessController, run_command
 from mediaforce.core.type_defs import int_value, object_dict, object_list
+from mediaforce.encoding.streams import resolve_stream_plan
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, analyze_media_fingerprint
 from mediaforce.library.animation_probe import ANIMATION_PROBE, probe_animation
@@ -130,6 +131,8 @@ def probe_evidence(
         probe_payload: dict[str, object] | None = None,
         review_dir: Path | None = None,
         fingerprint: dict[str, object] | None = None,
+        policy: dict[str, Any] | None = None,
+        output_container: str = "mkv",
 ) -> dict[str, object]:
     """Measure one kind of evidence; with a command runner, every command runs on that encode computer."""
     payload = probe_payload if probe_payload is not None else probe_evidence_source(
@@ -141,7 +144,20 @@ def probe_evidence(
     if evidence_kind == ANIMATION_PROBE:
         if review_dir is None:
             raise ValueError("An animation check needs a review directory.")
-        return probe_animation(path, duration_seconds or 0.0, review_dir=review_dir, fingerprint=fingerprint, process_controller=process_controller, command_runner=command_runner)
+        if not policy or not video_stream:
+            raise ValueError("The animation check needs the original picture and its sound settings.")
+        if any("dv_profile" in object_dict(side) for side in object_list(video_stream.get("side_data_list"))) or video_stream.get("color_transfer") in {"smpte2084", "arib-std-b67"}:
+            raise ValueError("This HDR picture needs a matching display reference before its colors can be scored.")
+        audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
+        if not fingerprint or not fingerprint.get("analysis"):
+            fingerprint = analyze_media_fingerprint(path, video_stream=video_stream, audio_streams=audio_streams, duration_seconds=duration_seconds,
+                                                    command_runner=command_runner, process_controller=process_controller)
+        plan = resolve_stream_plan({"rel_path": path.name, "resolved_policy": policy, "output_container": output_container,
+            "audio_summary": [_stream_entry(stream, duration_seconds) for stream in audio_streams],
+            "subtitle_summary": [_stream_entry(stream, duration_seconds) for stream in streams if stream.get("codec_type") == "subtitle"],
+            "attachment_summary": [_attachment_entry(stream) for stream in streams if stream.get("codec_type") == "attachment"]})
+        return probe_animation(path, duration_seconds or 0.0, review_dir=review_dir, fingerprint=fingerprint, plan=plan,
+                               video_policy=policy["video"], process_controller=process_controller, command_runner=command_runner)
     if evidence_kind == CADENCE_EVIDENCE_KIND:
         return analyze_cadence(
             path,

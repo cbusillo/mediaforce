@@ -1810,12 +1810,14 @@ class EvidenceWorkerTests(unittest.TestCase):
                 connection.execute(series_metadata.insert().values(series_prefix=f"tv/{show}", tmdb_genres_json=json.dumps([genre]), updated_at="now"))
             self.assertEqual(queue_animation_probes(connection, self.config), 1)
             self.assertEqual(queue_animation_probes(connection, self.config), 0)
-        analyzer = Mock(return_value={"kbps": 950.0})
+        self.config.raw.update(video={}, audio={}, subtitle={}, planning={})
+        self.config.media["output_container"] = "mkv"
+        analyzer = Mock(return_value={"kbps": 950.0, "picture_look": "cartoon"})
         deps = replace(self._deps(analyzer), evidence_host_rows=lambda _: [])
         self.assertEqual(process_evidence_queue_once(config_path=self.config.paths.config_path, config=self.config, deps=deps), 1)
         with open_db(self.config.paths.db_path) as connection:
             row = connection.execute(select(animation_sorts)).one()
-            self.assertEqual((row.title, row.kbps), ("tv/Toons/Season 1", 950.0))
+            self.assertEqual((row.title, row.kbps, row.picture_look), ("tv/Toons/Season 1", 950.0, "cartoon"))
             self.assertEqual(queue_animation_probes(connection, self.config), 0)
             connection.execute(library_items.update().where(library_items.c.id == row.item_id).values(content_version_fingerprint="new-source"))
             self.assertEqual(queue_animation_probes(connection, self.config), 1)

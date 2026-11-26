@@ -79,12 +79,7 @@ def build_ffmpeg_command(
         cmd.extend(["-metadata", f"{key}={value}"])
 
     if isinstance(selection, ProductionStreamPlan):
-        for audio in selection.audio_streams:
-            cmd.extend(["-map", f"0:{audio.source_index}"])
-        for subtitle in selection.subtitle_streams:
-            cmd.extend(["-map", f"0:{subtitle.source_index}"])
-        if selection.copies_attachments:
-            cmd.extend(["-map", "0:t?"])
+        cmd.extend(planned_stream_maps(selection))
     else:
         for audio in selection["audio_tracks"]:
             cmd.extend(["-map", f"0:{audio['index']}"])
@@ -118,33 +113,7 @@ def build_ffmpeg_command(
         cmd.extend(["-vf", video_filter])
 
     if isinstance(selection, ProductionStreamPlan):
-        for output_index, audio in enumerate(selection.audio_streams):
-            codec = str(audio.codec_argument or "copy")
-            if codec == "libopus":
-                cmd.extend(
-                    opus_encode_arguments(
-                        channels=audio.channels or 2,
-                        bitrate_text=str(audio.output_bitrate_text),
-                        output_channels=audio.output_channels,
-                        stream_index=output_index,
-                    )
-                )
-            else:
-                cmd.extend([f"-c:a:{output_index}", codec])
-            cmd.extend([f"-metadata:s:a:{output_index}", "language=eng"])
-            cmd.extend([f"-disposition:a:{output_index}", "default"])
-        if not selection.audio_streams:
-            cmd.extend(["-an"])
-
-        for output_index, subtitle in enumerate(selection.subtitle_streams):
-            cmd.extend([f"-c:s:{output_index}", str(subtitle.codec_argument or "copy")])
-            cmd.extend([f"-metadata:s:s:{output_index}", "language=eng"])
-            disposition = "default" if output_index == 0 and not subtitle.forced else "0"
-            if subtitle.forced:
-                disposition = "forced"
-            cmd.extend([f"-disposition:s:{output_index}", disposition])
-        if selection.copies_attachments:
-            cmd.extend(["-c:t", "copy"])
+        cmd.extend(planned_stream_codecs(selection))
         has_subtitles = bool(selection.subtitle_streams)
     else:
         for output_index, audio in enumerate(selection["audio_tracks"]):
@@ -181,3 +150,46 @@ def build_ffmpeg_command(
 
 def _format_metadata_number(value: float) -> str:
     return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def planned_stream_maps(selection: ProductionStreamPlan) -> list[str]:
+    cmd: list[str] = []
+    for audio in selection.audio_streams:
+        cmd.extend(["-map", f"0:{audio.source_index}"])
+    for subtitle in selection.subtitle_streams:
+        cmd.extend(["-map", f"0:{subtitle.source_index}"])
+    if selection.copies_attachments:
+        cmd.extend(["-map", "0:t?"])
+    return cmd
+
+
+def planned_stream_codecs(selection: ProductionStreamPlan) -> list[str]:
+    cmd: list[str] = []
+    for output_index, audio in enumerate(selection.audio_streams):
+        codec = str(audio.codec_argument or "copy")
+        if codec == "libopus":
+            cmd.extend(
+                opus_encode_arguments(
+                    channels=audio.channels or 2,
+                    bitrate_text=str(audio.output_bitrate_text),
+                    output_channels=audio.output_channels,
+                    stream_index=output_index,
+                )
+            )
+        else:
+            cmd.extend([f"-c:a:{output_index}", codec])
+        cmd.extend([f"-metadata:s:a:{output_index}", "language=eng"])
+        cmd.extend([f"-disposition:a:{output_index}", "default"])
+    if not selection.audio_streams:
+        cmd.extend(["-an"])
+
+    for output_index, subtitle in enumerate(selection.subtitle_streams):
+        cmd.extend([f"-c:s:{output_index}", str(subtitle.codec_argument or "copy")])
+        cmd.extend([f"-metadata:s:s:{output_index}", "language=eng"])
+        disposition = "default" if output_index == 0 and not subtitle.forced else "0"
+        if subtitle.forced:
+            disposition = "forced"
+        cmd.extend([f"-disposition:s:{output_index}", disposition])
+    if selection.copies_attachments:
+        cmd.extend(["-c:t", "copy"])
+    return cmd

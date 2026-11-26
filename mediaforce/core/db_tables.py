@@ -847,6 +847,7 @@ animation_sorts = Table(
     Column("item_id", Integer, ForeignKey("library_items.id", ondelete="CASCADE"), nullable=False),
     Column("source", Text, nullable=False),
     Column("kbps", REAL),
+    Column("picture_look", Text),
     Column("choice", Text),
     Column("moment_json", Text),
 )

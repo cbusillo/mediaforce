@@ -33,6 +33,7 @@ from mediaforce.ops.runtime_install import update_hold_reason
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES, derive_item_workflow_state
+from mediaforce.library.animation_probe import CARTOON_TARGET_MB
 from mediaforce.library.content_kinds import look_group, season_grouping, season_kind_report
 from mediaforce.tuning.calibration_jobs import load_latest_job, load_latest_sample_job, load_latest_jobs_for_prefixes
 from mediaforce.tuning.size_goals import tallest_picture
@@ -51,7 +52,6 @@ LIVE_ACTION = "live_action"
 CARTOON = "cartoon"
 APPROVABLE_KINDS = (LIVE_ACTION, CARTOON)
 _group_choice_lock = Lock()
-CARTOON_TARGET_MB = 150
 CARTOON_SIZES_MB = (CARTOON_TARGET_MB * 0.75, CARTOON_TARGET_MB, CARTOON_TARGET_MB * 1.5)
 # Darker and bright live action merged into live action (#1385); their saved approvals are carried over once.
 MERGED_INTO_LIVE_ACTION = ("darker_live_action", "bright_live_action")

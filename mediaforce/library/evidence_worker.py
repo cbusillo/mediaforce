@@ -533,6 +533,8 @@ def _run_evidence_claim(
                 analysis_kwargs["probe_payload"] = shared_probe
             if owned.evidence_kind == ANIMATION_PROBE:
                 analysis_kwargs["review_dir"] = config.paths.review_dir
+                analysis_kwargs["policy"] = config.resolve_policy(owned.rel_path)
+                analysis_kwargs["output_container"] = config.output_container
                 if observed_path == source_path:
                     analysis_kwargs["fingerprint"] = parse_evidence_summary(owned.canonical_summary_json)
                 else:
@@ -711,7 +713,7 @@ def _commit_evidence_summary(
             from mediaforce.core.db_tables import library_item_evidence_state
 
             connection.execute(update(animation_sorts).where(animation_sorts.c.item_id == claim.library_item_id,
-                animation_sorts.c.source == summary["source"], animation_sorts.c.kbps.is_(None)).values(kbps=summary["kbps"],
+                animation_sorts.c.source == summary["source"], animation_sorts.c.kbps.is_(None)).values(kbps=summary["kbps"], picture_look=summary["picture_look"],
                     moment_json=json.dumps(summary["moment"]) if summary.get("moment") else None))
             connection.execute(update(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == claim.library_item_id,
                 library_item_evidence_state.c.evidence_kind == ANIMATION_PROBE).values(state=EVIDENCE_STATE_CURRENT))

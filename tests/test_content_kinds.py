@@ -90,7 +90,7 @@ def test_movies_without_genres_keep_their_existing_group_but_extras_and_vr_never
     assert {row["reason"] for row in report["seasons"] if row["kind"] == "unmeasured"} == {"no_measured_original"}
 
 
-def test_movie_label_requests_a_probe_and_cannot_change_its_result(connection: DBClient) -> None:
+def test_movie_label_requests_a_probe_and_cannot_change_its_result(connection: DBClient, monkeypatch: pytest.MonkeyPatch) -> None:
     title = "movies/Feature"
     item = _item(connection, f"{title}/feature.mkv", status="discovered", codec="h264", current_dark=0.1)
     _admit_historical_original(connection, item, dark=0.2)
@@ -105,7 +105,10 @@ def test_movie_label_requests_a_probe_and_cannot_change_its_result(connection: D
         plex_genres_json=json.dumps(["Comedy", "Animation"]), observed_at=timestamp(),
     ))
     assert report_kind() == "unmeasured"
-    _save_probe(connection, title, 380)
+    _save_probe(connection, title, picture_look="cartoon")
+    monkeypatch.setattr("mediaforce.library.content_kinds.AUTOMATIC_ANIMATION_SORTING", False)
+    assert report_kind() == "unmeasured"
+    monkeypatch.setattr("mediaforce.library.content_kinds.AUTOMATIC_ANIMATION_SORTING", True)
     connection.execute(plex_item_metadata.update().values(plex_genres_json='["Comedy"]'))
     assert report_kind() == "cartoon"
     assert season_grouping(connection, title, library_types=libraries).kind == "cartoon"
@@ -116,11 +119,12 @@ def test_unmeasured_episodes_do_not_vote() -> None:
     assert season_kind([False, False], animated=True).kind == "unmeasured"
 
 
-def _save_probe(connection: DBClient, title: str, kbps: float) -> None:
+def _save_probe(connection: DBClient, title: str, *, picture_look: str = "unmeasured", choice: str | None = None) -> None:
     root = title.partition("/")[0]
     candidate = current_animation_title(connection, title, {root: "movie" if root == "movies" else "tv"})
     assert candidate is not None
-    connection.execute(animation_sorts.insert().values(title=title, item_id=candidate.item_id, source=candidate.source, kbps=kbps))
+    connection.execute(animation_sorts.insert().values(title=title, item_id=candidate.item_id, source=candidate.source, kbps=400, picture_look=picture_look, choice=choice,
+                                                      moment_json=json.dumps({"at_seconds": 40}) if picture_look == "unmeasured" else None))
 
 
 def _item(connection: DBClient, rel_path: str, *, status: str, codec: str, current_dark: float) -> int:
@@ -433,7 +437,6 @@ def test_admission_membership_handles_more_sources_than_one_sqlite_bind_batch(co
 
 
 def test_animation_choice_is_kept_for_its_source_and_ignored_after_replacement(connection: DBClient) -> None:
-    from mediaforce.library.animation_probe import CUTOFF_KBPS
     from mediaforce.library.content_kinds import choose_animation_look
 
     title = "movies/Borderline"
@@ -441,7 +444,7 @@ def test_animation_choice_is_kept_for_its_source_and_ignored_after_replacement(c
     _admit_historical_original(connection, item, dark=0.2)
     connection.execute(plex_item_metadata.insert().values(library_item_id=item, plex_server_id="plex",
         plex_item_rating_key="borderline", plex_part_path="feature.mkv", plex_genres_json='["Animation"]', observed_at=timestamp()))
-    _save_probe(connection, title, CUTOFF_KBPS)
+    _save_probe(connection, title)
 
     def grouping() -> SeasonGrouping:
         return season_grouping(connection, title, library_types={"movies": "movie"})
@@ -458,7 +461,6 @@ def test_animation_choice_is_kept_for_its_source_and_ignored_after_replacement(c
 
 
 def test_publishing_the_representative_keeps_its_original_sort_and_answer(connection: DBClient) -> None:
-    from mediaforce.library.animation_probe import CUTOFF_KBPS
     from mediaforce.library.content_kinds import choose_animation_look
 
     title = "tv/Animation/Season 1"
@@ -466,7 +468,7 @@ def test_publishing_the_representative_keeps_its_original_sort_and_answer(connec
     item = _item(connection, f"{title}/E1.mkv", status="discovered", codec="h264", current_dark=0.2)
     connection.execute(series_metadata.insert().values(series_prefix="tv/Animation", tmdb_genres_json='["Animation"]', updated_at=timestamp()))
     connection.execute(library_items.update().where(library_items.c.id == item).values(content_version_fingerprint=f"original-{item}"))
-    _save_probe(connection, title, CUTOFF_KBPS)
+    _save_probe(connection, title)
     assert choose_animation_look(connection, title, f"original-{item}", "live_action", library_types=library_types)
     _admit_historical_original(connection, item, dark=0.2)
     connection.execute(library_items.update().where(library_items.c.id == item).values(status="promoted", video_codec="av1"))

@@ -66,6 +66,7 @@ struct KindsFacts: Decodable, Sendable, Equatable {
     struct AnimationTitle: Decodable, Identifiable, Equatable, Sendable {
         let prefix: String
         let source: String
+        let pictureLook: String?
         let kbps: Double?
         let look: String
         let error: String?
@@ -82,7 +83,11 @@ struct KindsFacts: Decodable, Sendable, Equatable {
             switch look {
             case "cartoon": return "Easy to compress · Uses the cartoon look"
             case "live_action": return "Hard to compress · Uses the live action look"
-            default: return "Close call · Choose a look"
+            default:
+                if moment != nil { return "Close call · Choose a look" }
+                if pictureLook == "cartoon" { return "Picture passed · Automatic sorting is on hold" }
+                if pictureLook == "live_action" { return "Picture lost detail · Automatic sorting is on hold" }
+                return "Automatic sorting is on hold"
             }
         }
     }
