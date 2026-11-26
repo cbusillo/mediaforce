@@ -1875,6 +1875,19 @@ def create_app(
 
     sample_start_waits: dict[str, SampleStartWait] = {}
 
+    def _animation_choice(prefix: str, source: str, look: str) -> bool:
+        from mediaforce.library.content_kinds import choose_animation_look, retry_animation_probe
+        from mediaforce.library.evidence_queue import EvidenceQueueConflict
+
+        with open_db(config.paths.db_path) as connection:
+            if look == "retry":
+                try:
+                    return retry_animation_probe(connection, config, prefix, source)
+                except EvidenceQueueConflict:
+                    return False
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            return choose_animation_look(connection, prefix, source, look, library_types=config.library_type_map)
+
     def _kinds_payload() -> dict[str, Any]:
         with open_readonly_db(config.paths.db_path) as connection, library_calculations.request(connection):
             payload = kinds_payload(connection, config, load_calibration_state=_load_calibration_state)
@@ -2393,6 +2406,7 @@ def create_app(
         kinds_payload=_kinds_payload,
         approve_kind_action=_approve_app_kind,
         stop_kind_action=lambda kind: {"ok": True, "stopped": stop_kind_approval(config, kind)},
+        animation_choice=_animation_choice,
         kind_size_action=lambda kind, size: choose_kind_size(config, kind, size),
         kind_sample_action=_make_kind_sample,
         kind_picture_action=lambda kind, keep: {"ok": choose_kind_picture_height(config, kind, keep_full_height=keep)},

@@ -22,6 +22,7 @@ from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.evidence_acquisition import DEFAULT_UNCERTAINTY_FRONTIER_LIMIT, \
     FingerprintAcquisitionPlan, load_fingerprint_acquisition_items, plan_fingerprint_acquisition
 from mediaforce.library.evidence_hosts import ControllerDigestWindow, EVIDENCE_HOST_WAIT_REASON
+from mediaforce.library.animation_probe import ANIMATION_PROBE
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANALYSIS_REQUIRED, \
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, EvidenceKind
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
@@ -755,6 +756,7 @@ def next_evidence_work_query(batch_id: str, now_iso: str, *, excluded_media_root
     )
     running = library_item_evidence_state.alias("running_items")
     running_items = select(running.c.library_item_id).where(running.c.work_status == "running")
+    query = query.where(or_(library_item_evidence_state.c.evidence_kind != ANIMATION_PROBE, ~running_items.exists()))
     if allowed_running_item is not None:
         running_items = running_items.where(running.c.library_item_id != allowed_running_item)
     query = query.where(library_item_evidence_state.c.library_item_id.not_in(running_items))
@@ -1040,7 +1042,8 @@ def extend_evidence_claim(
             library_item_evidence_state.c.evidence_kind == kind,
         )).mappings().one()
         original = row["work_reason"] == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE
-        if (row["work_source_fingerprint"] != claim.expected_source_fingerprint
+        if (ANIMATION_PROBE in (kind, claim.evidence_kind)
+                or row["work_source_fingerprint"] != claim.expected_source_fingerprint
                 or original != (claim.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE)
                 or (not original and row["state"] != EVIDENCE_STATE_ANALYSIS_REQUIRED)):
             connection.commit()
@@ -1743,7 +1746,7 @@ def _hydrate_queue_state(row: Any) -> dict[str, Any]:
     evidence_kinds = [
         str(kind)
         for kind in object_list(_loads_json_value(row["evidence_kinds_json"]))
-        if str(kind) in EVIDENCE_KINDS
+        if str(kind) in (*EVIDENCE_KINDS, ANIMATION_PROBE)
     ]
     return {
         "queue_name": str(row["queue_name"]),
@@ -1766,8 +1769,9 @@ def _hydrate_queue_state(row: Any) -> dict[str, Any]:
 
 def _normalize_evidence_kinds(evidence_kinds: Sequence[str] | None) -> tuple[EvidenceKind, ...]:
     requested = list(evidence_kinds) if evidence_kinds is not None else list(EVIDENCE_KINDS)
-    normalized = tuple(kind for kind in EVIDENCE_KINDS if kind in requested)
-    unknown = sorted({str(kind) for kind in requested if kind not in EVIDENCE_KINDS})
+    supported = (*EVIDENCE_KINDS, ANIMATION_PROBE)
+    normalized = tuple(kind for kind in supported if kind in requested)
+    unknown = sorted({str(kind) for kind in requested if kind not in supported})
     if unknown:
         raise ValueError(f"Unsupported evidence kinds: {', '.join(unknown)}")
     if not normalized:
