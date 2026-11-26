@@ -9,10 +9,11 @@ from mediaforce.core.binaries import ffprobe_binary
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.process_control import ManagedProcessController, run_command
 from mediaforce.core.type_defs import int_value, object_dict, object_list
+from mediaforce.encoding.video_filters import build_video_filter
 from mediaforce.encoding.streams import resolve_stream_plan
-from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence
-from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, analyze_media_fingerprint
-from mediaforce.library.animation_probe import ANIMATION_PROBE, probe_animation
+from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence, cadence_manifest_payload
+from mediaforce.encoding.fingerprint import DEFAULT_FINGERPRINT_RANGE_COUNT, MEDIA_FINGERPRINT_EVIDENCE_KIND, PICTURE_MOMENT_SECONDS, analyze_media_fingerprint
+from mediaforce.library.animation_probe import ANIMATION_PROBE, PictureTestUnavailable, animation_moments, probe_animation
 from mediaforce.library.evidence_state import EvidenceKind
 
 if TYPE_CHECKING:
@@ -133,6 +134,8 @@ def probe_evidence(
         fingerprint: dict[str, object] | None = None,
         policy: dict[str, Any] | None = None,
         output_container: str = "mkv",
+        cadence: dict[str, Any] | None = None,
+        source_identity: str | None = None,
 ) -> dict[str, object]:
     """Measure one kind of evidence; with a command runner, every command runs on that encode computer."""
     payload = probe_payload if probe_payload is not None else probe_evidence_source(
@@ -147,16 +150,22 @@ def probe_evidence(
         if not policy or not video_stream:
             raise ValueError("The animation check needs the original picture and its sound settings.")
         if any("dv_profile" in object_dict(side) for side in object_list(video_stream.get("side_data_list"))) or video_stream.get("color_transfer") in {"smpte2084", "arib-std-b67"}:
-            raise ValueError("This HDR picture needs a matching display reference before its colors can be scored.")
+            raise PictureTestUnavailable("This HDR picture needs a matching display reference before its colors can be scored.")
         audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
-        if not fingerprint or not fingerprint.get("analysis"):
-            fingerprint = analyze_media_fingerprint(path, video_stream=video_stream, audio_streams=audio_streams, duration_seconds=duration_seconds,
-                                                    command_runner=command_runner, process_controller=process_controller)
+        if not animation_moments(duration_seconds or 0, fingerprint or {}):
+            fingerprint = analyze_media_fingerprint(path, video_stream=video_stream, audio_streams=[], duration_seconds=duration_seconds,
+                                                    command_runner=command_runner, process_controller=process_controller,
+                                                    range_count=1 if (duration_seconds or 0) <= 4 * PICTURE_MOMENT_SECONDS else DEFAULT_FINGERPRINT_RANGE_COUNT)
         plan = resolve_stream_plan({"rel_path": path.name, "resolved_policy": policy, "output_container": output_container,
             "audio_summary": [_stream_entry(stream, duration_seconds) for stream in audio_streams],
             "subtitle_summary": [_stream_entry(stream, duration_seconds) for stream in streams if stream.get("codec_type") == "subtitle"],
             "attachment_summary": [_attachment_entry(stream) for stream in streams if stream.get("codec_type") == "attachment"]})
-        return probe_animation(path, duration_seconds or 0.0, review_dir=review_dir, fingerprint=fingerprint, plan=plan,
+        evidence, decision = cadence_manifest_payload(cadence, source_id=path.name, source_fingerprint=source_identity)
+        if evidence is None and video_stream.get("field_order") in {"tt", "bb", "tb", "bt"}:
+            raise PictureTestUnavailable("This picture needs its motion checked before it can be compared.")
+        video_filter = build_video_filter(policy["video"], width=int_value(video_stream.get("width")), height=int_value(video_stream.get("height")),
+                                          cadence_decision=decision if evidence else None, cadence_evidence=evidence, cadence_source_fingerprint=source_identity)
+        return probe_animation(path, duration_seconds or 0.0, review_dir=review_dir, fingerprint=fingerprint or {}, plan=plan, video_filter=video_filter,
                                video_policy=policy["video"], process_controller=process_controller, command_runner=command_runner)
     if evidence_kind == CADENCE_EVIDENCE_KIND:
         return analyze_cadence(

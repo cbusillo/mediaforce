@@ -887,11 +887,7 @@ def _run_quality_command(
         )
         with deadline_context:
             if cmd and Path(cmd[0]).name == "ab-av1":
-                result = run_trusted_local_orchestrator_command(
-                    cmd,
-                    process_controller=process_controller,
-                    env=_local_quality_environment(),
-                )
+                result = run_local_quality_command(cmd, process_controller=process_controller)
             else:
                 result = run_command(
                     cmd,
@@ -1263,6 +1259,11 @@ def _quality_temp_dir_arg(cmd: list[str]) -> str | None:
         return None
     value = str(cmd[index + 1]).strip()
     return value or None
+
+
+def run_local_quality_command(cmd: list[str], *, process_controller: ManagedProcessController | None,
+                              **options: Any) -> subprocess.CompletedProcess[str]:
+    return run_trusted_local_orchestrator_command(cmd, process_controller=process_controller, env=_local_quality_environment(), **options)
 
 
 def _local_quality_environment() -> dict[str, str]:

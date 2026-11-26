@@ -25,7 +25,7 @@ from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, reclassify_cadence_summary
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, fingerprint_video_decode_timed_out, reclassify_media_fingerprint_summary
 from mediaforce.encoding.remote_media import RemoteMediaCommands, RemoteMediaConnections, RemoteMediaHostUnavailableError
-from mediaforce.library.animation_probe import ANIMATION_PROBE
+from mediaforce.library.animation_probe import ANIMATION_PROBE, PictureTestUnavailable
 from mediaforce.library.evidence_hosts import ControllerDigestWindowClosed, EVIDENCE_HOST_WAIT_REASON, collect_evidence_host_rows, controller_digest_window, \
     evidence_source_path_on_host, remote_evidence_hosts, select_evidence_host, unmeasurable_evidence_roots
 from mediaforce.library.evidence_queue import EVIDENCE_BACKGROUND_RETRY_SECONDS, DEFAULT_EVIDENCE_BATCH_LIMIT, MAX_CONCURRENT_EVIDENCE_FILES, SOURCE_ROOT_WAIT_REASON, EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, EvidenceWorkClaim, claim_next_evidence_work, \
@@ -535,11 +535,16 @@ def _run_evidence_claim(
                 analysis_kwargs["review_dir"] = config.paths.review_dir
                 analysis_kwargs["policy"] = config.resolve_policy(owned.rel_path)
                 analysis_kwargs["output_container"] = config.output_container
+                analysis_kwargs["source_identity"] = animation.source
                 if observed_path == source_path:
+                    with open_db(config.paths.db_path) as connection:
+                        cadence_json = connection.execute(select(library_items.c.cadence_summary_json).where(library_items.c.id == owned.library_item_id)).scalar_one()
+                    analysis_kwargs["cadence"] = parse_evidence_summary(cadence_json)
                     analysis_kwargs["fingerprint"] = parse_evidence_summary(owned.canonical_summary_json)
                 else:
                     with open_db(config.paths.db_path) as connection:
                         original = load_source_evidence(connection, owned.library_item_id)
+                    analysis_kwargs["cadence"] = original.traits[CADENCE_EVIDENCE_KIND].summary
                     analysis_kwargs["fingerprint"] = original.traits["media_fingerprint"].summary
             if owned.evidence_kind == MEDIA_FINGERPRINT_EVIDENCE_KIND:
                 if fingerprint_video_decode_timed_out(parse_evidence_summary(owned.canonical_summary_json) or {}):
@@ -824,7 +829,7 @@ def _retry_or_fail(
         exc: Exception,
 ) -> None:
     error_message = _error_message(exc)
-    if claim.attempt_count >= deps.max_attempts:
+    if isinstance(exc, PictureTestUnavailable) or claim.attempt_count >= deps.max_attempts:
         _finish_claim(
             config,
             claim,

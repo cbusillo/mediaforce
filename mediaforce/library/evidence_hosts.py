@@ -15,7 +15,7 @@ from mediaforce.core.schedule_deadline import parse_schedule_close_deadline
 from mediaforce.core.type_defs import object_list
 from mediaforce.encoding.helpers import resolve_item_source_path
 from mediaforce.hosts.config import _host_priority, configured_remote_host_execution_mode, host_media_access_for_host, host_targets_current_machine, ssh_target_for_host
-from mediaforce.hosts.types import FFMPEG_MISSING_ISSUE
+from mediaforce.hosts.types import AB_AV1_MISSING_ISSUE, FFMPEG_MISSING_ISSUE, SAMPLE_AV1_ENCODER_MISSING_ISSUE, SAMPLE_METRIC_MISSING_ISSUE, VMAF_MODEL_MISSING_ISSUE
 
 EVIDENCE_HOST_WAIT_REASON = "Waiting for a computer that can measure this file."
 _ENCODE_CAPABILITY = "encode_queue"
@@ -137,7 +137,8 @@ def select_evidence_host(
         if idle_only:
             from mediaforce.hosts.managed_tools import host_is_busy
 
-            if host_is_busy(config, host):
+            issues = {*object_list(row.get("issues")), *object_list(row.get("probe_issues"))}
+            if issues.intersection({AB_AV1_MISSING_ISSUE, SAMPLE_METRIC_MISSING_ISSUE, VMAF_MODEL_MISSING_ISSUE, SAMPLE_AV1_ENCODER_MISSING_ISSUE}) or host_is_busy(config, host):
                 continue
         candidates.append(host)
     if not candidates:

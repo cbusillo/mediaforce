@@ -25,6 +25,7 @@ MEDIA_FINGERPRINT_TOOL_NAME = "mediaforce.media_fingerprint"
 MEDIA_FINGERPRINT_TOOL_VERSION = "1"
 DEFAULT_FINGERPRINT_MAX_FRAMES = 360
 DEFAULT_FINGERPRINT_RANGE_COUNT = 3
+PICTURE_MOMENT_SECONDS = 10
 DEFAULT_FINGERPRINT_SAMPLE_FPS = 2.0
 MIN_FINGERPRINT_FRAMES = 90
 
@@ -673,6 +674,17 @@ def _range_payload(
         "decoder": decoder,
         "measurements": measurements,
     }
+    if status == "measured":
+        window = max(1, round(PICTURE_MOMENT_SECONDS * sample_fps))
+        moments = []
+        for offset in range(0, sampled_frames, window):
+            stop = min(offset + window, sampled_frames)
+            if stop - offset < window and offset:
+                break
+            scene = _range_measurements(signal_frames[offset:stop], edge_frames[offset:stop])
+            moments.append({"start_seconds": start_seconds + offset / sample_fps, "seconds": (stop - offset) / sample_fps,
+                            "motion": scene["ydif_p90"], "detail": scene["edge_density_p90"], "texture": scene["high_texture_frame_fraction"]})
+        payload["picture_moments"] = moments
     if failure_reason or not complete:
         payload["failure_reasons"] = [failure_reason or "Fingerprint frame metadata was incomplete."]
     if audio is not None:

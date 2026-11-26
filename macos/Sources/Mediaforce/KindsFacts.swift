@@ -76,7 +76,9 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         var id: String { prefix }
         var name: String { prefix.split(separator: "/").dropFirst().joined(separator: " · ") }
         var explanation: String {
-            if error != nil { return "The short test needs another try" }
+            if let error {
+                return error.hasPrefix("Command ") ? "The picture test could not finish" : error
+            }
             if originalMissing == true { return "Waiting for the original file" }
             if kbps == nil { return "Waiting for a short test" }
             if chosen { return look == "cartoon" ? "You chose the cartoon look" : "You chose the live action look" }

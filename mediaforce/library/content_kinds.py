@@ -307,10 +307,12 @@ def choose_animation_look(connection: DBClient, title: str, source: str, look: s
     if look not in {"cartoon", "live_action"}:
         return False
     record = current_animation_title(connection, title, library_types)
-    if record is None or record.source != source or record.picture_look != "unmeasured" or not record.moment:
+    if record is None or record.source != source:
         return False
     if record.choice is not None:
         return record.choice == look
+    if record.picture_look != "unmeasured" or not record.moment:
+        return False
     result = connection.execute(update(animation_sorts).where(animation_sorts.c.title == title, animation_sorts.c.source == source,
                                                                animation_sorts.c.choice.is_(None)).values(choice=look))
     return result.rowcount == 1

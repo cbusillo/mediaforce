@@ -307,3 +307,21 @@ def test_decoder_logs_cannot_corrupt_frame_metadata(audio_pattern_source: tuple[
             assert result.status == reference.status == "measured"
             assert result.signal_frames == reference.signal_frames
             assert result.edge_frames == reference.edge_frames
+
+
+def test_animation_picks_motion_and_detail_inside_fingerprint_ranges() -> None:
+    from mediaforce.library.animation_probe import animation_moments
+
+    quiet = _frame_metadata(30, 20)
+    moving = quiet.replace("YDIF=2", "YDIF=30")
+    detailed = _frame_metadata(55, 20)
+    plain = _frame_metadata(0, 20)
+    runner = Mock()
+    runner.run.return_value = subprocess.CompletedProcess([], 0, "\n".join([quiet, moving, quiet, quiet, quiet, quiet]),
+                                                        "\n".join([plain, plain, plain, detailed, plain, plain]))
+    fingerprint = _fingerprint(runner)
+    starts = animation_moments(1200, fingerprint)
+    measured_starts = [row["start_seconds"] for row in fingerprint["analysis"]["ranges"]]
+    assert len(starts) == 3
+    assert any(start - 10 in measured_starts for start in starts)
+    assert any(start - 30 in measured_starts for start in starts)
