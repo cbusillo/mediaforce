@@ -128,8 +128,6 @@ def probe_evidence(
         command_runner: "RemoteMediaCommands | None" = None,
         hardware_decoding: bool = True,
         probe_payload: dict[str, object] | None = None,
-        review_dir: Path | None = None,
-        fingerprint: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Measure one kind of evidence; with a command runner, every command runs on that encode computer."""
     payload = probe_payload if probe_payload is not None else probe_evidence_source(
@@ -139,9 +137,12 @@ def probe_evidence(
     video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
     duration_seconds = _as_float(format_info.get("duration"))
     if evidence_kind == ANIMATION_PROBE:
-        if review_dir is None:
-            raise ValueError("An animation check needs a review directory.")
-        return probe_animation(path, duration_seconds or 0.0, review_dir=review_dir, fingerprint=fingerprint, process_controller=process_controller, command_runner=command_runner)
+        video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"
+                             and not object_dict(stream.get("disposition")).get("attached_pic")), None)
+        if video_stream is None:
+            raise ValueError("The animation has no video stream.")
+        return probe_animation(path, duration_seconds or 0.0, video_stream=video_stream,
+                               process_controller=process_controller, command_runner=command_runner)
     if evidence_kind == CADENCE_EVIDENCE_KIND:
         return analyze_cadence(
             path,

@@ -420,6 +420,7 @@ def test_a_movie_under_the_live_action_look_is_estimated_like_a_season_of_its_ru
 
 
 @pytest.mark.parametrize("compressing", [False, True])
+@patch("mediaforce.library.content_kinds.AUTOMATIC_ANIMATION_SORTING", True)
 def test_a_library_not_set_to_compress_adds_nothing_to_a_looks_offers_counts_or_samples(tmp_path: Path, compressing: bool) -> None:
     config = _config(tmp_path)
     availability = "production" if compressing else "browse_only"
@@ -1654,6 +1655,7 @@ def test_measuring_outside_the_pipeline_names_the_reason_and_next_action(
 
 
 @pytest.mark.parametrize("approval_scope", [APPROVED_SEASON, "tv/Drama"])
+@patch("mediaforce.library.content_kinds.AUTOMATIC_ANIMATION_SORTING", True)
 def test_cartoon_kind_can_reuse_a_matching_approved_show_sample(tmp_path: Path, approval_scope: str) -> None:
     kind = "cartoon"
     config = _config(tmp_path)
@@ -1927,6 +1929,7 @@ def test_snapshot_and_queue_preserve_live_action_coverage_after_an_old_failed_sa
     assert queued == displayed
 
 
+@patch("mediaforce.library.content_kinds.AUTOMATIC_ANIMATION_SORTING", True)
 def test_futuramas_passing_sample_at_the_selected_size_leads_other_cartoons(tmp_path: Path) -> None:
     config = _config(tmp_path)
     futurama = "tv/Futurama/Season 7"

@@ -313,14 +313,12 @@ struct KindShows: View {
 private struct AnimationResults: View {
     let titles: [KindsFacts.AnimationTitle]
     let model: MainWindowModel
-    @State private var reviewing: String?
     @State private var saving = false
-    @State private var players = ComparePlayers()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Animation looks").font(.headline)
-            ForEach(titles.sorted { ($0.moment != nil || $0.error != nil) && ($1.moment == nil && $1.error == nil) }) { title in
+            ForEach(titles.sorted { $0.error != nil && $1.error == nil }) { title in
                 Divider()
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
@@ -328,37 +326,22 @@ private struct AnimationResults: View {
                         Text(title.explanation).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    if let error = title.error {
-                        Button("Retry test") { choose(title, look: "retry") }.help(error).disabled(saving)
-                    } else if title.moment != nil {
-                        Button("Compare") { reviewing = title.id }
+                    if let error = title.error, !title.onHold {
+                        Button("Retry test") { retry(title) }.help(error).disabled(saving)
                     }
                 }
                 .help(title.kbps.map { "The test used \($0.formatted(.number.precision(.fractionLength(0)))) kilobits per second." } ?? title.explanation)
-                if reviewing == title.id, let moment = title.moment {
-                    ComparePlayer(players: players, model: model, moments: .clips([moment]), names: PictureNames(compressed: Words.sample))
-                        .id(title.source)
-                    HStack {
-                        Button("Use cartoon look") { choose(title, look: "cartoon") }
-                        Button("Use live action look") { choose(title, look: "live_action") }
-                    }
-                    .disabled(saving)
-                }
             }
         }
-        .onDisappear { players.pause() }
     }
 
-    private func choose(_ title: KindsFacts.AnimationTitle, look: String) {
+    private func retry(_ title: KindsFacts.AnimationTitle) {
         saving = true
         Task {
             defer { saving = false }
             do {
-                if try await model.client.chooseAnimationLook(title, look: look).ok {
-                    players.pause()
-                    reviewing = nil
-                } else {
-                    model.notice = ActionNotice(title: "Choice could not be saved", message: "Check the current result for this title.")
+                if try await !model.client.retryAnimation(title).ok {
+                    model.notice = ActionNotice(title: "Test could not restart", message: "Check the current result for this title.")
                 }
             } catch {
                 model.notice = .unanswered

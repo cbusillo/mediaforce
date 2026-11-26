@@ -152,8 +152,8 @@ def app_window_payload(
         "work": {
             **_work(connection, controller_storage, storage_admits_work, computer_states, library_types, {item.rel_path for item in items if item.kind != "tv"}),
             "kinds_needing_you": pending_kinds,
-            "animation_choices": [{"prefix": title["prefix"], "failed": bool(title.get("error"))} for group in kinds
-                                  for title in group.get("animation_titles", []) if title.get("moment") or title.get("error")],
+            "animation_failures": [{"prefix": title["prefix"]} for group in kinds
+                                  for title in group.get("animation_titles", []) if title.get("error") and not title.get("on_hold")],
             "seasons_needing_you": [
                 _tv_season(season_identity(str(card["prefix"])), card) for card in cards
                 if (card.get("page_state") or {}).get("needs_you")

@@ -70,19 +70,20 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         let look: String
         let error: String?
         let originalMissing: Bool?
-        let chosen: Bool
-        let moment: SampleFacts.Moment?
+        let onHold: Bool
+        let hdr: Bool?
         var id: String { prefix }
         var name: String { prefix.split(separator: "/").dropFirst().joined(separator: " · ") }
         var explanation: String {
+            if onHold { return "Automatic animation sorting is on hold" }
+            if hdr == true { return "HDR picture · Uses the live action look" }
             if error != nil { return "The short test needs another try" }
             if originalMissing == true { return "Waiting for the original file" }
             if kbps == nil { return "Waiting for a short test" }
-            if chosen { return look == "cartoon" ? "You chose the cartoon look" : "You chose the live action look" }
             switch look {
-            case "cartoon": return "Easy to compress · Uses the cartoon look"
-            case "live_action": return "Hard to compress · Uses the live action look"
-            default: return "Close call · Choose a look"
+            case "cartoon": return "Flat colours · Uses the cartoon look"
+            case "live_action": return "Detailed picture · Uses the live action look"
+            default: return "Waiting for a short test"
             }
         }
     }
@@ -153,8 +154,8 @@ extension MediaforceClient {
         try await kindAction(kind, "approve", body: ["from_prefix": prefix])
     }
 
-    func chooseAnimationLook(_ title: KindsFacts.AnimationTitle, look: String) async throws -> KindActionResult {
-        try await kindAction("cartoon", "title-look", body: ["prefix": title.prefix, "source": title.source, "look": look])
+    func retryAnimation(_ title: KindsFacts.AnimationTitle) async throws -> KindActionResult {
+        try await kindAction("cartoon", "retry", body: ["prefix": title.prefix, "source": title.source])
     }
 
     func chooseKindSize(_ kind: String, megabytes: Double) async throws -> KindActionResult {

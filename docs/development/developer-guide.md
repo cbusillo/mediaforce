@@ -178,7 +178,7 @@ Approving a look's sample (live action or cartoons) approves that kind of
 content across its shows; "Approve only this season" limits it to one
 season. Mediaforce requests a first sample for each unapproved look with
 waiting shows and puts it in Needs you once there is something to watch or
-choose. Animation metadata puts a season or movie in line for a short AV1 test on an idle computer. The worker uses the sample picker’s typical and at-risk moments, filling any gaps with its usual duration-based positions. It encodes those three moments at one quality setting. It uses their middle bitrate so one unusually quiet or busy shot cannot decide a title. The test picture fits within the 1920 by 1080 calibration frame. Easy titles use the cartoon look and difficult ones use live action. Close calls appear in Needs you with the original and sample to compare. The Cartoons page includes finished titles and keeps the result and any choice until the tested source changes. A folder's own approval still takes precedence. VR & 3D has no look until
+choose. A folder's own approval still takes precedence. VR & 3D has no look until
 Mediaforce can compress it. A look's approval says whether 4K stays 4K or
 comes down to the tallest picture in Settings. Seasons missing original
 measurements wait for measuring first. When a sample re-encodes the audio,
@@ -266,3 +266,9 @@ Run plans holding original measurements are kept. Only the newest two
 `deployments/` folders and 30 days of `operations/` evidence are kept; change
 this with `kept_deploy_backups` and `operation_evidence_retention_days` under
 `[state.cleanup]`.
+
+### How animated titles get a look
+
+Automatic animation sorting is on hold because validation on nine titles missed a known hard animation. When sorting is enabled, an idle computer checks one original per animated movie or TV season. HDR and Dolby Vision use the live action look. For other titles, Mediaforce samples ten 2.5-second windows from 12% to 84% of the runtime. It measures only the AV1 video packets at CRF 36, preset 6, with grain off and a 1080p cap. Dropping the two highest and two lowest rates gives the average used for sorting.
+
+The middle frame of each window is scaled to at most 640 pixels wide. Mediaforce ignores the outer 5% on each edge and applies a 3×3 median filter. A patch counts as flat if its brightest and darkest luma values differ by at most three 8-bit levels. The cartoon look requires both a video rate at or below 1,504 kb/s and at least 50% flat patches across the ten frames. Other measured titles use the live action look. The title keeps its result until its representative source changes. Each file still goes through its usual size and quality checks.

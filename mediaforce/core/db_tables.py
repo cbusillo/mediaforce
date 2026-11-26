@@ -1,3 +1,4 @@
+from sqlalchemy import Boolean
 from sqlalchemy import Column
 from sqlalchemy import CheckConstraint
 from sqlalchemy import ForeignKey
@@ -847,6 +848,6 @@ animation_sorts = Table(
     Column("item_id", Integer, ForeignKey("library_items.id", ondelete="CASCADE"), nullable=False),
     Column("source", Text, nullable=False),
     Column("kbps", REAL),
-    Column("choice", Text),
-    Column("moment_json", Text),
+    Column("flat_fraction", REAL),
+    Column("hdr", Boolean),
 )
