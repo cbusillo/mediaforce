@@ -2261,6 +2261,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             *,
             best_reachable_bytes: int = 0,
             compression_intent: dict[str, Any] | None = None,
+            file_goal: dict[str, Any] | None = None,
             error_message: str | None = None,
     ) -> tuple[dict[str, Any] | None, Path]:
         source_path = self._create_source_file(f"{name}.mkv")
@@ -2280,6 +2281,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     "source_size_bytes": 1_000_000_000,
                     "duration_seconds": 2400.0,
                     "staging_path": str(staging_path),
+                    "stream_budget_ledger": {"size_goal": file_goal} if file_goal else None,
                     "compression_intent": compression_intent or self._compression_intent_snapshot(),
                     "resolved_policy": {
                         "video": {
@@ -2349,6 +2351,16 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(analysis["kind"], "quality_floor_size_conflict")
         self.assertEqual(analysis["retry_strategy"], "needs_operator_approval")
         self.assertEqual(manifest["items"][0]["resolved_policy"]["video"]["target_size_bytes"], 200_000_000)
+
+    def test_copied_sound_adds_no_automatic_picture_growth(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            updated, _ = self._quality_floor_conflict_job(
+                connection, "kept-audio", best_reachable_bytes=275_000_000,
+                file_goal={"mode": "normalized", "target_size_bytes": 200_000_000, "normalized_track_extra_bytes": 100_000_000},
+            )
+
+        assert updated is not None
+        self.assertEqual(updated["status"], "needs_attention")
 
     def test_quality_floor_conflict_with_unconfirmed_goal_waits_for_operator(self) -> None:
         with open_db(self.config.paths.db_path) as connection:

@@ -1,5 +1,5 @@
 import copy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Any, Literal, Mapping
 
@@ -388,9 +388,8 @@ def build_stream_budget_ledger(
     attachment_bytes = _category_total(entries, "attachment")
     container_bytes = _category_total(entries, "container")
     policy = object_dict(item_payload.get("resolved_policy"))
-    resolved_size_goal = _goal_with_retained_tracks(
-        resolved_size_goal, audio_bytes, subtitle_bytes, object_dict(policy.get("audio"))
-    )
+    track_extra_bytes = _normalized_track_extra_bytes(audio_bytes, subtitle_bytes, duration_seconds, object_dict(policy.get("audio")))
+    resolved_size_goal = resolved_size_goal.with_track_extra(track_extra_bytes)
     total_target_bytes = resolved_size_goal.target_size_bytes
     non_video_bytes = _known_total(entries)
     minimum_non_video_bytes = sum(entry.lower_bound_bytes or 0 for entry in entries)
@@ -432,6 +431,8 @@ def build_stream_budget_ledger(
     confidence = _aggregate_confidence(entries)
     requires_measurement = feasibility_status == "requires_measurement"
     size_goal_payload = resolved_size_goal.to_payload()
+    if track_extra_bytes:
+        size_goal_payload["normalized_track_extra_bytes"] = track_extra_bytes
     identity_payload = {
         "schema_version": STREAM_BUDGET_SCHEMA_VERSION,
         "source": {
@@ -752,27 +753,14 @@ def _unknown_attachments_entry() -> StreamBudgetEntry:
     )
 
 
-def _goal_with_retained_tracks(
-        goal: ResolvedSizeGoal, audio_bytes: int | None, subtitle_bytes: int | None, audio_policy: dict[str, Any],
-) -> ResolvedSizeGoal:
-    if goal.intent.mode != "normalized" or goal.target_size_bytes is None or audio_bytes is None or subtitle_bytes is None:
-        return goal
-    stereo_bytes = _bytes_for_bitrate(stereo_opus_bitrate_bps(audio_policy), goal.item_runtime_seconds)
-    if stereo_bytes is None or audio_bytes + subtitle_bytes <= stereo_bytes:
-        return goal
-    extra_bytes = audio_bytes + subtitle_bytes - stereo_bytes
-    file_target = goal.target_size_bytes + extra_bytes
-    reference_share = goal.target_size_bytes / file_target
-    return replace(
-        goal,
-        target_size_bytes=file_target,
-        intent=replace(
-            goal.intent,
-            sample_projection_tolerance_percent=goal.intent.sample_projection_tolerance_percent * reference_share,
-            final_output_tolerance_percent=goal.intent.final_output_tolerance_percent * reference_share,
-        ),
-        rationale=f"{goal.rationale} The kept sound and subtitles add {extra_bytes / 1_000_000:.1f} MB above the stereo allowance.",
-    )
+def _normalized_track_extra_bytes(
+        audio_bytes: int | None, subtitle_bytes: int | None, duration_seconds: float | None, audio_policy: dict[str, Any],
+) -> int:
+    if audio_bytes is None or subtitle_bytes is None or duration_seconds is None or not (audio_bytes or subtitle_bytes):
+        return 0
+    stereo_bytes = _bytes_for_bitrate(stereo_opus_bitrate_bps(audio_policy), duration_seconds)
+    assert stereo_bytes is not None
+    return max(0, audio_bytes + subtitle_bytes - stereo_bytes)
 
 
 def item_output_size_goal(item: Mapping[str, Any]) -> dict[str, Any]:

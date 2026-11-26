@@ -158,7 +158,9 @@ class StreamBudgetTests(unittest.TestCase):
         self.assertEqual(copied.total_target_bytes, copied.remaining_video_bytes + copied.non_video_bytes)
         self.assertEqual(copied.size_goal["target_size_bytes"], copied.total_target_bytes)
         for bound in ("sample_lower_bound_bytes", "sample_upper_bound_bytes", "final_lower_bound_bytes", "final_upper_bound_bytes"):
-            self.assertEqual(copied.size_goal[bound] - copied.non_video_bytes, stereo.size_goal[bound] - stereo.non_video_bytes)
+            self.assertAlmostEqual(
+                copied.size_goal[bound] - copied.non_video_bytes, stereo.size_goal[bound] - stereo.non_video_bytes, delta=1,
+            )
         self.assertEqual(copied.source_cap_total_bytes, stereo.source_cap_total_bytes)
 
     def test_container_reserve_scales_with_runtime_above_a_small_floor(self) -> None:

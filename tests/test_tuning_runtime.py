@@ -8030,7 +8030,9 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertEqual(request["request_type"], "combined_experiment")
         self.assertEqual(request["budget_bytes"], request["stream_budget_ledger"]["totals"]["total_target_bytes"])
-        self.assertGreater(request["budget_bytes"], 586_666_667)
+        file_goal = request["size_goal"]
+        reference_bytes = round(file_goal["reference_size_mb"] * 1_000_000 * 88 / file_goal["reference_runtime_minutes"])
+        self.assertGreater(request["budget_bytes"], reference_bytes)
         self.assertEqual(request["size_goal"]["target_size_bytes"], request["budget_bytes"])
         self.assertEqual(
             request["quality_risk_tags"],

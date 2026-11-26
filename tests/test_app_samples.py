@@ -309,7 +309,9 @@ def test_new_group_size_resamples_the_preferred_cartoon_before_another_show() ->
 
 
 def test_group_sample_replaces_the_seasons_old_budget_with_its_normalized_goal() -> None:
-    folder = _folder(sample_item={"duration_seconds": 1350})
+    folder = _folder(
+        sample_item={"duration_seconds": 1350}, stream_budget_ledger={"size_goal": {"normalized_track_extra_bytes": 50_000_000}},
+    )
     calls: list[tuple[Any, ...]] = []
     result = make_sample(folder, _status(action="retry_sample"), None, group_size_mb=150,
                          ai_tune=lambda *args: calls.append(args) or {"ok": True},
@@ -317,7 +319,7 @@ def test_group_sample_replaces_the_seasons_old_budget_with_its_normalized_goal()
     assert result["ok"]
     goal = calls[0][3]["size_goal"]
     assert (goal["mode"], goal["value_mb"], goal["reference_runtime_minutes"]) == ("normalized", 150, 45)
-    assert "75 MB" in calls[0][1]
+    assert "125 MB" in calls[0][1]
 
 
 def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() -> None:

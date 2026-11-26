@@ -1537,15 +1537,18 @@ def create_app(
             budget_item,
             default_video_policy=config.video,
             output_container=config.output_container,
+            resolved_size_goal=operator_intent.size_goal.resolve(item_runtime_seconds),
             prefer_persisted=False,
         )
         budget_item["stream_budget_ledger"] = stream_budget.to_payload()
+        resolved_operator_intent["size_goal"] = stream_budget.size_goal
         size_goal_options = guided_size_goal_options(
             video_policy,
             item_runtime_seconds=item_runtime_seconds,
             default_video_policy=persisted_policy_default,
             audio_policy=object_dict(policy.get("audio")),
             subtitle_policy=object_dict(policy.get("subtitle")),
+            normalized_track_extra_bytes=int_value(stream_budget.size_goal.get("normalized_track_extra_bytes")),
             requested_budget_bytes=int_value(object_dict(size_target_analysis).get("budget_bytes")),
             fallback_size_policy=object_dict(resolved_policy.get("video")) or config.video,
         )

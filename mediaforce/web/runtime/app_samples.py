@@ -12,6 +12,7 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict, objec
 from mediaforce.tuning.compression_intent import compression_intent_from_payload, compression_intent_options
 from mediaforce.tuning.size_goals import DECIMAL_MEGABYTE_BYTES, guided_size_goal_options, measured_followup_request, sample_goal_request, \
     with_compression_intent, operator_intent_from_policy
+from mediaforce.tuning.stream_budget import item_output_size_goal
 from mediaforce.web.runtime.app_window import file_identity, season_identity
 from mediaforce.web.runtime.folder_actions import APPROVED_SAMPLE_NOTES, ApprovalNeedsConfirmation, QueueNeedsChoice, \
     ReviewedDraftChanged
@@ -181,6 +182,7 @@ def make_sample(
                  "target_size_mb": group_size_mb, "target_size_bytes": round(group_size_mb * DECIMAL_MEGABYTE_BYTES)}
         folder = {**folder, "size_goal_options": guided_size_goal_options(
             video, item_runtime_seconds=float_value(object_dict(folder.get("sample_item")).get("duration_seconds")),
+            normalized_track_extra_bytes=int_value(item_output_size_goal(folder).get("normalized_track_extra_bytes")),
             default_video_policy=video, audio_policy=object_dict(policy.get("audio")), subtitle_policy=object_dict(policy.get("subtitle")),
         )}
         size = "recommended"

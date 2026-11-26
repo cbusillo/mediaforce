@@ -787,7 +787,7 @@ def operator_request_from_intent(
     )
     if size_request is None:
         raise ValueError("The selected size could not be converted into a test budget.")
-    size_request["budget_label"] = _resolved_size_goal_label(intent.size_goal, size_request["budget_bytes"])
+    size_request["budget_label"] = _resolved_size_goal_label(intent.size_goal, size_request["size_goal"])
     scale_request = {
         "source": "guided_workflow",
         "operator_note_parse": parsed_note,
@@ -873,12 +873,14 @@ def _positive_float_value(value: Any) -> float | None:
     return parsed if parsed > 0 else None
 
 
-def _resolved_size_goal_label(size_goal: SizeGoalIntent, target_size_bytes: int) -> str:
-    target_mb = bytes_to_megabytes(target_size_bytes) or 0
+def _resolved_size_goal_label(size_goal: SizeGoalIntent, file_goal: dict[str, Any]) -> str:
+    target_mb = float_value(file_goal.get("target_size_mb"))
     if size_goal.mode == "normalized" and size_goal.reference_runtime_seconds is not None:
         reference_mb = bytes_to_megabytes(size_goal.value_bytes) or 0
         reference_minutes = size_goal.reference_runtime_seconds / 60.0
-        return f"about {target_mb:.0f} MB for this episode ({reference_mb:g} MB / {reference_minutes:g} min)"
+        extra_mb = bytes_to_megabytes(int_value(file_goal.get("normalized_track_extra_bytes")))
+        sound = f" plus {extra_mb:.1f} MB for the kept tracks" if extra_mb else ""
+        return f"about {target_mb:.0f} MB for this episode ({reference_mb:g} MB / {reference_minutes:g} min{sound})"
     return f"{target_mb:g} MB per episode"
 
 

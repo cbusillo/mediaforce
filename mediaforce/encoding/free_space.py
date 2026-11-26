@@ -455,8 +455,7 @@ def _source_size_bytes(item: dict[str, Any]) -> int:
 
 def _planned_output_bytes(item: dict[str, Any], policy: FreeSpaceReservePolicy) -> int:
     stream_budget = object_dict(item.get("stream_budget_ledger"))
-    totals = object_dict(stream_budget.get("totals")) or stream_budget
-    target_bytes = int_value(totals.get("total_target_bytes"))
+    target_bytes = int_value(stream_budget.get("total_target_bytes"))
     if target_bytes <= 0:
         size_goal = item_output_size_goal(item)
         target_bytes = int_value(size_goal.get("target_size_bytes"))
