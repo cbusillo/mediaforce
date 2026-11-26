@@ -1799,7 +1799,8 @@ class EvidenceWorkerTests(unittest.TestCase):
     @patch("mediaforce.library.content_kinds.AUTOMATIC_ANIMATION_SORTING", True)
     def test_animation_probe_runs_once_per_changed_title_through_the_evidence_queue(self) -> None:
         from mediaforce.core.db_tables import animation_sorts, series_metadata
-        from mediaforce.library.content_kinds import queue_animation_probes
+        from mediaforce.library.animation_probe import ANIMATION_PROBE
+        from mediaforce.library.content_kinds import queue_animation_probes, retry_animation_probe
 
         for number, show in [(1, "Toons"), (2, "Toons"), (3, "Drama")]:
             item_id, _ = self._insert_item(number, cadence_summary_json=None, media_fingerprint_json=None)
@@ -1809,6 +1810,8 @@ class EvidenceWorkerTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             for show, genre in (("Toons", "Animation"), ("Drama", "Drama")):
                 connection.execute(series_metadata.insert().values(series_prefix=f"tv/{show}", tmdb_genres_json=json.dumps([genre]), updated_at="now"))
+            with patch("mediaforce.library.content_kinds.AUTOMATIC_ANIMATION_SORTING", False):
+                self.assertEqual(queue_animation_probes(connection, self.config), 0)
             self.assertEqual(queue_animation_probes(connection, self.config), 1)
             self.assertEqual(queue_animation_probes(connection, self.config), 0)
         analyzer = Mock(return_value={"kbps": 950.0, "flat_fraction": 0.8})
@@ -1821,6 +1824,13 @@ class EvidenceWorkerTests(unittest.TestCase):
             connection.execute(library_items.update().where(library_items.c.id == row.item_id).values(content_version_fingerprint="new-source"))
             self.assertEqual(queue_animation_probes(connection, self.config), 1)
             self.assertIsNone(connection.execute(select(animation_sorts.c.kbps)).scalar_one())
+            connection.execute(library_item_evidence_state.update().where(
+                library_item_evidence_state.c.library_item_id == row.item_id,
+                library_item_evidence_state.c.evidence_kind == ANIMATION_PROBE,
+            ).values(work_status="failed", last_error="The video could not be read."))
+            with patch("mediaforce.library.content_kinds.AUTOMATIC_ANIMATION_SORTING", False):
+                self.assertFalse(retry_animation_probe(connection, self.config, row.title, "new-source"))
+            self.assertTrue(retry_animation_probe(connection, self.config, row.title, "new-source"))
         analyzer.assert_called_once()
 
     def _insert_item(
