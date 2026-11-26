@@ -14,6 +14,13 @@ struct ItemFacts: Decodable, Sendable {
     let sound: Sound?
     let stillAiring: StillAiring?
     let movieQueue: MovieQueue?
+    var seasonRedo: SeasonRedo?
+
+    struct SeasonRedo: Decodable, Sendable {
+        let state: String
+        let approved: Bool
+        let active: Bool?
+    }
 
     struct MovieQueue: Decodable, Sendable {
         let waits: [String]
@@ -43,6 +50,7 @@ struct ItemFacts: Decodable, Sendable {
         let sizeQuestion: SizeQuestion?
         let bytes: Int64
         let originalBytes: Int64?
+        var redoWait: String?
         let originalBackup: Bool
         let heldCopy: HeldCopy?
         var id: Int { libraryItemId }
@@ -51,7 +59,7 @@ struct ItemFacts: Decodable, Sendable {
 
         private enum CodingKeys: String, CodingKey {
             case libraryItemId, relPath, name, season, episode, stage, validation, waitReason, additionalWaitReasons, keptReason, heldReason
-            case canCompressAsIs, percentComplete, sizeQuestion, bytes, originalBytes, originalBackup, heldCopy
+            case canCompressAsIs, percentComplete, sizeQuestion, bytes, originalBytes, originalBackup, redoWait, heldCopy
         }
 
         /// What the player shows: a held copy against the file as it is, a compressed file against its backup, or the
@@ -243,6 +251,14 @@ extension MediaforceClient {
     /// The Director's confirmed release of one held file: it is cleaned up and tried again like any retry.
     func releaseHold(_ file: ItemFacts.File) async throws -> ItemActionResult {
         try await folderAction(file.relPath, "queue-encode", body: ["release_hold": true, "bypass_schedule": false])
+    }
+
+    func keepCurrentEpisode(_ prefix: String, file: ItemFacts.File) async throws -> ItemActionResult {
+        try await folderAction(prefix, "keep-redo-copy/\(file.id)", body: [:])
+    }
+
+    func changeSeasonRedo(_ prefix: String, stop: Bool) async throws -> ItemActionResult {
+        try await folderAction(prefix, stop ? "stop-season" : "redo-season", body: [:])
     }
 
     func retryUnfinished(_ prefix: String) async throws -> ItemActionResult {

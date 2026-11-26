@@ -22,7 +22,12 @@ some shows need more, and your results will vary.
   and published on its own. A problem with one file stays with that file;
   the rest keep going.
 - **Rollback copies.** Each replaced original moves to a Cleanup folder.
-  Nothing is deleted until you approve it on the Space saved page.
+  Nothing is deleted until you approve it on the Space saved page. If a season is marked
+  for a redo, its backups stay out of cleanup. On the season page, **Stop this season**
+  cancels its queued episodes and lets running episodes finish. After the cartoon look is
+  approved, **Redo at the cartoon look** uses the kept originals. Each current episode
+  stays in the library until its replacement passes its checks. If an original or its
+  saved settings cannot be found, restore them and retry, or choose **Keep current episode**.
 - **Needs you.** Only real judgment calls reach you: a sample to watch, a
   file that came out much smaller than its sample, a computer that needs
   fixing. They appear in one list, with a notification and a Dock

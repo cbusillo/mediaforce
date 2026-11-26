@@ -5,6 +5,7 @@ backup is still there to compare against. The server sends states and codes; the
 player streams each file a few seconds at a time; see player_stream.
 """
 
+import json
 import re
 from time import time
 from collections.abc import Callable, Mapping
@@ -27,6 +28,9 @@ from mediaforce.library.staged_validation import staged_validation_outcome
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.web.runtime.app_window import season_identity
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
+from mediaforce.core.db_tables import season_redos
+from mediaforce.encoding.encode_queue import load_active_encode_jobs_for_prefix
+from mediaforce.web.runtime.season_redo import cartoon_redo_approval
 from mediaforce.web.runtime.kind_approvals import movie_queue_facts
 from mediaforce.web.runtime.production_approval import LoadCalibrationState
 from mediaforce.web.runtime.episode_progress import load_season_episode_progress
@@ -83,6 +87,10 @@ def item_payload(
                 staged_artifacts.c.validation_json,
             ).where(staged_artifacts.c.library_item_id.in_(ids))).mappings()
         }
+        redo_row = connection.execute(select(season_redos).where(season_redos.c.prefix == scope.prefix)).mappings().first()
+        redo = redo_row["state"] if redo_row else None
+        remaining = json.loads(redo_row["remaining_json"]) if redo_row and redo_row["remaining_json"] else {}
+        redo_active = bool(redo == "running" and load_active_encode_jobs_for_prefix(connection, scope.prefix))
         kept = {
             int(item_id): str(reason)
             for item_id, reason in connection.execute(
@@ -125,6 +133,7 @@ def item_payload(
             "kept_reason": kept.get(item.item_id),
             "can_compress_as_is": item.item_id in motion_choices,
             "held_reason": held_reason,
+            "redo_wait": (remaining.get(str(item.item_id)) or {}).get("reason"),
             "percent_complete": episode.get("percent_complete"),
             "size_question": episode.get("size_question"),
             "bytes": sizes.get(item.item_id, 0),
@@ -134,6 +143,7 @@ def item_payload(
         })
     files.sort(key=lambda row: (row["episode"] is None, row["season"] or 0, row["episode"] or 0, row["name"]))
     return {
+        "season_redo": ({"state": redo, "active": redo_active, "approved": cartoon_redo_approval(config, scope.prefix) is not None} if redo else None),
         "prefix": scope.prefix,
         "domain": scope.domain,
         "kind": scope.kind,

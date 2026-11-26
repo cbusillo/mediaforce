@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import uuid4
 
-from sqlalchemy import ColumnElement, Select, exists, inspect, literal_column, select, update
+from sqlalchemy import ColumnElement, Select, exists, func, inspect, literal_column, select, update
 
 from mediaforce.core.db import DBClient, DBRow
 from mediaforce.core.db_tables import library_items, source_admissions, source_generations, source_measurements, \
@@ -262,6 +262,23 @@ def record_current_measurement(connection: DBClient, item: Mapping[str, Any] | D
                               provenance=provenance, measured_at=timestamp(), recorded_at=timestamp())
 
 
+def archived_version(connection: DBClient, item_id: int, path: str) -> DBRow | None:
+    moved = connection.execute(select(source_versions).join(
+        source_moves, source_moves.c.version_id == source_versions.c.version_id
+    ).join(source_transitions, source_transitions.c.operation_id == source_moves.c.operation_id).where(
+        source_moves.c.to_path == path, source_transitions.c.library_item_id == item_id,
+        source_transitions.c.outcome == "committed", source_transitions.c.kind == "publish",
+    ).order_by(source_transitions.c.recorded_at.desc(), source_moves.c.ordinal.desc()).limit(1)).mappings().first()
+    if moved is not None:
+        return moved
+    return connection.execute(select(source_versions).join(
+        source_transitions, source_transitions.c.before_version_id == source_versions.c.version_id
+    ).where(source_transitions.c.library_item_id == item_id, source_transitions.c.kind == "encode",
+            source_transitions.c.outcome == "committed", func.json_extract(source_transitions.c.evidence_json, "$.original_backup") == path)
+      .order_by(source_transitions.c.recorded_at.desc()).limit(1)).mappings().first()
+
+
+
 def record_generated_output(connection: DBClient, item_id: int, *, identity: Mapping[str, Any],
                             profile: Mapping[str, Any], operation_key: Mapping[str, Any], recorded_at: str) -> str:
     item = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
@@ -276,6 +293,18 @@ def record_generated_output(connection: DBClient, item_id: int, *, identity: Map
         raise RuntimeError("Encode input changed before output commit")
     before = ensure_active_source_version(connection, item)
     generation = connection.execute(select(source_versions.c.generation_id).where(source_versions.c.version_id == before)).scalar_one()
+    if backup := operation_key.get("original_backup"):
+        original = archived_version(connection, item_id, str(backup))
+        if original is None:
+            observed = observe_file(Path(str(backup)), full_digest=True)
+            if observed["sample_fingerprint"] != operation_key["original_fingerprint"]:
+                raise RuntimeError("Original backup no longer matches the encode input")
+            before = append_version(connection, generation_id=generation, role="input", identity=observed,
+                                    profile={}, recorded_at=recorded_at)
+        else:
+            if original["sample_fingerprint"] != operation_key["original_fingerprint"]:
+                raise RuntimeError("Original backup no longer matches its recorded version")
+            before = original["version_id"]
     operation_id = stable_json_hash({"kind": "encode", "key": operation_key, "output": identity})
     after = append_version(connection, generation_id=generation, role="output", identity=identity,
                            profile=profile, recorded_at=recorded_at, version_id=f"output_{operation_id}")

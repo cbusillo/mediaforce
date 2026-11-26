@@ -203,7 +203,7 @@ def _insert_episode(config: MediaforceConfig) -> int:
 
 def _queue(
         config: MediaforceConfig, prefix: str, load: KindAwareLoader, *, only_library_item_ids: Collection[int] | None = None,
-        persist_jobs: bool = False,
+        persist_jobs: bool = False, season_redo: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     item_ids = [_insert_episode(config)] if only_library_item_ids is None else list(only_library_item_ids)
     manifests: list[dict[str, Any]] = []
@@ -225,7 +225,7 @@ def _queue(
         try:
             result = queue_folder_encode_action(
                 config, prefix, "", False, now_iso=lambda: "2026-10-26T00:00:00+00:00",
-                only_library_item_ids=only_library_item_ids,
+                only_library_item_ids=only_library_item_ids, season_redo=season_redo,
                 load_job_state=lambda *_args: None, load_calibration_state=load, review_gate=review_gate,
                 upsert_override=upsert_runtime_folder_policy_override, load_active_encode_job_for_prefix_fn=lambda *_args: None,
                 clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix if persist_jobs else lambda *_args: None,
@@ -1953,3 +1953,86 @@ def test_cartoons_page_remembers_its_size_without_approving_a_season(tmp_path: P
                         if row["kind"] == "cartoon")
     assert cartoons["selected_size_mb"] == 225
     assert cartoons["approval"] is None
+
+
+def test_redo_waits_for_group_approval_then_plans_from_the_archived_episode(tmp_path: Path) -> None:
+    from mediaforce.core.db_tables import season_redos
+    from mediaforce.core.utils import content_version_fingerprint
+    from mediaforce.execution import resolve_item_quality_source_path, resolve_item_source_path
+    from mediaforce.web.runtime.season_redo import stop_redo_season
+
+    config = _config(tmp_path)
+    config.raw["media"].update(archive_root=str(tmp_path / "Cleanup"), staging_root=str(tmp_path / "staging"),
+                               output_container="mkv")
+    item_id = _insert_episode(config)
+    backup = config.archive_root / EPISODE
+    backup.parent.mkdir(parents=True)
+    backup.write_bytes(b"original picture")
+    plan = tmp_path / "old.json"
+    old = {"library_item_id": item_id, "rel_path": EPISODE, "duration_seconds": 1200, "source_size_bytes": backup.stat().st_size,
+           "source_path": str(tmp_path / EPISODE), "source_fingerprint": "first-input",
+           "content_version_fingerprint": content_version_fingerprint(backup, backup.stat()), "container": ".mkv",
+           "video_codec": "h264", "width": 1280, "height": 720, "audio_summary": [], "subtitle_summary": []}
+    plan.write_text(json.dumps({"items": [old]}), encoding="utf-8")
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(season_redos.insert().values(prefix=SEASON, state="marked"))
+        connection.execute(staged_artifacts.insert().values(library_item_id=item_id, staging_path="published",
+                           archived_source_path=str(backup), manifest_path=str(plan), item_index=0, promoted_at="now", updated_at="now"))
+    assert stop_redo_season(config, SEASON)["ok"]
+    assert not stop_redo_season(config, OTHER_SEASON)["ok"]
+    load = _loader({SEASON: _approved(config)}, {SEASON: "cartoon"})
+    waiting, _ = _queue(config, SEASON, load, only_library_item_ids=[item_id], season_redo=True)
+    assert waiting.get("code") == "cartoon_approval_needed"
+    assert approve_kind(config, "cartoon", SEASON, _approved_on(config, EPISODE, size_mb=150), approved_at="now")["ok"]
+    queued, manifests = _queue(config, SEASON, load, only_library_item_ids=[item_id], season_redo=True)
+    assert queued["ok"], queued
+    [item] = manifests[0]["items"]
+    assert item["redo_season"] == SEASON
+    assert item["video_codec"] == "h264"
+    from mediaforce.library.season_redo import backup_encode_host
+
+    mounted = {"mode": "ssh", "host": "test.invalid", "media_access": "mounted", "staging_root": "/remote/staging"}
+    chosen = backup_encode_host(mounted, [item])
+    assert chosen["media_access"] == "stream"
+    assert backup_encode_host(mounted, [{}]) == mounted
+    assert resolve_item_source_path(config, item, host=chosen) == backup
+    assert resolve_item_source_path(config, item) == backup
+    assert resolve_item_quality_source_path(config, item, host={"media_access": "stream"}) == backup
+
+
+def test_stopping_one_season_leaves_running_episodes_and_other_seasons_alone(tmp_path: Path) -> None:
+    from mediaforce.core.db_tables import season_redos
+    from mediaforce.web.runtime.season_redo import stop_redo_season
+
+    config = _config(tmp_path)
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(season_redos.insert().values(prefix=SEASON, state="marked"))
+    queued = _encode_job(config, SEASON, "retry_backoff")
+    running = _encode_job(config, SEASON, "running")
+    other = _encode_job(config, SEASON + "0", "queued")
+    assert stop_redo_season(config, SEASON)["ok"]
+    with open_db(config.paths.db_path) as connection:
+        states = dict(connection.execute(select(encode_jobs.c.job_id, encode_jobs.c.status)).all())
+    assert states == {queued: "stopped", running: "running", other: "queued"}
+
+
+def test_unavailable_original_waits_for_the_owners_keep_before_cleanup(tmp_path: Path) -> None:
+    from mediaforce.core.db_tables import season_redos
+    from mediaforce.web.runtime.season_redo import keep_unavailable_redo, stop_redo_season
+
+    config = _config(tmp_path)
+    config.raw["media"].update(archive_root=str(tmp_path / "Cleanup"), staging_root=str(tmp_path / "staging"), output_container="mkv")
+    item_id = _insert_episode(config)
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(season_redos.insert().values(prefix=SEASON, state="marked"))
+        connection.execute(staged_artifacts.insert().values(library_item_id=item_id, staging_path="unavailable",
+                           manifest_path=str(tmp_path / "missing-plan.json"), item_index=0, promoted_at="now", updated_at="now"))
+    assert stop_redo_season(config, SEASON)["ok"]
+    assert not keep_unavailable_redo(config, SEASON, item_id)["ok"]
+    assert approve_kind(config, "cartoon", SEASON, _approved_on(config, EPISODE, size_mb=150), approved_at="now")["ok"]
+    result, _ = _queue(config, SEASON, _loader({}, {}), only_library_item_ids=[item_id], season_redo=True)
+    assert not result["ok"]
+    assert keep_unavailable_redo(config, SEASON, item_id)["ok"]
+    with open_db(config.paths.db_path) as connection:
+        assert not connection.execute(select(season_redos)).first()
+        assert connection.execute(select(staged_artifacts.c.promoted_at)).scalar_one()
