@@ -336,8 +336,13 @@ def complexity_timestamps(
     if result.returncode != 0:
         return []
 
+    return spaced_complexity_timestamps(result.stdout, total_duration, clip_duration)
+
+
+def spaced_complexity_timestamps(packet_sizes: str, total_duration: float, clip_duration: float) -> list[float]:
+    usable_end = max(total_duration - clip_duration, 0.0)
     second_buckets: dict[int, float] = {}
-    for row in csv.reader(result.stdout.splitlines()):
+    for row in csv.reader(packet_sizes.splitlines()):
         if len(row) < 2:
             continue
         try:

@@ -1796,6 +1796,32 @@ class EvidenceWorkerTests(unittest.TestCase):
                         priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE)
             resume_evidence_queue(connection)
 
+    def test_animation_probe_runs_once_per_changed_title_through_the_evidence_queue(self) -> None:
+        from mediaforce.core.db_tables import animation_sorts, series_metadata
+        from mediaforce.library.content_kinds import queue_animation_probes
+
+        for number, show in [(1, "Toons"), (2, "Toons"), (3, "Drama")]:
+            item_id, _ = self._insert_item(number, cadence_summary_json=None, media_fingerprint_json=None)
+            with open_db(self.config.paths.db_path) as connection:
+                connection.execute(library_items.update().where(library_items.c.id == item_id).values(
+                    rel_path=f"tv/{show}/Season 1/E{number}.mkv", parent_dir=f"tv/{show}/Season 1"))
+        with open_db(self.config.paths.db_path) as connection:
+            for show, genre in (("Toons", "Animation"), ("Drama", "Drama")):
+                connection.execute(series_metadata.insert().values(series_prefix=f"tv/{show}", tmdb_genres_json=json.dumps([genre]), updated_at="now"))
+            self.assertEqual(queue_animation_probes(connection, self.config), 1)
+            self.assertEqual(queue_animation_probes(connection, self.config), 0)
+        analyzer = Mock(return_value={"kbps": 950.0})
+        deps = replace(self._deps(analyzer), evidence_host_rows=lambda _: [])
+        self.assertEqual(process_evidence_queue_once(config_path=self.config.paths.config_path, config=self.config, deps=deps), 1)
+        with open_db(self.config.paths.db_path) as connection:
+            row = connection.execute(select(animation_sorts)).one()
+            self.assertEqual((row.title, row.kbps), ("tv/Toons/Season 1", 950.0))
+            self.assertEqual(queue_animation_probes(connection, self.config), 0)
+            connection.execute(library_items.update().where(library_items.c.id == row.item_id).values(content_version_fingerprint="new-source"))
+            self.assertEqual(queue_animation_probes(connection, self.config), 1)
+            self.assertIsNone(connection.execute(select(animation_sorts.c.kbps)).scalar_one())
+        analyzer.assert_called_once()
+
     def _insert_item(
             self,
             index: int,

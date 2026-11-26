@@ -839,3 +839,14 @@ season_redos = Table(
 )
 
 all_tables = metadata.sorted_tables
+
+
+animation_sorts = Table(
+    "animation_sorts", metadata,
+    Column("title", Text, primary_key=True),
+    Column("item_id", Integer, ForeignKey("library_items.id", ondelete="CASCADE"), nullable=False),
+    Column("source", Text, nullable=False),
+    Column("kbps", REAL),
+    Column("choice", Text),
+    Column("moment_json", Text),
+)

@@ -23,6 +23,7 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         var seasonApprovedShows: [String]? = nil
         var selectedSizeMb: Double? = nil
         var sizeOptionsMb: [Double]? = nil
+        var animationTitles: [AnimationTitle]? = nil
         var sampleReady: Bool? = nil
         var sampleStatus: String? = nil
         var id: String { kind }
@@ -59,6 +60,26 @@ struct KindsFacts: Decodable, Sendable, Equatable {
             }
             guard selectedSizeMb == nil else { return nil }
             return sampleSetting ?? settings.first { $0.libraryItemId != nil } ?? settings.first
+        }
+    }
+
+    struct AnimationTitle: Decodable, Identifiable, Equatable, Sendable {
+        let prefix: String
+        let source: String
+        let kbps: Double?
+        let look: String
+        let chosen: Bool
+        let moment: SampleFacts.Moment?
+        var id: String { prefix }
+        var name: String { prefix.split(separator: "/").dropFirst().joined(separator: " · ") }
+        var explanation: String {
+            if kbps == nil { return "Waiting for a short test" }
+            if chosen { return look == "cartoon" ? "You chose the cartoon look" : "You chose the live action look" }
+            switch look {
+            case "cartoon": return "Easy to compress · Uses the cartoon look"
+            case "live_action": return "Hard to compress · Uses the live action look"
+            default: return "Close call · Choose a look"
+            }
         }
     }
 
@@ -126,6 +147,10 @@ extension MediaforceClient {
     /// Uses a show's own approval for every season of the kind; a refusal answers 409 with a code the app words.
     func approveKind(_ kind: String, from prefix: String) async throws -> KindActionResult {
         try await kindAction(kind, "approve", body: ["from_prefix": prefix])
+    }
+
+    func chooseAnimationLook(_ title: KindsFacts.AnimationTitle, look: String) async throws -> KindActionResult {
+        try await kindAction("cartoon", "title-look", body: ["prefix": title.prefix, "source": title.source, "look": look])
     }
 
     func chooseKindSize(_ kind: String, megabytes: Double) async throws -> KindActionResult {

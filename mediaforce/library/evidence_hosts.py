@@ -114,6 +114,7 @@ def select_evidence_host(
         host_rows: list[dict[str, Any]],
         *,
         media_root: str,
+        idle_only: bool = False,
 ) -> dict[str, Any] | None:
     """The highest-priority encode computer that may take encode work now and can read this library."""
     rows_by_key = {
@@ -133,6 +134,11 @@ def select_evidence_host(
             continue
         if media_root not in config.source_root_map_for_host(host):
             continue
+        if idle_only:
+            from mediaforce.hosts.managed_tools import host_is_busy
+
+            if host_is_busy(config, host):
+                continue
         candidates.append(host)
     if not candidates:
         return None

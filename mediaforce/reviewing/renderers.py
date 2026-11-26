@@ -92,7 +92,7 @@ def render_encoded_preview_clip(
 ) -> int | None:
     production_preview_path = output_path.with_name(f".{output_path.stem}-production-preview.mkv")
     try:
-        cmd = _preview_render_command(
+        cmd = preview_render_command(
             source_path=source_path,
             source_codec=source_codec,
             output_path=production_preview_path,
@@ -112,7 +112,7 @@ def render_encoded_preview_clip(
         result = run_command(cmd, process_controller=process_controller)
         _raise_on_failure(result, "Preview sample encode failed")
         production_size = _final_output_size(result.stdout)
-        browser_cmd = _browser_preview_proxy_command(
+        browser_cmd = browser_preview_proxy_command(
             source_path=production_preview_path,
             output_path=output_path,
             duration_seconds=duration_seconds,
@@ -153,7 +153,7 @@ def render_encoded_preview_clip_remote(
         f".{remote_output_path.stem}-production-preview.mkv"
     )
     try:
-        cmd = _preview_render_command(
+        cmd = preview_render_command(
             source_path=source_path,
             source_codec=source_codec,
             output_path=production_preview_path,
@@ -173,7 +173,7 @@ def render_encoded_preview_clip_remote(
         result = run_remote_command(host, cmd, remote_preview_timeout_seconds, **managed_kwargs)
         _raise_on_failure(result, "Preview sample encode failed")
         production_size = _final_output_size(result.stdout)
-        browser_cmd = _browser_preview_proxy_command(
+        browser_cmd = browser_preview_proxy_command(
             source_path=production_preview_path,
             output_path=remote_output_path,
             duration_seconds=duration_seconds,
@@ -194,7 +194,7 @@ def render_encoded_preview_clip_remote(
             pass
 
 
-def _preview_render_command(
+def preview_render_command(
         *,
         source_path: Path,
         source_codec: str | None,
@@ -265,7 +265,7 @@ def _preview_render_command(
     return cmd
 
 
-def _browser_preview_proxy_command(
+def browser_preview_proxy_command(
         *,
         source_path: Path,
         output_path: Path,
@@ -366,7 +366,7 @@ def render_source_review_clip(
         ffmpeg_hwaccel_input_args: Callable[[str | None], list[str]],
         run_command: Callable[..., Any],
 ) -> None:
-    cmd = _source_review_clip_command(
+    cmd = source_review_clip_command(
         source_path=source_path,
         source_codec=source_codec,
         output_path=output_path,
@@ -396,7 +396,7 @@ def render_source_review_clip_remote(
         process_controller: Any = None,
 ) -> None:
     managed_kwargs = {"process_controller": process_controller} if process_controller is not None else {}
-    cmd = _source_review_clip_command(
+    cmd = source_review_clip_command(
         source_path=source_path,
         source_codec=source_codec,
         output_path=remote_output_path,
@@ -410,7 +410,7 @@ def render_source_review_clip_remote(
     _raise_on_failure(result, "Source review clip render failed")
 
 
-def _source_review_clip_command(
+def source_review_clip_command(
         *,
         source_path: Path,
         source_codec: str | None,

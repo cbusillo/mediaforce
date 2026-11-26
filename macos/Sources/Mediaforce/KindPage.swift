@@ -72,6 +72,9 @@ struct KindPage: View {
                                  showSample: showSample)
                         .disabled(asking)
                 }
+                if let titles = kind.animationTitles, !titles.isEmpty {
+                    AnimationResults(titles: titles, model: model)
+                }
                 KindShows(kind: kind, playing: offering ? kind.sampleShow : (kind.approval != nil && chosen == nil ? nil : setting?.show), leftOut: leftOut, posters: model.posters,
                           choose: { chosen = $0 }, open: openItem, openLeftOut: openLeftOut,
                           offer: offer)
@@ -304,5 +307,61 @@ struct KindShows: View {
                         .padding(6)
                 }
             }
+    }
+}
+
+private struct AnimationResults: View {
+    let titles: [KindsFacts.AnimationTitle]
+    let model: MainWindowModel
+    @State private var reviewing: String?
+    @State private var saving = false
+    @State private var players = ComparePlayers()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Animation looks").font(.headline)
+            ForEach(titles) { title in
+                Divider()
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(title.name)
+                        Text(title.explanation).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if title.moment != nil {
+                        Button("Compare") { reviewing = title.id }
+                    }
+                }
+                .help(title.kbps.map { "The test used \($0.formatted(.number.precision(.fractionLength(0)))) kilobits per second." } ?? title.explanation)
+                if reviewing == title.id, let moment = title.moment {
+                    ComparePlayer(players: players, model: model, moments: .clips([moment]), names: PictureNames(compressed: Words.sample))
+                        .id(title.source)
+                    HStack {
+                        Button("Use cartoon look") { choose(title, look: "cartoon") }
+                        Button("Use live action look") { choose(title, look: "live_action") }
+                    }
+                    .disabled(saving)
+                }
+            }
+        }
+    }
+
+    private func choose(_ title: KindsFacts.AnimationTitle, look: String) {
+        saving = true
+        Task {
+            defer { saving = false }
+            do {
+                if try await model.client.chooseAnimationLook(title, look: look).ok {
+                    players.pause()
+                    reviewing = nil
+                } else {
+                    model.notice = ActionNotice(title: "Choice could not be saved", message: "Check the current result for this title.")
+                }
+            } catch {
+                model.notice = .unanswered
+            }
+            await model.refreshKinds()
+            await model.refresh()
+        }
     }
 }

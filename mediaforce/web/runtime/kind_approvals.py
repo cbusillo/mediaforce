@@ -771,6 +771,7 @@ def kinds_payload(
         if entry["kind"] == CARTOON:
             entry["sample_in_progress"] = entry["sample_status"] in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES
             offered = {setting["show"] for setting in entry["settings"]}
+            entry["animation_titles"] = report.get("animation_titles", [])
             entry["season_approved_shows"] = sorted(show for show, found in approvals_by_show.items() if show not in offered
                                                    and any(kinds_by_season.get(item.sample_season) == CARTOON for item in found))
         entry["sample_ready"] = False

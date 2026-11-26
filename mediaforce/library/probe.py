@@ -11,6 +11,7 @@ from mediaforce.core.process_control import ManagedProcessController, run_comman
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, analyze_media_fingerprint
+from mediaforce.library.animation_probe import ANIMATION_PROBE, probe_animation
 from mediaforce.library.evidence_state import EvidenceKind
 
 if TYPE_CHECKING:
@@ -127,6 +128,7 @@ def probe_evidence(
         command_runner: "RemoteMediaCommands | None" = None,
         hardware_decoding: bool = True,
         probe_payload: dict[str, object] | None = None,
+        review_dir: Path | None = None,
 ) -> dict[str, object]:
     """Measure one kind of evidence; with a command runner, every command runs on that encode computer."""
     payload = probe_payload if probe_payload is not None else probe_evidence_source(
@@ -135,6 +137,10 @@ def probe_evidence(
     format_info = object_dict(payload.get("format"))
     video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
     duration_seconds = _as_float(format_info.get("duration"))
+    if evidence_kind == ANIMATION_PROBE:
+        if review_dir is None:
+            raise ValueError("An animation check needs a review directory.")
+        return probe_animation(path, duration_seconds or 0.0, review_dir=review_dir, process_controller=process_controller, command_runner=command_runner)
     if evidence_kind == CADENCE_EVIDENCE_KIND:
         return analyze_cadence(
             path,

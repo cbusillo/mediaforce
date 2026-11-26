@@ -19,12 +19,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import open_db
-from mediaforce.core.db_tables import library_items
+from mediaforce.core.db_tables import animation_sorts, library_items
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ProcessDeadlineEnforcementError
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, reclassify_cadence_summary
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, fingerprint_video_decode_timed_out, reclassify_media_fingerprint_summary
 from mediaforce.encoding.remote_media import RemoteMediaCommands, RemoteMediaConnections, RemoteMediaHostUnavailableError
+from mediaforce.library.animation_probe import ANIMATION_PROBE
 from mediaforce.library.evidence_hosts import ControllerDigestWindowClosed, EVIDENCE_HOST_WAIT_REASON, collect_evidence_host_rows, controller_digest_window, \
     evidence_source_path_on_host, remote_evidence_hosts, select_evidence_host, unmeasurable_evidence_roots
 from mediaforce.library.evidence_queue import EVIDENCE_BACKGROUND_RETRY_SECONDS, DEFAULT_EVIDENCE_BATCH_LIMIT, MAX_CONCURRENT_EVIDENCE_FILES, SOURCE_ROOT_WAIT_REASON, EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, EvidenceWorkClaim, claim_next_evidence_work, \
@@ -293,6 +294,7 @@ def _unmeasurable_roots(config: MediaforceConfig, deps: EvidenceWorkerDeps) -> f
 
 
 def discover_originals(config: MediaforceConfig, deps: EvidenceWorkerDeps) -> int:
+    from mediaforce.library.content_kinds import queue_animation_probes
     from mediaforce.library.source_intake import queue_original_intake
     from mediaforce.library.original_registration import queue_confirmed_originals
 
@@ -305,7 +307,7 @@ def discover_originals(config: MediaforceConfig, deps: EvidenceWorkerDeps) -> in
                 return 0
             discovered = queue_original_intake(connection, config)
             refresh_controller_digest_waits(connection, window)
-            return discovered
+            return discovered + queue_animation_probes(connection, config)
     except (OSError, RuntimeError, ValueError, SQLAlchemyError):
         deps.logger.exception("Original discovery failed; queued analysis can still continue")
         return 0
@@ -509,6 +511,8 @@ def _run_evidence_claim(
             analysis_kwargs = dict(kwargs)
             if shared_probe is not None:
                 analysis_kwargs["probe_payload"] = shared_probe
+            if owned.evidence_kind == ANIMATION_PROBE:
+                analysis_kwargs["review_dir"] = config.paths.review_dir
             if owned.evidence_kind == MEDIA_FINGERPRINT_EVIDENCE_KIND:
                 if fingerprint_video_decode_timed_out(parse_evidence_summary(owned.canonical_summary_json) or {}):
                     analysis_kwargs["hardware_decoding"] = False
@@ -675,6 +679,12 @@ def _commit_evidence_summary(
                 restore_attempt=not classification_only,
             )
             return
+        if claim.evidence_kind == ANIMATION_PROBE:
+            connection.execute(update(animation_sorts).where(animation_sorts.c.item_id == claim.library_item_id,
+                animation_sorts.c.source == actual_fingerprint, animation_sorts.c.kbps.is_(None)).values(kbps=summary["kbps"],
+                    moment_json=json.dumps(summary["moment"]) if summary.get("moment") else None))
+            transition_evidence_work(connection, claim, work_status="completed", reset_attempt_state=True)
+            return
         column = (
             library_items.c.cadence_summary_json
             if claim.evidence_kind == CADENCE_EVIDENCE_KIND
@@ -813,9 +823,15 @@ def _analysis_target(
     None means encode computers are set up but none can take the work now, so it waits instead of
     falling back to the controller.
     """
+    idle_only = claim.evidence_kind == ANIMATION_PROBE
     if not remote_evidence_hosts(config):
+        if idle_only:
+            from mediaforce.hosts.managed_tools import host_is_busy
+
+            if host_is_busy(config, {"key": "local", "host": socket.gethostname()}) or not controller_digest_window(config, deps.evidence_host_rows).is_open:
+                return None
         return _AnalysisTarget(source_path=source_path, command_runner=None)
-    host = select_evidence_host(config, deps.evidence_host_rows(config), media_root=claim.media_root)
+    host = select_evidence_host(config, deps.evidence_host_rows(config), media_root=claim.media_root, idle_only=idle_only)
     if host is None:
         return None
     command_runner = (deps.remote_commands or RemoteMediaCommands)(host)

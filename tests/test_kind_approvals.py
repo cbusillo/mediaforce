@@ -13,7 +13,7 @@ from fastapi import FastAPI, HTTPException
 from test_web_route_security import _json_request, _route_endpoint
 from test_page_state import _review_ready
 from sqlalchemy import create_engine, select
-from test_content_kinds import _admit_historical_original, _fingerprint, _item as _content_item
+from test_content_kinds import _admit_historical_original, _fingerprint, _item as _content_item, _save_probe
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig, upsert_runtime_folder_policy_override
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
@@ -436,6 +436,7 @@ def test_a_library_not_set_to_compress_adds_nothing_to_a_looks_offers_counts_or_
             _admit_historical_original(connection, published, dark=0.5)
             _content_item(connection, measured.replace("e00", "e01").replace("Heat.mkv", "Heat - 4K.mkv"),
                           status="discovered", codec="h264", current_dark=0.0)
+        _save_probe(connection, "kids/Toons/Season 1", 390)
         connection.execute(series_metadata.insert().values(series_prefix="kids/Toons", tmdb_genres_json='["Animation"]', updated_at="now"))
         connection.execute(series_metadata.insert().values(series_prefix="shows/Drama", tmdb_genres_json='["Drama"]', updated_at="now"))
         _content_item(connection, "movies/Unseen (2020)/Unseen.mkv", status="discovered", codec="h264", current_dark=0.0)
@@ -1662,6 +1663,8 @@ def test_cartoon_kind_can_reuse_a_matching_approved_show_sample(tmp_path: Path, 
     _finished_sample(config, APPROVED_SEASON)
     with open_db(config.paths.db_path) as connection:
         _completed_and_waiting_seasons(connection)
+        for prefix in (APPROVED_SEASON, SEASON):
+            _save_probe(connection, prefix, 400)
         connection.execute(series_metadata.update().values(tmdb_genres_json='["Animation"]'))
         connection.commit()
         before = next(row for row in kinds_payload(connection, config, load_calibration_state=load)["kinds"] if row["kind"] == kind)
@@ -1712,10 +1715,10 @@ def test_window_kind_snapshot_refreshes_genre_changes(tmp_path: Path, status: st
             assert approval is not None and approval.kind == LIVE_ACTION
         connection.execute(series_metadata.update().values(tmdb_genres_json='["Animation"]'))
         with kind_snapshot(connection, config, load):
-            assert kinds(config, SEASON) == "cartoon"
+            assert kinds(config, SEASON) == "unmeasured"
             assert effective_production_approval(config, EPISODE, load) is None
         connection.commit()
-        assert kinds(config, SEASON) == "cartoon"
+        assert kinds(config, SEASON) == "unmeasured"
 
 
 def test_reused_library_classifications_do_not_retain_kind_approval_or_work_status(tmp_path: Path) -> None:
@@ -1936,6 +1939,7 @@ def test_futuramas_passing_sample_at_the_selected_size_leads_other_cartoons(tmp_
         with open_db(config.paths.db_path) as connection:
             published = _content_item(connection, episode, status="promoted", codec="av1", current_dark=0)
             _admit_historical_original(connection, published, dark=0.5)
+            _save_probe(connection, season, 430)
             connection.execute(series_metadata.insert().values(series_prefix=season.rsplit("/", 1)[0],
                                                                tmdb_genres_json='["Animation"]', updated_at="now"))
             connection.commit()
