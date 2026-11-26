@@ -84,9 +84,6 @@ def build_manifest_item(
         *,
         target_provenance_config: MediaforceConfig | None = None,
 ) -> dict[str, Any]:
-    policy = config.resolve_policy(str(row["rel_path"]))
-    staging_root = config.staging_root
-    output_rel = Path(row["rel_path"]).with_suffix(f".{config.output_container}")
     recommendation = recommend_item(row, config)
 
     audio_summary = json.loads(row["audio_summary_json"])
@@ -106,15 +103,6 @@ def build_manifest_item(
         source_id=source_id,
         source_fingerprint=str(row.get("fingerprint") or "") or None,
     )
-    video_policy = object_dict(policy.get("video"))
-    operator_intent = operator_intent_from_policy(
-        video_policy,
-        default_video_policy=config.video,
-        audio_policy=object_dict(policy.get("audio")),
-        subtitle_policy=object_dict(policy.get("subtitle")),
-    )
-    provenance_config = target_provenance_config or config
-
     item = {
         "library_item_id": row["id"],
         "source_version_id": row.get("active_source_version_id"),
@@ -131,23 +119,10 @@ def build_manifest_item(
         "height": row.get("height"),
         "duration_seconds": row["duration_seconds"],
         "container": row["container"],
-        "output_container": config.output_container,
         "status": row["status"],
         "recommendation": recommendation.bucket,
         "priority_score": recommendation.score,
         "recommendation_reason": recommendation.reason,
-        "staging_path": str(staging_root / output_rel),
-        "resolved_policy": policy,
-        "resolved_operator_intent": operator_intent.to_payload(
-            item_runtime_seconds=float_value(row.get("duration_seconds")) or None
-        ),
-        "target_size_provenance": target_size_provenance(
-            source_config=provenance_config,
-            rel_path=str(row["rel_path"]),
-            effective_policy=policy,
-            duration_seconds=float_value(row.get("duration_seconds")) or None,
-        ),
-        "compression_intent": operator_intent.compression_intent.to_payload(),
         "audio_summary": audio_summary,
         "subtitle_summary": subtitle_summary,
         "attachment_summary": attachment_summary,
@@ -160,11 +135,43 @@ def build_manifest_item(
         "media_fingerprint_decision": media_fingerprint_decision,
         "original_source_evidence": row.get("original_source_evidence"),
     }
+    return apply_manifest_policy(item, config, target_provenance_config=target_provenance_config)
+
+
+def apply_manifest_policy(item: dict[str, Any], config: MediaforceConfig, *,
+                          target_provenance_config: MediaforceConfig | None = None) -> dict[str, Any]:
+    policy = config.resolve_policy(str(item["rel_path"]))
+    staging_root = config.staging_root
+    output_rel = Path(item["rel_path"]).with_suffix(f".{config.output_container}")
+    video_policy = object_dict(policy.get("video"))
+    operator_intent = operator_intent_from_policy(
+        video_policy,
+        default_video_policy=config.video,
+        audio_policy=object_dict(policy.get("audio")),
+        subtitle_policy=object_dict(policy.get("subtitle")),
+    )
+    provenance_config = target_provenance_config or config
+
+    item.update({
+        "staging_path": str(staging_root / output_rel),
+        "resolved_policy": policy,
+        "resolved_operator_intent": operator_intent.to_payload(
+            item_runtime_seconds=float_value(item.get("duration_seconds")) or None
+        ),
+        "target_size_provenance": target_size_provenance(
+            source_config=provenance_config,
+            rel_path=str(item["rel_path"]),
+            effective_policy=policy,
+            duration_seconds=float_value(item.get("duration_seconds")) or None,
+        ),
+        "compression_intent": operator_intent.compression_intent.to_payload(),
+        "output_container": config.output_container,
+    })
     item["stream_budget_ledger"] = resolve_stream_budget_ledger(
         item,
         default_video_policy=config.video,
         output_container=config.output_container,
-        resolved_size_goal=operator_intent.size_goal.resolve(float_value(row.get("duration_seconds")) or None),
+        resolved_size_goal=operator_intent.size_goal.resolve(float_value(item.get("duration_seconds")) or None),
         prefer_persisted=False,
     ).to_payload()
     return item

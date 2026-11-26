@@ -830,4 +830,12 @@ item_events = Table(
 )
 Index("idx_item_events_item_time", item_events.c.library_item_id, item_events.c.created_at.desc())
 
+
+season_redos = Table(
+    "season_redos", metadata,
+    Column("prefix", Text, primary_key=True),
+    Column("state", Text, nullable=False),
+    Column("remaining_json", Text),
+)
+
 all_tables = metadata.sorted_tables

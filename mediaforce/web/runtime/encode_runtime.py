@@ -41,6 +41,8 @@ from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
+from mediaforce.library.season_redo import backup_encode_host
+from mediaforce.core.db_tables import season_redos
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, RUNNABLE_ENCODE_JOB_KINDS, ensure_queue_state, \
     encode_run_manifest_files, encode_run_manifest_indexes, list_child_encode_jobs, load_encode_job, load_queue_state, persisted_encode_host_payload, save_encode_job, save_queue_state
 from mediaforce.core.process_control import (
@@ -4588,10 +4590,21 @@ def load_next_runnable_encode_job(
             running_reserve_state,
         )
 
+    stopped_seasons = set(connection.execute(select(season_redos.c.prefix).where(
+        season_redos.c.state.in_(("stopped", "running"))
+    )).scalars()) if rows else set()
     for queue_position, row in enumerate(rows):
         job = load_encode_job(connection, str(row["job_id"]))
         if job is None:
             continue
+        if stopped_seasons:
+            items = _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache)
+            if any(any(str(item.get("rel_path", "")).startswith(prefix + "/") and item.get("redo_season") != prefix
+                       for prefix in stopped_seasons) for item in items):
+                job.update(status="stopped", terminal_reason="season_stopped", finished_at=deps.now_iso(), updated_at=deps.now_iso())
+                save_encode_job(connection, job)
+                defer_parent_sync(job)
+                continue
         library_key = _encode_job_library_key(job)
         if library_key and library_key not in config.source_root_map:
             waiting_reason = LIBRARY_NOT_COMPRESSING_WAITING_REASON
@@ -4771,6 +4784,7 @@ def load_next_runnable_encode_job(
             connection,
             _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache),
         )
+        host_payload = backup_encode_host(host_payload, reserve_items)
         waiting_reason = reserve_waiting_reason(reserve_items, host_payload)
         if waiting_reason is not None:
             if str(job.get("waiting_reason") or "") != waiting_reason:

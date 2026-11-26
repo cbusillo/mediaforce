@@ -20,7 +20,7 @@ from mediaforce.core.media_storage import probe_media_path, storage_problem
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, motion_keep_decisions, source_transitions, \
     source_versions, staged_artifacts
-from mediaforce.library.source_evidence import append_version, ensure_active_source_version, json_text, observe_file, \
+from mediaforce.library.source_evidence import archived_version, append_version, ensure_active_source_version, json_text, observe_file, \
     pending_source_operation
 from mediaforce.encoding.source_publication import apply_source_moves, commit_source_publish, reconcile_source_publish, \
     record_prepared_moves
@@ -65,7 +65,8 @@ def _original_version(connection: DBClient, item_id: int, active: str, archive_i
 
     A recorded original that differs from the backup on disk is refused: that backup is not this file's original.
     """
-    replaced = connection.execute(select(source_transitions.c.before_version_id).where(
+    archived = archived_version(connection, item_id, str(archive_path))
+    replaced = archived["version_id"] if archived else connection.execute(select(source_transitions.c.before_version_id).where(
         source_transitions.c.library_item_id == item_id,
         source_transitions.c.kind == "publish",
         source_transitions.c.outcome == "committed",

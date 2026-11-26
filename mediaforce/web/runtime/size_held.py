@@ -12,6 +12,7 @@ from typing import Any, cast
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from mediaforce.library.season_redo import finish_redo_file
 from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow, open_db
@@ -324,10 +325,13 @@ def keep_original_after_failed_checks(
         return "The original is kept, but Mediaforce could not remove the failed copy yet. It will try again."
     with open_db(config.paths.db_path) as connection:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
-        connection.execute(delete(staged_artifacts).where(
+        removed = connection.execute(delete(staged_artifacts).where(
             staged_artifacts.c.library_item_id == library_item_id, staged_artifacts.c.promoted_at.is_(None)))
+        if removed.rowcount != 1:
+            return ""
         connection.execute(update(library_items).where(library_items.c.id == library_item_id)
                            .values(status="discovered", updated_at=now_iso()))
+        finish_redo_file(connection, str(source["parent_dir"]), library_item_id, keep_current=True)
     return ""
 
 

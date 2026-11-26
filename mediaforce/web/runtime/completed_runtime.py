@@ -11,6 +11,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
+from mediaforce.library.season_redo import redo_prefixes
 from mediaforce.library.media_scopes import media_scope_from_prefix
 FolderGroup = tuple[str, str, str, str]
 ORIGINALS_REMOVED_EVENT = "originals_removed_confirmed"
@@ -92,6 +93,7 @@ def completed_page_payload(
 
 
 def completed_archive_cleanup_summary(archive_root: Path | None, folders: list[CompletedFolder]) -> dict[str, Any]:
+    folders = [folder for folder in folders if folder.cleanup_state != "redo"]
     file_count = sum(folder.archived_backup_count for folder in folders)
     total_size_bytes = sum(folder.archived_backup_size_bytes for folder in folders)
     return {
@@ -215,7 +217,12 @@ def list_completed_folders(
                 folder.archived_backup_size_bytes += probe.info.st_size
                 counted_backup_paths.add(backup.resolve())
 
+    protected_seasons = redo_prefixes(connection)
     for folder in grouped.values():
+        if folder.prefix in protected_seasons:
+            folder.cleanup_state = "redo"
+            folder.cleanup_detail = "Original backups are kept until this season’s redo finishes."
+            continue
         if folder.cleanup_state == "blocked":
             continue
         folder.cleanup_state, folder.cleanup_detail = _folder_cleanup_state(

@@ -154,8 +154,12 @@ def choose_kind_size(config: MediaforceConfig, kind: str, size_mb: float) -> boo
 def _matches_group_size(config: MediaforceConfig, kind: str, contract: Mapping[str, Any] | None) -> bool:
     if kind != CARTOON:
         return True
+    return matches_cartoon_size(contract, selected_cartoon_size(config))
+
+
+def matches_cartoon_size(contract: Mapping[str, Any] | None, size_mb: float) -> bool:
     goal = object_dict(object_dict(object_dict(contract).get("operator_intent")).get("size_goal"))
-    return (goal.get("mode") == "normalized" and goal.get("value_mb") == selected_cartoon_size(config)
+    return (goal.get("mode") == "normalized" and goal.get("value_mb") == size_mb
             and goal.get("reference_runtime_minutes") == 45)
 
 

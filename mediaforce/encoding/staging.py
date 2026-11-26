@@ -16,12 +16,13 @@ from sqlalchemy import update
 from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.binaries import ffprobe_binary
+from mediaforce.library.season_redo import finish_redo_file, verify_redo_input
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
-from mediaforce.core.db_tables import source_moves, source_transitions
+from mediaforce.core.db_tables import season_redos, source_moves, source_transitions
 from mediaforce.core.process_control import run_command
 from mediaforce.core.type_defs import float_value
 from mediaforce.core.type_defs import int_value
@@ -31,7 +32,7 @@ from mediaforce.core.utils import content_version_fingerprint
 from mediaforce.encoding.free_space import ReservePreflight, promotion_reserve_preflight
 from mediaforce.encoding.source_publication import apply_source_moves, commit_source_publish, \
     prepare_source_publish, reconcile_source_publish
-from mediaforce.library.media_scopes import logical_library_rel_path
+from mediaforce.library.media_scopes import logical_library_rel_path, scope_descendant_filter
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.tuning.compression_intent import compression_intent_from_item
 from mediaforce.tuning.production_lineage import validated_target_identity
@@ -712,7 +713,21 @@ def promote_one_item(
             "This file is kept original. Undo that on its page to publish this copy.",
             reason_code="kept_original",
         )
+    redo_prefix = connection.execute(select(season_redos.c.prefix).join(
+        library_items, scope_descendant_filter(library_items.c.rel_path, season_redos.c.prefix)
+    ).where(season_redos.c.state == "running", library_items.c.id == item["library_item_id"])).scalar_one_or_none()
+    if redo_prefix is not None:
+        from mediaforce.web.runtime.season_redo import approved_redo_item
+
+        saved = approved_redo_item(config, str(redo_prefix), stage_row)
+        if saved is None:
+            raise PromotionWaiting("This episode needs a checked replacement made under the approved cartoon look.")
+        item = saved
     validation = json.loads(stage_row["validation_json"] or "{}")
+    if item.get("redo_season"):
+        force = False
+        if not probe_media_path(Path(item["source_path"])).is_file:
+            raise PromotionWaiting("The current library file is unavailable.")
     if not force and not validation.get("passed"):
         raise RuntimeError(f"Item {item['library_item_id']} must be validated before promotion")
     # The stage-time record can say "passed" before the size check ever ran, so the hold is enforced here too.
@@ -734,6 +749,11 @@ def promote_one_item(
     staging_path = Path(stage_row["staging_path"])
     destination_path = source_path.with_suffix(f".{config.output_container}")
     archive_path = config.archive_root / Path(item["rel_path"])
+    original_backup = None
+    if item.get("redo_backup"):
+        verify_redo_input(config, item)
+        original_backup = config.archive_root / item["redo_backup"]
+        archive_path = _archive_backup_path(original_backup)
 
     if probe_media_path(destination_path).exists_or_raise() and destination_path != source_path:
         raise FileExistsError(f"Destination already exists: {destination_path}")
@@ -828,18 +848,22 @@ def promote_one_item(
             .values(
                 promoted_at=now,
                 promoted_path=str(destination_path),
-                archived_source_path=str(archive_path),
+                archived_source_path=str(original_backup or archive_path),
+                source_path=item.get("redo_original_path") or stage_row["source_path"] or str(source_path),
                 updated_at=now,
             )
         )
+        if prefix := item.get("redo_season"):
+            finish_redo_file(connection, str(prefix), int(item["library_item_id"]))
         append_target_production_outcome(
             connection, prepared=target_outcome, promoted_at=now,
             promoted_path=str(destination_path), promoted_content_fingerprint=promoted_content_fingerprint,
             promoted_size_bytes=promoted_stat.st_size, promoted_mtime_ns=promoted_stat.st_mtime_ns,
         )
-        if archive_backup_path is not None:
+        retained_backup = archive_path if original_backup else archive_backup_path
+        if retained_backup is not None:
             record_event(connection, item["library_item_id"], "promotion_rollback_retained", {
-                "retained_archive_backup_path": str(archive_backup_path),
+                "retained_archive_backup_path": str(retained_backup),
             })
         connection.commit()
     except BaseException as promotion_error:
@@ -862,8 +886,8 @@ def promote_one_item(
             "promotion_completed",
             {
                 "promoted_path": str(destination_path),
-                "archived_source_path": str(archive_path),
-                "retained_archive_backup_path": str(archive_backup_path) if archive_backup_path is not None else None,
+                "archived_source_path": str(original_backup or archive_path),
+                "retained_archive_backup_path": str(retained_backup) if retained_backup else None,
                 # Which approval covered this file: a folder's own, or a kind of content's (#1047).
                 "approval": item.get("production_approval"),
             },

@@ -9,6 +9,7 @@ from typing import Any
 
 from sqlalchemy import ColumnElement, Select, case, func, or_, select
 
+from mediaforce.library.season_redo import redo_item_ids
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow
 from mediaforce.core.db_tables import (
@@ -917,7 +918,7 @@ def _event(row: DBRow, media_type: str) -> dict[str, Any]:
 
 
 def _original_backups(connection: DBClient, promotions: Mapping[int, _Promotion]) -> dict[str, int]:
-    removed = confirmed_originals_removed_item_ids(connection)
+    removed = confirmed_originals_removed_item_ids(connection) | redo_item_ids(connection)
     waiting = [promotion for item_id, promotion in promotions.items() if promotion.has_backup and item_id not in removed]
     return {"count": len(waiting), "bytes": sum(promotion.source_size_bytes for promotion in waiting)}
 
