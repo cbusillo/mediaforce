@@ -28,7 +28,7 @@ def register_app_window_routes(
         kinds_payload: Callable[[], dict[str, Any]] | None = None,
         approve_kind_action: Callable[[str, str], dict[str, Any]] | None = None,
         stop_kind_action: Callable[[str], dict[str, Any]] | None = None,
-        animation_choice: Callable[[str, str, str], bool] | None = None,
+        retry_animation: Callable[[str, str], bool] | None = None,
         kind_size_action: Callable[[str, float], bool] | None = None,
         kind_sample_action: Callable[[str, str], dict[str, Any]] | None = None,
         kind_picture_action: Callable[[str, bool], dict[str, Any]] | None = None,
@@ -103,13 +103,13 @@ def register_app_window_routes(
         def api_app_kind_stop(kind: str) -> JSONResponse:
             return JSONResponse(stop_kind(kind))
 
-    if animation_choice is not None:
-        save_choice = animation_choice
+    if retry_animation is not None:
+        retry = retry_animation
 
-        @app.post("/api/app/kinds/cartoon/title-look")
-        async def api_app_title_look(request: Request) -> JSONResponse:
+        @app.post("/api/app/kinds/cartoon/retry")
+        async def api_app_retry_animation(request: Request) -> JSONResponse:
             body = await request_body(request)
-            ok = await run_in_threadpool(save_choice, str(body.get("prefix") or ""), str(body.get("source") or ""), str(body.get("look") or ""))
+            ok = await run_in_threadpool(retry, str(body.get("prefix") or ""), str(body.get("source") or ""))
             return JSONResponse({"ok": ok}, status_code=200 if ok else 409)
 
     if kind_size_action is not None:

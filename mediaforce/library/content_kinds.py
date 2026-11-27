@@ -7,7 +7,7 @@ from itertools import batched
 from pathlib import PurePosixPath
 from typing import Any, Literal
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.config import MediaforceConfig
@@ -32,7 +32,7 @@ from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, Sourc
 ContentKind = Literal["live_action", "cartoon"]
 SeasonKind = Literal["live_action", "cartoon", "unmeasured"]
 
-CONTENT_KINDS_VERSION = 3
+CONTENT_KINDS_VERSION = 4
 ANIMATION_GENRE = "animation"
 
 
@@ -69,9 +69,9 @@ def season_kind(measured: Sequence[bool], *, animated: bool | None, sort: "Anima
     if not count:
         return grouping("unmeasured", "no_measured_original")
     if sort or animated:
-        if sort is None or sort.kbps is None:
+        if sort is None or not sort.measured:
             return grouping("unmeasured", "animation_probe_pending")
-        return grouping(sort.look, "animation_look_needed" if sort.look == "unmeasured" else None)
+        return grouping(sort.look)
     if animated is None:
         return grouping("unmeasured", "genres_unknown")
     return grouping("live_action")
@@ -191,20 +191,28 @@ class AnimationTitle:
     prefix: str
     item_id: int
     source: str
-    kbps: float | None
-    choice: str | None
+    median_score: float | None
+    hdr: bool | None
     catalog_source: str
     original_path: str | None
     error: str | None = None
-    moment: dict[str, Any] | None = None
+
+    @property
+    def measured(self) -> bool:
+        return bool(self.hdr) or self.median_score is not None
 
     @property
     def look(self) -> SeasonKind:
-        return "unmeasured" if self.kbps is None else animation_look(self.kbps, self.choice)
+        if self.hdr:
+            return "live_action"
+        if self.median_score is not None:
+            return animation_look(self.median_score)
+        return "unmeasured"
 
     def payload(self) -> dict[str, Any]:
-        return {"prefix": self.prefix, "source": self.source, "kbps": self.kbps, "look": self.look, "chosen": self.choice is not None, "error": self.error,
-                "moment": self.moment if self.look == "unmeasured" else None, "original_missing": self.original_path is None and self.kbps is None}
+        return {"prefix": self.prefix, "source": self.source, "median_score": self.median_score,
+                "look": self.look, "hdr": self.hdr,
+                "error": self.error, "original_missing": self.original_path is None and not self.measured}
 
 
 def _animation_titles(connection: DBClient, seasons: Mapping[str, list[Mapping[str, Any]]], series_of: Mapping[str, str],
@@ -235,10 +243,11 @@ def _animation_titles(connection: DBClient, seasons: Mapping[str, list[Mapping[s
             current = record if record is not None and record.item_id == item["id"] and record.source == source else None
             failure = failures.get(int(item["id"]))
             error = failure.last_error if failure and failure.work_source_fingerprint == catalog_source and current else None
-            candidate = AnimationTitle(title, int(item["id"]), source, current.kbps if current is not None else None, current.choice if current is not None else None,
-                                       catalog_source, path, error, json.loads(current.moment_json) if current is not None and current.moment_json else None)
+            candidate = AnimationTitle(title, int(item["id"]), source, current.median_score if current is not None else None,
+                                       current.hdr if current is not None else None,
+                                       catalog_source, path, error)
             candidates.append((candidate, str(item["rel_path"])))
-        titles[title] = min(candidates, key=lambda pair: (pair[0].kbps is None, pair[0].original_path is None,
+        titles[title] = min(candidates, key=lambda pair: (not pair[0].measured, pair[0].original_path is None,
                                                           record is None or pair[0].item_id != record.item_id, pair[1]))[0]
     return titles
 
@@ -256,14 +265,14 @@ def queue_animation_probes(connection: DBClient, config: MediaforceConfig, *, li
     count = 0
     for title in _animation_titles(connection, seasons, shows, _series_animation(connection)).values():
         root = title.prefix.partition("/")[0]
-        if title.kbps is not None or not title.original_path or not title.source or root not in config.source_root_map or queued.get(title.item_id) == title.catalog_source:
+        if title.measured or not title.original_path or not title.source or root not in config.source_root_map or queued.get(title.item_id) == title.catalog_source:
             continue
         with connection.begin_nested():
-            values = {"item_id": title.item_id, "source": title.source, "kbps": None, "choice": None, "moment_json": None}
+            values = {"item_id": title.item_id, "source": title.source, "median_score": None, "hdr": None}
             statement = sqlite_insert(animation_sorts).values(title=title.prefix, **values)
             connection.execute(statement.on_conflict_do_update(index_elements=[animation_sorts.c.title], set_=values,
                 where=or_(animation_sorts.c.source != title.source, animation_sorts.c.item_id != title.item_id)))
-            if connection.execute(select(animation_sorts.c.kbps).where(animation_sorts.c.title == title.prefix)).scalar_one() is not None:
+            if connection.execute(select(animation_sorts.c.hdr).where(animation_sorts.c.title == title.prefix)).scalar_one() is not None:
                 continue
             connection.execute(sqlite_insert(library_item_evidence_state).values(
                 library_item_id=title.item_id, evidence_kind=ANIMATION_PROBE, state="analysis_required", policy_hash=ANIMATION_PROBE,
@@ -291,19 +300,6 @@ def retry_animation_probe(connection: DBClient, config: MediaforceConfig, prefix
         return False
     return bool(queue_decision_evidence_work(connection, config, prefix, library_item_ids=[title.item_id], evidence_kind=ANIMATION_PROBE,
                                           work_reason=ANIMATION_PROBE, priority=100, restart_terminal=True)["prepared_count"])
-
-
-def choose_animation_look(connection: DBClient, title: str, source: str, look: str, *, library_types: Mapping[str, str]) -> bool:
-    if look not in {"cartoon", "live_action"}:
-        return False
-    record = current_animation_title(connection, title, library_types)
-    if record is None or record.source != source or record.kbps is None or animation_look(record.kbps) != "unmeasured":
-        return False
-    if record.choice is not None:
-        return record.choice == look
-    result = connection.execute(update(animation_sorts).where(animation_sorts.c.title == title, animation_sorts.c.source == source,
-                                                               animation_sorts.c.choice.is_(None)).values(choice=look))
-    return result.rowcount == 1
 
 
 def season_grouping(

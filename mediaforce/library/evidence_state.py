@@ -18,7 +18,7 @@ from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, CADENCE_SCHEMA_VE
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, MEDIA_FINGERPRINT_SCHEMA_VERSION, \
     MEDIA_FINGERPRINT_TOOL_NAME, MEDIA_FINGERPRINT_TOOL_VERSION, media_fingerprint_policy_snapshot
 
-EvidenceKind = Literal["cadence_analysis", "media_fingerprint", "animation_bitrate"]
+EvidenceKind = Literal["cadence_analysis", "media_fingerprint", "animation_picture"]
 
 EVIDENCE_STATE_CURRENT = "current"
 EVIDENCE_STATE_ANALYSIS_REQUIRED = "analysis_required"
