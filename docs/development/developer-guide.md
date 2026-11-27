@@ -178,7 +178,7 @@ Approving a look's sample (live action or cartoons) approves that kind of
 content across its shows; "Approve only this season" limits it to one
 season. Mediaforce requests a first sample for each unapproved look with
 waiting shows and puts it in Needs you once there is something to watch or
-choose. Animation metadata puts a season or movie in line for a short AV1 test on an idle computer. The worker uses the sample picker’s typical and at-risk moments, filling any gaps with its usual duration-based positions. It encodes those three moments at one quality setting. It uses their middle bitrate so one unusually quiet or busy shot cannot decide a title. The test picture fits within the 1920 by 1080 calibration frame. Easy titles use the cartoon look and difficult ones use live action. Close calls appear in Needs you with the original and sample to compare. The Cartoons page includes finished titles and keeps the result and any choice until the tested source changes. A folder's own approval still takes precedence. VR & 3D has no look until
+choose. A folder's own approval still takes precedence. VR & 3D has no look until
 Mediaforce can compress it. A look's approval says whether 4K stays 4K or
 comes down to the tallest picture in Settings. Seasons missing original
 measurements wait for measuring first. When a sample re-encodes the audio,
@@ -266,3 +266,9 @@ Run plans holding original measurements are kept. Only the newest two
 `deployments/` folders and 30 days of `operations/` evidence are kept; change
 this with `kept_deploy_backups` and `operation_evidence_retention_days` under
 `[state.cleanup]`.
+
+### How animated titles get a look
+
+An idle computer checks one original per animated movie or TV season. Dolby Vision and HDR titles use the live action look. For other titles, Mediaforce encodes ten 2.5-second moments from 12% to 84% of the runtime at the cartoon size of 150 MB per 45 minutes. The full-file stream budget sets the picture allowance. The median of the ten picture scores determines the look. A score of 87 or higher selects cartoons. Lower scores select live action.
+
+The Cartoons page shows the result and the median on hover. The result stays with the original until its source changes. Each file still goes through its usual size and quality checks.

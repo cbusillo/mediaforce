@@ -437,7 +437,7 @@ def test_a_library_not_set_to_compress_adds_nothing_to_a_looks_offers_counts_or_
             _content_item(connection, measured.replace("e00", "e01").replace("Heat.mkv", "Heat - 4K.mkv"),
                           status="discovered", codec="h264", current_dark=0.0)
         connection.execute(series_metadata.insert().values(series_prefix="kids/Toons", tmdb_genres_json='["Animation"]', updated_at="now"))
-        _save_probe(connection, "kids/Toons/Season 1", 390)
+        _save_probe(connection, "kids/Toons/Season 1", 91)
         connection.execute(series_metadata.insert().values(series_prefix="shows/Drama", tmdb_genres_json='["Drama"]', updated_at="now"))
         _content_item(connection, "movies/Unseen (2020)/Unseen.mkv", status="discovered", codec="h264", current_dark=0.0)
         facts = kinds_payload(connection, config, load_calibration_state=_loader({}, {}))
@@ -1665,7 +1665,7 @@ def test_cartoon_kind_can_reuse_a_matching_approved_show_sample(tmp_path: Path, 
         _completed_and_waiting_seasons(connection)
         connection.execute(series_metadata.update().values(tmdb_genres_json='["Animation"]'))
         for prefix in (APPROVED_SEASON, SEASON):
-            _save_probe(connection, prefix, 400)
+            _save_probe(connection, prefix, 93)
         connection.commit()
         before = next(row for row in kinds_payload(connection, config, load_calibration_state=load)["kinds"] if row["kind"] == kind)
         assert before["sample_ready"] and before["sample_season"] == APPROVED_SEASON
@@ -1941,7 +1941,7 @@ def test_futuramas_passing_sample_at_the_selected_size_leads_other_cartoons(tmp_
             _admit_historical_original(connection, published, dark=0.5)
             connection.execute(series_metadata.insert().values(series_prefix=season.rsplit("/", 1)[0],
                                                                tmdb_genres_json='["Animation"]', updated_at="now"))
-            _save_probe(connection, season, 430)
+            _save_probe(connection, season, 93)
             connection.commit()
     with open_db(config.paths.db_path) as connection:
         kind = next(row for row in kinds_payload(connection, config, load_calibration_state=_loader(folders, {}))["kinds"]

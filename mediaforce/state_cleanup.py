@@ -10,8 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import open_db, open_readonly_db
-from mediaforce.core.db_tables import animation_sorts, encode_jobs
+from mediaforce.core.db import open_db
+from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.media_storage import probe_media_path
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.reviewing.clips import review_file_from_url
@@ -140,10 +140,6 @@ def _retained_kind_review_paths(config: MediaforceConfig) -> tuple[Path, ...]:
     from mediaforce.web.runtime.app_samples import sample_moments
 
     moments = []
-    if config.paths.db_path.is_file():
-        with open_readonly_db(config.paths.db_path) as connection:
-            moments.extend(json.loads(value) for value in connection.execute(select(animation_sorts.c.moment_json).where(
-                animation_sorts.c.choice.is_(None), animation_sorts.c.moment_json.is_not(None))).scalars())
     for kind in APPROVABLE_KINDS:
         try:
             payload = json.loads(kind_approval_file(config, kind).read_text())
