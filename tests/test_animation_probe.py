@@ -2,6 +2,7 @@ import json
 import subprocess
 import tomllib
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -83,20 +84,25 @@ def test_hdr_bypasses_the_sdr_picture_measurement(metadata: dict[str, object]) -
 
 def test_picture_allowance_counts_a_large_untagged_copied_track() -> None:
     policy = tomllib.loads(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
-    item = {
+    item: dict[str, Any] = {
         "audio_summary": [{"index": 1, "codec_name": "aac", "channels": 2, "language": "eng", "size_bytes": None}],
-        "subtitle_summary": [],
+        "subtitle_summary": [{"index": 2, "codec_name": "hdmv_pgs_subtitle", "language": "eng", "size_bytes": None}],
         "attachment_summary": [],
-        "source_size_bytes": 2_000_000_000,
+        "source_size_bytes": 200_000_000,
         "duration_seconds": 2700,
         "rel_path": "feature.mkv",
         "resolved_policy": policy,
     }
-    read = Mock(return_value="1,173000000\n")
+    read = Mock(return_value="0,9000000\n1,173000000\n2,150000\n")
     copied = probe._picture_budget(item, Path("feature.mkv"), "ffprobe", read)
     read.assert_called_once()
-    item["audio_summary"] = [{"index": 1, "codec_name": "eac3", "channels": 2, "size_bytes": 200_000_000}]
+    assert item["subtitle_summary"][0]["size_bytes"] == 150_000
+    item["audio_summary"] = [{"index": 1, "codec_name": "eac3", "channels": 2, "size_bytes": None}]
     stereo = probe._picture_budget(item, Path("feature.mkv"), "ffprobe", read)
+    item["source_size_bytes"] = 120_000_000
+    small_original = probe._picture_budget(item, Path("feature.mkv"), "ffprobe", read)
+    read.assert_called_once()
+    assert small_original == stereo
     assert copied.bytes_per_second > 0
     assert copied.bytes_per_second == stereo.bytes_per_second
 

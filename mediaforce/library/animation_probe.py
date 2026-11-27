@@ -18,7 +18,7 @@ from mediaforce.encoding.helpers import build_svt_params
 from mediaforce.encoding.remote_media import RemoteMediaCommands
 from mediaforce.encoding.video_filters import build_video_filter
 from mediaforce.tuning.size_goals import size_goal_from_policy
-from mediaforce.tuning.stream_budget import resolve_stream_budget_ledger, stream_budget_projection_blocker
+from mediaforce.tuning.stream_budget import resolve_stream_budget_ledger
 
 ANIMATION_PROBE = "animation_picture"
 CARTOON_TARGET_MB = 150
@@ -55,37 +55,31 @@ class PictureBudget:
 
 
 def _picture_budget(item: dict[str, Any], path: Path, ffprobe: str, run: Callable[[list[str]], str]) -> PictureBudget:
-    for selector, tracks in (("a", item["audio_summary"]), ("s", item["subtitle_summary"])):
-        if not any(track["size_bytes"] is None for track in tracks):
-            continue
-        sizes: Counter[int] = Counter()
-        packets = run(
-            [
-                ffprobe,
-                "-v",
-                "error",
-                "-select_streams",
-                selector,
-                "-show_entries",
-                "packet=stream_index,size",
-                "-of",
-                "csv=p=0",
-                str(path),
-            ]
-        )
-        for line in packets.splitlines():
-            fields = line.split(",")
-            if len(fields) >= 2 and fields[0].isdigit() and fields[1].isdigit():
-                sizes[int(fields[0])] += int(fields[1])
-        for track in tracks:
-            if size := sizes.get(track["index"]):
-                track["size_bytes"] = size
     duration = item["duration_seconds"]
     goal = size_goal_from_policy(
         {"size_goal_mode": "normalized", "target_size_mb": CARTOON_TARGET_MB, "target_runtime_minutes": 45}
     ).resolve(duration)
     ledger = resolve_stream_budget_ledger(item, resolved_size_goal=goal)
-    if stream_budget_projection_blocker(ledger) or not ledger.remaining_video_bytes or ledger.non_video_bytes is None:
+    missing = {
+        stream.source_index: stream.kind
+        for stream in ledger.stream_plan.streams
+        if stream.kind in ("audio", "subtitle") and stream.action == "copy" and stream.source_size_bytes is None
+    }
+    if missing:
+        selectors = {"audio": "a", "subtitle": "s"}
+        kinds = set(missing.values())
+        select = ["-select_streams", selectors[kinds.pop()]] if len(kinds) == 1 else []
+        sizes: Counter[int] = Counter()
+        packets = run([ffprobe, "-v", "error", *select, "-show_entries", "packet=stream_index,size", "-of", "csv=p=0", str(path)])
+        for line in packets.splitlines():
+            fields = line.split(",")
+            if len(fields) >= 2 and fields[0].isdigit() and fields[1].isdigit() and int(fields[0]) in missing:
+                sizes[int(fields[0])] += int(fields[1])
+        for track in (*item["audio_summary"], *item["subtitle_summary"]):
+            if size := sizes.get(track["index"]):
+                track["size_bytes"] = size
+        ledger = resolve_stream_budget_ledger(item, resolved_size_goal=goal)
+    if ledger.remaining_video_bytes is None or ledger.remaining_video_bytes <= 0 or ledger.non_video_bytes is None:
         raise ValueError("The picture allowance for this original could not be measured.")
     return PictureBudget(
         ledger.remaining_video_bytes / duration,
@@ -316,17 +310,17 @@ def probe_animation(
         video = tomllib.load(defaults)["video"]
     ffprobe = "ffprobe" if command_runner else ffprobe_binary()
 
-    def run(command: list[str]) -> str:
+    def run(command: list[str], timeout: int = 600) -> str:
         if command_runner:
-            result = command_runner.run(command, timeout_seconds=600, process_controller=process_controller)
+            result = command_runner.run(command, timeout_seconds=timeout, process_controller=process_controller)
             result.check_returncode()
         else:
             result = run_command(
-                command, timeout=600, check=True, capture_output=True, text=True, process_controller=process_controller
+                command, timeout=timeout, check=True, capture_output=True, text=True, process_controller=process_controller
             )
         return result.stdout
 
-    budget = _picture_budget(item, path, ffprobe, run)
+    budget = _picture_budget(item, path, ffprobe, lambda command: run(command, timeout=3600))
     cadence = analyze_cadence(
         path,
         video_stream=video_stream,
